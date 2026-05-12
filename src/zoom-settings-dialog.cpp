@@ -1,8 +1,6 @@
 #include "zoom-settings-dialog.h"
 #include "zoom-settings.h"
-#include "zoom-auth.h"
 #include "zoom-control-server.h"
-#include "zoom-osc-server.h"
 #include <QVBoxLayout>
 #include <QFormLayout>
 #include <QDialogButtonBox>
@@ -83,23 +81,7 @@ void ZoomSettingsDialog::onSave()
     s.control_token       = m_control_token_edit->text().toStdString();
     s.save();
 
-    ZoomAuth &auth = ZoomAuth::instance();
-    if (!s.sdk_key.empty() && !s.sdk_secret.empty()) {
-        if (!auth.init(s.sdk_key, s.sdk_secret)) {
-            QMessageBox::warning(this, "Zoom Plugin",
-                "SDK initialisation failed. Check SDK key and secret.");
-            return;
-        }
-    }
-    if (!s.jwt_token.empty() &&
-        auth.state() != ZoomAuthState::Authenticated &&
-        auth.state() != ZoomAuthState::Authenticating) {
-        auth.authenticate(s.jwt_token);
-    }
-
     ZoomControlServer::instance().set_token(s.control_token);
-    ZoomOscServer::instance().stop();
-    ZoomOscServer::instance().start(s.osc_server_port);
 
     accept();
 }

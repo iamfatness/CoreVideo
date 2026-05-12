@@ -1,8 +1,7 @@
 #include "zoom-control-server.h"
-#include "zoom-auth.h"
-#include "zoom-meeting.h"
+#include "zoom-engine-client.h"
 #include "zoom-output-manager.h"
-#include "zoom-participants.h"
+#include "zoom-settings.h"
 #include <QHostAddress>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -108,17 +107,6 @@ void ZoomControlServer::on_new_connection()
     }
 }
 
-static QJsonObject participant_to_json(const ParticipantInfo &p)
-{
-    QJsonObject obj;
-    obj["id"] = static_cast<double>(p.user_id);
-    obj["name"] = QString::fromStdString(p.display_name);
-    obj["has_video"] = p.has_video;
-    obj["is_talking"] = p.is_talking;
-    obj["is_muted"] = p.is_muted;
-    return obj;
-}
-
 static QJsonObject output_to_json(const ZoomOutputInfo &o)
 {
     QJsonObject obj;
@@ -131,6 +119,17 @@ static QJsonObject output_to_json(const ZoomOutputInfo &o)
     obj["isolate_audio"]  = o.isolate_audio;
     obj["audio_channels"] = o.audio_mode == AudioChannelMode::Stereo
         ? "stereo" : "mono";
+    return obj;
+}
+
+static QJsonObject participant_to_json(const ParticipantInfo &p)
+{
+    QJsonObject obj;
+    obj["id"] = static_cast<double>(p.user_id);
+    obj["name"] = QString::fromStdString(p.display_name);
+    obj["has_video"] = p.has_video;
+    obj["is_talking"] = p.is_talking;
+    obj["is_muted"] = p.is_muted;
     return obj;
 }
 
@@ -189,16 +188,16 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
     if (cmd == "status") {
         write_response(socket, {
             {"ok", true},
-            {"meeting_state", meeting_state_to_string(ZoomMeeting::instance().state())},
+            {"meeting_state", meeting_state_to_string(ZoomEngineClient::instance().state())},
             {"active_speaker_id", static_cast<double>(
-                ZoomParticipants::instance().active_speaker_id())}
+                ZoomEngineClient::instance().active_speaker_id())}
         });
         return;
     }
 
     if (cmd == "list_participants") {
         QJsonArray participants;
-        for (const auto &p : ZoomParticipants::instance().roster())
+        for (const auto &p : ZoomEngineClient::instance().roster())
             participants.append(participant_to_json(p));
         write_response(socket, {{"ok", true}, {"participants", participants}});
         return;
@@ -239,7 +238,9 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
         const QString meeting_id = req.value("meeting_id").toString();
         const QString passcode = req.value("passcode").toString();
         const QString display_name = req.value("display_name").toString("OBS");
-        const bool ok = ZoomMeeting::instance().join(
+        const ZoomPluginSettings settings = ZoomPluginSettings::load();
+        const bool ok = ZoomEngineClient::instance().start(settings.jwt_token) &&
+            ZoomEngineClient::instance().join(
             meeting_id.toStdString(), passcode.toStdString(),
             display_name.toStdString());
         write_response(socket, {{"ok", ok}});
@@ -247,7 +248,7 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
     }
 
     if (cmd == "leave") {
-        ZoomMeeting::instance().leave();
+        ZoomEngineClient::instance().leave();
         write_response(socket, {{"ok", true}});
         return;
     }

@@ -55,7 +55,8 @@ void EngineAudio::onMixedAudioRawDataReceived(AudioRawData *data)
                 data->GetBuffer(), byte_len);
 
     ipc_write_line(m_e2p_fd,
-        R"({"cmd":"audio","source_uuid":")" + m_source_uuid + "\"}");
+        R"({"cmd":"audio","source_uuid":")" + m_source_uuid +
+        R"(","byte_len":)" + std::to_string(byte_len) + "}");
 }
 
 void EngineAudio::onOneWayAudioRawDataReceived(AudioRawData *, uint32_t) {}

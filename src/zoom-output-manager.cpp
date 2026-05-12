@@ -42,7 +42,7 @@ std::vector<ZoomOutputInfo> ZoomOutputManager::outputs() const
 }
 
 void ZoomOutputManager::set_preview_cb(const std::string &source_name,
-                                        ZoomVideoDelegate::PreviewCallback cb)
+                                        ZoomPreviewCallback cb)
 {
     std::lock_guard<std::mutex> lk(m_mtx);
     for (auto *src : m_sources) {

@@ -5,10 +5,6 @@
 #include <zoom_sdk_raw_data_def.h>
 #include <rawdata/rawdata_audio_helper_interface.h>
 
-#pragma pack(push, 1)
-struct ShmAudioHeader { uint32_t sample_rate; uint16_t channels; uint32_t byte_len; };
-#pragma pack(pop)
-
 class EngineAudio : public ZOOMSDK::IZoomSDKAudioRawDataDelegate {
 public:
     static EngineAudio &instance();

@@ -12,6 +12,9 @@ ZoomAudioDelegate::ZoomAudioDelegate(obs_source_t *source, AudioChannelMode mode
 
 ZoomAudioDelegate::~ZoomAudioDelegate()
 {
+    // Invalidate before removing from router so any in-flight snapshot
+    // callbacks that already captured this sink bail without touching freed memory.
+    m_alive->store(false, std::memory_order_release);
     unsubscribe();
 }
 
@@ -20,10 +23,15 @@ bool ZoomAudioDelegate::subscribe()
     if (m_registered) return true;
 
     ZoomAudioRouter &router = ZoomAudioRouter::instance();
+    auto alive = m_alive; // shared_ptr copy kept alive by lambda
     router.add_mixed_sink(this,
-        [this](AudioRawData *d) { on_mixed_audio(d); });
+        [this, alive](AudioRawData *d) {
+            if (alive->load(std::memory_order_acquire)) on_mixed_audio(d);
+        });
     router.add_one_way_sink(this,
-        [this](AudioRawData *d, uint32_t uid) { on_one_way_audio(d, uid); });
+        [this, alive](AudioRawData *d, uint32_t uid) {
+            if (alive->load(std::memory_order_acquire)) on_one_way_audio(d, uid);
+        });
 
     m_registered = true;
     blog(LOG_INFO, "[obs-zoom-plugin] Audio delegate registered with router");

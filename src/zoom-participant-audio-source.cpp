@@ -87,14 +87,14 @@ void ZoomParticipantAudioSource::do_register()
 
     obs_source_t       *src  = source;
     AudioChannelMode    mode = audio_mode;
-    // The stereo buffer lives on the heap, shared via shared_ptr so it outlives
-    // any individual callback invocation while the source is alive.
-    auto buf = std::make_shared<std::vector<int16_t>>();
+    auto buf  = std::make_shared<std::vector<int16_t>>();
+    auto live = alive; // shared_ptr copy kept alive by the lambda
 
     ZoomAudioRouter::instance().add_participant_sink(
         participant_id,
         this,
-        [src, mode, buf](AudioRawData *data) {
+        [src, mode, buf, live](AudioRawData *data) {
+            if (!live->load(std::memory_order_acquire)) return;
             if (mode == AudioChannelMode::Stereo)
                 push_stereo(src, data, *buf);
             else
@@ -145,6 +145,7 @@ static void pa_destroy(void *data)
 {
     auto *ctx = static_cast<ZoomParticipantAudioSource *>(data);
     ZoomMeeting::instance().remove_state_change(ctx);
+    ctx->alive->store(false, std::memory_order_release); // invalidate before removing
     ctx->do_unregister();
     delete ctx;
 }

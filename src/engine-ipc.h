@@ -105,23 +105,25 @@
 #endif
 
 // ── Line-oriented I/O helpers ─────────────────────────────────────────────────
-static inline std::string ipc_read_line(IpcFd fd)
+// Returns false on EOF or I/O error; 'out' is empty in that case.
+static inline bool ipc_read_line(IpcFd fd, std::string &out)
 {
-    std::string line;
+    out.clear();
 #if defined(WIN32)
     char ch; DWORD n;
     while (ReadFile(fd, &ch, 1, &n, nullptr) && n == 1) {
-        if (ch == '\n') break;
-        line += ch;
+        if (ch == '\n') return true;
+        out += ch;
     }
+    return false; // EOF or error
 #else
     char ch; ssize_t n;
     while ((n = read(fd, &ch, 1)) == 1) {
-        if (ch == '\n') break;
-        line += ch;
+        if (ch == '\n') return true;
+        out += ch;
     }
+    return false; // EOF (n==0) or error (n==-1)
 #endif
-    return line;
 }
 
 static inline void ipc_write_line(IpcFd fd, const std::string &msg)

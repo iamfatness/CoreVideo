@@ -47,13 +47,10 @@ bool ZoomOutputManager::configure_output(const std::string &source_name,
                                          bool isolate_audio,
                                          AudioChannelMode audio_mode)
 {
-    std::vector<ZoomSource *> sources;
-    {
-        std::lock_guard<std::mutex> lk(m_mtx);
-        sources = m_sources;
-    }
-
-    for (auto *source : sources) {
+    // Hold the mutex for the full operation so a source cannot be unregistered
+    // (and freed) between the find and the configure call.
+    std::lock_guard<std::mutex> lk(m_mtx);
+    for (auto *source : m_sources) {
         if (!source) continue;
         if (source->output_name() != source_name) continue;
         source->configure_output(participant_id, active_speaker,

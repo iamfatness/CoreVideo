@@ -33,10 +33,16 @@ public:
     void add_participant_sink(uint32_t user_id, void *key, ParticipantSink cb);
     void remove_participant_sink(uint32_t user_id, void *key);
 
+    // Share-audio sink — ZoomShareDelegate registers here to receive computer
+    // audio from screen shares (separate stream from participant audio).
+    using ShareAudioSink = std::function<void(AudioRawData *, uint32_t)>;
+    void add_share_audio_sink(void *key, ShareAudioSink cb);
+    void remove_share_audio_sink(void *key);
+
     // IZoomSDKAudioRawDataDelegate
     void onMixedAudioRawDataReceived(AudioRawData *data) override;
     void onOneWayAudioRawDataReceived(AudioRawData *data, uint32_t user_id) override;
-    void onShareAudioRawDataReceived(AudioRawData *, uint32_t) override {}
+    void onShareAudioRawDataReceived(AudioRawData *data, uint32_t share_user_id) override;
     void onOneWayInterpreterAudioRawDataReceived(AudioRawData *,
                                                  const zchar_t *) override {}
 
@@ -48,5 +54,6 @@ private:
     std::unordered_map<void *, OneWaySink> m_one_way_sinks;
     std::unordered_map<uint32_t, std::unordered_map<void *, ParticipantSink>>
         m_participant_sinks;
+    std::unordered_map<void *, ShareAudioSink> m_share_audio_sinks;
     bool        m_subscribed = false;
 };

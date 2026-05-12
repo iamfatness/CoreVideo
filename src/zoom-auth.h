@@ -1,6 +1,8 @@
 #pragma once
 #include <string>
 #include <functional>
+#include <mutex>
+#include <unordered_map>
 #include <auth_service_interface.h>
 
 enum class ZoomAuthState { Unauthenticated, Authenticating, Authenticated, Failed };
@@ -14,7 +16,9 @@ public:
     void shutdown();
 
     using StateCallback = std::function<void(ZoomAuthState)>;
-    void on_state_change(StateCallback cb) { m_callback = cb; }
+    // Keyed callbacks — safe to add/remove from within a callback.
+    void add_state_callback(void *key, StateCallback cb);
+    void remove_state_callback(void *key);
 
     // IAuthServiceEvent
     void onAuthenticationReturn(ZOOMSDK::AuthResult ret) override;
@@ -32,8 +36,11 @@ public:
 
 private:
     ZoomAuth() = default;
+    void fire_state_cbs();
+
     ZoomAuthState          m_state        = ZoomAuthState::Unauthenticated;
-    StateCallback          m_callback;
+    std::mutex             m_cbs_mtx;
+    std::unordered_map<void *, StateCallback> m_state_cbs;
     bool                   m_sdk_init     = false;
     ZOOMSDK::IAuthService *m_auth_service = nullptr;
     // Kept alive for the duration of the async SDKAuth call.

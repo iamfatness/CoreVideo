@@ -21,17 +21,41 @@ static std::wstring to_zstr(const std::string &utf8)
     return wide;
 }
 
+static bool ipc_connect_timeout(HANDLE pipe, DWORD timeout_ms)
+{
+    OVERLAPPED ov = {};
+    ov.hEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+    if (!ov.hEvent) return false;
+    BOOL ok = ConnectNamedPipe(pipe, &ov);
+    if (!ok && GetLastError() == ERROR_IO_PENDING) {
+        DWORD waited = WaitForSingleObject(ov.hEvent, timeout_ms);
+        if (waited != WAIT_OBJECT_0) {
+            CancelIo(pipe);
+            CloseHandle(ov.hEvent);
+            return false;
+        }
+        DWORD dummy;
+        ok = GetOverlappedResult(pipe, &ov, &dummy, FALSE);
+    }
+    CloseHandle(ov.hEvent);
+    return ok || GetLastError() == ERROR_PIPE_CONNECTED;
+}
+
 static bool ipc_setup(IpcFd &p2e, IpcFd &e2p)
 {
-    p2e = CreateNamedPipeA(PIPE_P2E, PIPE_ACCESS_INBOUND,
+    p2e = CreateNamedPipeA(PIPE_P2E,
+                           PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
                            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
                            1, 65536, 65536, 0, nullptr);
-    e2p = CreateNamedPipeA(PIPE_E2P, PIPE_ACCESS_OUTBOUND,
+    e2p = CreateNamedPipeA(PIPE_E2P,
+                           PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED,
                            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
                            1, 65536, 65536, 0, nullptr);
     if (p2e == INVALID_HANDLE_VALUE || e2p == INVALID_HANDLE_VALUE) return false;
-    ConnectNamedPipe(p2e, nullptr);
-    ConnectNamedPipe(e2p, nullptr);
+    constexpr DWORD kConnectTimeoutMs = 30000;
+    if (!ipc_connect_timeout(p2e, kConnectTimeoutMs) ||
+        !ipc_connect_timeout(e2p, kConnectTimeoutMs))
+        return false;
     return true;
 }
 
@@ -44,6 +68,7 @@ static void ipc_teardown(IpcFd p2e, IpcFd e2p)
 #else // POSIX (macOS / Linux)
 #  include <sys/socket.h>
 #  include <sys/un.h>
+#  include <poll.h>
 #  include <unistd.h>
 #  include <cstring>
 
@@ -66,6 +91,13 @@ static int unix_listen(const char *path)
     return srv;
 }
 
+static int unix_accept_timeout(int srv, int timeout_ms)
+{
+    struct pollfd pfd = {srv, POLLIN, 0};
+    if (poll(&pfd, 1, timeout_ms) <= 0) return -1;
+    return accept(srv, nullptr, nullptr);
+}
+
 static bool ipc_setup(IpcFd &p2e, IpcFd &e2p)
 {
     int srv_p2e = unix_listen(SOCK_P2E);
@@ -75,8 +107,9 @@ static bool ipc_setup(IpcFd &p2e, IpcFd &e2p)
         if (srv_e2p >= 0) close(srv_e2p);
         return false;
     }
-    p2e = accept(srv_p2e, nullptr, nullptr);
-    e2p = accept(srv_e2p, nullptr, nullptr);
+    constexpr int kConnectTimeoutMs = 30000; // 30 s
+    p2e = unix_accept_timeout(srv_p2e, kConnectTimeoutMs);
+    e2p = unix_accept_timeout(srv_e2p, kConnectTimeoutMs);
     close(srv_p2e);
     close(srv_e2p);
     return p2e >= 0 && e2p >= 0;
@@ -193,10 +226,23 @@ int main()
     EngineMeetingEvent meeting_event(e2p);
     EngineVideo        video_engine;
 
+    // Persistent wide-string storage for async SDK calls (JoinParam / AuthContext
+    // hold raw pointers — these must outlive the Join/SDKAuth call).
+#if defined(WIN32)
+    std::wstring g_wide_jwt;
+    std::wstring g_wide_name;
+    std::wstring g_wide_psw;
+#else
+    std::string g_wide_jwt;
+    std::string g_wide_name;
+    std::string g_wide_psw;
+#endif
+
     std::atomic<bool> running{true};
+    std::string line;
 
     while (running) {
-        std::string line = ipc_read_line(p2e);
+        if (!ipc_read_line(p2e, line)) break; // EOF or connection closed
         if (line.empty()) continue;
 
         if (line.find(IPC_CMD_QUIT) != std::string::npos) {
@@ -220,9 +266,9 @@ int main()
             ZOOMSDK::CreateAuthService(&auth_svc);
             if (auth_svc) {
                 auth_svc->SetEvent(&auth_event);
-                auto wjwt = to_zstr(jwt);
+                g_wide_jwt = to_zstr(jwt); // persists for async SDKAuth call
                 ZOOMSDK::AuthContext ctx;
-                ctx.jwt_token = wjwt.c_str();
+                ctx.jwt_token = g_wide_jwt.c_str();
                 auth_svc->SDKAuth(ctx);
             } else {
                 ipc_write_line(e2p, R"({"cmd":"auth_fail","code":-1})");
@@ -239,15 +285,17 @@ int main()
                 if (meeting_svc) meeting_svc->SetEvent(&meeting_event);
             }
             if (meeting_svc && !meeting_id.empty()) {
-                auto wname = to_zstr(display_name);
-                auto wpsw  = to_zstr(passcode);
+                // Store as persistent variables so JoinParam raw pointers
+                // remain valid for the duration of the async Join() call.
+                g_wide_name = to_zstr(display_name);
+                g_wide_psw  = to_zstr(passcode);
 
                 ZOOMSDK::JoinParam jp;
                 jp.userType = ZOOMSDK::SDK_UT_WITHOUT_LOGIN;
                 ZOOMSDK::JoinParam4WithoutLogin &p = jp.param.withoutloginuserJoin;
                 p.meetingNumber             = std::stoull(meeting_id);
-                p.userName                  = wname.c_str();
-                p.psw                       = passcode.empty() ? nullptr : wpsw.c_str();
+                p.userName                  = g_wide_name.c_str();
+                p.psw                       = passcode.empty() ? nullptr : g_wide_psw.c_str();
                 p.isVideoOff                = true;
                 p.isAudioOff                = true;
                 p.isMyVoiceInMix            = false;

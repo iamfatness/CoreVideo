@@ -39,4 +39,8 @@ private:
     std::atomic<uint32_t> m_isolated_user{0};
     std::vector<int16_t>  m_stereo_buf;
     bool                  m_registered = false;
+    // Kept alive by lambda captures in the router; set to false before
+    // unsubscribing so any in-flight snapshot callbacks bail safely.
+    std::shared_ptr<std::atomic<bool>> m_alive{
+        std::make_shared<std::atomic<bool>>(true)};
 };

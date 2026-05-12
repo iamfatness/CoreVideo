@@ -61,7 +61,7 @@ void ZoomControlServer::on_new_connection()
         auto *socket = m_server->nextPendingConnection();
         connect(socket, &QTcpSocket::readyRead, this, [this, socket]() {
             while (socket->canReadLine())
-                handle_line(socket, socket->readLine().trimmed());
+                handle_line(socket, socket->readLine(4096).trimmed());
         });
         connect(socket, &QTcpSocket::disconnected, socket, &QTcpSocket::deleteLater);
     }

@@ -11,7 +11,7 @@ ZoomVideoDelegate::~ZoomVideoDelegate()
     unsubscribe();
 }
 
-bool ZoomVideoDelegate::subscribe(uint32_t participant_id)
+bool ZoomVideoDelegate::subscribe(uint32_t participant_id, VideoResolution res)
 {
     if (m_renderer) unsubscribe();
 
@@ -21,8 +21,13 @@ bool ZoomVideoDelegate::subscribe(uint32_t participant_id)
         return false;
     }
 
-    // 1080P for broadcast quality
-    m_renderer->setRawDataResolution(ZOOMSDK::ZoomSDKResolution_1080P);
+    ZOOMSDK::ZoomSDKResolution sdk_res;
+    switch (res) {
+    case VideoResolution::P360:  sdk_res = ZOOMSDK::ZoomSDKResolution_360P;  break;
+    case VideoResolution::P720:  sdk_res = ZOOMSDK::ZoomSDKResolution_720P;  break;
+    default:                     sdk_res = ZOOMSDK::ZoomSDKResolution_1080P; break;
+    }
+    m_renderer->setRawDataResolution(sdk_res);
 
     err = m_renderer->subscribe(participant_id, ZOOMSDK::RAW_DATA_TYPE_VIDEO);
     if (err != ZOOMSDK::SDKERR_SUCCESS) {
@@ -32,7 +37,9 @@ bool ZoomVideoDelegate::subscribe(uint32_t participant_id)
         return false;
     }
 
-    blog(LOG_INFO, "[obs-zoom-plugin] Video subscribed for participant %u at 1080P", participant_id);
+    static const char *res_names[] = {"360P", "720P", "1080P"};
+    blog(LOG_INFO, "[obs-zoom-plugin] Video subscribed for participant %u at %s",
+         participant_id, res_names[static_cast<int>(res)]);
     return true;
 }
 

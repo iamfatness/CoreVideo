@@ -10,16 +10,38 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <obs-module.h>
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <limits>
 
 // Timing-safe string equality — prevents token leakage via timing side-channel.
 static bool ct_equal(const std::string &a, const std::string &b)
 {
-    if (a.size() != b.size()) return false;
-    volatile uint8_t diff = 0;
-    for (size_t i = 0; i < a.size(); ++i)
-        diff |= static_cast<uint8_t>(a[i]) ^ static_cast<uint8_t>(b[i]);
+    volatile size_t diff = a.size() ^ b.size();
+    const size_t max_len = std::max(a.size(), b.size());
+    for (size_t i = 0; i < max_len; ++i) {
+        const uint8_t ca = i < a.size() ? static_cast<uint8_t>(a[i]) : 0;
+        const uint8_t cb = i < b.size() ? static_cast<uint8_t>(b[i]) : 0;
+        diff |= static_cast<size_t>(ca ^ cb);
+    }
     return diff == 0;
+}
+
+static bool json_to_uint32(const QJsonObject &obj, const char *key, uint32_t &out)
+{
+    const QJsonValue value = obj.value(key);
+    if (!value.isDouble()) return false;
+
+    const double raw = value.toDouble(-1);
+    if (!std::isfinite(raw) || raw < 0 ||
+        raw > static_cast<double>(std::numeric_limits<uint32_t>::max()) ||
+        std::floor(raw) != raw) {
+        return false;
+    }
+
+    out = static_cast<uint32_t>(raw);
+    return true;
 }
 
 ZoomControlServer &ZoomControlServer::instance()
@@ -89,7 +111,7 @@ void ZoomControlServer::on_new_connection()
 static QJsonObject participant_to_json(const ParticipantInfo &p)
 {
     QJsonObject obj;
-    obj["id"] = static_cast<int>(p.user_id);
+    obj["id"] = static_cast<double>(p.user_id);
     obj["name"] = QString::fromStdString(p.display_name);
     obj["has_video"] = p.has_video;
     obj["is_talking"] = p.is_talking;
@@ -104,7 +126,7 @@ static QJsonObject output_to_json(const ZoomOutputInfo &o)
     obj["display_name"]   = o.display_name.empty()
                             ? QString::fromStdString(o.source_name)
                             : QString::fromStdString(o.display_name);
-    obj["participant_id"] = static_cast<int>(o.participant_id);
+    obj["participant_id"] = static_cast<double>(o.participant_id);
     obj["active_speaker"] = o.active_speaker;
     obj["isolate_audio"]  = o.isolate_audio;
     obj["audio_channels"] = o.audio_mode == AudioChannelMode::Stereo
@@ -168,7 +190,7 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
         write_response(socket, {
             {"ok", true},
             {"meeting_state", meeting_state_to_string(ZoomMeeting::instance().state())},
-            {"active_speaker_id", static_cast<int>(
+            {"active_speaker_id", static_cast<double>(
                 ZoomParticipants::instance().active_speaker_id())}
         });
         return;
@@ -192,12 +214,11 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
 
     if (cmd == "assign_output") {
         const QString source = req.value("source").toString();
-        const int raw_pid = req.value("participant_id").toInt(-1);
-        if (raw_pid < 0) {
+        uint32_t participant_id = 0;
+        if (!json_to_uint32(req, "participant_id", participant_id)) {
             write_response(socket, {{"ok", false}, {"error", "invalid_participant_id"}});
             return;
         }
-        const uint32_t participant_id = static_cast<uint32_t>(raw_pid);
         const bool active_speaker = req.value("active_speaker").toBool(false);
         const bool isolate_audio = req.value("isolate_audio").toBool(false);
         const QString audio_channels = req.value("audio_channels").toString("mono");

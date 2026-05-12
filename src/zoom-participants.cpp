@@ -222,10 +222,8 @@ void ZoomParticipants::onBotAuthorizerRelationChanged(unsigned int) {}
 void ZoomParticipants::onVirtualNameTagStatusChanged(bool, unsigned int) {}
 void ZoomParticipants::onVirtualNameTagRosterInfoUpdated(unsigned int) {}
 void ZoomParticipants::onGrantCoOwnerPrivilegeChanged(bool) {}
-#if defined(WIN32)
 void ZoomParticipants::onCreateCompanionRelation(unsigned int, unsigned int) {}
 void ZoomParticipants::onRemoveCompanionRelation(unsigned int) {}
-#endif
 
 // ── IMeetingAudioCtrlEvent ────────────────────────────────────────────────────
 

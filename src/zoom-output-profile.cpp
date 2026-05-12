@@ -7,6 +7,9 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <obs-module.h>
+#include <cmath>
+#include <cstdint>
+#include <limits>
 
 static QString profiles_dir()
 {
@@ -23,6 +26,22 @@ static QString profile_path(const std::string &name)
     const QString dir = profiles_dir();
     if (dir.isEmpty()) return {};
     return dir + "/" + QString::fromStdString(name) + ".json";
+}
+
+static bool json_to_uint32(const QJsonObject &obj, const char *key, uint32_t &out)
+{
+    const QJsonValue value = obj.value(key);
+    if (!value.isDouble()) return false;
+
+    const double raw = value.toDouble(-1);
+    if (!std::isfinite(raw) || raw < 0 ||
+        raw > static_cast<double>(std::numeric_limits<uint32_t>::max()) ||
+        std::floor(raw) != raw) {
+        return false;
+    }
+
+    out = static_cast<uint32_t>(raw);
+    return true;
 }
 
 namespace ZoomOutputProfile {
@@ -49,7 +68,7 @@ bool save(const std::string &name, const std::vector<ZoomOutputInfo> &outputs)
         QJsonObject obj;
         obj["source"]         = QString::fromStdString(o.source_name);
         obj["display_name"]   = QString::fromStdString(o.display_name);
-        obj["participant_id"] = static_cast<int>(o.participant_id);
+        obj["participant_id"] = static_cast<double>(o.participant_id);
         obj["active_speaker"] = o.active_speaker;
         obj["isolate_audio"]  = o.isolate_audio;
         obj["audio_channels"] = o.audio_mode == AudioChannelMode::Stereo
@@ -83,7 +102,7 @@ std::vector<ZoomOutputInfo> load(const std::string &name)
         ZoomOutputInfo o;
         o.source_name    = obj.value("source").toString().toStdString();
         o.display_name   = obj.value("display_name").toString().toStdString();
-        o.participant_id = static_cast<uint32_t>(obj.value("participant_id").toInt(0));
+        json_to_uint32(obj, "participant_id", o.participant_id);
         o.active_speaker = obj.value("active_speaker").toBool(false);
         o.isolate_audio  = obj.value("isolate_audio").toBool(false);
         o.audio_mode     = obj.value("audio_channels").toString() == "stereo"

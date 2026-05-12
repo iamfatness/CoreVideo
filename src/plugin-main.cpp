@@ -2,6 +2,7 @@
 #include <obs-frontend-api.h>
 #include <util/platform.h>
 #include "zoom-source.h"
+#include "zoom-share-delegate.h"
 #include "zoom-auth.h"
 #include "zoom-settings.h"
 #include "zoom-settings-dialog.h"
@@ -20,6 +21,7 @@ bool obs_module_load(void)
     blog(LOG_INFO, "[obs-zoom-plugin] Loading plugin v%s", OBS_ZOOM_PLUGIN_VERSION);
 
     zoom_source_register();
+    zoom_share_source_register();
 
     ZoomPluginSettings s = ZoomPluginSettings::load();
     if (!s.sdk_key.empty() && !s.sdk_secret.empty()) {

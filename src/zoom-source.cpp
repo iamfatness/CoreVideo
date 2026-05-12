@@ -9,6 +9,7 @@
 #define PROP_PASSCODE          "passcode"
 #define PROP_PARTICIPANT_ID    "participant_id"
 #define PROP_ACTIVE_SPEAKER    "active_speaker_mode"
+#define PROP_ISOLATE_AUDIO     "isolate_audio"
 #define PROP_AUTO_JOIN         "auto_join"
 #define PROP_AUDIO_CHANNELS    "audio_channels"
 #define AUDIO_CH_MONO   0
@@ -28,6 +29,7 @@ void ZoomSource::apply_settings(obs_data_t *settings)
                             obs_data_get_int(settings, PROP_PARTICIPANT_ID));
     auto_join           = obs_data_get_bool(settings, PROP_AUTO_JOIN);
     active_speaker_mode = obs_data_get_bool(settings, PROP_ACTIVE_SPEAKER);
+    isolate_audio       = obs_data_get_bool(settings, PROP_ISOLATE_AUDIO);
     audio_mode          = audio_mode_from_data(settings);
     if (audio_delegate) audio_delegate->set_channel_mode(audio_mode);
 }
@@ -39,11 +41,14 @@ void ZoomSource::on_meeting_state(MeetingState state)
         if (!active_speaker_mode)
             video_delegate->subscribe(participant_id);
         audio_delegate->subscribe();
+        if (isolate_audio && !active_speaker_mode && participant_id != 0)
+            audio_delegate->set_isolated_user(participant_id);
         break;
     case MeetingState::Idle:
     case MeetingState::Failed:
         video_delegate->unsubscribe();
         audio_delegate->unsubscribe();
+        audio_delegate->set_isolated_user(0);
         break;
     default:
         break;
@@ -61,6 +66,8 @@ void ZoomSource::on_active_speaker_changed()
     participant_id = spk;
     video_delegate->unsubscribe();
     video_delegate->subscribe(spk);
+    if (isolate_audio)
+        audio_delegate->set_isolated_user(spk);
 }
 
 // ── OBS source callbacks ──────────────────────────────────────────────────────
@@ -152,6 +159,9 @@ static obs_properties_t *zoom_source_get_properties(void *data)
     }
     obs_property_set_enabled(plist, !ctx->active_speaker_mode);
 
+    obs_properties_add_bool(props, PROP_ISOLATE_AUDIO,
+        obs_module_text("ZoomSource.IsolateAudio"));
+
     obs_properties_add_bool(props, PROP_AUTO_JOIN,
         obs_module_text("ZoomSource.AutoJoin"));
 
@@ -199,6 +209,7 @@ static void zoom_source_get_defaults(obs_data_t *settings)
 {
     obs_data_set_default_bool(settings, PROP_AUTO_JOIN,       false);
     obs_data_set_default_bool(settings, PROP_ACTIVE_SPEAKER,  false);
+    obs_data_set_default_bool(settings, PROP_ISOLATE_AUDIO,   false);
     obs_data_set_default_int( settings, PROP_PARTICIPANT_ID,  0);
     obs_data_set_default_int( settings, PROP_AUDIO_CHANNELS,  AUDIO_CH_MONO);
 }

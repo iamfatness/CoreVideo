@@ -51,9 +51,39 @@ AudioChannelMode ZoomAudioDelegate::channel_mode() const
     return static_cast<AudioChannelMode>(m_mode.load(std::memory_order_relaxed));
 }
 
+void ZoomAudioDelegate::set_isolated_user(uint32_t user_id)
+{
+    m_isolated_user.store(user_id, std::memory_order_relaxed);
+}
+
+uint32_t ZoomAudioDelegate::isolated_user() const
+{
+    return m_isolated_user.load(std::memory_order_relaxed);
+}
+
 // ── IZoomSDKAudioRawDataDelegate ─────────────────────────────────────────────
 
 void ZoomAudioDelegate::onMixedAudioRawDataReceived(AudioRawData *data)
+{
+    // Suppress mixed feed when isolating a specific participant
+    if (m_isolated_user.load(std::memory_order_relaxed) != 0) return;
+    push_audio(data);
+}
+
+void ZoomAudioDelegate::onOneWayAudioRawDataReceived(AudioRawData *data, uint32_t user_id)
+{
+    uint32_t target = m_isolated_user.load(std::memory_order_relaxed);
+    if (target == 0 || user_id != target) return;
+    push_audio(data);
+}
+
+void ZoomAudioDelegate::onShareAudioRawDataReceived(AudioRawData *, uint32_t) {}
+void ZoomAudioDelegate::onOneWayInterpreterAudioRawDataReceived(AudioRawData *,
+                                                                const zchar_t *) {}
+
+// ── Private helpers ───────────────────────────────────────────────────────────
+
+void ZoomAudioDelegate::push_audio(AudioRawData *data)
 {
     if (!data || !m_source) return;
     const auto mode = static_cast<AudioChannelMode>(
@@ -63,14 +93,6 @@ void ZoomAudioDelegate::onMixedAudioRawDataReceived(AudioRawData *data)
     else
         push_mono(data);
 }
-
-// Per-participant audio is not used for the mixed broadcast feed
-void ZoomAudioDelegate::onOneWayAudioRawDataReceived(AudioRawData *, uint32_t) {}
-void ZoomAudioDelegate::onShareAudioRawDataReceived(AudioRawData *, uint32_t) {}
-void ZoomAudioDelegate::onOneWayInterpreterAudioRawDataReceived(AudioRawData *,
-                                                                 const zchar_t *) {}
-
-// ── Private helpers ───────────────────────────────────────────────────────────
 
 void ZoomAudioDelegate::push_mono(AudioRawData *data)
 {

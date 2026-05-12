@@ -1,5 +1,6 @@
 #include "zoom-meeting.h"
 #include "zoom-participants.h"
+#include "zoom-share-delegate.h"
 #include "zoom-auth.h"
 #include <obs-module.h>
 #include "../third_party/zoom-sdk/h/zoom_sdk.h"
@@ -102,8 +103,11 @@ void ZoomMeeting::onMeetingStatusChanged(ZOOMSDK::MeetingStatus status, int iRes
     case ZOOMSDK::MEETING_STATUS_INMEETING:
         m_state = MeetingState::InMeeting;
         if (m_meeting_service) {
-            auto *pc = m_meeting_service->GetMeetingParticipantsController();
-            ZoomParticipants::instance().attach(pc);
+            ZoomParticipants::instance().attach(
+                m_meeting_service->GetMeetingParticipantsController(),
+                m_meeting_service->GetMeetingAudioController());
+            ZoomShareDelegate::instance().attach(
+                m_meeting_service->GetMeetingShareController());
         }
         break;
 
@@ -111,6 +115,7 @@ void ZoomMeeting::onMeetingStatusChanged(ZOOMSDK::MeetingStatus status, int iRes
     case ZOOMSDK::MEETING_STATUS_ENDED:
         m_state = MeetingState::Idle;
         ZoomParticipants::instance().detach();
+        ZoomShareDelegate::instance().detach();
         // Safe to destroy service here — status callbacks fire on the SDK thread
         // after the meeting has fully disconnected, not during an active call.
         if (m_meeting_service) {
@@ -124,6 +129,7 @@ void ZoomMeeting::onMeetingStatusChanged(ZOOMSDK::MeetingStatus status, int iRes
         m_state = MeetingState::Failed;
         blog(LOG_ERROR, "[obs-zoom-plugin] Meeting failed, code: %d", iResult);
         ZoomParticipants::instance().detach();
+        ZoomShareDelegate::instance().detach();
         if (m_meeting_service) {
             m_meeting_service->SetEvent(nullptr);
             ZOOMSDK::DestroyMeetingService(m_meeting_service);

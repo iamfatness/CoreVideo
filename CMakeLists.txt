@@ -13,6 +13,7 @@ add_library(obs-zoom-plugin MODULE
     src/zoom-auth.cpp
     src/zoom-meeting.cpp
     src/zoom-participants.cpp
+    src/zoom-share-delegate.cpp
     src/zoom-settings.cpp
     src/zoom-settings-dialog.cpp
     src/zoom-video-delegate.cpp

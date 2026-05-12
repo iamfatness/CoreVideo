@@ -5,10 +5,10 @@
 
 ParticipantSubscription::ParticipantSubscription(uint32_t participant_id,
                                                  const std::string &source_uuid,
-                                                 HANDLE e2p_pipe)
+                                                 IpcFd e2p_fd)
     : m_participant_id(participant_id),
       m_source_uuid(source_uuid),
-      m_e2p_pipe(e2p_pipe)
+      m_e2p_fd(e2p_fd)
 {
     ZOOMSDK::SDKError err = ZOOMSDK::createRenderer(&m_renderer, this);
     if (err != ZOOMSDK::SDKERR_SUCCESS || !m_renderer) return;
@@ -24,25 +24,16 @@ ParticipantSubscription::~ParticipantSubscription()
         ZOOMSDK::destroyRenderer(m_renderer);
         m_renderer = nullptr;
     }
-    if (m_shm_ptr)    UnmapViewOfFile(m_shm_ptr);
-    if (m_shm_handle) CloseHandle(m_shm_handle);
+    shm_region_destroy(m_shm);
 }
 
 void ParticipantSubscription::ensure_shm(uint32_t y_len)
 {
     const size_t total = sizeof(ShmFrameHeader) + y_len + y_len / 4 + y_len / 4;
-    if (m_shm_handle && m_shm_size >= total) return;
-
-    if (m_shm_ptr)    { UnmapViewOfFile(m_shm_ptr);  m_shm_ptr    = nullptr; }
-    if (m_shm_handle) { CloseHandle(m_shm_handle);   m_shm_handle = nullptr; }
+    if (m_shm.ptr && m_shm.size >= total) return;
 
     const std::string region_name = IPC_SHM_PREFIX + m_source_uuid;
-    m_shm_handle = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr,
-                                      PAGE_READWRITE, 0,
-                                      static_cast<DWORD>(total),
-                                      region_name.c_str());
-    m_shm_ptr  = MapViewOfFile(m_shm_handle, FILE_MAP_WRITE, 0, 0, total);
-    m_shm_size = total;
+    shm_region_create(m_shm, region_name, total);
 }
 
 void ParticipantSubscription::onRawDataFrameReceived(YUVRawDataI420 *data)
@@ -54,21 +45,19 @@ void ParticipantSubscription::onRawDataFrameReceived(YUVRawDataI420 *data)
     if (w == 0 || h == 0) return;
 
     ensure_shm(y_len);
-    if (!m_shm_ptr) return;
+    if (!m_shm.ptr) return;
 
-    auto *hdr    = static_cast<ShmFrameHeader *>(m_shm_ptr);
-    auto *pixels = static_cast<char *>(m_shm_ptr) + sizeof(ShmFrameHeader);
+    auto *hdr    = static_cast<ShmFrameHeader *>(m_shm.ptr);
+    auto *pixels = static_cast<char *>(m_shm.ptr) + sizeof(ShmFrameHeader);
     hdr->width = w; hdr->height = h; hdr->y_len = y_len;
 
     std::memcpy(pixels,                   data->GetYBuffer(), y_len);
     std::memcpy(pixels + y_len,           data->GetUBuffer(), y_len / 4);
     std::memcpy(pixels + y_len + y_len/4, data->GetVBuffer(), y_len / 4);
 
-    const std::string msg = R"({"cmd":"frame","source_uuid":")" + m_source_uuid +
-        R"(","w":)" + std::to_string(w) + R"(,"h":)" + std::to_string(h) + "}";
-    DWORD written;
-    WriteFile(m_e2p_pipe, (msg + "\n").c_str(),
-              static_cast<DWORD>(msg.size() + 1), &written, nullptr);
+    ipc_write_line(m_e2p_fd,
+        R"({"cmd":"frame","source_uuid":")" + m_source_uuid +
+        R"(","w":)" + std::to_string(w) + R"(,"h":)" + std::to_string(h) + "}");
 }
 
 void ParticipantSubscription::onRawDataStatusChanged(RawDataStatus) {}
@@ -80,10 +69,10 @@ void ParticipantSubscription::onRendererBeDestroyed()
 
 void EngineVideo::subscribe(uint32_t participant_id,
                              const std::string &source_uuid,
-                             HANDLE e2p_pipe)
+                             IpcFd e2p_fd)
 {
     m_subs[source_uuid] = std::make_unique<ParticipantSubscription>(
-        participant_id, source_uuid, e2p_pipe);
+        participant_id, source_uuid, e2p_fd);
 }
 
 void EngineVideo::unsubscribe(const std::string &source_uuid)

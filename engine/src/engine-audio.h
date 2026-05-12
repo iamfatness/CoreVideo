@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
-#include <windows.h>
+#include "../../src/engine-ipc.h"
 #include "../../third_party/zoom-sdk/h/rawdata_def.h"
 #include "../../third_party/zoom-sdk/h/rawdata_audio_helper_interface.h"
 
@@ -13,7 +13,7 @@ class EngineAudio : public ZOOMSDK::IZoomSDKAudioRawDataDelegate {
 public:
     static EngineAudio &instance();
 
-    bool init(HANDLE e2p_pipe, const std::string &source_uuid);
+    bool init(IpcFd e2p_fd, const std::string &source_uuid);
     void shutdown();
 
     // IZoomSDKAudioRawDataDelegate
@@ -27,10 +27,8 @@ private:
     EngineAudio() = default;
     void ensure_shm(uint32_t byte_len);
 
-    HANDLE      m_e2p_pipe   = nullptr;
+    IpcFd       m_e2p_fd     = kIpcInvalidFd;
     std::string m_source_uuid;
-    HANDLE      m_shm_handle = nullptr;
-    void       *m_shm_ptr    = nullptr;
-    size_t      m_shm_size   = 0;
+    ShmRegion   m_shm;
     bool        m_subscribed = false;
 };

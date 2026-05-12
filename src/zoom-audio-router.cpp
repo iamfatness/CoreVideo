@@ -1,6 +1,23 @@
 #include "zoom-audio-router.h"
 #include <rawdata/zoom_rawdata_api.h>
 #include <obs-module.h>
+#if defined(WIN32)
+#include <windows.h>
+#endif
+
+static std::string zchar_to_utf8(const zchar_t *s)
+{
+    if (!s) return {};
+#if defined(WIN32)
+    int len = WideCharToMultiByte(CP_UTF8, 0, s, -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return {};
+    std::string out(len - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, s, -1, &out[0], len, nullptr, nullptr);
+    return out;
+#else
+    return s;
+#endif
+}
 
 ZoomAudioRouter &ZoomAudioRouter::instance()
 {
@@ -102,6 +119,19 @@ void ZoomAudioRouter::remove_share_audio_sink(void *key)
     m_share_audio_sinks.erase(key);
 }
 
+void ZoomAudioRouter::add_interp_sink(void *key, InterpSink cb)
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    if (cb) m_interp_sinks[key] = std::move(cb);
+    else    m_interp_sinks.erase(key);
+}
+
+void ZoomAudioRouter::remove_interp_sink(void *key)
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    m_interp_sinks.erase(key);
+}
+
 // ── IZoomSDKAudioRawDataDelegate ─────────────────────────────────────────────
 
 void ZoomAudioRouter::onMixedAudioRawDataReceived(AudioRawData *data)
@@ -147,4 +177,18 @@ void ZoomAudioRouter::onShareAudioRawDataReceived(AudioRawData *data,
     }
     for (auto &cb : sinks)
         cb(data, share_user_id);
+}
+
+void ZoomAudioRouter::onOneWayInterpreterAudioRawDataReceived(AudioRawData *data,
+                                                              const zchar_t *language)
+{
+    const std::string lang = zchar_to_utf8(language);
+    std::vector<InterpSink> sinks;
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        for (auto &[key, cb] : m_interp_sinks)
+            if (cb) sinks.push_back(cb);
+    }
+    for (auto &cb : sinks)
+        cb(data, lang);
 }

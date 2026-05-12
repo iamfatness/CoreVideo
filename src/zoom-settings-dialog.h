@@ -17,5 +17,6 @@ private:
     QLineEdit *m_sdk_secret_edit        = nullptr;
     QLineEdit *m_jwt_token_edit         = nullptr;
     QSpinBox  *m_control_port_spin      = nullptr;
+    QSpinBox  *m_osc_port_spin          = nullptr;
     QLineEdit *m_control_token_edit     = nullptr;
 };

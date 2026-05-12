@@ -2,6 +2,7 @@
 #include "zoom-settings.h"
 #include "zoom-auth.h"
 #include "zoom-control-server.h"
+#include "zoom-osc-server.h"
 #include <QVBoxLayout>
 #include <QFormLayout>
 #include <QDialogButtonBox>
@@ -30,6 +31,10 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     m_control_port_spin->setRange(1024, 65535);
     m_control_port_spin->setValue(s.control_server_port);
 
+    m_osc_port_spin = new QSpinBox(this);
+    m_osc_port_spin->setRange(1024, 65535);
+    m_osc_port_spin->setValue(s.osc_server_port);
+
     m_control_token_edit = new QLineEdit(QString::fromStdString(s.control_token), this);
     m_control_token_edit->setEchoMode(QLineEdit::Password);
     m_control_token_edit->setPlaceholderText("Leave blank to allow unauthenticated access");
@@ -43,11 +48,17 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     sdk_group->setLayout(sdk_form);
 
     auto *ctrl_form = new QFormLayout;
-    ctrl_form->addRow(new QLabel("Port:",  this), m_control_port_spin);
+    ctrl_form->addRow(new QLabel("TCP Port:",  this), m_control_port_spin);
     ctrl_form->addRow(new QLabel("Token:", this), m_control_token_edit);
 
-    auto *ctrl_group = new QGroupBox("Control Server (127.0.0.1)", this);
+    auto *ctrl_group = new QGroupBox("Control Server (127.0.0.1 TCP/JSON)", this);
     ctrl_group->setLayout(ctrl_form);
+
+    auto *osc_form = new QFormLayout;
+    osc_form->addRow(new QLabel("UDP Port:", this), m_osc_port_spin);
+
+    auto *osc_group = new QGroupBox("OSC Server (127.0.0.1 UDP)", this);
+    osc_group->setLayout(osc_form);
 
     auto *buttons = new QDialogButtonBox(
         QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
@@ -57,6 +68,7 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     auto *layout = new QVBoxLayout(this);
     layout->addWidget(sdk_group);
     layout->addWidget(ctrl_group);
+    layout->addWidget(osc_group);
     layout->addWidget(buttons);
 }
 
@@ -67,6 +79,7 @@ void ZoomSettingsDialog::onSave()
     s.sdk_secret          = m_sdk_secret_edit->text().toStdString();
     s.jwt_token           = m_jwt_token_edit->text().toStdString();
     s.control_server_port = static_cast<uint16_t>(m_control_port_spin->value());
+    s.osc_server_port     = static_cast<uint16_t>(m_osc_port_spin->value());
     s.control_token       = m_control_token_edit->text().toStdString();
     s.save();
 
@@ -85,6 +98,8 @@ void ZoomSettingsDialog::onSave()
     }
 
     ZoomControlServer::instance().set_token(s.control_token);
+    ZoomOscServer::instance().stop();
+    ZoomOscServer::instance().start(s.osc_server_port);
 
     accept();
 }

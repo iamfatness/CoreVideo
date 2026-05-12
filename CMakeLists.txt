@@ -44,11 +44,14 @@ add_library(obs-zoom-plugin MODULE
     src/zoom-settings-dialog.cpp
     src/zoom-output-manager.cpp
     src/zoom-output-dialog.cpp
+    src/zoom-output-profile.cpp
     src/zoom-control-server.cpp
+    src/zoom-osc-server.cpp
     src/zoom-video-delegate.cpp
     src/zoom-audio-delegate.cpp
     src/zoom-audio-router.cpp
     src/zoom-participant-audio-source.cpp
+    src/zoom-interpretation-audio-source.cpp
     src/obs-utils.cpp
 )
 target_include_directories(obs-zoom-plugin PRIVATE

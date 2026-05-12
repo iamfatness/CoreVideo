@@ -2,8 +2,8 @@
 #include <functional>
 #include <unordered_map>
 #include <mutex>
-#include "../third_party/zoom-sdk/h/rawdata_def.h"
-#include "../third_party/zoom-sdk/h/rawdata_audio_helper_interface.h"
+#include <zoom_sdk_raw_data_def.h>
+#include <rawdata/rawdata_audio_helper_interface.h>
 
 // Sole subscriber to IZoomSDKAudioRawDataHelper.
 // ZoomAudioDelegate and ZoomParticipantAudioSource register sinks here;

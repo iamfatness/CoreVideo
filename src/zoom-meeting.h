@@ -3,7 +3,7 @@
 #include <functional>
 #include <thread>
 #include <unordered_map>
-#include "../third_party/zoom-sdk/h/meeting_service_interface.h"
+#include <meeting_service_interface.h>
 
 enum class MeetingState { Idle, Joining, InMeeting, Leaving, Failed };
 

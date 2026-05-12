@@ -1,9 +1,10 @@
 #pragma once
 #include <cstdint>
 #include <obs-module.h>
-#include "../third_party/zoom-sdk/h/rawdata_renderer_interface.h"
-#include "../third_party/zoom-sdk/h/meeting_sharing_interface.h"
-#include "../third_party/zoom-sdk/h/zoom_rawdata_api.h"
+#include <zoom_sdk_raw_data_def.h>
+#include <rawdata/rawdata_renderer_interface.h>
+#include <meeting_service_components/meeting_sharing_interface.h>
+#include <rawdata/zoom_rawdata_api.h>
 
 class ZoomShareDelegate : public ZOOMSDK::IZoomSDKRendererDelegate,
                           public ZOOMSDK::IMeetingShareCtrlEvent {

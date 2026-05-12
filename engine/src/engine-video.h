@@ -4,8 +4,8 @@
 #include <unordered_map>
 #include <memory>
 #include "../../src/engine-ipc.h"
-#include "../../third_party/zoom-sdk/h/rawdata_def.h"
-#include "../../third_party/zoom-sdk/h/rawdata_renderer_interface.h"
+#include <zoom_sdk_raw_data_def.h>
+#include <rawdata/rawdata_renderer_interface.h>
 
 #pragma pack(push, 1)
 struct ShmFrameHeader { uint32_t width, height, y_len; };

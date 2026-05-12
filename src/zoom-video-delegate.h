@@ -2,8 +2,8 @@
 #include <obs-module.h>
 #include <cstdint>
 #include <atomic>
-#include "../third_party/zoom-sdk/h/rawdata_def.h"
-#include "../third_party/zoom-sdk/h/rawdata_renderer_interface.h"
+#include <zoom_sdk_raw_data_def.h>
+#include <rawdata/rawdata_renderer_interface.h>
 
 class ZoomVideoDelegate : public ZOOMSDK::IZoomSDKRendererDelegate {
 public:

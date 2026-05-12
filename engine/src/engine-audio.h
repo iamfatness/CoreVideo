@@ -2,8 +2,8 @@
 #include <cstdint>
 #include <string>
 #include "../../src/engine-ipc.h"
-#include "../../third_party/zoom-sdk/h/rawdata_def.h"
-#include "../../third_party/zoom-sdk/h/rawdata_audio_helper_interface.h"
+#include <zoom_sdk_raw_data_def.h>
+#include <rawdata/rawdata_audio_helper_interface.h>
 
 #pragma pack(push, 1)
 struct ShmAudioHeader { uint32_t sample_rate; uint16_t channels; uint32_t byte_len; };

@@ -1,6 +1,6 @@
 #include "zoom-auth.h"
 #include <obs-module.h>
-#include "../third_party/zoom-sdk/h/zoom_sdk.h"
+#include <zoom_sdk.h>
 
 #if defined(WIN32)
 #include <windows.h>

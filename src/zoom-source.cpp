@@ -1,11 +1,13 @@
 #include "zoom-source.h"
-#include "zoom-meeting.h"
-#include "zoom-participants.h"
-#include "zoom-auth.h"
+#include "zoom-engine-client.h"
 #include "zoom-settings.h"
-#include "zoom-output-manager.h"
+#include <media-io/audio-io.h>
+#include <media-io/video-io.h>
 #include <obs-module.h>
-#include <thread>
+#include <util/platform.h>
+#include <algorithm>
+#include <climits>
+#include <cstring>
 
 #define PROP_MEETING_ID           "meeting_id"
 #define PROP_PASSCODE             "passcode"
@@ -17,17 +19,22 @@
 #define PROP_SPEAKER_HOLD         "speaker_hold_ms"
 #define PROP_VIDEO_LOSS_MODE      "video_loss_mode"
 #define PROP_ISOLATE_AUDIO        "isolate_audio"
-#define VIDEO_LOSS_LAST_FRAME 0
-#define VIDEO_LOSS_BLACK      1
 #define PROP_AUTO_JOIN            "auto_join"
 #define PROP_AUDIO_CHANNELS       "audio_channels"
 #define PROP_RESOLUTION           "resolution"
 #define PROP_STATUS               "status_label"
+
+#define VIDEO_LOSS_LAST_FRAME 0
+#define VIDEO_LOSS_BLACK      1
 #define AUDIO_CH_MONO   0
 #define AUDIO_CH_STEREO 1
 #define RES_360P  0
 #define RES_720P  1
 #define RES_1080P 2
+
+static std::atomic<uint64_t> s_source_counter{1};
+static constexpr uint32_t kZoomBytesPerSample = sizeof(int16_t);
+static constexpr uint64_t kPreviewIntervalNs = 200'000'000ULL;
 
 static AudioChannelMode audio_mode_from_data(obs_data_t *s)
 {
@@ -44,42 +51,59 @@ static VideoResolution resolution_from_data(obs_data_t *s)
     }
 }
 
+static const char *meeting_state_to_text(MeetingState state)
+{
+    switch (state) {
+    case MeetingState::Idle: return "ZoomStatus.Idle";
+    case MeetingState::Joining: return "ZoomStatus.Joining";
+    case MeetingState::InMeeting: return "ZoomStatus.InMeeting";
+    case MeetingState::Leaving: return "ZoomStatus.Leaving";
+    case MeetingState::Failed: return "ZoomStatus.Failed";
+    }
+    return "ZoomStatus.Idle";
+}
+
+static std::string make_source_uuid()
+{
+    return "source_" + std::to_string(os_gettime_ns()) + "_" +
+        std::to_string(s_source_counter.fetch_add(1, std::memory_order_relaxed));
+}
+
+static uint32_t effective_participant_id(uint32_t configured_participant_id,
+                                         bool active_speaker_mode)
+{
+    if (!active_speaker_mode) return configured_participant_id;
+    const uint32_t active = ZoomEngineClient::instance().active_speaker_id();
+    return active != 0 ? active : configured_participant_id;
+}
+
 void ZoomSource::apply_settings(obs_data_t *settings)
 {
     const uint32_t old_participant_id = participant_id;
     const bool old_active_speaker_mode = active_speaker_mode;
-    const bool old_isolate_audio = isolate_audio;
     const AudioChannelMode old_audio_mode = audio_mode;
     const VideoResolution old_resolution = resolution;
 
-    meeting_id           = obs_data_get_string(settings, PROP_MEETING_ID);
-    passcode             = obs_data_get_string(settings, PROP_PASSCODE);
-    display_name         = obs_data_get_string(settings, PROP_DISPLAY_NAME);
-    output_display_name  = obs_data_get_string(settings, PROP_OUTPUT_DISPLAY_NAME);
-    participant_id      = static_cast<uint32_t>(
-                            obs_data_get_int(settings, PROP_PARTICIPANT_ID));
-    auto_join           = obs_data_get_bool(settings, PROP_AUTO_JOIN);
+    meeting_id = obs_data_get_string(settings, PROP_MEETING_ID);
+    passcode = obs_data_get_string(settings, PROP_PASSCODE);
+    display_name = obs_data_get_string(settings, PROP_DISPLAY_NAME);
+    output_display_name = obs_data_get_string(settings, PROP_OUTPUT_DISPLAY_NAME);
+    participant_id = static_cast<uint32_t>(obs_data_get_int(settings, PROP_PARTICIPANT_ID));
+    auto_join = obs_data_get_bool(settings, PROP_AUTO_JOIN);
     active_speaker_mode = obs_data_get_bool(settings, PROP_ACTIVE_SPEAKER);
     speaker_sensitivity_ms = static_cast<uint32_t>(
-                            obs_data_get_int(settings, PROP_SPEAKER_SENSITIVITY));
-    speaker_hold_ms     = static_cast<uint32_t>(
-                            obs_data_get_int(settings, PROP_SPEAKER_HOLD));
-    isolate_audio       = obs_data_get_bool(settings, PROP_ISOLATE_AUDIO);
-    audio_mode          = audio_mode_from_data(settings);
-    resolution          = resolution_from_data(settings);
+        obs_data_get_int(settings, PROP_SPEAKER_SENSITIVITY));
+    speaker_hold_ms = static_cast<uint32_t>(obs_data_get_int(settings, PROP_SPEAKER_HOLD));
+    isolate_audio = obs_data_get_bool(settings, PROP_ISOLATE_AUDIO);
+    audio_mode = audio_mode_from_data(settings);
+    resolution = resolution_from_data(settings);
     video_loss_mode = obs_data_get_int(settings, PROP_VIDEO_LOSS_MODE) == VIDEO_LOSS_BLACK
-                      ? VideoLossMode::Black : VideoLossMode::LastFrame;
-    if (audio_delegate) audio_delegate->set_channel_mode(audio_mode);
-    if (video_delegate) video_delegate->set_loss_mode(video_loss_mode);
+        ? VideoLossMode::Black : VideoLossMode::LastFrame;
 
-    if (video_delegate && audio_delegate &&
-        ZoomMeeting::instance().state() == MeetingState::InMeeting &&
-        (old_participant_id != participant_id ||
-         old_active_speaker_mode != active_speaker_mode ||
-         old_isolate_audio != isolate_audio ||
-         old_audio_mode != audio_mode ||
-         old_resolution != resolution)) {
-        resubscribe();
+    if (m_subscribed && (old_participant_id != participant_id ||
+        old_active_speaker_mode != active_speaker_mode ||
+        old_audio_mode != audio_mode || old_resolution != resolution)) {
+        subscribe();
     }
 }
 
@@ -92,12 +116,12 @@ std::string ZoomSource::output_name() const
 ZoomOutputInfo ZoomSource::output_info() const
 {
     ZoomOutputInfo info;
-    info.source_name    = output_name();
-    info.display_name   = output_display_name;
+    info.source_name = output_name();
+    info.display_name = output_display_name;
     info.participant_id = participant_id;
     info.active_speaker = active_speaker_mode;
-    info.isolate_audio  = isolate_audio;
-    info.audio_mode     = audio_mode;
+    info.isolate_audio = isolate_audio;
+    info.audio_mode = audio_mode;
     return info;
 }
 
@@ -123,193 +147,176 @@ void ZoomSource::configure_output(uint32_t new_participant_id,
     active_speaker_mode = new_active_speaker_mode;
     isolate_audio = new_isolate_audio;
     audio_mode = new_audio_mode;
-    if (audio_delegate) audio_delegate->set_channel_mode(audio_mode);
-    if (ZoomMeeting::instance().state() == MeetingState::InMeeting)
-        resubscribe();
+    if (m_subscribed) subscribe();
 }
 
-void ZoomSource::resubscribe()
+void ZoomSource::subscribe()
 {
-    if (!video_delegate || !audio_delegate) return;
-    video_delegate->unsubscribe();
-    audio_delegate->unsubscribe();
-    audio_delegate->set_isolated_user(0);
-    on_meeting_state(ZoomMeeting::instance().state());
+    if (source_uuid.empty()) source_uuid = make_source_uuid();
+    const uint32_t subscribe_id =
+        effective_participant_id(participant_id, active_speaker_mode);
+    ZoomEngineClient::instance().subscribe(source_uuid, subscribe_id);
+    m_current_subscription_id = subscribe_id;
+    m_subscribed = true;
 }
 
-void ZoomSource::on_meeting_state(MeetingState state)
+void ZoomSource::unsubscribe()
 {
-    switch (state) {
-    case MeetingState::InMeeting:
-        if (!active_speaker_mode)
-            video_delegate->subscribe(participant_id, resolution);
-        audio_delegate->subscribe();
-        if (isolate_audio && !active_speaker_mode && participant_id != 0)
-            audio_delegate->set_isolated_user(participant_id);
-        break;
-    case MeetingState::Idle:
-    case MeetingState::Failed:
-        video_delegate->unsubscribe();
-        audio_delegate->unsubscribe();
-        audio_delegate->set_isolated_user(0);
-        break;
-    default:
-        break;
-    }
+    if (!m_subscribed) return;
+    ZoomEngineClient::instance().unsubscribe(source_uuid);
+    m_subscribed = false;
+    m_current_subscription_id = 0;
 }
 
-void ZoomSource::do_speaker_switch(uint32_t spk)
+void ZoomSource::on_roster_changed()
 {
-    pending_speaker_id = 0;
-    participant_id     = spk;
-    last_switch_time   = std::chrono::steady_clock::now();
-    video_delegate->unsubscribe();
-    video_delegate->subscribe(spk, resolution);
-    if (isolate_audio)
-        audio_delegate->set_isolated_user(spk);
-    blog(LOG_INFO, "[obs-zoom-plugin] Active speaker switched to user %u", spk);
+    if (!m_subscribed || !active_speaker_mode) return;
+    const uint32_t subscribe_id =
+        effective_participant_id(participant_id, active_speaker_mode);
+    if (subscribe_id == 0 || subscribe_id == m_current_subscription_id) return;
+    subscribe();
 }
 
-struct SpeakerCheckPayload {
-    std::shared_ptr<std::atomic<bool>> live;
-    ZoomSource *self;
-    uint32_t    spk;
-};
-
-void ZoomSource::schedule_speaker_check(uint32_t spk, int64_t delay_ms)
+void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height)
 {
-    auto live    = speaker_alive;
-    auto *self   = this;
-    std::thread([live, self, spk, delay_ms]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-        if (!live->load(std::memory_order_acquire)) return;
-        auto *p = new SpeakerCheckPayload{live, self, spk};
-        obs_queue_task(OBS_TASK_UI, [](void *ptr) {
-            auto *d = static_cast<SpeakerCheckPayload *>(ptr);
-            if (d->live->load(std::memory_order_acquire))
-                d->self->try_commit_speaker(d->spk);
-            delete d;
-        }, p, false);
-    }).detach();
-}
-
-void ZoomSource::try_commit_speaker(uint32_t spk)
-{
-    if (!active_speaker_mode) return;
-    if (spk != pending_speaker_id) return; // a newer candidate superseded this one
-    if (spk == participant_id) { pending_speaker_id = 0; return; }
-
-    const auto now = std::chrono::steady_clock::now();
-    using ms = std::chrono::milliseconds;
-    const int64_t ms_held    = std::chrono::duration_cast<ms>(now - last_switch_time).count();
-    const int64_t ms_pending = std::chrono::duration_cast<ms>(now - candidate_since).count();
-
-    const int64_t hold_remain  = std::max(0LL, (int64_t)speaker_hold_ms        - ms_held);
-    const int64_t sense_remain = std::max(0LL, (int64_t)speaker_sensitivity_ms - ms_pending);
-    const int64_t delay        = std::max(hold_remain, sense_remain);
-
-    if (delay == 0) {
-        if (ZoomParticipants::instance().active_speaker_id() == spk)
-            do_speaker_switch(spk);
-        else
-            pending_speaker_id = 0;
+    std::lock_guard<std::mutex> lk(m_mtx);
+    const std::string shm_name = IPC_SHM_PREFIX + source_uuid;
+    if (event_width == 0 || event_height == 0) return;
+    const size_t frame_bytes = sizeof(ShmFrameHeader) +
+        static_cast<size_t>(event_width) * event_height * 3 / 2;
+    if ((!m_video_shm.ptr || m_video_shm.size < frame_bytes) &&
+        !shm_region_open_read(m_video_shm, shm_name, frame_bytes))
         return;
+
+    auto *hdr = static_cast<const ShmFrameHeader *>(m_video_shm.ptr);
+    const uint32_t w = hdr->width;
+    const uint32_t h = hdr->height;
+    const uint32_t y_len = hdr->y_len;
+    if (!source || w == 0 || h == 0 || y_len != w * h) return;
+
+    const auto *pixels = static_cast<const uint8_t *>(m_video_shm.ptr) + sizeof(ShmFrameHeader);
+    obs_source_frame frame = {};
+    frame.format = VIDEO_FORMAT_I420;
+    frame.width = w;
+    frame.height = h;
+    frame.timestamp = os_gettime_ns();
+    frame.data[0] = const_cast<uint8_t *>(pixels);
+    frame.data[1] = const_cast<uint8_t *>(pixels + y_len);
+    frame.data[2] = const_cast<uint8_t *>(pixels + y_len + y_len / 4);
+    frame.linesize[0] = w;
+    frame.linesize[1] = w / 2;
+    frame.linesize[2] = w / 2;
+    obs_source_output_video(source, &frame);
+    m_width.store(w, std::memory_order_relaxed);
+    m_height.store(h, std::memory_order_relaxed);
+
+    const uint64_t now_ns = os_gettime_ns();
+    if (m_preview_cb && now_ns - m_preview_last_ns >= kPreviewIntervalNs) {
+        m_preview_last_ns = now_ns;
+        m_preview_cb(w, h, pixels, pixels + y_len, pixels + y_len + y_len / 4, w, w / 2);
     }
-    schedule_speaker_check(spk, delay);
 }
 
-void ZoomSource::on_active_speaker_changed()
+void ZoomSource::on_engine_audio(uint32_t event_byte_len)
 {
-    if (!active_speaker_mode) return;
-    if (ZoomMeeting::instance().state() != MeetingState::InMeeting) return;
+    std::lock_guard<std::mutex> lk(m_mtx);
+    const std::string shm_name = IPC_SHM_PREFIX + source_uuid + "_audio";
+    if (event_byte_len == 0) return;
+    const size_t audio_bytes = sizeof(ShmAudioHeader) + event_byte_len;
+    if ((!m_audio_shm.ptr || m_audio_shm.size < audio_bytes) &&
+        !shm_region_open_read(m_audio_shm, shm_name, audio_bytes))
+        return;
 
-    const uint32_t new_spk = ZoomParticipants::instance().active_speaker_id();
-    if (new_spk == 0 || new_spk == participant_id) return;
+    auto *hdr = static_cast<const ShmAudioHeader *>(m_audio_shm.ptr);
+    const uint32_t byte_len = hdr->byte_len;
+    if (!source || byte_len == 0) return;
+    const auto *pcm = reinterpret_cast<const int16_t *>(
+        static_cast<const uint8_t *>(m_audio_shm.ptr) + sizeof(ShmAudioHeader));
 
-    const auto now = std::chrono::steady_clock::now();
-    if (new_spk != pending_speaker_id) {
-        pending_speaker_id = new_spk;
-        candidate_since    = now;
+    obs_source_audio audio = {};
+    audio.samples_per_sec = hdr->sample_rate;
+    audio.timestamp = os_gettime_ns();
+
+    if (audio_mode == AudioChannelMode::Stereo && hdr->channels == 1) {
+        const uint32_t mono_frames = byte_len / kZoomBytesPerSample;
+        const uint32_t stereo_count = mono_frames * 2;
+        if (m_stereo_buf.size() < stereo_count)
+            m_stereo_buf.resize(stereo_count);
+        for (uint32_t i = 0; i < mono_frames; ++i) {
+            m_stereo_buf[i * 2] = pcm[i];
+            m_stereo_buf[i * 2 + 1] = pcm[i];
+        }
+        audio.data[0] = reinterpret_cast<const uint8_t *>(m_stereo_buf.data());
+        audio.frames = mono_frames;
+        audio.format = AUDIO_FORMAT_16BIT;
+        audio.speakers = SPEAKERS_STEREO;
+    } else {
+        audio.data[0] = reinterpret_cast<const uint8_t *>(pcm);
+        audio.frames = byte_len / (kZoomBytesPerSample * std::max<uint16_t>(hdr->channels, 1));
+        audio.format = AUDIO_FORMAT_16BIT;
+        audio.speakers = hdr->channels == 2 ? SPEAKERS_STEREO : SPEAKERS_MONO;
     }
-
-    using ms = std::chrono::milliseconds;
-    const int64_t ms_held    = std::chrono::duration_cast<ms>(now - last_switch_time).count();
-    const int64_t ms_pending = std::chrono::duration_cast<ms>(now - candidate_since).count();
-
-    const int64_t hold_remain  = std::max(0LL, (int64_t)speaker_hold_ms        - ms_held);
-    const int64_t sense_remain = std::max(0LL, (int64_t)speaker_sensitivity_ms - ms_pending);
-    const int64_t delay        = std::max(hold_remain, sense_remain);
-
-    if (delay == 0)
-        do_speaker_switch(new_spk);
-    else
-        schedule_speaker_check(new_spk, delay);
+    obs_source_output_audio(source, &audio);
 }
 
-// ── OBS source callbacks ──────────────────────────────────────────────────────
+void ZoomSource::set_preview_cb(ZoomPreviewCallback cb)
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    m_preview_cb = std::move(cb);
+}
 
-static const char *zoom_source_get_name(void *) { return obs_module_text("ZoomSource.Name"); }
+void ZoomSource::clear_preview_cb()
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    m_preview_cb = nullptr;
+}
+
+void ZoomSource::release_shared_memory()
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    shm_region_destroy(m_video_shm);
+    shm_region_destroy(m_audio_shm);
+}
+
+static const char *zoom_source_get_name(void *)
+{
+    return obs_module_text("ZoomSource.Name");
+}
 
 static void *zoom_source_create(obs_data_t *settings, obs_source_t *source)
 {
     auto *ctx = new ZoomSource();
     ctx->source = source;
+    ctx->source_uuid = make_source_uuid();
     ctx->apply_settings(settings);
-    ctx->video_delegate = std::make_unique<ZoomVideoDelegate>(source);
-    ctx->video_delegate->set_loss_mode(ctx->video_loss_mode);
-    ctx->audio_delegate = std::make_unique<ZoomAudioDelegate>(source, ctx->audio_mode);
 
-    ZoomMeeting::instance().on_state_change(ctx,
-        [ctx](MeetingState s) { ctx->on_meeting_state(s); });
-
-    ZoomParticipants::instance().add_roster_callback(ctx,
-        [ctx]() { ctx->on_active_speaker_changed(); });
-
+    ZoomEngineClient::instance().register_source(ctx->source_uuid, {
+        [ctx](uint32_t w, uint32_t h) { ctx->on_engine_frame(w, h); },
+        [ctx](uint32_t byte_len) { ctx->on_engine_audio(byte_len); }
+    });
+    ZoomEngineClient::instance().add_roster_callback(ctx,
+        [ctx]() { ctx->on_roster_changed(); });
     ZoomOutputManager::instance().register_source(ctx);
 
     if (ctx->auto_join && !ctx->meeting_id.empty()) {
-        if (ZoomAuth::instance().state() == ZoomAuthState::Authenticated) {
-            ZoomMeeting::instance().join(ctx->meeting_id, ctx->passcode,
-                                         ctx->display_name.empty() ? "OBS"
-                                                                    : ctx->display_name);
-        } else {
-            // Not yet authenticated — init SDK if needed and register a
-            // one-shot callback to join as soon as authentication completes.
-            auto s = ZoomPluginSettings::load();
-            if (ZoomAuth::instance().state() == ZoomAuthState::Unauthenticated) {
-                if (!s.sdk_key.empty())
-                    ZoomAuth::instance().init(s.sdk_key, s.sdk_secret);
-                if (!s.jwt_token.empty())
-                    ZoomAuth::instance().authenticate(s.jwt_token);
-            }
-            ZoomAuth::instance().add_state_callback(ctx,
-                [ctx](ZoomAuthState auth_state) {
-                    if (auth_state == ZoomAuthState::Authenticated) {
-                        ZoomAuth::instance().remove_state_callback(ctx);
-                        ZoomMeeting::instance().join(
-                            ctx->meeting_id, ctx->passcode,
-                            ctx->display_name.empty() ? "OBS" : ctx->display_name);
-                    } else if (auth_state == ZoomAuthState::Failed) {
-                        ZoomAuth::instance().remove_state_callback(ctx);
-                    }
-                });
+        const ZoomPluginSettings s = ZoomPluginSettings::load();
+        if (ZoomEngineClient::instance().start(s.jwt_token)) {
+            ZoomEngineClient::instance().join(ctx->meeting_id, ctx->passcode,
+                ctx->display_name.empty() ? "OBS" : ctx->display_name);
+            ctx->subscribe();
         }
     }
-
-    if (ZoomMeeting::instance().state() == MeetingState::InMeeting)
-        ctx->on_meeting_state(MeetingState::InMeeting);
-
     return ctx;
 }
 
 static void zoom_source_destroy(void *data)
 {
     auto *ctx = static_cast<ZoomSource *>(data);
-    ctx->speaker_alive->store(false, std::memory_order_release);
     ZoomOutputManager::instance().unregister_source(ctx);
-    ZoomAuth::instance().remove_state_callback(ctx);
-    ZoomMeeting::instance().remove_state_change(ctx);
-    ZoomParticipants::instance().remove_roster_callback(ctx);
+    ctx->unsubscribe();
+    ZoomEngineClient::instance().remove_roster_callback(ctx);
+    ZoomEngineClient::instance().unregister_source(ctx->source_uuid);
+    ctx->release_shared_memory();
     delete ctx;
 }
 
@@ -320,14 +327,12 @@ static void zoom_source_update(void *data, obs_data_t *settings)
 
 static uint32_t zoom_source_get_width(void *data)
 {
-    auto *ctx = static_cast<ZoomSource *>(data);
-    return ctx->video_delegate ? ctx->video_delegate->width() : 0;
+    return static_cast<ZoomSource *>(data)->width();
 }
 
 static uint32_t zoom_source_get_height(void *data)
 {
-    auto *ctx = static_cast<ZoomSource *>(data);
-    return ctx->video_delegate ? ctx->video_delegate->height() : 0;
+    return static_cast<ZoomSource *>(data)->height();
 }
 
 static obs_properties_t *zoom_source_get_properties(void *data)
@@ -335,176 +340,122 @@ static obs_properties_t *zoom_source_get_properties(void *data)
     auto *ctx = static_cast<ZoomSource *>(data);
     obs_properties_t *props = obs_properties_create();
 
-    // Read-only status label
-    {
-        const MeetingState cur_state = ZoomMeeting::instance().state();
-        const char *status_keys[] = {
-            "ZoomStatus.Idle", "ZoomStatus.Joining", "ZoomStatus.InMeeting",
-            "ZoomStatus.Leaving", "ZoomStatus.Failed"
-        };
-        const char *status_str = obs_module_text(
-            status_keys[static_cast<int>(cur_state)]);
-        obs_property_t *status_prop = obs_properties_add_text(
-            props, PROP_STATUS, obs_module_text("ZoomSource.Status"),
-            OBS_TEXT_DEFAULT);
-        obs_data_set_string(obs_source_get_settings(ctx->source),
-                            PROP_STATUS, status_str);
-        obs_property_set_enabled(status_prop, false);
-    }
+    obs_property_t *status_prop = obs_properties_add_text(
+        props, PROP_STATUS, obs_module_text("ZoomSource.Status"), OBS_TEXT_DEFAULT);
+    obs_data_t *settings = obs_source_get_settings(ctx->source);
+    obs_data_set_string(settings, PROP_STATUS,
+                        obs_module_text(meeting_state_to_text(
+                            ZoomEngineClient::instance().state())));
+    obs_data_release(settings);
+    obs_property_set_enabled(status_prop, false);
 
     obs_properties_add_text(props, PROP_OUTPUT_DISPLAY_NAME,
         obs_module_text("ZoomSource.OutputDisplayName"), OBS_TEXT_DEFAULT);
     obs_properties_add_text(props, PROP_MEETING_ID,
-        obs_module_text("ZoomSource.MeetingId"),   OBS_TEXT_DEFAULT);
+        obs_module_text("ZoomSource.MeetingId"), OBS_TEXT_DEFAULT);
     obs_properties_add_text(props, PROP_PASSCODE,
-        obs_module_text("ZoomSource.Passcode"),    OBS_TEXT_PASSWORD);
+        obs_module_text("ZoomSource.Passcode"), OBS_TEXT_PASSWORD);
     obs_properties_add_text(props, PROP_DISPLAY_NAME,
         obs_module_text("ZoomSource.DisplayName"), OBS_TEXT_DEFAULT);
 
-    // Active speaker toggle + timing controls
-    obs_property_t *asp = obs_properties_add_bool(props, PROP_ACTIVE_SPEAKER,
-        obs_module_text("ZoomSource.ActiveSpeaker"));
-    obs_property_set_modified_callback(asp,
-        [](obs_properties_t *pp, obs_property_t *, obs_data_t *settings) -> bool {
-            const bool on = obs_data_get_bool(settings, PROP_ACTIVE_SPEAKER);
-            obs_property_set_enabled(obs_properties_get(pp, PROP_PARTICIPANT_ID),      !on);
-            obs_property_set_enabled(obs_properties_get(pp, PROP_SPEAKER_SENSITIVITY),  on);
-            obs_property_set_enabled(obs_properties_get(pp, PROP_SPEAKER_HOLD),         on);
-            return true;
-        });
-
-    obs_property_t *sense_p = obs_properties_add_int(props, PROP_SPEAKER_SENSITIVITY,
-        obs_module_text("ZoomSource.SpeakerSensitivity"), 0, 3000, 50);
-    obs_property_set_enabled(sense_p, ctx->active_speaker_mode);
-
-    obs_property_t *hold_p = obs_properties_add_int(props, PROP_SPEAKER_HOLD,
-        obs_module_text("ZoomSource.SpeakerHold"), 0, 10000, 100);
-    obs_property_set_enabled(hold_p, ctx->active_speaker_mode);
-
-    // Participant list — populated from live roster; falls back to "(none / ID 0)"
-    obs_property_t *plist = obs_properties_add_list(props, PROP_PARTICIPANT_ID,
+    obs_property_t *participant = obs_properties_add_list(props, PROP_PARTICIPANT_ID,
         obs_module_text("ZoomSource.ParticipantId"),
         OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-    obs_property_list_add_int(plist,
-        obs_module_text("ZoomSource.NoParticipant"), 0);
-    for (const auto &p : ZoomParticipants::instance().roster()) {
+    obs_property_list_add_int(participant, obs_module_text("ZoomSource.NoParticipant"), 0);
+    for (const auto &p : ZoomEngineClient::instance().roster()) {
         std::string label = p.display_name.empty()
-                            ? ("ID " + std::to_string(p.user_id))
-                            : p.display_name;
-        if (p.is_talking) label += " \xe2\x97\x8f"; // UTF-8 black circle
-        if (p.has_video)  label += " [video]";
-        obs_property_list_add_int(plist, label.c_str(),
+            ? "ID " + std::to_string(p.user_id)
+            : p.display_name + " (" + std::to_string(p.user_id) + ")";
+        if (p.is_talking) label += " *";
+        obs_property_list_add_int(participant, label.c_str(),
                                   static_cast<long long>(p.user_id));
     }
-    obs_property_set_enabled(plist, !ctx->active_speaker_mode);
-
+    obs_properties_add_bool(props, PROP_ACTIVE_SPEAKER,
+        obs_module_text("ZoomSource.ActiveSpeaker"));
+    obs_properties_add_int(props, PROP_SPEAKER_SENSITIVITY,
+        obs_module_text("ZoomSource.SpeakerSensitivity"), 0, 3000, 50);
+    obs_properties_add_int(props, PROP_SPEAKER_HOLD,
+        obs_module_text("ZoomSource.SpeakerHold"), 0, 10000, 100);
     obs_properties_add_bool(props, PROP_ISOLATE_AUDIO,
         obs_module_text("ZoomSource.IsolateAudio"));
-
     obs_properties_add_bool(props, PROP_AUTO_JOIN,
         obs_module_text("ZoomSource.AutoJoin"));
 
     obs_property_t *ch = obs_properties_add_list(props, PROP_AUDIO_CHANNELS,
         obs_module_text("ZoomSource.AudioChannels"),
         OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-    obs_property_list_add_int(ch,
-        obs_module_text("ZoomSource.AudioMono"),   AUDIO_CH_MONO);
-    obs_property_list_add_int(ch,
-        obs_module_text("ZoomSource.AudioStereo"), AUDIO_CH_STEREO);
+    obs_property_list_add_int(ch, obs_module_text("ZoomSource.AudioMono"), AUDIO_CH_MONO);
+    obs_property_list_add_int(ch, obs_module_text("ZoomSource.AudioStereo"), AUDIO_CH_STEREO);
 
     obs_property_t *res = obs_properties_add_list(props, PROP_RESOLUTION,
         obs_module_text("ZoomSource.Resolution"),
         OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-    obs_property_list_add_int(res,
-        obs_module_text("ZoomSource.Resolution360P"),  RES_360P);
-    obs_property_list_add_int(res,
-        obs_module_text("ZoomSource.Resolution720P"),  RES_720P);
-    obs_property_list_add_int(res,
-        obs_module_text("ZoomSource.Resolution1080P"), RES_1080P);
+    obs_property_list_add_int(res, obs_module_text("ZoomSource.Resolution360P"), RES_360P);
+    obs_property_list_add_int(res, obs_module_text("ZoomSource.Resolution720P"), RES_720P);
+    obs_property_list_add_int(res, obs_module_text("ZoomSource.Resolution1080P"), RES_1080P);
 
     obs_property_t *loss = obs_properties_add_list(props, PROP_VIDEO_LOSS_MODE,
         obs_module_text("ZoomSource.VideoLossMode"),
         OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-    obs_property_list_add_int(loss,
-        obs_module_text("ZoomSource.VideoLossLastFrame"), VIDEO_LOSS_LAST_FRAME);
-    obs_property_list_add_int(loss,
-        obs_module_text("ZoomSource.VideoLossBlack"),     VIDEO_LOSS_BLACK);
+    obs_property_list_add_int(loss, obs_module_text("ZoomSource.VideoLossLastFrame"),
+                              VIDEO_LOSS_LAST_FRAME);
+    obs_property_list_add_int(loss, obs_module_text("ZoomSource.VideoLossBlack"),
+                              VIDEO_LOSS_BLACK);
 
     obs_properties_add_button(props, "btn_join",
         obs_module_text("ZoomSource.JoinMeeting"),
         [](obs_properties_t *, obs_property_t *, void *d) -> bool {
             auto *c = static_cast<ZoomSource *>(d);
-            if (ZoomAuth::instance().state() == ZoomAuthState::Authenticated) {
-                ZoomMeeting::instance().join(c->meeting_id, c->passcode,
-                    c->display_name.empty() ? "OBS" : c->display_name);
-            } else {
-                auto s = ZoomPluginSettings::load();
-                if (ZoomAuth::instance().state() == ZoomAuthState::Unauthenticated) {
-                    if (!s.sdk_key.empty())
-                        ZoomAuth::instance().init(s.sdk_key, s.sdk_secret);
-                    if (!s.jwt_token.empty())
-                        ZoomAuth::instance().authenticate(s.jwt_token);
-                }
-                ZoomAuth::instance().add_state_callback(c,
-                    [c](ZoomAuthState auth_state) {
-                        if (auth_state == ZoomAuthState::Authenticated ||
-                            auth_state == ZoomAuthState::Failed) {
-                            ZoomAuth::instance().remove_state_callback(c);
-                            if (auth_state == ZoomAuthState::Authenticated)
-                                ZoomMeeting::instance().join(
-                                    c->meeting_id, c->passcode,
-                                    c->display_name.empty() ? "OBS" : c->display_name);
-                        }
-                    });
+            const ZoomPluginSettings s = ZoomPluginSettings::load();
+            if (ZoomEngineClient::instance().start(s.jwt_token) &&
+                ZoomEngineClient::instance().join(c->meeting_id, c->passcode,
+                    c->display_name.empty() ? "OBS" : c->display_name)) {
+                c->subscribe();
             }
-            return true; // return true so OBS refreshes the properties panel
+            return true;
         });
 
     obs_properties_add_button(props, "btn_leave",
         obs_module_text("ZoomSource.LeaveMeeting"),
         [](obs_properties_t *, obs_property_t *, void *) -> bool {
-            ZoomMeeting::instance().leave();
+            ZoomEngineClient::instance().leave();
             return false;
         });
 
-    // Refresh participant list from current roster
     obs_properties_add_button(props, "btn_refresh",
         obs_module_text("ZoomSource.RefreshParticipants"),
-        [](obs_properties_t *, obs_property_t *, void *) -> bool {
-            return true; // returning true causes OBS to rebuild the properties panel
-        });
+        [](obs_properties_t *, obs_property_t *, void *) -> bool { return true; });
 
     return props;
 }
 
 static void zoom_source_get_defaults(obs_data_t *settings)
 {
-    obs_data_set_default_string(settings, PROP_DISPLAY_NAME,         "OBS");
-    obs_data_set_default_bool(  settings, PROP_AUTO_JOIN,            false);
-    obs_data_set_default_bool(  settings, PROP_ACTIVE_SPEAKER,       false);
-    obs_data_set_default_int(   settings, PROP_SPEAKER_SENSITIVITY,  300);
-    obs_data_set_default_int(   settings, PROP_SPEAKER_HOLD,         2000);
-    obs_data_set_default_bool(  settings, PROP_ISOLATE_AUDIO,        false);
-    obs_data_set_default_int(   settings, PROP_PARTICIPANT_ID,       0);
-    obs_data_set_default_int(   settings, PROP_AUDIO_CHANNELS,       AUDIO_CH_MONO);
-    obs_data_set_default_int(   settings, PROP_RESOLUTION,           RES_1080P);
-    obs_data_set_default_int(   settings, PROP_VIDEO_LOSS_MODE,      VIDEO_LOSS_LAST_FRAME);
+    obs_data_set_default_string(settings, PROP_DISPLAY_NAME, "OBS");
+    obs_data_set_default_bool(settings, PROP_AUTO_JOIN, false);
+    obs_data_set_default_bool(settings, PROP_ACTIVE_SPEAKER, false);
+    obs_data_set_default_int(settings, PROP_SPEAKER_SENSITIVITY, 300);
+    obs_data_set_default_int(settings, PROP_SPEAKER_HOLD, 2000);
+    obs_data_set_default_bool(settings, PROP_ISOLATE_AUDIO, false);
+    obs_data_set_default_int(settings, PROP_PARTICIPANT_ID, 0);
+    obs_data_set_default_int(settings, PROP_AUDIO_CHANNELS, AUDIO_CH_MONO);
+    obs_data_set_default_int(settings, PROP_RESOLUTION, RES_1080P);
+    obs_data_set_default_int(settings, PROP_VIDEO_LOSS_MODE, VIDEO_LOSS_LAST_FRAME);
 }
 
 void zoom_source_register()
 {
-    struct obs_source_info info = {};
-    info.id             = "zoom_participant_source";
-    info.type           = OBS_SOURCE_TYPE_INPUT;
-    info.output_flags   = OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO |
-                          OBS_SOURCE_DO_NOT_DUPLICATE;
-    info.get_name       = zoom_source_get_name;
-    info.create         = zoom_source_create;
-    info.destroy        = zoom_source_destroy;
-    info.update         = zoom_source_update;
-    info.get_width      = zoom_source_get_width;
-    info.get_height     = zoom_source_get_height;
+    obs_source_info info = {};
+    info.id = "zoom_participant_source";
+    info.type = OBS_SOURCE_TYPE_INPUT;
+    info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO | OBS_SOURCE_DO_NOT_DUPLICATE;
+    info.get_name = zoom_source_get_name;
+    info.create = zoom_source_create;
+    info.destroy = zoom_source_destroy;
+    info.update = zoom_source_update;
+    info.get_width = zoom_source_get_width;
+    info.get_height = zoom_source_get_height;
     info.get_properties = zoom_source_get_properties;
-    info.get_defaults   = zoom_source_get_defaults;
+    info.get_defaults = zoom_source_get_defaults;
     obs_register_source(&info);
 }

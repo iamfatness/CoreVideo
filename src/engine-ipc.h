@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <cstddef>
+#include <cstdint>
 
 // ── IPC command / event tokens ────────────────────────────────────────────────
 #define IPC_CMD_INIT        "init"
@@ -20,6 +21,9 @@
 
 // Shared-memory name prefix (no leading slash — added per-platform below)
 #define IPC_SHM_PREFIX "ZoomObsPlugin_"
+
+struct ShmFrameHeader { uint32_t width, height, y_len; };
+struct ShmAudioHeader { uint32_t sample_rate; uint16_t channels; uint32_t byte_len; };
 
 // ── Platform-specific pipe / socket paths ─────────────────────────────────────
 #if defined(WIN32)
@@ -68,6 +72,17 @@
        if (!r.ptr) { shm_region_destroy(r); return false; }
        return true;
    }
+
+   inline bool shm_region_open_read(ShmRegion &r, const std::string &name, size_t size)
+   {
+       shm_region_destroy(r);
+       r.map_handle = OpenFileMappingA(FILE_MAP_READ, FALSE, name.c_str());
+       if (!r.map_handle) return false;
+       r.ptr = MapViewOfFile(r.map_handle, FILE_MAP_READ, 0, 0, size);
+       r.size = r.ptr ? size : 0;
+       if (!r.ptr) { shm_region_destroy(r); return false; }
+       return true;
+   }
 #else
 #  include <sys/mman.h>
 #  include <fcntl.h>
@@ -76,6 +91,7 @@
        void       *ptr  = nullptr;
        size_t      size = 0;
        std::string name; // stored so we can shm_unlink on destroy
+       bool        owner = false;
    };
 
    inline void shm_region_destroy(ShmRegion &r)
@@ -83,21 +99,36 @@
        if (r.ptr && r.ptr != MAP_FAILED) { munmap(r.ptr, r.size); r.ptr = nullptr; }
        if (r.fd >= 0) {
            close(r.fd);
-           if (!r.name.empty()) shm_unlink(r.name.c_str());
+           if (r.owner && !r.name.empty()) shm_unlink(r.name.c_str());
            r.fd = -1;
        }
        r.size = 0;
        r.name.clear();
+       r.owner = false;
    }
 
    inline bool shm_region_create(ShmRegion &r, const std::string &name, size_t size)
    {
        shm_region_destroy(r);
        r.name = "/" + name; // shm_open requires a leading '/'
+       r.owner = true;
        r.fd   = shm_open(r.name.c_str(), O_CREAT | O_RDWR, 0600);
        if (r.fd < 0) return false;
        if (ftruncate(r.fd, static_cast<off_t>(size)) < 0) { shm_region_destroy(r); return false; }
        r.ptr  = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, r.fd, 0);
+       r.size = (r.ptr != MAP_FAILED) ? size : 0;
+       if (r.ptr == MAP_FAILED) { r.ptr = nullptr; shm_region_destroy(r); return false; }
+       return true;
+   }
+
+   inline bool shm_region_open_read(ShmRegion &r, const std::string &name, size_t size)
+   {
+       shm_region_destroy(r);
+       r.name = "/" + name;
+       r.owner = false;
+       r.fd = shm_open(r.name.c_str(), O_RDONLY, 0600);
+       if (r.fd < 0) return false;
+       r.ptr = mmap(nullptr, size, PROT_READ, MAP_SHARED, r.fd, 0);
        r.size = (r.ptr != MAP_FAILED) ? size : 0;
        if (r.ptr == MAP_FAILED) { r.ptr = nullptr; shm_region_destroy(r); return false; }
        return true;

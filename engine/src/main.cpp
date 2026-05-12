@@ -4,8 +4,14 @@
 #include <zoom_sdk.h>
 #include <auth_service_interface.h>
 #include <meeting_service_interface.h>
+#include <meeting_service_components/meeting_participants_ctrl_interface.h>
+#include <meeting_service_components/meeting_audio_interface.h>
+#include <meeting_service_components/meeting_video_interface.h>
+#include <algorithm>
 #include <string>
 #include <atomic>
+#include <mutex>
+#include <vector>
 
 // ── Platform setup ────────────────────────────────────────────────────────────
 #if defined(WIN32)
@@ -158,6 +164,23 @@ static uint32_t json_uint(const std::string &json, const std::string &key)
     }
 }
 
+static std::string json_escape(const std::string &in)
+{
+    std::string out;
+    out.reserve(in.size() + 8);
+    for (char c : in) {
+        switch (c) {
+        case '\\': out += "\\\\"; break;
+        case '"': out += "\\\""; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default: out += c; break;
+        }
+    }
+    return out;
+}
+
 // UUID may only contain alphanumerics, hyphens, and underscores to prevent
 // path traversal when used as a POSIX shared-memory name.
 static bool is_valid_source_uuid(const std::string &uuid)
@@ -170,6 +193,217 @@ static bool is_valid_source_uuid(const std::string &uuid)
     }
     return true;
 }
+
+struct ParticipantInfo {
+    uint32_t user_id = 0;
+    std::string display_name;
+    bool has_video = false;
+    bool is_talking = false;
+    bool is_muted = false;
+};
+
+static std::string zchar_to_utf8(const zchar_t *name)
+{
+    if (!name) return {};
+#if defined(WIN32)
+    int len = WideCharToMultiByte(CP_UTF8, 0, name, -1,
+                                  nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return {};
+    std::string out(static_cast<size_t>(len - 1), '\0');
+    if (!out.empty()) {
+        WideCharToMultiByte(CP_UTF8, 0, name, -1, &out[0], len,
+                            nullptr, nullptr);
+    }
+    return out;
+#else
+    return name;
+#endif
+}
+
+class EngineParticipants : public ZOOMSDK::IMeetingParticipantsCtrlEvent,
+                           public ZOOMSDK::IMeetingAudioCtrlEvent,
+                           public ZOOMSDK::IMeetingVideoCtrlEvent {
+public:
+    explicit EngineParticipants(IpcFd e2p) : m_e2p(e2p) {}
+
+    void attach(ZOOMSDK::IMeetingParticipantsController *part_ctrl,
+                ZOOMSDK::IMeetingAudioController *audio_ctrl,
+                ZOOMSDK::IMeetingVideoController *video_ctrl)
+    {
+        m_ctrl = part_ctrl;
+        if (m_ctrl) m_ctrl->SetEvent(this);
+        m_audio_ctrl = audio_ctrl;
+        if (m_audio_ctrl) m_audio_ctrl->SetEvent(this);
+        m_video_ctrl = video_ctrl;
+        if (m_video_ctrl) m_video_ctrl->SetEvent(this);
+        rebuild_roster();
+        send_roster();
+    }
+
+    void detach()
+    {
+        if (m_video_ctrl) {
+            m_video_ctrl->SetEvent(nullptr);
+            m_video_ctrl = nullptr;
+        }
+        if (m_audio_ctrl) {
+            m_audio_ctrl->SetEvent(nullptr);
+            m_audio_ctrl = nullptr;
+        }
+        if (m_ctrl) {
+            m_ctrl->SetEvent(nullptr);
+            m_ctrl = nullptr;
+        }
+        {
+            std::lock_guard<std::mutex> lk(m_mtx);
+            m_roster.clear();
+            m_active_speaker = 0;
+        }
+        send_roster();
+    }
+
+    void onUserJoin(ZOOMSDK::IList<unsigned int> *, const zchar_t *) override { rebuild_roster(); send_roster(); }
+    void onUserLeft(ZOOMSDK::IList<unsigned int> *, const zchar_t *) override { rebuild_roster(); send_roster(); }
+    void onUserNamesChanged(ZOOMSDK::IList<unsigned int> *) override { rebuild_roster(); send_roster(); }
+    void onUserAudioStatusChange(ZOOMSDK::IList<ZOOMSDK::IUserAudioStatus *> *, const zchar_t *) override { rebuild_roster(); send_roster(); }
+
+    void onUserActiveAudioChange(ZOOMSDK::IList<unsigned int> *lst) override
+    {
+        uint32_t active = 0;
+        {
+            std::lock_guard<std::mutex> lk(m_mtx);
+            active = (lst && lst->GetCount() > 0) ? lst->GetItem(0) : 0;
+            m_active_speaker = active;
+            for (auto &p : m_roster) p.is_talking = false;
+            if (lst) {
+                for (int i = 0; i < lst->GetCount(); ++i) {
+                    const uint32_t uid = lst->GetItem(i);
+                    for (auto &p : m_roster) {
+                        if (p.user_id == uid) {
+                            p.is_talking = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        ipc_write_line(m_e2p, R"({"cmd":"active_speaker","participant_id":)" +
+                       std::to_string(active) + "}");
+        send_roster();
+    }
+
+    void onUserVideoStatusChange(unsigned int, ZOOMSDK::VideoStatus) override { rebuild_roster(); send_roster(); }
+    void onActiveSpeakerVideoUserChanged(unsigned int userId) override
+    {
+        {
+            std::lock_guard<std::mutex> lk(m_mtx);
+            if (m_active_speaker == 0) m_active_speaker = userId;
+        }
+        ipc_write_line(m_e2p, R"({"cmd":"active_speaker","participant_id":)" +
+                       std::to_string(userId) + "}");
+    }
+
+    void onActiveVideoUserChanged(unsigned int) override {}
+    void onSpotlightedUserListChangeNotification(ZOOMSDK::IList<unsigned int> *) override {}
+    void onHostRequestStartVideo(ZOOMSDK::IRequestStartVideoHandler *) override {}
+    void onUserVideoQualityChanged(ZOOMSDK::VideoConnectionQuality, unsigned int) override {}
+    void onHostVideoOrderUpdated(ZOOMSDK::IList<unsigned int> *) override {}
+    void onLocalVideoOrderUpdated(ZOOMSDK::IList<unsigned int> *) override {}
+    void onFollowHostVideoOrderChanged(bool) override {}
+    void onVideoAlphaChannelStatusChanged(bool) override {}
+    void onCameraControlRequestReceived(unsigned int, ZOOMSDK::CameraControlRequestType, ZOOMSDK::ICameraControlRequestHandler *) override {}
+    void onCameraControlRequestResult(unsigned int, ZOOMSDK::CameraControlRequestResult) override {}
+    void onHostChangeNotification(unsigned int) override {}
+    void onLowOrRaiseHandStatusChanged(bool, unsigned int) override {}
+    void onCoHostChangeNotification(unsigned int, bool) override {}
+    void onInvalidReclaimHostkey() override {}
+    void onAllHandsLowered() override {}
+    void onLocalRecordingStatusChanged(unsigned int, ZOOMSDK::RecordingStatus) override {}
+    void onAllowParticipantsRenameNotification(bool) override {}
+    void onAllowParticipantsUnmuteSelfNotification(bool) override {}
+    void onAllowParticipantsStartVideoNotification(bool) override {}
+    void onAllowParticipantsShareWhiteBoardNotification(bool) override {}
+    void onRequestLocalRecordingPrivilegeChanged(ZOOMSDK::LocalRecordingRequestPrivilegeStatus) override {}
+    void onAllowParticipantsRequestCloudRecording(bool) override {}
+    void onInMeetingUserAvatarPathUpdated(unsigned int) override {}
+    void onParticipantProfilePictureStatusChange(bool) override {}
+    void onFocusModeStateChanged(bool) override {}
+    void onFocusModeShareTypeChanged(ZOOMSDK::FocusModeShareType) override {}
+    void onBotAuthorizerRelationChanged(unsigned int) override {}
+    void onVirtualNameTagStatusChanged(bool, unsigned int) override {}
+    void onVirtualNameTagRosterInfoUpdated(unsigned int) override {}
+#if defined(WIN32)
+    void onCreateCompanionRelation(unsigned int, unsigned int) override {}
+    void onRemoveCompanionRelation(unsigned int) override {}
+#endif
+    void onGrantCoOwnerPrivilegeChanged(bool) override {}
+    void onHostRequestStartAudio(ZOOMSDK::IRequestStartAudioHandler *) override {}
+    void onJoin3rdPartyTelephonyAudio(const zchar_t *) override {}
+    void onMuteOnEntryStatusChange(bool) override {}
+
+private:
+    ParticipantInfo user_to_info(ZOOMSDK::IUserInfo *u)
+    {
+        ParticipantInfo info;
+        if (!u) return info;
+        info.user_id = u->GetUserID();
+        info.display_name = zchar_to_utf8(u->GetUserName());
+        info.has_video = u->IsVideoOn();
+        info.is_talking = u->IsTalking();
+        info.is_muted = u->IsAudioMuted();
+        return info;
+    }
+
+    void rebuild_roster()
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        m_roster.clear();
+        m_active_speaker = 0;
+        if (!m_ctrl) return;
+        auto *list = m_ctrl->GetParticipantsList();
+        if (!list) return;
+        for (int i = 0; i < list->GetCount(); ++i) {
+            auto *user = m_ctrl->GetUserByUserID(list->GetItem(i));
+            if (!user) continue;
+            auto info = user_to_info(user);
+            m_roster.push_back(info);
+            if (info.is_talking) m_active_speaker = info.user_id;
+        }
+    }
+
+    void send_roster()
+    {
+        std::vector<ParticipantInfo> roster;
+        uint32_t active = 0;
+        {
+            std::lock_guard<std::mutex> lk(m_mtx);
+            roster = m_roster;
+            active = m_active_speaker;
+        }
+
+        std::string msg = R"({"cmd":"participants","active_speaker_id":)" +
+            std::to_string(active) + R"(,"participants":[)";
+        for (size_t i = 0; i < roster.size(); ++i) {
+            const auto &p = roster[i];
+            if (i) msg += ",";
+            msg += R"({"id":)" + std::to_string(p.user_id) +
+                R"(,"name":")" + json_escape(p.display_name) +
+                R"(","has_video":)" + (p.has_video ? "true" : "false") +
+                R"(,"is_talking":)" + (p.is_talking ? "true" : "false") +
+                R"(,"is_muted":)" + (p.is_muted ? "true" : "false") + "}";
+        }
+        msg += "]}";
+        ipc_write_line(m_e2p, msg);
+    }
+
+    IpcFd m_e2p;
+    ZOOMSDK::IMeetingParticipantsController *m_ctrl = nullptr;
+    ZOOMSDK::IMeetingAudioController *m_audio_ctrl = nullptr;
+    ZOOMSDK::IMeetingVideoController *m_video_ctrl = nullptr;
+    std::mutex m_mtx;
+    std::vector<ParticipantInfo> m_roster;
+    uint32_t m_active_speaker = 0;
+};
 
 // ── Auth event handler ────────────────────────────────────────────────────────
 
@@ -202,18 +436,29 @@ private:
 
 class EngineMeetingEvent : public ZOOMSDK::IMeetingServiceEvent {
 public:
-    explicit EngineMeetingEvent(IpcFd e2p) : m_e2p(e2p) {}
+    EngineMeetingEvent(IpcFd e2p, ZOOMSDK::IMeetingService **meeting_svc,
+                       EngineParticipants *participants)
+        : m_e2p(e2p), m_meeting_svc(meeting_svc),
+          m_participants(participants) {}
 
     void onMeetingStatusChanged(ZOOMSDK::MeetingStatus status, int iResult) override {
         switch (status) {
         case ZOOMSDK::MEETING_STATUS_INMEETING:
             ipc_write_line(m_e2p, R"({"cmd":"joined"})");
+            if (m_participants && m_meeting_svc && *m_meeting_svc) {
+                m_participants->attach(
+                    (*m_meeting_svc)->GetMeetingParticipantsController(),
+                    (*m_meeting_svc)->GetMeetingAudioController(),
+                    (*m_meeting_svc)->GetMeetingVideoController());
+            }
             break;
         case ZOOMSDK::MEETING_STATUS_DISCONNECTING:
         case ZOOMSDK::MEETING_STATUS_ENDED:
+            if (m_participants) m_participants->detach();
             ipc_write_line(m_e2p, R"({"cmd":"left"})");
             break;
         case ZOOMSDK::MEETING_STATUS_FAILED:
+            if (m_participants) m_participants->detach();
             ipc_write_line(m_e2p, R"({"cmd":"error","msg":"meeting_failed","code":)" +
                            std::to_string(iResult) + "}");
             break;
@@ -234,6 +479,8 @@ public:
 #endif
 private:
     IpcFd m_e2p;
+    ZOOMSDK::IMeetingService **m_meeting_svc = nullptr;
+    EngineParticipants *m_participants = nullptr;
 };
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -249,7 +496,8 @@ int main()
     ZOOMSDK::IAuthService    *auth_svc    = nullptr;
     ZOOMSDK::IMeetingService *meeting_svc = nullptr;
     EngineAuthEvent    auth_event(e2p);
-    EngineMeetingEvent meeting_event(e2p);
+    EngineParticipants participants(e2p);
+    EngineMeetingEvent meeting_event(e2p, &meeting_svc, &participants);
     EngineVideo        video_engine;
 
     // Persistent wide-string storage for async SDK calls (JoinParam / AuthContext

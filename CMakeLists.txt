@@ -64,28 +64,18 @@ set(ZOOM_SDK_FRAMEWORK "${ZOOM_SDK_DIR}/ZoomSDK.framework" CACHE PATH
 add_library(obs-zoom-plugin MODULE
     src/plugin-main.cpp
     src/zoom-source.cpp
-    src/zoom-auth.cpp
-    src/zoom-meeting.cpp
-    src/zoom-participants.cpp
-    src/zoom-share-delegate.cpp
+    src/zoom-engine-client.cpp
     src/zoom-settings.cpp
     src/zoom-settings-dialog.cpp
     src/zoom-output-manager.cpp
     src/zoom-output-dialog.cpp
     src/zoom-output-profile.cpp
     src/zoom-control-server.cpp
-    src/zoom-osc-server.cpp
-    src/zoom-video-delegate.cpp
-    src/zoom-audio-delegate.cpp
-    src/zoom-audio-router.cpp
-    src/zoom-participant-audio-source.cpp
-    src/zoom-interpretation-audio-source.cpp
     src/obs-utils.cpp
 )
 
 target_include_directories(obs-zoom-plugin PRIVATE
     src
-    ${ZOOM_SDK_INCLUDE_DIR}
 )
 target_link_libraries(obs-zoom-plugin PRIVATE
     OBS::libobs
@@ -95,29 +85,14 @@ target_link_libraries(obs-zoom-plugin PRIVATE
     Qt6::Widgets
 )
 
-if(WIN32)
-    target_link_libraries(obs-zoom-plugin PRIVATE ${ZOOM_SDK_LIBRARY})
-elseif(APPLE)
+if(APPLE)
     target_link_libraries(obs-zoom-plugin PRIVATE
-        "-framework ${ZOOM_SDK_FRAMEWORK}"
         "-framework CoreFoundation"
         "-framework Foundation"
     )
 endif()
 
 set_target_properties(obs-zoom-plugin PROPERTIES PREFIX "")
-
-if(WIN32)
-    add_custom_command(TARGET obs-zoom-plugin POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${ZOOM_SDK_RUNTIME_DIR}"
-            "$<TARGET_FILE_DIR:obs-zoom-plugin>"
-        COMMENT "Copying Zoom SDK runtime files to output directory"
-    )
-    install(DIRECTORY "${ZOOM_SDK_RUNTIME_DIR}/"
-        DESTINATION "${CMAKE_INSTALL_PREFIX}/obs-plugins/64bit"
-    )
-endif()
 
 set(ENGINE_SOURCES
     engine/src/main.cpp
@@ -134,8 +109,17 @@ if(WIN32)
         ${ZOOM_SDK_LIBRARY}
     )
     set_target_properties(ZoomObsEngine PROPERTIES WIN32_EXECUTABLE FALSE)
+    add_custom_command(TARGET ZoomObsEngine POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${ZOOM_SDK_RUNTIME_DIR}"
+            "$<TARGET_FILE_DIR:ZoomObsEngine>"
+        COMMENT "Copying Zoom SDK runtime files to output directory"
+    )
     install(TARGETS ZoomObsEngine
         RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}/obs-plugins/64bit"
+    )
+    install(DIRECTORY "${ZOOM_SDK_RUNTIME_DIR}/"
+        DESTINATION "${CMAKE_INSTALL_PREFIX}/obs-plugins/64bit"
     )
 elseif(APPLE)
     add_executable(ZoomObsEngine ${ENGINE_SOURCES})

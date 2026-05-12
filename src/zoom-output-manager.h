@@ -1,7 +1,6 @@
 #pragma once
 
-#include "zoom-audio-delegate.h"
-#include "zoom-video-delegate.h"
+#include "zoom-types.h"
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -34,7 +33,7 @@ public:
 
     // Preview callbacks — call from the UI thread only.
     void set_preview_cb(const std::string &source_name,
-                        ZoomVideoDelegate::PreviewCallback cb);
+                        ZoomPreviewCallback cb);
     void clear_preview_cb(const std::string &source_name);
     void clear_all_preview_cbs();
 

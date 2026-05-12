@@ -1,7 +1,7 @@
 #include "zoom-output-dialog.h"
+#include "zoom-engine-client.h"
 #include "zoom-output-manager.h"
 #include "zoom-output-profile.h"
-#include "zoom-participants.h"
 #include <QAbstractItemView>
 #include <QCheckBox>
 #include <QComboBox>
@@ -15,12 +15,14 @@
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QPixmap>
+#include <QPointer>
 #include <QPushButton>
 #include <QTableWidget>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <atomic>
 #include <memory>
+#include <vector>
 
 enum OutputColumns {
     ColumnPreview = 0,
@@ -142,9 +144,16 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     layout->addWidget(m_table);
     layout->addWidget(buttons);
 
-    ZoomParticipants::instance().add_roster_callback(this, [this]() {
-        QMetaObject::invokeMethod(this, [this]() { refresh(); }, Qt::QueuedConnection);
+    QPointer<ZoomOutputDialog> self(this);
+    auto alive = m_alive;
+    ZoomEngineClient::instance().add_roster_callback(this, [self, alive]() {
+        if (!alive->load(std::memory_order_acquire) || !self) return;
+        QMetaObject::invokeMethod(self, [self, alive]() {
+            if (!alive->load(std::memory_order_acquire) || !self) return;
+            self->refresh();
+        }, Qt::QueuedConnection);
     });
+
     refresh();
     refresh_profiles();
 }
@@ -152,8 +161,8 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
 ZoomOutputDialog::~ZoomOutputDialog()
 {
     m_alive->store(false, std::memory_order_release);
+    ZoomEngineClient::instance().remove_roster_callback(this);
     ZoomOutputManager::instance().clear_all_preview_cbs();
-    ZoomParticipants::instance().remove_roster_callback(this);
 }
 
 void ZoomOutputDialog::refresh()
@@ -164,7 +173,7 @@ void ZoomOutputDialog::refresh()
     ZoomOutputManager::instance().clear_all_preview_cbs();
 
     const auto outputs = ZoomOutputManager::instance().outputs();
-    const auto roster = ZoomParticipants::instance().roster();
+    const std::vector<ParticipantInfo> roster = ZoomEngineClient::instance().roster();
 
     m_table->setRowCount(static_cast<int>(outputs.size()));
     m_table->setRowHeight(0, 92); // apply uniform row height once
@@ -234,7 +243,7 @@ void ZoomOutputDialog::refresh()
 void ZoomOutputDialog::refresh_participants()
 {
     const QString filter = m_filter ? m_filter->text().trimmed() : QString{};
-    const auto roster = ZoomParticipants::instance().roster();
+    const std::vector<ParticipantInfo> roster = ZoomEngineClient::instance().roster();
 
     int row = 0;
     m_participant_table->setRowCount(0);

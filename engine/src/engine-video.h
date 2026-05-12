@@ -7,10 +7,6 @@
 #include <zoom_sdk_raw_data_def.h>
 #include <rawdata/rawdata_renderer_interface.h>
 
-#pragma pack(push, 1)
-struct ShmFrameHeader { uint32_t width, height, y_len; };
-#pragma pack(pop)
-
 class ParticipantSubscription : public ZOOMSDK::IZoomSDKRendererDelegate {
 public:
     ParticipantSubscription(uint32_t participant_id,

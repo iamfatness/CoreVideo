@@ -8,14 +8,16 @@
 #define OBS_ZOOM_PLUGIN_VERSION "0.1.0"
 void zoom_source_register();
 struct ZoomSource {
-    obs_source_t *source       = nullptr;
+    obs_source_t *source          = nullptr;
     std::string   meeting_id;
     std::string   passcode;
-    uint32_t      participant_id = 0;
-    bool          auto_join      = false;
-    AudioChannelMode audio_mode  = AudioChannelMode::Mono;
+    uint32_t      participant_id  = 0;
+    bool          auto_join       = false;
+    bool          active_speaker_mode = false;
+    AudioChannelMode audio_mode   = AudioChannelMode::Mono;
     std::unique_ptr<ZoomVideoDelegate> video_delegate;
     std::unique_ptr<ZoomAudioDelegate> audio_delegate;
     void apply_settings(obs_data_t *settings);
     void on_meeting_state(MeetingState state);
+    void on_active_speaker_changed();
 };

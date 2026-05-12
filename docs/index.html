@@ -150,6 +150,7 @@
   <div class="nav-section">Flows</div>
   <a href="#flow-auth">Authentication Flow</a>
   <a href="#flow-meeting">Meeting Join Flow</a>
+  <a href="#active-speaker">Active Speaker Mode</a>
   <div class="nav-section">Reference</div>
   <a href="#control-api">TCP Control API</a>
   <a href="#osc-api">OSC Control API</a>
@@ -694,6 +695,152 @@ sequenceDiagram
       </div>
       <div class="diagram-caption">Fig 9 — Meeting join, live capture, debounced active-speaker switching, and teardown.</div>
     </div>
+  </section>
+
+  <!-- ══ ACTIVE SPEAKER ════════════════════════════════════════ -->
+
+  <section id="active-speaker">
+    <h2>Active Speaker Mode</h2>
+    <p>
+      When <strong>Follow active speaker</strong> is enabled on a Zoom Participant
+      source, the plugin continuously monitors who is speaking and switches the
+      video subscription (and optionally the isolated audio feed) to the new speaker.
+      A two-timer debounce prevents rapid camera cuts caused by brief interruptions.
+    </p>
+
+    <h3>Debounce Algorithm</h3>
+    <p>
+      Every time <code>ZoomParticipants</code> fires a roster callback, the source
+      runs <code>on_active_speaker_changed()</code>. Two independent timers must
+      both be satisfied before a switch is committed:
+    </p>
+    <ul>
+      <li><strong>Sensitivity guard</strong> — the candidate speaker must hold the
+          floor continuously for at least <code>speaker_sensitivity_ms</code>
+          (default 300 ms). A new candidate resets this clock.</li>
+      <li><strong>Hold guard</strong> — after any switch, no further switch may
+          occur for at least <code>speaker_hold_ms</code> (default 2 000 ms),
+          regardless of who speaks.</li>
+    </ul>
+    <p>
+      The actual delay is <code>max(hold_remain, sense_remain)</code>. If the delay
+      is zero the switch fires immediately on the calling thread; otherwise a
+      detached background thread sleeps for the delay and then posts a UI task via
+      <code>obs_queue_task(OBS_TASK_UI, …)</code> to re-evaluate on the OBS UI thread.
+    </p>
+
+    <div class="diagram-wrap">
+      <div class="mermaid">
+stateDiagram-v2
+    [*] --> Idle : active_speaker_mode = off
+
+    Idle --> Idle : speaker change\n(mode is off, ignored)
+
+    state "Active Speaker Mode ON" as ASM {
+        [*] --> Watching
+
+        Watching --> Evaluating : ZoomParticipants fires\nnew active_speaker_id\n(≠ current participant)
+
+        Evaluating --> Switching : delay = max(hold_remain, sense_remain) == 0\nAND speaker still active
+
+        Evaluating --> Scheduled : delay > 0\n→ schedule_speaker_check(spk, delay)
+
+        Scheduled --> Evaluating : timer fires\n→ try_commit_speaker() on UI thread
+
+        Scheduled --> Watching : newer candidate\nsupersedes pending
+
+        Switching --> Watching : do_speaker_switch()\n• unsubscribe old video\n• subscribe(new_pid, resolution)\n• update isolated audio user\n• record last_switch_time
+
+        Evaluating --> Watching : speaker changed again\nbefore commit\n(pending_speaker_id reset)
+    }
+
+    Idle --> ASM : active_speaker_mode = on
+    ASM --> Idle : active_speaker_mode = off\nor source destroyed
+      </div>
+      <div class="diagram-caption">Fig 10 — Active speaker state machine: debounce evaluation, deferred commit, and supersede handling.</div>
+    </div>
+
+    <h3>Switch Sequence</h3>
+    <div class="diagram-wrap">
+      <div class="mermaid">
+sequenceDiagram
+    participant ZP as ZoomParticipants
+    participant ZS4 as ZoomSource
+    participant Thread as Background Thread
+    participant UI as OBS UI Thread
+    participant VD as VideoDelegate
+
+    ZP-->>ZS4: roster callback\n(new active_speaker_id = X)
+    ZS4->>ZS4: on_active_speaker_changed()\npending = X, candidate_since = now
+
+    alt delay == 0
+        ZS4->>ZS4: do_speaker_switch(X)
+        ZS4->>VD: unsubscribe()
+        ZS4->>VD: subscribe(X, resolution)
+        Note over ZS4: isolate_audio → set_isolated_user(X)
+        Note over ZS4: last_switch_time = now
+    else delay > 0
+        ZS4->>Thread: schedule_speaker_check(X, delay_ms)
+        Thread->>Thread: sleep(delay_ms)
+        Thread->>UI: obs_queue_task(try_commit_speaker, X)
+        UI->>ZS4: try_commit_speaker(X)
+        alt X == pending_speaker_id AND still active
+            ZS4->>ZS4: do_speaker_switch(X)
+            ZS4->>VD: unsubscribe() + subscribe(X, resolution)
+        else superseded or speaker moved on
+            ZS4->>ZS4: pending_speaker_id = 0\n(or re-schedule)
+        end
+    end
+      </div>
+      <div class="diagram-caption">Fig 11 — Active speaker switch sequence: immediate vs. deferred commit with UI-thread safety.</div>
+    </div>
+
+    <h3>Timing Parameters</h3>
+    <table>
+      <tr><th>Parameter</th><th>Default</th><th>Range</th><th>Description</th></tr>
+      <tr><td><code>speaker_sensitivity_ms</code></td><td>300 ms</td><td>0 – 3 000 ms (step 50)</td><td>New speaker must hold the floor this long before the switch fires</td></tr>
+      <tr><td><code>speaker_hold_ms</code></td><td>2 000 ms</td><td>0 – 10 000 ms (step 100)</td><td>Minimum time to stay on current speaker after any switch</td></tr>
+    </table>
+
+    <h3>Safety Mechanisms</h3>
+    <ul>
+      <li><strong>Liveness flag</strong> — <code>speaker_alive</code> is a
+          <code>shared_ptr&lt;atomic&lt;bool&gt;&gt;</code> captured by value in every
+          in-flight lambda. When the source is destroyed,
+          <code>speaker_alive → false</code> is stored before deletion.
+          The deferred UI task checks the flag before touching
+          <code>ZoomSource</code>, preventing use-after-free.</li>
+      <li><strong>Supersede logic</strong> — if a new candidate arrives while one
+          is already pending, <code>pending_speaker_id</code> and
+          <code>candidate_since</code> are updated to the newer speaker, restarting
+          the sensitivity clock. Stale callbacks from the previous candidate see
+          <code>spk != pending_speaker_id</code> and bail out silently.</li>
+      <li><strong>Final verification</strong> — immediately before calling
+          <code>do_speaker_switch()</code>, the code re-checks
+          <code>ZoomParticipants::active_speaker_id() == spk</code> so a switch
+          never fires for a speaker who stopped talking during the hold period.</li>
+      <li><strong>UI-thread commitment</strong> — all state mutations (participant_id,
+          last_switch_time, video subscription) happen on the OBS UI thread via
+          <code>obs_queue_task</code>, avoiding data races with the properties panel.</li>
+    </ul>
+
+    <h3>Audio Isolation Interaction</h3>
+    <p>
+      When <strong>Isolate Audio</strong> is also enabled, every speaker switch
+      calls <code>audio_delegate->set_isolated_user(new_pid)</code> immediately
+      after the video subscription updates, so the audio track always follows
+      the same participant as the video.
+    </p>
+
+    <h3>UI Behaviour</h3>
+    <p>
+      Enabling active speaker mode in the Properties panel automatically
+      <strong>disables</strong> the Participant dropdown (not relevant while
+      following the speaker) and <strong>enables</strong> the Sensitivity and
+      Hold sliders. The participant list still shows live roster entries with
+      talking (<code>●</code>) and video (<code>[video]</code>) indicators,
+      and updates when the <strong>Refresh</strong> button is pressed.
+    </p>
   </section>
 
   <!-- ══ REFERENCE ══════════════════════════════════════════════ -->

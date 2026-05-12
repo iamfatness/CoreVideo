@@ -1,4 +1,5 @@
 #include "zoom-participants.h"
+#include <obs-module.h>
 #include <algorithm>
 #if defined(WIN32)
 #include <windows.h>
@@ -11,7 +12,8 @@ ZoomParticipants &ZoomParticipants::instance()
 }
 
 void ZoomParticipants::attach(ZOOMSDK::IMeetingParticipantsController *part_ctrl,
-                              ZOOMSDK::IMeetingAudioController       *audio_ctrl)
+                              ZOOMSDK::IMeetingAudioController        *audio_ctrl,
+                              ZOOMSDK::IMeetingVideoController        *video_ctrl)
 {
     m_ctrl = part_ctrl;
     if (part_ctrl) {
@@ -20,11 +22,17 @@ void ZoomParticipants::attach(ZOOMSDK::IMeetingParticipantsController *part_ctrl
     }
     m_audio_ctrl = audio_ctrl;
     if (audio_ctrl) audio_ctrl->SetEvent(this);
+    m_video_ctrl = video_ctrl;
+    if (video_ctrl) video_ctrl->SetEvent(this);
     fire();
 }
 
 void ZoomParticipants::detach()
 {
+    if (m_video_ctrl) {
+        m_video_ctrl->SetEvent(nullptr);
+        m_video_ctrl = nullptr;
+    }
     if (m_audio_ctrl) {
         m_audio_ctrl->SetEvent(nullptr);
         m_audio_ctrl = nullptr;
@@ -88,14 +96,24 @@ void ZoomParticipants::rebuild_roster()
 
 void ZoomParticipants::fire()
 {
+    // Snapshot under lock; dispatch to main thread so callbacks can safely call
+    // SDK functions (e.g. createRenderer) without SDK re-entrancy issues, and
+    // so they are serialized with source creation / destruction.
     std::vector<RosterCallback> callbacks;
     {
         std::lock_guard<std::mutex> lk(m_mtx);
         for (auto &[key, cb] : m_cbs)
             if (cb) callbacks.push_back(cb);
     }
-    for (auto &cb : callbacks)
-        cb();
+    if (callbacks.empty()) return;
+
+    struct Payload { std::vector<RosterCallback> cbs; };
+    auto *p = new Payload{std::move(callbacks)};
+    obs_queue_task(OBS_TASK_UI, [](void *ptr) {
+        auto *d = static_cast<Payload *>(ptr);
+        for (auto &cb : d->cbs) cb();
+        delete d;
+    }, p, false);
 }
 
 void ZoomParticipants::add_roster_callback(void *key, RosterCallback cb)
@@ -257,3 +275,21 @@ void ZoomParticipants::onUserAudioStatusChange(
 void ZoomParticipants::onHostRequestStartAudio(ZOOMSDK::IRequestStartAudioHandler *) {}
 void ZoomParticipants::onJoin3rdPartyTelephonyAudio(const zchar_t *) {}
 void ZoomParticipants::onMuteOnEntryStatusChange(bool) {}
+
+// ── IMeetingVideoCtrlEvent ────────────────────────────────────────────────────
+
+void ZoomParticipants::onUserVideoStatusChange(unsigned int userId,
+                                               ZOOMSDK::VideoStatus status)
+{
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        const bool on = (status == ZOOMSDK::Video_ON);
+        for (auto &p : m_roster) {
+            if (p.user_id == static_cast<uint32_t>(userId)) {
+                p.has_video = on;
+                break;
+            }
+        }
+    }
+    fire();
+}

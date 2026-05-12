@@ -19,6 +19,33 @@ static std::string to_zstr(const std::string &s) { return s; }
 
 ZoomAuth &ZoomAuth::instance() { static ZoomAuth inst; return inst; }
 
+void ZoomAuth::add_state_callback(void *key, StateCallback cb)
+{
+    std::lock_guard<std::mutex> lk(m_cbs_mtx);
+    if (cb) m_state_cbs[key] = std::move(cb);
+    else    m_state_cbs.erase(key);
+}
+
+void ZoomAuth::remove_state_callback(void *key)
+{
+    std::lock_guard<std::mutex> lk(m_cbs_mtx);
+    m_state_cbs.erase(key);
+}
+
+void ZoomAuth::fire_state_cbs()
+{
+    // Copy under lock, fire outside to avoid re-entrant lock acquisition
+    // (callbacks may call add_state_callback / remove_state_callback).
+    std::vector<StateCallback> cbs;
+    {
+        std::lock_guard<std::mutex> lk(m_cbs_mtx);
+        for (auto &[key, cb] : m_state_cbs)
+            if (cb) cbs.push_back(cb);
+    }
+    for (auto &cb : cbs)
+        cb(m_state);
+}
+
 bool ZoomAuth::init(const std::string &sdk_key, const std::string &sdk_secret)
 {
     if (m_sdk_init) {
@@ -89,7 +116,7 @@ bool ZoomAuth::authenticate(const std::string &jwt_token)
     }
 
     m_state = ZoomAuthState::Authenticating;
-    if (m_callback) m_callback(m_state);
+    fire_state_cbs();
     blog(LOG_INFO, "[obs-zoom-plugin] Authentication requested");
     return true;
 }
@@ -124,7 +151,7 @@ void ZoomAuth::onAuthenticationReturn(ZOOMSDK::AuthResult ret)
         m_state = ZoomAuthState::Failed;
         blog(LOG_ERROR, "[obs-zoom-plugin] Authentication failed: %d", static_cast<int>(ret));
     }
-    if (m_callback) m_callback(m_state);
+    fire_state_cbs();
 }
 
 void ZoomAuth::onLoginReturnWithReason(ZOOMSDK::LOGINSTATUS ret,
@@ -139,7 +166,7 @@ void ZoomAuth::onLogout()
 {
     m_state = ZoomAuthState::Unauthenticated;
     blog(LOG_INFO, "[obs-zoom-plugin] Logged out");
-    if (m_callback) m_callback(m_state);
+    fire_state_cbs();
 }
 
 void ZoomAuth::onZoomIdentityExpired()
@@ -149,7 +176,7 @@ void ZoomAuth::onZoomIdentityExpired()
         authenticate(m_last_jwt);
     } else {
         m_state = ZoomAuthState::Failed;
-        if (m_callback) m_callback(m_state);
+        fire_state_cbs();
     }
 }
 

@@ -2,6 +2,8 @@
 #include <string>
 #include <functional>
 #include <thread>
+#include <mutex>
+#include <atomic>
 #include <unordered_map>
 #include <meeting_service_interface.h>
 
@@ -17,13 +19,15 @@ public:
     bool join(const std::string &meeting_id, const std::string &passcode = "",
               const std::string &display_name = "OBS");
     void leave();
-    MeetingState state() const { return m_state; }
+    MeetingState state() const {
+        return m_state.load(std::memory_order_acquire);
+    }
 
     ZOOMSDK::IMeetingService *service() const { return m_meeting_service; }
 
     using StateCallback = std::function<void(MeetingState)>;
-    // Register a state-change callback keyed by an opaque pointer (typically the
-    // obs_source_t or 'this' of the caller).  Pass cb = nullptr to remove.
+    // Register a state-change callback keyed by an opaque pointer.
+    // Callbacks always fire on the OBS main thread — safe to call OBS/SDK APIs.
     void on_state_change(void *key, StateCallback cb);
     void remove_state_change(void *key) { on_state_change(key, nullptr); }
 
@@ -51,7 +55,9 @@ private:
 
     void fire_state_cb();
 
-    MeetingState              m_state           = MeetingState::Idle;
+    // m_state is written on the SDK thread and read from any thread.
+    std::atomic<MeetingState> m_state{MeetingState::Idle};
+    // m_state_cbs is only accessed on the OBS main thread.
     std::unordered_map<void *, StateCallback> m_state_cbs;
     ZOOMSDK::IMeetingService *m_meeting_service = nullptr;
 

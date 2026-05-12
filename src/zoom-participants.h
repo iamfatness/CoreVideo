@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <meeting_service_components/meeting_participants_ctrl_interface.h>
 #include <meeting_service_components/meeting_audio_interface.h>
+#include <meeting_service_components/meeting_video_interface.h>
 
 struct ParticipantInfo {
     uint32_t    user_id      = 0;
@@ -17,12 +18,14 @@ struct ParticipantInfo {
 };
 
 class ZoomParticipants : public ZOOMSDK::IMeetingParticipantsCtrlEvent,
-                         public ZOOMSDK::IMeetingAudioCtrlEvent {
+                         public ZOOMSDK::IMeetingAudioCtrlEvent,
+                         public ZOOMSDK::IMeetingVideoCtrlEvent {
 public:
     static ZoomParticipants &instance();
 
     void attach(ZOOMSDK::IMeetingParticipantsController *part_ctrl,
-                ZOOMSDK::IMeetingAudioController       *audio_ctrl);
+                ZOOMSDK::IMeetingAudioController        *audio_ctrl,
+                ZOOMSDK::IMeetingVideoController        *video_ctrl);
     void detach();
 
     std::vector<ParticipantInfo> roster() const;
@@ -66,6 +69,24 @@ public:
     void onRemoveCompanionRelation(unsigned int childUserID) override;
 #endif
 
+    // IMeetingVideoCtrlEvent — used to keep has_video flag current
+    void onUserVideoStatusChange(unsigned int userId,
+                                 ZOOMSDK::VideoStatus status) override;
+    void onActiveSpeakerVideoUserChanged(unsigned int userId) override {}
+    void onActiveVideoUserChanged(unsigned int userId) override {}
+    void onSpotlightedUserListChangeNotification(
+        ZOOMSDK::IList<unsigned int> *) override {}
+    void onHostRequestStartVideo(
+        ZOOMSDK::IRequestStartVideoHandler *) override {}
+    void onUserVideoQualityChanged(ZOOMSDK::VideoQuality,
+                                   unsigned int) override {}
+    void onVideoOrderUpdated(
+        ZOOMSDK::IVideoOrderUpdatedHelper *) override {}
+    void onLocalVideoOrderUpdated(
+        ZOOMSDK::ILocalVideoOrderUpdatedHelper *) override {}
+    void onFollowHostVideoOrderChanged(bool) override {}
+    void onVideoAlphaChannelStatusChanged(bool) override {}
+
     // IMeetingAudioCtrlEvent — used for reliable active-speaker tracking
     void onUserAudioStatusChange(
         ZOOMSDK::IList<ZOOMSDK::IUserAudioStatus *> *lstAudioStatusChange,
@@ -83,6 +104,7 @@ private:
 
     ZOOMSDK::IMeetingParticipantsController *m_ctrl       = nullptr;
     ZOOMSDK::IMeetingAudioController        *m_audio_ctrl = nullptr;
+    ZOOMSDK::IMeetingVideoController        *m_video_ctrl = nullptr;
     mutable std::mutex              m_mtx;
     std::vector<ParticipantInfo>    m_roster;
     uint32_t                        m_active_speaker = 0;

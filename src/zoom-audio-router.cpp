@@ -89,6 +89,19 @@ void ZoomAudioRouter::remove_participant_sink(uint32_t user_id, void *key)
     if (it->second.empty()) m_participant_sinks.erase(it);
 }
 
+void ZoomAudioRouter::add_share_audio_sink(void *key, ShareAudioSink cb)
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    if (cb) m_share_audio_sinks[key] = std::move(cb);
+    else    m_share_audio_sinks.erase(key);
+}
+
+void ZoomAudioRouter::remove_share_audio_sink(void *key)
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    m_share_audio_sinks.erase(key);
+}
+
 // ── IZoomSDKAudioRawDataDelegate ─────────────────────────────────────────────
 
 void ZoomAudioRouter::onMixedAudioRawDataReceived(AudioRawData *data)
@@ -121,4 +134,17 @@ void ZoomAudioRouter::onOneWayAudioRawDataReceived(AudioRawData *data, uint32_t 
         cb(data, user_id);
     for (auto &cb : participant_sinks)
         cb(data);
+}
+
+void ZoomAudioRouter::onShareAudioRawDataReceived(AudioRawData *data,
+                                                  uint32_t share_user_id)
+{
+    std::vector<ShareAudioSink> sinks;
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        for (auto &[key, cb] : m_share_audio_sinks)
+            if (cb) sinks.push_back(cb);
+    }
+    for (auto &cb : sinks)
+        cb(data, share_user_id);
 }

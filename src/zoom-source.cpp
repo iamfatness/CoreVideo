@@ -82,7 +82,7 @@ static void *zoom_source_create(obs_data_t *settings, obs_source_t *source)
     ctx->video_delegate = std::make_unique<ZoomVideoDelegate>(source);
     ctx->audio_delegate = std::make_unique<ZoomAudioDelegate>(source, ctx->audio_mode);
 
-    ZoomMeeting::instance().on_state_change(
+    ZoomMeeting::instance().on_state_change(ctx,
         [ctx](MeetingState s) { ctx->on_meeting_state(s); });
 
     ZoomParticipants::instance().on_roster_change(
@@ -108,7 +108,7 @@ static void *zoom_source_create(obs_data_t *settings, obs_source_t *source)
 static void zoom_source_destroy(void *data)
 {
     auto *ctx = static_cast<ZoomSource *>(data);
-    ZoomMeeting::instance().on_state_change(nullptr);
+    ZoomMeeting::instance().remove_state_change(ctx);
     ZoomParticipants::instance().on_roster_change(nullptr);
     delete ctx;
 }

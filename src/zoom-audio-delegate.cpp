@@ -1,5 +1,5 @@
 #include "zoom-audio-delegate.h"
-#include "../third_party/zoom-sdk/h/zoom_rawdata_api.h"
+#include "zoom-audio-router.h"
 #include <obs-module.h>
 #include <media-io/audio-io.h>
 #include <util/platform.h>
@@ -17,28 +17,25 @@ ZoomAudioDelegate::~ZoomAudioDelegate()
 
 bool ZoomAudioDelegate::subscribe()
 {
-    if (m_subscribed) return true;
-    ZOOMSDK::IZoomSDKAudioRawDataHelper *helper = ZOOMSDK::GetAudioRawdataHelper();
-    if (!helper) {
-        blog(LOG_ERROR, "[obs-zoom-plugin] GetAudioRawdataHelper returned null");
-        return false;
-    }
-    ZOOMSDK::SDKError err = helper->subscribe(this);
-    if (err != ZOOMSDK::SDKERR_SUCCESS) {
-        blog(LOG_ERROR, "[obs-zoom-plugin] Audio subscribe failed: %d", static_cast<int>(err));
-        return false;
-    }
-    m_subscribed = true;
-    blog(LOG_INFO, "[obs-zoom-plugin] Audio subscribed (48kHz mixed)");
+    if (m_registered) return true;
+
+    ZoomAudioRouter &router = ZoomAudioRouter::instance();
+    router.set_mixed_sink(
+        [this](AudioRawData *d) { on_mixed_audio(d); });
+    router.set_one_way_sink(
+        [this](AudioRawData *d, uint32_t uid) { on_one_way_audio(d, uid); });
+
+    m_registered = true;
+    blog(LOG_INFO, "[obs-zoom-plugin] Audio delegate registered with router");
     return true;
 }
 
 void ZoomAudioDelegate::unsubscribe()
 {
-    if (!m_subscribed) return;
-    ZOOMSDK::IZoomSDKAudioRawDataHelper *helper = ZOOMSDK::GetAudioRawdataHelper();
-    if (helper) helper->unSubscribe();
-    m_subscribed = false;
+    if (!m_registered) return;
+    ZoomAudioRouter::instance().clear_mixed_sink();
+    ZoomAudioRouter::instance().clear_one_way_sink();
+    m_registered = false;
 }
 
 void ZoomAudioDelegate::set_channel_mode(AudioChannelMode mode)
@@ -61,25 +58,20 @@ uint32_t ZoomAudioDelegate::isolated_user() const
     return m_isolated_user.load(std::memory_order_relaxed);
 }
 
-// ── IZoomSDKAudioRawDataDelegate ─────────────────────────────────────────────
+// ── Router callbacks ──────────────────────────────────────────────────────────
 
-void ZoomAudioDelegate::onMixedAudioRawDataReceived(AudioRawData *data)
+void ZoomAudioDelegate::on_mixed_audio(AudioRawData *data)
 {
-    // Suppress mixed feed when isolating a specific participant
     if (m_isolated_user.load(std::memory_order_relaxed) != 0) return;
     push_audio(data);
 }
 
-void ZoomAudioDelegate::onOneWayAudioRawDataReceived(AudioRawData *data, uint32_t user_id)
+void ZoomAudioDelegate::on_one_way_audio(AudioRawData *data, uint32_t user_id)
 {
     uint32_t target = m_isolated_user.load(std::memory_order_relaxed);
     if (target == 0 || user_id != target) return;
     push_audio(data);
 }
-
-void ZoomAudioDelegate::onShareAudioRawDataReceived(AudioRawData *, uint32_t) {}
-void ZoomAudioDelegate::onOneWayInterpreterAudioRawDataReceived(AudioRawData *,
-                                                                const zchar_t *) {}
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
@@ -111,7 +103,7 @@ void ZoomAudioDelegate::push_mono(AudioRawData *data)
 
 void ZoomAudioDelegate::push_stereo(AudioRawData *data)
 {
-    const uint32_t byte_len    = data->GetBufferLen();
+    const uint32_t byte_len     = data->GetBufferLen();
     if (byte_len == 0) return;
     const uint32_t mono_frames  = byte_len / ZOOM_BYTES_PER_SAMPLE;
     const uint32_t stereo_count = mono_frames * 2;

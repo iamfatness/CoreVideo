@@ -3,6 +3,7 @@
 #include <util/platform.h>
 #include "zoom-source.h"
 #include "zoom-share-delegate.h"
+#include "zoom-participant-audio-source.h"
 #include "zoom-auth.h"
 #include "zoom-settings.h"
 #include "zoom-settings-dialog.h"
@@ -22,6 +23,7 @@ bool obs_module_load(void)
 
     zoom_source_register();
     zoom_share_source_register();
+    zoom_participant_audio_source_register();
 
     ZoomPluginSettings s = ZoomPluginSettings::load();
     if (!s.sdk_key.empty() && !s.sdk_secret.empty()) {

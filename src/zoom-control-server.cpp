@@ -10,6 +10,17 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <obs-module.h>
+#include <cstdint>
+
+// Timing-safe string equality — prevents token leakage via timing side-channel.
+static bool ct_equal(const std::string &a, const std::string &b)
+{
+    if (a.size() != b.size()) return false;
+    volatile uint8_t diff = 0;
+    for (size_t i = 0; i < a.size(); ++i)
+        diff |= static_cast<uint8_t>(a[i]) ^ static_cast<uint8_t>(b[i]);
+    return diff == 0;
+}
 
 ZoomControlServer &ZoomControlServer::instance()
 {
@@ -32,6 +43,8 @@ bool ZoomControlServer::start(quint16 port)
                 [this]() { on_new_connection(); });
     }
 
+    m_server->setMaxPendingConnections(10);
+
     if (!m_server->listen(QHostAddress::LocalHost, port)) {
         blog(LOG_ERROR,
              "[obs-zoom-plugin] Control server failed to bind on 127.0.0.1:%u: %s "
@@ -40,6 +53,10 @@ bool ZoomControlServer::start(quint16 port)
              m_server->errorString().toUtf8().constData());
         return false;
     }
+
+    if (m_token.empty())
+        blog(LOG_WARNING, "[obs-zoom-plugin] Control server started without an auth token "
+             "— any local process can issue commands. Set a token in Zoom Plugin Settings.");
 
     blog(LOG_INFO, "[obs-zoom-plugin] Control server listening on 127.0.0.1:%u",
          static_cast<unsigned>(port));
@@ -119,8 +136,8 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
     const QJsonObject req = doc.object();
 
     if (!m_token.empty()) {
-        const QString provided = req.value("token").toString();
-        if (provided.toStdString() != m_token) {
+        const std::string provided = req.value("token").toString().toStdString();
+        if (!ct_equal(provided, m_token)) {
             write_response(socket, {{"ok", false}, {"error", "unauthorized"}});
             return;
         }
@@ -172,8 +189,12 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
 
     if (cmd == "assign_output") {
         const QString source = req.value("source").toString();
-        const uint32_t participant_id =
-            static_cast<uint32_t>(req.value("participant_id").toInt(0));
+        const int raw_pid = req.value("participant_id").toInt(-1);
+        if (raw_pid < 0) {
+            write_response(socket, {{"ok", false}, {"error", "invalid_participant_id"}});
+            return;
+        }
+        const uint32_t participant_id = static_cast<uint32_t>(raw_pid);
         const bool active_speaker = req.value("active_speaker").toBool(false);
         const bool isolate_audio = req.value("isolate_audio").toBool(false);
         const QString audio_channels = req.value("audio_channels").toString("mono");

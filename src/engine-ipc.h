@@ -105,14 +105,16 @@
 #endif
 
 // ── Line-oriented I/O helpers ─────────────────────────────────────────────────
-// Returns false on EOF or I/O error; 'out' is empty in that case.
-static inline bool ipc_read_line(IpcFd fd, std::string &out)
+// Returns false on EOF, I/O error, or if the line exceeds max_len bytes.
+static inline bool ipc_read_line(IpcFd fd, std::string &out,
+                                 size_t max_len = 65536)
 {
     out.clear();
 #if defined(WIN32)
     char ch; DWORD n;
     while (ReadFile(fd, &ch, 1, &n, nullptr) && n == 1) {
         if (ch == '\n') return true;
+        if (out.size() >= max_len) return false; // line too long
         out += ch;
     }
     return false; // EOF or error
@@ -120,6 +122,7 @@ static inline bool ipc_read_line(IpcFd fd, std::string &out)
     char ch; ssize_t n;
     while ((n = read(fd, &ch, 1)) == 1) {
         if (ch == '\n') return true;
+        if (out.size() >= max_len) return false; // line too long
         out += ch;
     }
     return false; // EOF (n==0) or error (n==-1)

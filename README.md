@@ -90,6 +90,32 @@ Commands: `help`, `status`, `list_participants`, `list_outputs`, `assign_output`
 | `/zoom/assign_output/active_speaker` | `,s` | source |
 | `/zoom/isolate_audio` | `,si` | source, 0\|1 |
 
+## Active Speaker Mode
+
+Enable **Follow active speaker** on any Zoom Participant source to automatically switch the video (and audio) feed to whoever is currently speaking.
+
+### Debounce
+
+Two independent timers prevent rapid camera cuts:
+
+| Parameter | Default | Description |
+|---|---|---|
+| **Sensitivity** (`speaker_sensitivity_ms`) | 300 ms | New speaker must hold the floor continuously for this long before the switch fires. A different speaker speaking resets the clock. |
+| **Hold** (`speaker_hold_ms`) | 2 000 ms | After any switch, no further switch occurs for at least this long. |
+
+The effective delay before each switch is `max(hold_remaining, sensitivity_remaining)`. If the delay is zero the switch fires immediately; otherwise a background thread sleeps for the delay and re-evaluates on the OBS UI thread.
+
+### Safety
+
+- **Liveness flag** — a `shared_ptr<atomic<bool>>` captured in every in-flight lambda ensures deferred callbacks bail safely if the source is destroyed before the timer fires.
+- **Supersede logic** — a new candidate replaces the pending one, restarting the sensitivity clock. Stale callbacks silently discard themselves.
+- **Final verification** — before committing a switch the code re-checks that the candidate is still the active speaker, so no switch fires for someone who stopped talking during the hold window.
+- **UI-thread commitment** — all state mutations run on the OBS UI thread via `obs_queue_task`, preventing data races with the properties panel.
+
+### Audio isolation interaction
+
+When **Isolate Audio** is also enabled, every speaker switch immediately calls `set_isolated_user(new_pid)` so the audio track always follows the same participant as the video.
+
 ## Output Profiles
 
 Named profiles save the full source-to-participant mapping to JSON files under:

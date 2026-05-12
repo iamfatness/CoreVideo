@@ -39,12 +39,18 @@ public:
     void add_share_audio_sink(void *key, ShareAudioSink cb);
     void remove_share_audio_sink(void *key);
 
+    // Interpretation-language sink — receives frames for a specific language track.
+    // language_name is UTF-8; the sink is responsible for filtering by language.
+    using InterpSink = std::function<void(AudioRawData *, const std::string &language_name)>;
+    void add_interp_sink(void *key, InterpSink cb);
+    void remove_interp_sink(void *key);
+
     // IZoomSDKAudioRawDataDelegate
     void onMixedAudioRawDataReceived(AudioRawData *data) override;
     void onOneWayAudioRawDataReceived(AudioRawData *data, uint32_t user_id) override;
     void onShareAudioRawDataReceived(AudioRawData *data, uint32_t share_user_id) override;
-    void onOneWayInterpreterAudioRawDataReceived(AudioRawData *,
-                                                 const zchar_t *) override {}
+    void onOneWayInterpreterAudioRawDataReceived(AudioRawData *data,
+                                                 const zchar_t *language) override;
 
 private:
     ZoomAudioRouter() = default;
@@ -55,5 +61,6 @@ private:
     std::unordered_map<uint32_t, std::unordered_map<void *, ParticipantSink>>
         m_participant_sinks;
     std::unordered_map<void *, ShareAudioSink> m_share_audio_sinks;
+    std::unordered_map<void *, InterpSink>     m_interp_sinks;
     bool        m_subscribed = false;
 };

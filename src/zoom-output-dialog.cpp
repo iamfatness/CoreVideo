@@ -1,25 +1,64 @@
 #include "zoom-output-dialog.h"
 #include "zoom-output-manager.h"
+#include "zoom-output-profile.h"
 #include "zoom-participants.h"
 #include <QAbstractItemView>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
+#include <QHBoxLayout>
 #include <QHeaderView>
+#include <QImage>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QMetaObject>
+#include <QPixmap>
 #include <QPushButton>
 #include <QTableWidget>
 #include <QVBoxLayout>
+#include <algorithm>
+#include <atomic>
+#include <memory>
 
 enum OutputColumns {
-    ColumnName = 0,
+    ColumnPreview = 0,
+    ColumnName,
     ColumnAssignment,
     ColumnAudio,
     ColumnIsolate,
     ColumnCount
 };
+
+// Fast I420 → RGB888 conversion for preview thumbnails.
+// Samples every (step) pixels to produce a scaled-down image.
+static QImage i420_to_qimage_scaled(uint32_t w, uint32_t h,
+    const uint8_t *y_plane, const uint8_t *u_plane, const uint8_t *v_plane,
+    uint32_t stride_y, uint32_t stride_uv,
+    int out_w, int out_h)
+{
+    QImage img(out_w, out_h, QImage::Format_RGB888);
+    const float x_scale = static_cast<float>(w) / out_w;
+    const float y_scale = static_cast<float>(h) / out_h;
+
+    for (int dy = 0; dy < out_h; ++dy) {
+        const uint32_t sy  = static_cast<uint32_t>(dy * y_scale);
+        const uint32_t scy = sy / 2;
+        uint8_t *row = img.scanLine(dy);
+        for (int dx = 0; dx < out_w; ++dx) {
+            const uint32_t sx  = static_cast<uint32_t>(dx * x_scale);
+            const uint32_t scx = sx / 2;
+            const int Y = y_plane[sy  * stride_y  + sx];
+            const int U = u_plane[scy * stride_uv + scx] - 128;
+            const int V = v_plane[scy * stride_uv + scx] - 128;
+            row[dx * 3 + 0] = static_cast<uint8_t>(std::clamp(Y + (int)(1.402f  * V), 0, 255));
+            row[dx * 3 + 1] = static_cast<uint8_t>(std::clamp(Y - (int)(0.344f  * U) - (int)(0.714f * V), 0, 255));
+            row[dx * 3 + 2] = static_cast<uint8_t>(std::clamp(Y + (int)(1.772f  * U), 0, 255));
+        }
+    }
+    return img;
+}
 
 static QString participant_label(const ParticipantInfo &p)
 {
@@ -35,7 +74,28 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     : QDialog(parent)
 {
     setWindowTitle("Zoom Output Manager");
-    resize(760, 420);
+    resize(760, 500);
+
+    // ── Profile toolbar ───────────────────────────────────────────────────────
+    m_profile_combo = new QComboBox(this);
+    m_profile_combo->setMinimumWidth(180);
+    m_profile_combo->setPlaceholderText("— select profile —");
+
+    auto *save_btn   = new QPushButton("Save Profile",   this);
+    auto *load_btn   = new QPushButton("Load Profile",   this);
+    auto *delete_btn = new QPushButton("Delete Profile", this);
+
+    connect(save_btn,   &QPushButton::clicked, this, [this]() { save_profile(); });
+    connect(load_btn,   &QPushButton::clicked, this, [this]() { load_profile(); });
+    connect(delete_btn, &QPushButton::clicked, this, [this]() { delete_profile(); });
+
+    auto *profile_row = new QHBoxLayout();
+    profile_row->addWidget(new QLabel("Profile:", this));
+    profile_row->addWidget(m_profile_combo, 1);
+    profile_row->addWidget(save_btn);
+    profile_row->addWidget(load_btn);
+    profile_row->addWidget(delete_btn);
+    profile_row->addStretch();
 
     m_filter = new QLineEdit(this);
     m_filter->setPlaceholderText("Filter participants");
@@ -55,10 +115,12 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     m_table = new QTableWidget(this);
     m_table->setColumnCount(ColumnCount);
     m_table->setHorizontalHeaderLabels({
-        "Output", "Assignment", "Audio", "Isolated audio"
+        "Preview", "Output", "Assignment", "Audio", "Isolated audio"
     });
-    m_table->horizontalHeader()->setSectionResizeMode(ColumnName, QHeaderView::Stretch);
+    m_table->horizontalHeader()->setSectionResizeMode(ColumnPreview,    QHeaderView::Fixed);
+    m_table->horizontalHeader()->setSectionResizeMode(ColumnName,       QHeaderView::Stretch);
     m_table->horizontalHeader()->setSectionResizeMode(ColumnAssignment, QHeaderView::Stretch);
+    m_table->setColumnWidth(ColumnPreview, 162);
     m_table->verticalHeader()->setVisible(false);
     m_table->setSelectionMode(QAbstractItemView::NoSelection);
 
@@ -72,6 +134,7 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
     auto *layout = new QVBoxLayout(this);
+    layout->addLayout(profile_row);
     layout->addWidget(new QLabel("Participants", this));
     layout->addWidget(m_filter);
     layout->addWidget(m_participant_table);
@@ -83,10 +146,13 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
         QMetaObject::invokeMethod(this, [this]() { refresh(); }, Qt::QueuedConnection);
     });
     refresh();
+    refresh_profiles();
 }
 
 ZoomOutputDialog::~ZoomOutputDialog()
 {
+    m_alive->store(false, std::memory_order_release);
+    ZoomOutputManager::instance().clear_all_preview_cbs();
     ZoomParticipants::instance().remove_roster_callback(this);
 }
 
@@ -94,14 +160,48 @@ void ZoomOutputDialog::refresh()
 {
     refresh_participants();
 
+    // Clear any existing preview callbacks before rebuilding rows.
+    ZoomOutputManager::instance().clear_all_preview_cbs();
+
     const auto outputs = ZoomOutputManager::instance().outputs();
     const auto roster = ZoomParticipants::instance().roster();
 
     m_table->setRowCount(static_cast<int>(outputs.size()));
+    m_table->setRowHeight(0, 92); // apply uniform row height once
     for (int row = 0; row < static_cast<int>(outputs.size()); ++row) {
+        m_table->setRowHeight(row, 92);
         const auto &output = outputs[row];
 
-        auto *name_item = new QTableWidgetItem(QString::fromStdString(output.source_name));
+        // Preview thumbnail label
+        auto *preview_label = new QLabel(m_table);
+        preview_label->setFixedSize(160, 90);
+        preview_label->setAlignment(Qt::AlignCenter);
+        preview_label->setStyleSheet("background: #1a1a1a;");
+        preview_label->setText("No video");
+        m_table->setCellWidget(row, ColumnPreview, preview_label);
+
+        // Register live preview callback for this source.
+        auto alive = m_alive;
+        const std::string src_name = output.source_name;
+        ZoomOutputManager::instance().set_preview_cb(src_name,
+            [preview_label, alive](uint32_t w, uint32_t h,
+                const uint8_t *y, const uint8_t *u, const uint8_t *v,
+                uint32_t stride_y, uint32_t stride_uv) {
+                if (!alive->load(std::memory_order_acquire)) return;
+                QImage img = i420_to_qimage_scaled(w, h, y, u, v,
+                    stride_y, stride_uv, 160, 90);
+                QMetaObject::invokeMethod(preview_label,
+                    [preview_label, img, alive]() {
+                        if (!alive->load(std::memory_order_acquire)) return;
+                        preview_label->setPixmap(QPixmap::fromImage(img));
+                        preview_label->setText({});
+                    }, Qt::QueuedConnection);
+            });
+
+        auto *name_item = new QTableWidgetItem(
+            output.display_name.empty()
+            ? QString::fromStdString(output.source_name)
+            : QString::fromStdString(output.display_name));
         name_item->setFlags(name_item->flags() & ~Qt::ItemIsEditable);
         name_item->setData(Qt::UserRole, QString::fromStdString(output.source_name));
         m_table->setItem(row, ColumnName, name_item);
@@ -160,6 +260,100 @@ void ZoomOutputDialog::refresh_participants()
             new QTableWidgetItem(p.is_talking ? "Yes" : ""));
         ++row;
     }
+}
+
+void ZoomOutputDialog::refresh_profiles()
+{
+    const QString current = m_profile_combo->currentText();
+    m_profile_combo->clear();
+    for (const auto &name : ZoomOutputProfile::list())
+        m_profile_combo->addItem(QString::fromStdString(name));
+    // Restore previous selection if it still exists
+    const int idx = m_profile_combo->findText(current);
+    if (idx >= 0) m_profile_combo->setCurrentIndex(idx);
+}
+
+void ZoomOutputDialog::save_profile()
+{
+    bool ok = false;
+    const QString name = QInputDialog::getText(this, "Save Profile",
+        "Profile name:", QLineEdit::Normal,
+        m_profile_combo->currentText(), &ok);
+    if (!ok || name.trimmed().isEmpty()) return;
+
+    // Collect current table state as ZoomOutputInfo list
+    std::vector<ZoomOutputInfo> outputs;
+    for (int row = 0; row < m_table->rowCount(); ++row) {
+        auto *name_item  = m_table->item(row, ColumnName);
+        auto *assignment = qobject_cast<QComboBox *>(m_table->cellWidget(row, ColumnAssignment));
+        auto *audio      = qobject_cast<QComboBox *>(m_table->cellWidget(row, ColumnAudio));
+        auto *isolate    = qobject_cast<QCheckBox *>(m_table->cellWidget(row, ColumnIsolate));
+        if (!name_item || !assignment || !audio || !isolate) continue;
+
+        ZoomOutputInfo o;
+        o.source_name    = name_item->data(Qt::UserRole).toString().toStdString();
+        const QString ad = assignment->currentData().toString();
+        o.active_speaker = (ad == "active");
+        o.participant_id = ad.startsWith("user:") ? ad.mid(5).toUInt() : 0;
+        o.isolate_audio  = isolate->isChecked();
+        o.audio_mode     = static_cast<AudioChannelMode>(audio->currentData().toInt());
+        outputs.push_back(std::move(o));
+    }
+
+    if (ZoomOutputProfile::save(name.trimmed().toStdString(), outputs)) {
+        refresh_profiles();
+        m_profile_combo->setCurrentText(name.trimmed());
+    } else {
+        QMessageBox::warning(this, "Save Profile", "Failed to save profile.");
+    }
+}
+
+void ZoomOutputDialog::load_profile()
+{
+    const std::string name = m_profile_combo->currentText().toStdString();
+    if (name.empty()) return;
+
+    const auto profile = ZoomOutputProfile::load(name);
+    if (profile.empty()) {
+        QMessageBox::warning(this, "Load Profile", "Profile is empty or could not be read.");
+        return;
+    }
+
+    // Apply each entry in the profile to the matching output row
+    for (const auto &o : profile) {
+        for (int row = 0; row < m_table->rowCount(); ++row) {
+            auto *name_item = m_table->item(row, ColumnName);
+            if (!name_item) continue;
+            if (name_item->data(Qt::UserRole).toString().toStdString() != o.source_name)
+                continue;
+
+            auto *assignment = qobject_cast<QComboBox *>(m_table->cellWidget(row, ColumnAssignment));
+            auto *audio      = qobject_cast<QComboBox *>(m_table->cellWidget(row, ColumnAudio));
+            auto *isolate    = qobject_cast<QCheckBox *>(m_table->cellWidget(row, ColumnIsolate));
+            if (!assignment || !audio || !isolate) continue;
+
+            const QString ad = o.active_speaker
+                ? "active"
+                : QString("user:%1").arg(o.participant_id);
+            const int idx = assignment->findData(ad);
+            if (idx >= 0) assignment->setCurrentIndex(idx);
+            audio->setCurrentIndex(o.audio_mode == AudioChannelMode::Stereo ? 1 : 0);
+            isolate->setChecked(o.isolate_audio);
+            break;
+        }
+    }
+}
+
+void ZoomOutputDialog::delete_profile()
+{
+    const std::string name = m_profile_combo->currentText().toStdString();
+    if (name.empty()) return;
+    if (QMessageBox::question(this, "Delete Profile",
+            QString("Delete profile '%1'?").arg(QString::fromStdString(name)),
+            QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
+        return;
+    ZoomOutputProfile::remove(name);
+    refresh_profiles();
 }
 
 void ZoomOutputDialog::apply()

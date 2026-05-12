@@ -3,6 +3,8 @@
 #include <obs-module.h>
 #include <media-io/video-io.h>
 #include <util/platform.h>
+#include <vector>
+#include <algorithm>
 
 ZoomVideoDelegate::ZoomVideoDelegate(obs_source_t *source) : m_source(source) {}
 
@@ -63,6 +65,18 @@ void ZoomVideoDelegate::unsubscribe()
     ZOOMSDK::destroyRenderer(r);
 }
 
+void ZoomVideoDelegate::set_preview_cb(PreviewCallback cb)
+{
+    std::lock_guard<std::mutex> lk(m_preview_mtx);
+    m_preview_cb = std::move(cb);
+}
+
+void ZoomVideoDelegate::clear_preview_cb()
+{
+    std::lock_guard<std::mutex> lk(m_preview_mtx);
+    m_preview_cb = nullptr;
+}
+
 void ZoomVideoDelegate::onRawDataFrameReceived(YUVRawDataI420 *data)
 {
     if (!data || !m_source) return;
@@ -86,6 +100,24 @@ void ZoomVideoDelegate::onRawDataFrameReceived(YUVRawDataI420 *data)
     frame.linesize[2] = w / 2;
 
     obs_source_output_video(m_source, &frame);
+
+    // Throttled preview callback — at most 5 fps
+    const uint64_t now_ns = os_gettime_ns();
+    if (now_ns - m_preview_last_ns >= kPreviewIntervalNs) {
+        PreviewCallback preview_cb;
+        {
+            std::lock_guard<std::mutex> lk(m_preview_mtx);
+            preview_cb = m_preview_cb;
+        }
+        if (preview_cb) {
+            m_preview_last_ns = now_ns;
+            preview_cb(w, h,
+                reinterpret_cast<const uint8_t *>(data->GetYBuffer()),
+                reinterpret_cast<const uint8_t *>(data->GetUBuffer()),
+                reinterpret_cast<const uint8_t *>(data->GetVBuffer()),
+                w, w / 2);
+        }
+    }
 }
 
 void ZoomVideoDelegate::onRawDataStatusChanged(RawDataStatus status)
@@ -93,6 +125,33 @@ void ZoomVideoDelegate::onRawDataStatusChanged(RawDataStatus status)
     m_active.store(status == RawData_On, std::memory_order_relaxed);
     blog(LOG_INFO, "[obs-zoom-plugin] Video raw data %s",
          status == RawData_On ? "active" : "inactive");
+
+    if (status == RawData_Off && m_source &&
+        static_cast<VideoLossMode>(m_loss_mode.load(std::memory_order_relaxed))
+            == VideoLossMode::Black) {
+        const uint32_t w = m_width.load(std::memory_order_relaxed);
+        const uint32_t h = m_height.load(std::memory_order_relaxed);
+        if (w == 0 || h == 0) return;
+
+        // I420: Y=0 (black), U/V=128 (neutral chroma)
+        const size_t y_sz  = static_cast<size_t>(w) * h;
+        const size_t uv_sz = static_cast<size_t>(w / 2) * (h / 2);
+        std::vector<uint8_t> buf(y_sz + 2 * uv_sz, 0);
+        std::fill(buf.begin() + static_cast<ptrdiff_t>(y_sz), buf.end(), uint8_t{128});
+
+        obs_source_frame frame = {};
+        frame.format      = VIDEO_FORMAT_I420;
+        frame.width       = w;
+        frame.height      = h;
+        frame.timestamp   = os_gettime_ns();
+        frame.data[0]     = buf.data();
+        frame.data[1]     = buf.data() + y_sz;
+        frame.data[2]     = buf.data() + y_sz + uv_sz;
+        frame.linesize[0] = w;
+        frame.linesize[1] = w / 2;
+        frame.linesize[2] = w / 2;
+        obs_source_output_video(m_source, &frame);
+    }
 }
 
 void ZoomVideoDelegate::onRendererBeDestroyed()

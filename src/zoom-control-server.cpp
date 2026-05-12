@@ -100,10 +100,13 @@ static QJsonObject participant_to_json(const ParticipantInfo &p)
 static QJsonObject output_to_json(const ZoomOutputInfo &o)
 {
     QJsonObject obj;
-    obj["source"] = QString::fromStdString(o.source_name);
+    obj["source"]         = QString::fromStdString(o.source_name);
+    obj["display_name"]   = o.display_name.empty()
+                            ? QString::fromStdString(o.source_name)
+                            : QString::fromStdString(o.display_name);
     obj["participant_id"] = static_cast<int>(o.participant_id);
     obj["active_speaker"] = o.active_speaker;
-    obj["isolate_audio"] = o.isolate_audio;
+    obj["isolate_audio"]  = o.isolate_audio;
     obj["audio_channels"] = o.audio_mode == AudioChannelMode::Stereo
         ? "stereo" : "mono";
     return obj;

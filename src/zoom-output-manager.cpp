@@ -41,6 +41,36 @@ std::vector<ZoomOutputInfo> ZoomOutputManager::outputs() const
     return out;
 }
 
+void ZoomOutputManager::set_preview_cb(const std::string &source_name,
+                                        ZoomVideoDelegate::PreviewCallback cb)
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    for (auto *src : m_sources) {
+        if (src && src->output_name() == source_name) {
+            src->set_preview_cb(std::move(cb));
+            return;
+        }
+    }
+}
+
+void ZoomOutputManager::clear_preview_cb(const std::string &source_name)
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    for (auto *src : m_sources) {
+        if (src && src->output_name() == source_name) {
+            src->clear_preview_cb();
+            return;
+        }
+    }
+}
+
+void ZoomOutputManager::clear_all_preview_cbs()
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    for (auto *src : m_sources)
+        if (src) src->clear_preview_cb();
+}
+
 bool ZoomOutputManager::configure_output(const std::string &source_name,
                                          uint32_t participant_id,
                                          bool active_speaker,

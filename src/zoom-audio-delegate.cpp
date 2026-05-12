@@ -3,7 +3,7 @@
 #include <media-io/audio-io.h>
 #include <util/platform.h>
 #include <cstring>
-static constexpr uint32_t ZOOM_SAMPLE_RATE      = 32000;
+static constexpr uint32_t ZOOM_SAMPLE_RATE      = 48000;
 static constexpr uint32_t ZOOM_BYTES_PER_SAMPLE = sizeof(int16_t);
 ZoomAudioDelegate::ZoomAudioDelegate(obs_source_t *source, AudioChannelMode mode)
     : m_source(source), m_mode(static_cast<int>(mode)) {}

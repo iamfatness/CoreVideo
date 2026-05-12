@@ -31,7 +31,6 @@
     }
 
     /* ── Layout ── */
-    .layout { display: flex; min-height: 100vh; }
     nav {
       position: fixed; top: 0; left: 0; bottom: 0; width: 260px;
       background: var(--surface); border-right: 1px solid var(--border);
@@ -173,15 +172,18 @@
   <div class="nav-section">Architecture</div>
   <a href="#arch-system">System Overview</a>
   <a href="#arch-components">Plugin Components</a>
-  <a href="#arch-windows">Windows IPC Engine</a>
+  <a href="#arch-audio-router">Audio Router</a>
+  <a href="#arch-windows">IPC Engine</a>
   <a href="#arch-video">Video Pipeline</a>
   <a href="#arch-audio">Audio Pipeline</a>
+  <a href="#arch-share">Screen Share Pipeline</a>
 
   <div class="nav-section">Flows</div>
   <a href="#flow-auth">Authentication Flow</a>
   <a href="#flow-meeting">Meeting Join Flow</a>
 
   <div class="nav-section">Reference</div>
+  <a href="#control-api">Control Server API</a>
   <a href="#ipc-protocol">IPC Protocol</a>
   <a href="#installation">Installation</a>
   <a href="#configuration">Configuration</a>
@@ -195,8 +197,8 @@
   <div class="hero">
     <h1>CoreVideo</h1>
     <p style="font-size:1.1rem; color:#8b949e; max-width:620px;">
-      An OBS Studio plugin that captures live Zoom meeting video and audio,
-      letting you stream or record any participant directly on your OBS canvas.
+      An OBS Studio plugin that captures live Zoom meeting video, audio, and screen
+      share content, letting you stream or record any participant directly on your OBS canvas.
     </p>
     <div class="hero-badges">
       <span class="badge blue">C++17</span>
@@ -206,6 +208,7 @@
       <span class="badge purple">Zoom Meeting SDK</span>
       <span class="badge orange">Windows</span>
       <span class="badge orange">macOS</span>
+      <span class="badge orange">Linux</span>
     </div>
   </div>
 
@@ -214,18 +217,23 @@
     <h2>Introduction</h2>
     <p>
       <strong>CoreVideo</strong> is an OBS Studio plugin that integrates the
-      <strong>Zoom Meeting SDK</strong> to bring raw video and audio frames from
-      a live Zoom meeting directly into OBS. No screen capture or virtual camera is
-      involved — the plugin subscribes to raw I420 video frames and 48 kHz PCM audio
-      from specific meeting participants or the active speaker, then converts and pushes
-      those frames into OBS as a first-class source.
+      <strong>Zoom Meeting SDK</strong> to bring raw video, audio, and screen share
+      frames from a live Zoom meeting directly into OBS. No screen capture or virtual
+      camera is involved — the plugin subscribes to raw I420 video frames and 48 kHz
+      PCM audio from specific meeting participants or the active speaker, then converts
+      and pushes those frames into OBS as first-class sources.
     </p>
     <p>
-      On <strong>Windows</strong> the Zoom SDK must run in its own process due to
-      COM apartment and UI-thread constraints. A companion executable
-      (<code>ZoomObsEngine.exe</code>) hosts the SDK and communicates back to the
-      plugin via JSON over named pipes and shared memory for frame data.
-      On <strong>macOS</strong> the SDK is loaded directly in-process.
+      A companion executable <code>ZoomObsEngine</code> hosts the Zoom SDK in its own
+      process to avoid threading and SDK isolation issues. This engine runs on all three
+      supported platforms and communicates with the plugin via JSON over named pipes
+      (Windows) or Unix domain sockets (macOS / Linux), with bulk frame data passed
+      through shared memory.
+    </p>
+    <p>
+      A built-in <strong>TCP control server</strong> on port 19870 exposes a JSON API
+      that lets external tools — scripts, dashboards, or broadcast automation systems —
+      query participants, reassign sources, and control meeting state at runtime.
     </p>
   </section>
 
@@ -241,37 +249,57 @@
       <div class="card">
         <div class="card-icon">🎙️</div>
         <h4>Raw Audio Capture</h4>
-        <p>48 kHz PCM audio with configurable mono/stereo mixing modes.</p>
+        <p>48 kHz PCM with configurable mono/stereo modes and per-participant isolation.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🖥️</div>
+        <h4>Screen Share Capture</h4>
+        <p>Dedicated OBS source type for any active screen share in the meeting.</p>
       </div>
       <div class="card">
         <div class="card-icon">👥</div>
         <h4>Participant Roster</h4>
-        <p>Track all meeting participants with active-speaker detection.</p>
+        <p>Live list of meeting participants with video, mute, and talking state.</p>
       </div>
       <div class="card">
         <div class="card-icon">🔄</div>
-        <h4>Auto-Follow Speaker</h4>
-        <p>Optionally follow the active speaker instead of a fixed participant.</p>
+        <h4>Active Speaker Mode</h4>
+        <p>Optionally follow whoever is speaking instead of a fixed participant.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🔊</div>
+        <h4>Per-Participant Audio</h4>
+        <p>Standalone audio source type for individual participant audio tracks.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🌐</div>
+        <h4>TCP Control API</h4>
+        <p>JSON control server on port 19870 for external automation and monitoring.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">📡</div>
+        <h4>Output Manager</h4>
+        <p>Centrally reconfigure source assignments and audio modes at runtime.</p>
       </div>
       <div class="card">
         <div class="card-icon">🔒</div>
         <h4>JWT Authentication</h4>
-        <p>Authenticates with the Zoom SDK using your SDK key, secret, and JWT token.</p>
+        <p>Authenticates with your Zoom SDK key, secret, and JWT token.</p>
       </div>
       <div class="card">
         <div class="card-icon">⚙️</div>
         <h4>Settings Dialog</h4>
-        <p>Qt GUI dialog for credential management, accessible from OBS Tools menu.</p>
-      </div>
-      <div class="card">
-        <div class="card-icon">🖥️</div>
-        <h4>Multi-Platform</h4>
-        <p>Windows (x64) and macOS (universal arm64 + x86_64) support.</p>
+        <p>Qt GUI accessible from OBS → Tools → Zoom Plugin Settings.</p>
       </div>
       <div class="card">
         <div class="card-icon">🔗</div>
-        <h4>IPC Engine (Windows)</h4>
-        <p>Separate engine process communicates via named pipes for SDK isolation.</p>
+        <h4>Cross-Platform IPC</h4>
+        <p>Named pipes on Windows, Unix domain sockets on macOS and Linux.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">💻</div>
+        <h4>Multi-Platform</h4>
+        <p>Windows (x64/arm64), macOS (universal arm64 + x86_64), and Linux.</p>
       </div>
     </div>
   </section>
@@ -283,9 +311,9 @@
       <tr><th>Dependency</th><th>Version</th><th>Notes</th></tr>
       <tr><td>OBS Studio</td><td>30+</td><td>Provides <code>libobs</code> and <code>obs-frontend-api</code></td></tr>
       <tr><td>CMake</td><td>3.16+</td><td>Build system</td></tr>
-      <tr><td>Qt</td><td>6.x</td><td>Core + Widgets modules</td></tr>
+      <tr><td>Qt</td><td>6.x</td><td>Core + Network + Widgets modules</td></tr>
       <tr><td>Zoom Meeting SDK</td><td>5.x</td><td>Place in <code>third_party/zoom-sdk/</code></td></tr>
-      <tr><td>C++ Compiler</td><td>C++17</td><td>MSVC 2022 (Windows) / Clang 14+ (macOS)</td></tr>
+      <tr><td>C++ Compiler</td><td>C++17</td><td>MSVC 2022 (Windows) / Clang 14+ (macOS) / GCC 11+ (Linux)</td></tr>
       <tr><td>Zoom Developer Account</td><td>—</td><td>Required for SDK key, secret &amp; JWT token</td></tr>
     </table>
   </section>
@@ -298,64 +326,68 @@
   <section id="arch-system">
     <h2>Architecture: System Overview</h2>
     <p>
-      At the highest level, CoreVideo bridges two independent systems —
-      <strong>OBS Studio</strong> and the <strong>Zoom Meeting SDK</strong> —
-      by acting as both an OBS source plugin and a Zoom SDK consumer.
+      CoreVideo bridges OBS Studio and the Zoom Meeting SDK across three layers:
+      the in-process <strong>plugin</strong>, the out-of-process
+      <strong>engine</strong> (which owns the SDK), and the
+      <strong>TCP control server</strong> for external automation.
     </p>
     <div class="diagram-wrap">
       <div class="mermaid">
 graph TB
-    subgraph UserSpace["User's Machine"]
-      direction TB
+    subgraph UserMachine["User's Machine"]
       subgraph OBS["OBS Studio"]
-        direction LR
-        Canvas["OBS Canvas / Output"]
-        Source["Zoom Participant Source\n(obs_source_t)"]
-        Frontend["OBS Frontend API\nTools Menu · Events"]
-        Canvas --> |"renders"| Source
+        Canvas["Canvas / Output"]
+        VSrc["Zoom Participant\nSource"]
+        ASrc["Zoom Participant\nAudio Source"]
+        SSrc["Zoom Share\nSource"]
+        Canvas --> VSrc & ASrc & SSrc
       end
 
-      subgraph Plugin["obs-zoom-plugin.dll / .so"]
-        direction TB
-        PM["plugin-main\nModule Init"]
-        ZS["ZoomSource\nOBS Source Impl"]
-        ZAuth["ZoomAuth\nSDK Init · JWT Auth"]
-        ZMeet["ZoomMeeting\nJoin · Leave"]
-        ZPart["ZoomParticipants\nRoster · Active Speaker"]
-        ZVD["VideoDelegate\nI420 → BGRA"]
-        ZAD["AudioDelegate\n48kHz PCM"]
-        ZSet["ZoomSettings\nCredential Store"]
-        ZDlg["SettingsDialog\nQt UI"]
+      subgraph Plugin["obs-zoom-plugin"]
+        PM["plugin-main"]
+        ZS["ZoomSource"]
+        ZAR["ZoomAudioRouter"]
+        ZOM["ZoomOutputManager"]
+        ZCS["ZoomControlServer\n127.0.0.1:19870"]
+        ZSD["ZoomShareDelegate"]
+        ZPart["ZoomParticipants"]
+        ZMeet["ZoomMeeting"]
+        ZAuth["ZoomAuth"]
       end
 
-      subgraph EngineProc["ZoomObsEngine.exe (Windows only)"]
-        EMain["Engine Main\nIPC Loop"]
-        EVid["EngineVideo\nParticipant Subscriptions"]
-        EAud["EngineAudio\nAudio Capture"]
-        ZSDK["Zoom Meeting SDK\n(in-process on macOS\nout-of-process on Windows)"]
-        EMain --> EVid & EAud --> ZSDK
+      subgraph Engine["ZoomObsEngine\n(separate process)"]
+        ELoop["IPC Loop"]
+        EVid["EngineVideo"]
+        EAud["EngineAudio"]
+        SDK["Zoom Meeting SDK"]
+        ELoop --> EVid & EAud --> SDK
       end
 
-      subgraph Zoom["Zoom Cloud"]
-        Meeting["Live Meeting\nParticipants · Audio · Video"]
+      subgraph External["External Tools"]
+        Ctrl["Automation Script\nDashboard / CLI"]
+      end
+
+      subgraph ZoomCloud["Zoom Cloud"]
+        Meeting["Live Meeting"]
       end
     end
 
-    OBS --> |"loads"| Plugin
-    Frontend <--> PM
-    Source <--> ZS
-    ZS <--> ZAuth & ZMeet & ZPart & ZVD & ZAD
-    ZAuth & ZSet <--> ZDlg
-    Plugin <-->|"Named Pipes\nJSON IPC"| EMain
-    EVid & EAud <-->|"Shared Memory\nFrame Data"| ZVD & ZAD
-    ZSDK <-->|"HTTPS / WebSocket"| Meeting
+    OBS -->|loads| Plugin
+    VSrc & ASrc & SSrc <--> ZS & ZAR & ZSD
+    ZS --> ZOM
+    PM --> ZCS & ZAuth & ZMeet & ZPart
+    Plugin <-->|"JSON IPC\nnamed pipe / Unix socket"| ELoop
+    EVid & EAud <-->|"Shared Memory\nframe data"| Plugin
+    SDK <-->|HTTPS / WSS| Meeting
+    Ctrl <-->|"TCP JSON\nport 19870"| ZCS
 
     style OBS fill:#0d2137,stroke:#2f81f7,color:#e6edf3
     style Plugin fill:#1a2332,stroke:#388bfd,color:#e6edf3
-    style EngineProc fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
-    style Zoom fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
+    style Engine fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
+    style ZoomCloud fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
+    style External fill:#2d2000,stroke:#d29922,color:#e6edf3
       </div>
-      <div class="diagram-caption">Fig 1 — Full system view showing OBS, the plugin, the Windows engine process, and Zoom cloud.</div>
+      <div class="diagram-caption">Fig 1 — Full system view: OBS, the plugin, the engine process, control server, and Zoom cloud.</div>
     </div>
   </section>
 
@@ -363,10 +395,9 @@ graph TB
   <section id="arch-components">
     <h2>Architecture: Plugin Components</h2>
     <p>
-      The plugin is structured as a set of cooperating singletons and per-source objects.
-      <code>ZoomAuth</code> and <code>ZoomMeeting</code> are process-wide singletons;
-      <code>ZoomSource</code>, <code>VideoDelegate</code>, and <code>AudioDelegate</code>
-      are instantiated once per OBS source item.
+      The plugin is organized around singletons for shared SDK state and per-source
+      objects for each OBS source item. The <code>ZoomAudioRouter</code> is the sole
+      SDK audio subscriber; it dispatches frames to all registered sinks.
     </p>
     <div class="diagram-wrap">
       <div class="mermaid">
@@ -374,29 +405,24 @@ classDiagram
     class plugin_main {
         +obs_module_load() bool
         +obs_module_unload() void
-        -register_source()
-        -add_tools_menu()
-        -handle_frontend_events()
     }
 
     class ZoomSource {
         -obs_source_t* source
         -std::string meeting_id
         -uint32_t participant_id
-        -AudioMode audio_mode
+        -bool active_speaker
+        -bool isolate_audio
+        -AudioChannelMode audio_mode
         +create(settings, source) void*
         +destroy(data) void
-        +get_name() const char*
         +update(data, settings) void
-        +video_tick(data, seconds) void
-        +get_properties(data) obs_properties_t*
-        +get_defaults(settings) void
+        +output_info() ZoomOutputInfo
+        +configure_output(...) void
     }
 
     class ZoomAuth {
         &lt;&lt;Singleton&gt;&gt;
-        -IAuthService* auth_svc
-        -AuthState state
         +instance() ZoomAuth&
         +init(key, secret) bool
         +authenticate(jwt) bool
@@ -406,159 +432,228 @@ classDiagram
 
     class ZoomMeeting {
         &lt;&lt;Singleton&gt;&gt;
-        -IMeetingService* meeting_svc
-        -MeetingState state
-        -std::string current_meeting_id
         +instance() ZoomMeeting&
-        +join(meeting_id, passcode) bool
+        +join(id, passcode, name) bool
         +leave() void
-        +get_state() MeetingState
+        +state() MeetingState
     }
 
     class ZoomParticipants {
         &lt;&lt;Singleton&gt;&gt;
-        -std::map~uint32_t,ParticipantInfo~ roster
-        -uint32_t active_speaker_id
         +instance() ZoomParticipants&
-        +get_roster() vector~ParticipantInfo~
-        +get_active_speaker() uint32_t
-        +on_user_join(user_id) void
-        +on_user_leave(user_id) void
-        +on_active_speaker(user_id) void
+        +roster() vector~ParticipantInfo~
+        +active_speaker_id() uint32_t
+    }
+
+    class ZoomAudioRouter {
+        &lt;&lt;Singleton&gt;&gt;
+        +instance() ZoomAudioRouter&
+        +subscribe() bool
+        +unsubscribe() void
+        +add_mixed_sink(key, cb) void
+        +add_one_way_sink(key, cb) void
+        +add_participant_sink(uid, key, cb) void
+        +remove_mixed_sink(key) void
+        +remove_one_way_sink(key) void
+        +remove_participant_sink(uid, key) void
+    }
+
+    class ZoomOutputManager {
+        &lt;&lt;Singleton&gt;&gt;
+        +instance() ZoomOutputManager&
+        +register_source(source) void
+        +unregister_source(source) void
+        +outputs() vector~ZoomOutputInfo~
+        +configure_output(...) bool
+    }
+
+    class ZoomControlServer {
+        &lt;&lt;Singleton&gt;&gt;
+        +instance() ZoomControlServer&
+        +start(port 19870) bool
+        +stop() void
+        +set_token(token) void
+    }
+
+    class ZoomShareDelegate {
+        &lt;&lt;Singleton&gt;&gt;
+        +instance() ZoomShareDelegate&
+        +attach(ctrl) void
+        +detach() void
+        +set_obs_source(source) void
+        +onRawDataFrameReceived(data) void
+        +onSharingStatus(info) void
     }
 
     class ZoomVideoDelegate {
-        -obs_source_t* source
         -uint32_t subscribed_pid
-        -obs_source_frame frame
         +subscribe(participant_id) void
         +unsubscribe() void
         +onRawDataFrameReceived(data) void
-        -convert_i420_to_bgra(yuv, bgra) void
-        -push_frame_to_obs() void
     }
 
     class ZoomAudioDelegate {
+        -AudioChannelMode mode
+        -bool isolate_audio
+        -uint32_t isolated_user
+        +init(source, mode, isolate) void
+    }
+
+    class ZoomParticipantAudioSource {
         -obs_source_t* source
-        -AudioMode mode
-        -obs_source_audio audio
-        +init(source, mode) void
-        +onMixedAudioRawDataReceived(data) void
-        -push_audio_to_obs() void
+        -uint32_t participant_id
+        -AudioChannelMode audio_mode
+        +apply_settings(settings) void
+        +do_register() void
+        +do_unregister() void
     }
 
-    class ZoomSettings {
-        +sdk_key string
-        +sdk_secret string
-        +jwt_token string
-        +load() ZoomPluginSettings
-        +save(settings) void
-    }
-
-    class ZoomSettingsDialog {
-        -QLineEdit* key_edit
-        -QLineEdit* secret_edit
-        -QLineEdit* token_edit
-        +ZoomSettingsDialog(parent)
-        +accept() void
-    }
-
-    plugin_main --> ZoomAuth : init on load
-    plugin_main --> ZoomSettings : load credentials
-    plugin_main --> ZoomSettingsDialog : open from Tools menu
-    plugin_main --> ZoomSource : register source type
-    ZoomSource --> ZoomAuth : check auth state
-    ZoomSource --> ZoomMeeting : join / leave
-    ZoomSource --> ZoomParticipants : query roster
-    ZoomSource --> ZoomVideoDelegate : create / configure
-    ZoomSource --> ZoomAudioDelegate : create / configure
-    ZoomSettingsDialog --> ZoomSettings : persist
-    ZoomSettingsDialog --> ZoomAuth : re-init
+    plugin_main --> ZoomAuth
+    plugin_main --> ZoomMeeting
+    plugin_main --> ZoomParticipants
+    plugin_main --> ZoomOutputManager
+    plugin_main --> ZoomControlServer
+    plugin_main --> ZoomShareDelegate
+    ZoomSource --> ZoomOutputManager : register / unregister
+    ZoomSource --> ZoomVideoDelegate
+    ZoomSource --> ZoomAudioDelegate
+    ZoomOutputManager --> ZoomControlServer : queried by
+    ZoomAudioRouter --> ZoomAudioDelegate : dispatches mixed/one-way
+    ZoomAudioRouter --> ZoomParticipantAudioSource : dispatches per-participant
       </div>
-      <div class="diagram-caption">Fig 2 — Plugin class diagram showing singletons, per-source objects, and their relationships.</div>
+      <div class="diagram-caption">Fig 2 — Plugin class diagram showing all singletons, per-source objects, and their relationships.</div>
     </div>
   </section>
 
-  <!-- ── Windows IPC Engine ─────────────────────────────────────── -->
-  <section id="arch-windows">
-    <h2>Architecture: Windows IPC Engine</h2>
+  <!-- ── Audio Router ───────────────────────────────────────────── -->
+  <section id="arch-audio-router">
+    <h2>Architecture: Audio Router</h2>
     <p>
-      On Windows, the Zoom SDK requires a dedicated UI-thread and COM STA context
-      that conflicts with OBS's rendering thread. CoreVideo solves this by spawning
-      <code>ZoomObsEngine.exe</code> — a separate process that owns the SDK — and
-      communicating with it via two named pipes carrying newline-delimited JSON.
+      <code>ZoomAudioRouter</code> is the <strong>single subscriber</strong> to the Zoom SDK's
+      <code>IZoomSDKAudioRawDataHelper</code>. All audio consumers register sinks with the router
+      rather than subscribing to the SDK directly, avoiding conflicts with the SDK's
+      one-subscriber constraint.
     </p>
     <div class="diagram-wrap">
       <div class="mermaid">
 graph LR
-    subgraph Plugin["obs-zoom-plugin.dll\n(OBS process)"]
-        direction TB
+    SDK["Zoom SDK\nAudio Raw Data"]
+
+    subgraph Router["ZoomAudioRouter (Singleton)"]
+        MixedCB["onMixedAudioRawDataReceived()"]
+        OneWayCB["onOneWayAudioRawDataReceived()"]
+        MixedCB --> DispatchMixed["Dispatch to\nmixed sinks"]
+        OneWayCB --> DispatchOneWay["Dispatch to\none-way sinks"]
+        OneWayCB --> DispatchParticipant["Dispatch to\nparticipant sinks\n(keyed by user_id)"]
+    end
+
+    subgraph Consumers
+        AD["ZoomAudioDelegate\n(mixed or isolated user)"]
+        PAS1["ZoomParticipantAudioSource\nuser_id = 101"]
+        PAS2["ZoomParticipantAudioSource\nuser_id = 202"]
+    end
+
+    SDK -->|"mixed frames"| MixedCB
+    SDK -->|"per-user frames"| OneWayCB
+    DispatchMixed --> AD
+    DispatchOneWay --> AD
+    DispatchParticipant --> PAS1 & PAS2
+
+    style Router fill:#1a2332,stroke:#388bfd,color:#e6edf3
+    style Consumers fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
+      </div>
+      <div class="diagram-caption">Fig 3 — ZoomAudioRouter dispatches SDK audio frames to all registered consumers without multiple SDK subscriptions.</div>
+    </div>
+
+    <h3>Sink Types</h3>
+    <table>
+      <tr><th>Sink Type</th><th>Registered By</th><th>Receives</th></tr>
+      <tr><td><code>MixedSink</code></td><td><code>ZoomAudioDelegate</code> (non-isolated mode)</td><td>Every mixed frame</td></tr>
+      <tr><td><code>OneWaySink</code></td><td><code>ZoomAudioDelegate</code> (isolated mode)</td><td>All per-user frames; delegate filters by <code>m_isolated_user</code></td></tr>
+      <tr><td><code>ParticipantSink</code></td><td><code>ZoomParticipantAudioSource</code></td><td>Only frames for that specific <code>user_id</code></td></tr>
+    </table>
+  </section>
+
+  <!-- ── IPC Engine ─────────────────────────────────────────────── -->
+  <section id="arch-windows">
+    <h2>Architecture: IPC Engine</h2>
+    <p>
+      <code>ZoomObsEngine</code> runs as a separate process on all platforms, hosting
+      the Zoom SDK to avoid threading constraints. The plugin communicates with it via
+      newline-delimited JSON over a pair of IPC channels. Frame data is passed through
+      named shared memory segments to avoid copying large buffers through the IPC channel.
+    </p>
+    <div class="diagram-wrap">
+      <div class="mermaid">
+graph LR
+    subgraph Plugin["obs-zoom-plugin"]
         ZS2["ZoomSource"]
         ZVD2["VideoDelegate"]
         ZAD2["AudioDelegate"]
-        SHM_R["Read Shared Memory\nFrames"]
-        ZS2 --> ZVD2 & ZAD2
-        ZVD2 & ZAD2 --> SHM_R
+        SHM_R["Read\nShared Memory"]
+        ZS2 --> ZVD2 & ZAD2 --> SHM_R
     end
 
-    subgraph Pipes["IPC Channels"]
-        direction TB
-        P2E["\\\\.\\pipe\\ZoomObsPlugin_P2E\nPlugin → Engine\nCommands"]
-        E2P["\\\\.\\pipe\\ZoomObsPlugin_E2P\nEngine → Plugin\nEvents"]
-        SHM["Named Shared Memory\nZoomObsPlugin_&lt;uuid&gt;\nVideo &amp; Audio Frames"]
+    subgraph IPC["IPC Channels (platform-specific)"]
+        P2E["Plugin → Engine\nWindows: named pipe\nmacOS/Linux: Unix socket"]
+        E2P["Engine → Plugin\nWindows: named pipe\nmacOS/Linux: Unix socket"]
+        SHM["Named Shared Memory\nZoomObsPlugin_&lt;uuid&gt;\nBGRA video · PCM audio"]
     end
 
-    subgraph Engine["ZoomObsEngine.exe\n(Separate process)"]
-        direction TB
-        EMain2["IPC Loop\nmain()"]
-        EVid2["EngineVideo\nParticipant Subscriptions"]
-        EAud2["EngineAudio\nAudio Capture"]
-        SDK2["Zoom SDK\nIMeetingService\nIAuthService"]
-        EMain2 --> EVid2 & EAud2 --> SDK2
+    subgraph Engine["ZoomObsEngine"]
+        ELoop2["IPC Loop"]
+        EVid2["EngineVideo"]
+        EAud2["EngineAudio"]
+        SDK2["Zoom Meeting SDK"]
+        ELoop2 --> EVid2 & EAud2 --> SDK2
     end
 
-    Plugin -- "init · join · leave\nsubscribe · unsubscribe · quit" --> P2E --> EMain2
-    EMain2 -- "ready · auth_ok · auth_fail\njoined · left · frame · audio · error" --> E2P --> Plugin
-    EVid2 & EAud2 -- "write frames" --> SHM --> SHM_R
+    Plugin -- "init · join · leave\nsubscribe · unsubscribe · quit" --> P2E --> ELoop2
+    ELoop2 -- "ready · auth_ok/fail\njoined · left · frame · audio · error" --> E2P --> Plugin
+    EVid2 & EAud2 -- "write" --> SHM --> SHM_R
 
     style Plugin fill:#0d2137,stroke:#2f81f7,color:#e6edf3
     style Engine fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
-    style Pipes fill:#2d1f00,stroke:#d29922,color:#e6edf3
+    style IPC fill:#2d1f00,stroke:#d29922,color:#e6edf3
       </div>
-      <div class="diagram-caption">Fig 3 — Windows inter-process communication: two named pipes for JSON commands/events, shared memory for frame data.</div>
+      <div class="diagram-caption">Fig 4 — Cross-platform IPC: JSON commands over named pipes (Windows) or Unix sockets (macOS/Linux), frames via shared memory.</div>
     </div>
+
+    <h3>IPC Channel Paths</h3>
+    <table>
+      <tr><th>Platform</th><th>Plugin → Engine</th><th>Engine → Plugin</th></tr>
+      <tr><td>Windows</td><td><code>\\.\pipe\ZoomObsPlugin_P2E</code></td><td><code>\\.\pipe\ZoomObsPlugin_E2P</code></td></tr>
+      <tr><td>macOS / Linux</td><td><code>/tmp/ZoomObsPlugin_P2E.sock</code></td><td><code>/tmp/ZoomObsPlugin_E2P.sock</code></td></tr>
+    </table>
 
     <h3>IPC Message Flow</h3>
     <div class="diagram-wrap">
       <div class="mermaid">
 sequenceDiagram
-    participant P as Plugin (OBS process)
-    participant E as ZoomObsEngine.exe
+    participant P as Plugin
+    participant E as ZoomObsEngine
 
-    Note over E: Creates named pipes
+    Note over E: Creates IPC channels
     E-->>P: {"cmd":"ready"}
 
     P->>E: {"cmd":"init","jwt":"&lt;token&gt;"}
-    E-->>P: {"cmd":"auth_ok"}  or  {"cmd":"auth_fail","code":N}
+    E-->>P: {"cmd":"auth_ok"}
 
     P->>E: {"cmd":"join","meeting_id":"123","passcode":"pw","display_name":"OBS"}
     E-->>P: {"cmd":"joined"}
 
     P->>E: {"cmd":"subscribe","source_uuid":"&lt;uuid&gt;","participant_id":456}
-    loop Every video frame
+    loop Live capture
         E-->>P: {"cmd":"frame","uuid":"&lt;uuid&gt;","shm":"ZoomObsPlugin_&lt;uuid&gt;","w":1280,"h":720}
-    end
-    loop Every audio chunk
         E-->>P: {"cmd":"audio","uuid":"&lt;uuid&gt;","shm":"ZoomObsPlugin_audio_&lt;uuid&gt;"}
     end
 
     P->>E: {"cmd":"unsubscribe","source_uuid":"&lt;uuid&gt;"}
     P->>E: {"cmd":"leave"}
     E-->>P: {"cmd":"left"}
-
     P->>E: {"cmd":"quit"}
       </div>
-      <div class="diagram-caption">Fig 4 — Full IPC command/event sequence for the Windows engine process.</div>
+      <div class="diagram-caption">Fig 5 — Full IPC command/event sequence.</div>
     </div>
   </section>
 
@@ -566,18 +661,18 @@ sequenceDiagram
   <section id="arch-video">
     <h2>Architecture: Video Pipeline</h2>
     <p>
-      Video travels from the Zoom meeting through the SDK's raw-data callback,
-      gets color-converted, then is pushed into OBS as a texture frame.
+      Participant camera video travels from the Zoom cloud through the SDK's raw-data
+      callback, gets color-converted from I420 to BGRA, then is pushed into OBS.
     </p>
     <div class="diagram-wrap">
       <div class="mermaid">
 flowchart LR
-    ZP["Zoom\nParticipant\nCamera"] -->|"H.264 stream"| ZC["Zoom\nCloud"]
-    ZC -->|"decoded in SDK"| RV["Raw Video\nCallback\nI420 YUV"]
-    RV -->|"Windows:\nshared memory\nmacOS: heap ptr"| VD["VideoDelegate\nonRawDataFrameReceived()"]
-    VD -->|"convert_i420_to_bgra()"| CV["BGRA\nFrame Buffer\nobs_source_frame"]
-    CV -->|"obs_source_output_video()"| OT["OBS\nVideo Texture"]
-    OT -->|"rendered each frame"| Canvas["OBS Canvas\nScene / Output"]
+    ZP["Zoom\nParticipant\nCamera"] -->|H.264| ZC["Zoom\nCloud"]
+    ZC -->|decoded| RV["Zoom SDK\nRaw Video\nI420 YUV"]
+    RV -->|shared memory| VD["VideoDelegate\nonRawDataFrameReceived()"]
+    VD -->|"I420 → BGRA"| CV["obs_source_frame\nBGRA"]
+    CV -->|obs_source_output_video| OT["OBS\nVideo Texture"]
+    OT --> Canvas["OBS Canvas"]
 
     style ZP fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
     style ZC fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
@@ -587,20 +682,13 @@ flowchart LR
     style OT fill:#1a2137,stroke:#388bfd,color:#e6edf3
     style Canvas fill:#1a2137,stroke:#388bfd,color:#e6edf3
       </div>
-      <div class="diagram-caption">Fig 5 — Video data path from Zoom participant camera to OBS canvas.</div>
+      <div class="diagram-caption">Fig 6 — Participant video path: Zoom cloud → SDK → VideoDelegate → OBS canvas.</div>
     </div>
 
-    <h3>Color Space Conversion</h3>
-    <p>
-      The Zoom SDK delivers frames in <strong>I420 (YUV planar)</strong> format using
-      BT.709 full-range colorspace. OBS consumes <code>VIDEO_FORMAT_BGRA</code>.
-      The <code>VideoDelegate</code> performs this conversion on every received frame
-      before calling <code>obs_source_output_video()</code>.
-    </p>
     <table>
       <tr><th>Stage</th><th>Format</th><th>Notes</th></tr>
       <tr><td>Zoom SDK output</td><td>I420 YUV planar</td><td>BT.709 full-range (<code>VideoRawdataColorspace_BT709_F</code>)</td></tr>
-      <tr><td>After conversion</td><td>BGRA 32-bit</td><td>OBS <code>VIDEO_FORMAT_BGRA</code></td></tr>
+      <tr><td>After conversion</td><td>BGRA 32-bit</td><td><code>VIDEO_FORMAT_BGRA</code></td></tr>
       <tr><td>OBS texture</td><td>BGRA / GPU</td><td>Uploaded per frame via <code>obs_source_frame</code></td></tr>
     </table>
   </section>
@@ -609,35 +697,80 @@ flowchart LR
   <section id="arch-audio">
     <h2>Architecture: Audio Pipeline</h2>
     <p>
-      Audio is received as mixed 48 kHz PCM from the Zoom SDK and forwarded to
-      OBS with configurable channel layout.
+      All audio from the Zoom SDK flows through <code>ZoomAudioRouter</code>
+      before being dispatched to the appropriate consumer.
+      <code>ZoomAudioDelegate</code> handles mixed or isolated-user audio for a
+      <code>ZoomSource</code>; <code>ZoomParticipantAudioSource</code> handles
+      dedicated per-participant audio sources.
     </p>
     <div class="diagram-wrap">
       <div class="mermaid">
-flowchart LR
-    ZA["Zoom\nMeeting\nAudio Mix"] -->|"48 kHz PCM"| RA["Raw Audio\nCallback\nonMixedAudioRawDataReceived()"]
-    RA -->|"Windows: shared mem\nmacOS: heap ptr"| AD["AudioDelegate"]
-    AD -->|"channel map\nmono / stereo"| AF["obs_source_audio\n48 kHz · S16LE"]
-    AF -->|"obs_source_output_audio()"| OA["OBS Audio\nTrack"]
-    OA --> Mix["OBS Audio\nMixer / Output"]
+flowchart TB
+    SDK3["Zoom SDK"]
+    Router["ZoomAudioRouter\n(sole SDK subscriber)"]
 
-    style ZA fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
-    style RA fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
-    style AD fill:#0d2137,stroke:#2f81f7,color:#e6edf3
-    style AF fill:#0d2137,stroke:#2f81f7,color:#e6edf3
-    style OA fill:#1a2137,stroke:#388bfd,color:#e6edf3
-    style Mix fill:#1a2137,stroke:#388bfd,color:#e6edf3
+    SDK3 -->|"mixed frames"| Router
+    SDK3 -->|"per-user frames"| Router
+
+    Router -->|"MixedSink\nnon-isolated mode"| AD["ZoomAudioDelegate\n(mixed)"]
+    Router -->|"OneWaySink\nisolated mode"| ADI["ZoomAudioDelegate\n(isolated, filter by user_id)"]
+    Router -->|"ParticipantSink\nuser_id=101"| PAS1["ZoomParticipant\nAudioSource #1"]
+    Router -->|"ParticipantSink\nuser_id=202"| PAS2["ZoomParticipant\nAudioSource #2"]
+
+    AD -->|"obs_source_output_audio"| OBS_A["OBS Audio\n(ZoomSource)"]
+    ADI -->|"obs_source_output_audio"| OBS_A
+    PAS1 -->|"obs_source_output_audio"| OBS_P1["OBS Audio\n(Participant #1)"]
+    PAS2 -->|"obs_source_output_audio"| OBS_P2["OBS Audio\n(Participant #2)"]
+
+    style SDK3 fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
+    style Router fill:#0d2137,stroke:#2f81f7,color:#e6edf3
+    style AD fill:#1a2332,stroke:#388bfd,color:#e6edf3
+    style ADI fill:#1a2332,stroke:#388bfd,color:#e6edf3
+    style PAS1 fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
+    style PAS2 fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
       </div>
-      <div class="diagram-caption">Fig 6 — Audio data path from Zoom meeting mix to OBS audio track.</div>
+      <div class="diagram-caption">Fig 7 — Audio routing: all SDK audio flows through ZoomAudioRouter to mixed, isolated, and per-participant consumers.</div>
     </div>
 
     <table>
       <tr><th>Property</th><th>Value</th></tr>
-      <tr><td>Sample rate</td><td>48 000 Hz (<code>AudioRawdataSamplingRate_48K</code>)</td></tr>
-      <tr><td>Format</td><td>Signed 16-bit little-endian (S16LE)</td></tr>
-      <tr><td>Mono mode</td><td>Single channel — Zoom mixed audio downmixed</td></tr>
-      <tr><td>Stereo mode</td><td>Two channels — left/right separation preserved</td></tr>
+      <tr><td>Sample rate</td><td>48 000 Hz</td></tr>
+      <tr><td>Format</td><td>Signed 16-bit LE (S16LE)</td></tr>
+      <tr><td>Mono mode</td><td>Mixed feed downmixed to one channel</td></tr>
+      <tr><td>Stereo mode</td><td>Left/right separation preserved</td></tr>
+      <tr><td>Isolated mode</td><td>One-way per-user feed filtered to a single participant</td></tr>
     </table>
+  </section>
+
+  <!-- ── Screen Share Pipeline ──────────────────────────────────── -->
+  <section id="arch-share">
+    <h2>Architecture: Screen Share Pipeline</h2>
+    <p>
+      When a meeting participant shares their screen, <code>ZoomShareDelegate</code>
+      receives the share status event, subscribes a <code>IZoomSDKRenderer</code> to
+      that share source, and forwards decoded I420 frames to OBS as a dedicated
+      <em>Zoom Share</em> source.
+    </p>
+    <div class="diagram-wrap">
+      <div class="mermaid">
+flowchart LR
+    SC["Meeting\nParticipant\nScreen Share"] --> ZC2["Zoom Cloud"]
+    ZC2 -->|decoded| SD["Zoom SDK\nIMeetingShareCtrlEvent\nonSharingStatus()"]
+    SD -->|subscribe_to| RD["IZoomSDKRenderer\nYUVRawDataI420"]
+    RD -->|onRawDataFrameReceived| SDelegate["ZoomShareDelegate"]
+    SDelegate -->|I420 → BGRA| SF["obs_source_frame"]
+    SF -->|obs_source_output_video| OBS_S["OBS Zoom\nShare Source"]
+
+    style SC fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
+    style ZC2 fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
+    style SD fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
+    style RD fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
+    style SDelegate fill:#0d2137,stroke:#2f81f7,color:#e6edf3
+    style SF fill:#0d2137,stroke:#2f81f7,color:#e6edf3
+    style OBS_S fill:#1a2137,stroke:#388bfd,color:#e6edf3
+      </div>
+      <div class="diagram-caption">Fig 8 — Screen share pipeline: share events trigger renderer subscription; frames forwarded to a dedicated OBS source.</div>
+    </div>
   </section>
 
   <!-- ══════════════════════════════════════════════════════════════ -->
@@ -654,7 +787,6 @@ flowchart LR
     <div class="diagram-wrap">
       <div class="mermaid">
 sequenceDiagram
-    participant U as User
     participant OBS as OBS Studio
     participant PM as plugin-main
     participant ZA as ZoomAuth
@@ -667,78 +799,63 @@ sequenceDiagram
     ZS2-->>PM: {sdk_key, sdk_secret, jwt_token}
     alt Credentials present
         PM->>ZA: init(sdk_key, sdk_secret)
-        ZA->>SDK: InitSDK(domain, customUI flag)
-        ZA->>SDK: CreateAuthService()
+        ZA->>SDK: InitSDK()
         PM->>ZA: authenticate(jwt_token)
         ZA->>SDK: SDKAuth({jwt_token})
-        SDK-->>ZA: onAuthenticationReturn(AUTHRET_SUCCESS)
-        ZA-->>PM: authenticated = true
-    else No credentials
-        PM-->>OBS: plugin loaded (unauthenticated)
+        SDK-->>ZA: onAuthenticationReturn(SUCCESS)
     end
+    PM->>ZA: start control server (port 19870)
 
     opt User opens Settings dialog
-        U->>OBS: Tools → Zoom Plugin Settings
-        OBS->>DLG: exec()
-        U->>DLG: Enter SDK key / secret / JWT
+        OBS->>DLG: Tools → Zoom Plugin Settings
         DLG->>ZS2: save(settings)
-        DLG->>ZA: init(key, secret)
-        DLG->>ZA: authenticate(jwt)
-        ZA->>SDK: SDKAuth({jwt})
-        SDK-->>ZA: onAuthenticationReturn(AUTHRET_SUCCESS)
+        DLG->>ZA: init(key, secret) + authenticate(jwt)
+        SDK-->>ZA: onAuthenticationReturn(SUCCESS)
     end
       </div>
-      <div class="diagram-caption">Fig 7 — SDK authentication sequence at load time and via the Settings dialog.</div>
+      <div class="diagram-caption">Fig 9 — SDK authentication at load time and via the Settings dialog.</div>
     </div>
   </section>
 
   <!-- ── Meeting Join Flow ──────────────────────────────────────── -->
   <section id="flow-meeting">
     <h2>Flow: Meeting Join &amp; Capture</h2>
-    <p>
-      When a Zoom Participant source is activated in OBS, the plugin joins the
-      configured meeting and begins streaming frames to OBS.
-    </p>
     <div class="diagram-wrap">
       <div class="mermaid">
 sequenceDiagram
-    participant U as User
-    participant OBS as OBS Studio
+    participant U as User / Control API
     participant ZS3 as ZoomSource
+    participant ZOM2 as ZoomOutputManager
     participant ZM as ZoomMeeting
-    participant ZPart2 as ZoomParticipants
+    participant ZAR2 as ZoomAudioRouter
     participant ZVD3 as VideoDelegate
     participant ZAD3 as AudioDelegate
-    participant SDK3 as Zoom SDK / Engine
+    participant Engine as ZoomObsEngine
 
-    U->>OBS: Add / activate "Zoom Participant" source
-    OBS->>ZS3: zoom_source_create(settings)
+    U->>ZS3: activate source (or assign_output via TCP)
+    ZS3->>ZOM2: register_source(this)
     ZS3->>ZM: join(meeting_id, passcode)
-    ZM->>SDK3: IMeetingService::Join(JoinParam)
-    SDK3-->>ZM: onMeetingStatusChanged(INMEETING)
-    ZM-->>ZS3: joined callback
-
-    ZS3->>ZPart2: query roster
-    ZPart2-->>ZS3: [{participant_id, display_name}, ...]
+    ZM->>Engine: {"cmd":"join",...}
+    Engine-->>ZM: {"cmd":"joined"}
 
     ZS3->>ZVD3: subscribe(participant_id)
-    ZS3->>ZAD3: init(source, audio_mode)
+    ZS3->>ZAR2: add_mixed_sink / add_one_way_sink
+    ZAR2-->ZAD3: dispatch frames
 
     loop Live capture
-        SDK3-->>ZVD3: onRawDataFrameReceived(I420 frame)
-        ZVD3->>OBS: obs_source_output_video(BGRA frame)
-        SDK3-->>ZAD3: onMixedAudioRawDataReceived(PCM)
-        ZAD3->>OBS: obs_source_output_audio(48kHz S16)
+        Engine-->>ZVD3: frame via shared memory
+        ZVD3->>OBS: obs_source_output_video()
+        Engine-->>ZAD3: audio via ZoomAudioRouter
+        ZAD3->>OBS: obs_source_output_audio()
     end
 
-    U->>OBS: Deactivate / remove source
-    OBS->>ZS3: zoom_source_destroy()
+    U->>ZS3: deactivate / destroy
+    ZS3->>ZOM2: unregister_source(this)
     ZS3->>ZVD3: unsubscribe()
+    ZS3->>ZAR2: remove sinks
     ZS3->>ZM: leave()
-    ZM->>SDK3: IMeetingService::Leave()
-    SDK3-->>ZM: onMeetingStatusChanged(ENDED)
       </div>
-      <div class="diagram-caption">Fig 8 — Full sequence from source activation to live capture and teardown.</div>
+      <div class="diagram-caption">Fig 10 — Meeting join, live capture, and teardown sequence.</div>
     </div>
   </section>
 
@@ -746,23 +863,106 @@ sequenceDiagram
   <!--  REFERENCE                                                     -->
   <!-- ══════════════════════════════════════════════════════════════ -->
 
+  <!-- ── Control Server API ────────────────────────────────────── -->
+  <section id="control-api">
+    <h2>Control Server API</h2>
+    <p>
+      The plugin starts a TCP server on <code>127.0.0.1:19870</code> accepting
+      newline-delimited JSON. An optional <strong>token</strong> can be configured for
+      authentication; if set, every request must include <code>"token":"&lt;value&gt;"</code>.
+    </p>
+
+    <div class="callout info">
+      <div class="callout-title">ℹ️ Quick test</div>
+      <code>echo '{"cmd":"status"}' | nc 127.0.0.1 19870</code>
+    </div>
+
+    <h3>Commands</h3>
+    <table>
+      <tr><th>Command</th><th>Request</th><th>Response fields</th></tr>
+      <tr>
+        <td><code>help</code></td>
+        <td><code>{"cmd":"help"}</code></td>
+        <td><code>commands</code> — array of available command names</td>
+      </tr>
+      <tr>
+        <td><code>status</code></td>
+        <td><code>{"cmd":"status"}</code></td>
+        <td><code>meeting_state</code>, <code>active_speaker_id</code></td>
+      </tr>
+      <tr>
+        <td><code>list_participants</code></td>
+        <td><code>{"cmd":"list_participants"}</code></td>
+        <td><code>participants</code> — array of participant objects</td>
+      </tr>
+      <tr>
+        <td><code>list_outputs</code></td>
+        <td><code>{"cmd":"list_outputs"}</code></td>
+        <td><code>outputs</code> — array of output configuration objects</td>
+      </tr>
+      <tr>
+        <td><code>assign_output</code></td>
+        <td><code>{"cmd":"assign_output","source":"My Source","participant_id":123,"active_speaker":false,"isolate_audio":true,"audio_channels":"stereo"}</code></td>
+        <td><code>ok</code> true/false; <code>error</code> on failure</td>
+      </tr>
+      <tr>
+        <td><code>join</code></td>
+        <td><code>{"cmd":"join","meeting_id":"123","passcode":"pw","display_name":"OBS"}</code></td>
+        <td><code>ok</code> true/false</td>
+      </tr>
+      <tr>
+        <td><code>leave</code></td>
+        <td><code>{"cmd":"leave"}</code></td>
+        <td><code>ok</code> true</td>
+      </tr>
+    </table>
+
+    <h3>Participant Object</h3>
+    <pre><code>{
+  "id": 123,
+  "name": "Alice",
+  "has_video": true,
+  "is_talking": false,
+  "is_muted": false
+}</code></pre>
+
+    <h3>Output Object</h3>
+    <pre><code>{
+  "source": "Zoom Participant 1",
+  "participant_id": 123,
+  "active_speaker": false,
+  "isolate_audio": true,
+  "audio_channels": "stereo"
+}</code></pre>
+
+    <h3>Meeting States</h3>
+    <table>
+      <tr><th>State</th><th>Meaning</th></tr>
+      <tr><td><code>idle</code></td><td>Not in a meeting</td></tr>
+      <tr><td><code>joining</code></td><td>Join in progress</td></tr>
+      <tr><td><code>in_meeting</code></td><td>Active meeting</td></tr>
+      <tr><td><code>leaving</code></td><td>Leave in progress</td></tr>
+      <tr><td><code>failed</code></td><td>Meeting failed</td></tr>
+    </table>
+  </section>
+
   <!-- ── IPC Protocol ──────────────────────────────────────────── -->
   <section id="ipc-protocol">
     <h2>IPC Protocol Reference</h2>
     <p>
-      All messages are UTF-8 JSON terminated by <code>\n</code>, exchanged over
-      two Windows named pipes. The plugin writes to
-      <code>\\.\pipe\ZoomObsPlugin_P2E</code> (plugin-to-engine) and reads from
-      <code>\\.\pipe\ZoomObsPlugin_E2P</code> (engine-to-plugin).
+      All messages are UTF-8 JSON terminated by <code>\n</code>.
+      On Windows, two named pipes are used. On macOS and Linux, two Unix domain
+      sockets are used instead. Frame data is always passed through named shared
+      memory segments to avoid copying large buffers through the IPC channel.
     </p>
 
     <h3>Plugin → Engine Commands</h3>
     <table>
       <tr><th>Command</th><th>Payload</th><th>Description</th></tr>
-      <tr><td><code>init</code></td><td><code>{"cmd":"init","jwt":"&lt;token&gt;"}</code></td><td>Initialize Zoom SDK with JWT token</td></tr>
+      <tr><td><code>init</code></td><td><code>{"cmd":"init","jwt":"&lt;token&gt;"}</code></td><td>Initialize SDK and authenticate</td></tr>
       <tr><td><code>join</code></td><td><code>{"cmd":"join","meeting_id":"&lt;id&gt;","passcode":"&lt;pw&gt;","display_name":"OBS"}</code></td><td>Join a Zoom meeting</td></tr>
       <tr><td><code>leave</code></td><td><code>{"cmd":"leave"}</code></td><td>Leave current meeting</td></tr>
-      <tr><td><code>subscribe</code></td><td><code>{"cmd":"subscribe","source_uuid":"&lt;uuid&gt;","participant_id":&lt;id&gt;}</code></td><td>Subscribe to a participant's video &amp; audio</td></tr>
+      <tr><td><code>subscribe</code></td><td><code>{"cmd":"subscribe","source_uuid":"&lt;uuid&gt;","participant_id":&lt;id&gt;}</code></td><td>Subscribe to participant video &amp; audio</td></tr>
       <tr><td><code>unsubscribe</code></td><td><code>{"cmd":"unsubscribe","source_uuid":"&lt;uuid&gt;"}</code></td><td>Stop frame delivery for a source</td></tr>
       <tr><td><code>quit</code></td><td><code>{"cmd":"quit"}</code></td><td>Shut down the engine process</td></tr>
     </table>
@@ -770,30 +970,22 @@ sequenceDiagram
     <h3>Engine → Plugin Events</h3>
     <table>
       <tr><th>Event</th><th>Payload</th><th>Description</th></tr>
-      <tr><td><code>ready</code></td><td><code>{"cmd":"ready"}</code></td><td>Engine started, pipes connected</td></tr>
-      <tr><td><code>auth_ok</code></td><td><code>{"cmd":"auth_ok"}</code></td><td>SDK authenticated successfully</td></tr>
-      <tr><td><code>auth_fail</code></td><td><code>{"cmd":"auth_fail","code":&lt;N&gt;}</code></td><td>Authentication failed with error code</td></tr>
+      <tr><td><code>ready</code></td><td><code>{"cmd":"ready"}</code></td><td>Engine started, channels connected</td></tr>
+      <tr><td><code>auth_ok</code></td><td><code>{"cmd":"auth_ok"}</code></td><td>SDK authenticated</td></tr>
+      <tr><td><code>auth_fail</code></td><td><code>{"cmd":"auth_fail","code":N}</code></td><td>Authentication failed</td></tr>
       <tr><td><code>joined</code></td><td><code>{"cmd":"joined"}</code></td><td>Successfully joined the meeting</td></tr>
       <tr><td><code>left</code></td><td><code>{"cmd":"left"}</code></td><td>Meeting ended or left</td></tr>
-      <tr><td><code>frame</code></td><td><code>{"cmd":"frame","uuid":"&lt;uuid&gt;","shm":"ZoomObsPlugin_&lt;uuid&gt;","w":W,"h":H}</code></td><td>New video frame in shared memory</td></tr>
-      <tr><td><code>audio</code></td><td><code>{"cmd":"audio","uuid":"&lt;uuid&gt;","shm":"ZoomObsPlugin_audio_&lt;uuid&gt;"}</code></td><td>New audio chunk in shared memory</td></tr>
-      <tr><td><code>error</code></td><td><code>{"cmd":"error","msg":"&lt;reason&gt;","code":&lt;N&gt;}</code></td><td>SDK or meeting error</td></tr>
+      <tr><td><code>frame</code></td><td><code>{"cmd":"frame","uuid":"...","shm":"ZoomObsPlugin_&lt;uuid&gt;","w":W,"h":H}</code></td><td>New video frame in shared memory</td></tr>
+      <tr><td><code>audio</code></td><td><code>{"cmd":"audio","uuid":"...","shm":"ZoomObsPlugin_audio_&lt;uuid&gt;"}</code></td><td>New audio chunk in shared memory</td></tr>
+      <tr><td><code>error</code></td><td><code>{"cmd":"error","msg":"...","code":N}</code></td><td>SDK or meeting error</td></tr>
     </table>
-
-    <h3>Shared Memory Layout</h3>
-    <p>
-      Frame data is written to named shared memory segments prefixed with
-      <code>ZoomObsPlugin_</code> followed by the source UUID. Video frames are
-      raw BGRA pixels (<code>width × height × 4</code> bytes); audio chunks are
-      raw S16LE samples.
-    </p>
   </section>
 
   <!-- ── Installation ──────────────────────────────────────────── -->
   <section id="installation">
     <h2>Installation</h2>
     <div class="callout info">
-      <div class="callout-title">ℹ️ Pre-built releases coming soon</div>
+      <div class="callout-title">ℹ️ Pre-built releases</div>
       Pre-built binaries are not yet published. Install from source using the steps below.
     </div>
 
@@ -801,10 +993,10 @@ sequenceDiagram
       <div class="step">
         <div class="step-body">
           <h4>Obtain the Zoom Meeting SDK</h4>
-          <p>Download the Zoom Meeting SDK for your platform from the
-          <a href="https://developers.zoom.us/docs/meeting-sdk/releases/" target="_blank">Zoom Developer Portal</a>
+          <p>Download from the <a href="https://developers.zoom.us/docs/meeting-sdk/releases/" target="_blank">Zoom Developer Portal</a>
           and place it at <code>third_party/zoom-sdk/</code> so that
-          <code>third_party/zoom-sdk/h/zoom_sdk.h</code> exists.</p>
+          <code>third_party/zoom-sdk/h/zoom_sdk.h</code> exists.
+          On Windows, CMake will auto-detect x64/arm64/x86 sub-layouts.</p>
         </div>
       </div>
       <div class="step">
@@ -820,23 +1012,21 @@ sequenceDiagram
         <div class="step-body">
           <h4>Build</h4>
           <pre><code>cmake --build build --config Release</code></pre>
-          <p>On Windows this also produces <code>ZoomObsEngine.exe</code>.</p>
+          <p>This builds <code>obs-zoom-plugin</code> and <code>ZoomObsEngine</code> on all platforms.
+          On Windows, <code>sdk.dll</code> is also copied automatically if found.</p>
         </div>
       </div>
       <div class="step">
         <div class="step-body">
           <h4>Install into OBS</h4>
           <pre><code>cmake --install build --prefix "/path/to/obs-studio"</code></pre>
-          <p>This copies the plugin module and the engine executable to
-          <code>obs-plugins/64bit/</code> and locale files to
-          <code>data/obs-plugins/obs-zoom-plugin/</code>.</p>
         </div>
       </div>
       <div class="step">
         <div class="step-body">
-          <h4>Launch OBS and configure credentials</h4>
-          <p>Open OBS → <strong>Tools → Zoom Plugin Settings</strong> and enter your
-          Zoom SDK Key, SDK Secret, and JWT token.</p>
+          <h4>Configure credentials and launch</h4>
+          <p>Open OBS → <strong>Tools → Zoom Plugin Settings</strong> and enter
+          your Zoom SDK Key, SDK Secret, and JWT token.</p>
         </div>
       </div>
     </div>
@@ -847,11 +1037,6 @@ sequenceDiagram
     <h2>Configuration</h2>
 
     <h3>Credentials (Settings Dialog)</h3>
-    <p>
-      Open <strong>Tools → Zoom Plugin Settings</strong> in OBS to save your Zoom
-      developer credentials. These are persisted in the OBS global configuration
-      file via <code>obs_data_t</code>.
-    </p>
     <table>
       <tr><th>Field</th><th>Description</th></tr>
       <tr><td>SDK Key</td><td>Your Zoom SDK App Key from the developer portal</td></tr>
@@ -859,23 +1044,33 @@ sequenceDiagram
       <tr><td>JWT Token</td><td>A signed JWT generated from your key/secret pair</td></tr>
     </table>
 
-    <h3>Source Properties</h3>
-    <p>
-      Each <em>Zoom Participant</em> source exposes these properties in the OBS
-      source Properties dialog:
-    </p>
+    <h3>Zoom Participant Source Properties</h3>
     <table>
       <tr><th>Property</th><th>Type</th><th>Description</th></tr>
       <tr><td>Meeting ID</td><td>String</td><td>Zoom meeting number to join</td></tr>
       <tr><td>Meeting Passcode</td><td>String</td><td>Optional meeting password</td></tr>
-      <tr><td>Participant</td><td>List</td><td>Select participant from live roster, or "Active Speaker"</td></tr>
+      <tr><td>Participant</td><td>List</td><td>Select from live roster, or "Active Speaker"</td></tr>
       <tr><td>Audio Mode</td><td>List</td><td>None / Mono / Stereo</td></tr>
+      <tr><td>Isolate Audio</td><td>Boolean</td><td>Use per-user feed instead of meeting mix</td></tr>
     </table>
+
+    <h3>Zoom Participant Audio Source Properties</h3>
+    <table>
+      <tr><th>Property</th><th>Type</th><th>Description</th></tr>
+      <tr><td>Participant ID</td><td>Integer</td><td>Zoom user ID to capture audio for</td></tr>
+      <tr><td>Audio Mode</td><td>List</td><td>Mono / Stereo</td></tr>
+    </table>
+
+    <h3>Control Server Token</h3>
+    <p>
+      Set a token in Settings to require authentication on the TCP control API.
+      All requests must then include <code>"token":"&lt;your-token&gt;"</code> in the JSON body.
+    </p>
 
     <div class="callout warning">
       <div class="callout-title">⚠️ Display Name</div>
-      The plugin joins meetings as <strong>"OBS"</strong>. Ensure the Zoom meeting
-      host allows guests or has "waiting room" disabled, or pre-admit the OBS participant.
+      The plugin joins meetings as <strong>"OBS"</strong>. Ensure the meeting host
+      allows guests or pre-admits the OBS participant from the waiting room.
     </div>
   </section>
 
@@ -885,42 +1080,47 @@ sequenceDiagram
 
     <h3>Directory Layout</h3>
     <pre><code>CoreVideo/
-├── CMakeLists.txt          # Top-level build config
+├── CMakeLists.txt                  # Build config (plugin + engine, all platforms)
 ├── buildspec/
-│   ├── macos.cmake         # macOS universal binary settings
-│   └── windows.cmake       # Windows MSVC settings
-├── data/
-│   └── locale/en-US.ini    # UI string translations
-├── engine/src/             # Windows engine process
-│   ├── main.cpp            # IPC event loop
-│   ├── engine-video.cpp/h  # Video frame capture
-│   └── engine-audio.cpp/h  # Audio capture
-├── src/                    # Main plugin
-│   ├── plugin-main.cpp     # Module entry point
-│   ├── zoom-source.*       # OBS source implementation
-│   ├── zoom-auth.*         # SDK initialization & auth
-│   ├── zoom-meeting.*      # Meeting join/leave
-│   ├── zoom-participants.* # Participant roster
-│   ├── zoom-settings.*     # Credential persistence
-│   ├── zoom-settings-dialog.* # Qt settings UI
-│   ├── zoom-video-delegate.* # Video frame handler
-│   ├── zoom-audio-delegate.* # Audio frame handler
-│   ├── engine-ipc.h        # Shared IPC constants
-│   └── obs-utils.*         # OBS helper functions
-└── third_party/
-    └── zoom-sdk/           # Zoom SDK (not in repo)</code></pre>
+│   ├── macos.cmake                 # macOS universal binary settings
+│   └── windows.cmake               # Windows MSVC settings
+├── data/locale/en-US.ini           # UI string translations
+├── docs/                           # GitHub Pages documentation
+├── engine/src/                     # ZoomObsEngine (out-of-process, all platforms)
+│   ├── main.cpp                    # IPC event loop
+│   ├── engine-video.cpp/h          # Video frame capture
+│   └── engine-audio.cpp/h          # Audio capture
+└── src/                            # OBS plugin
+    ├── plugin-main.cpp             # Module entry point
+    ├── zoom-source.*               # OBS source (video + audio, per participant)
+    ├── zoom-auth.*                 # SDK init & JWT auth
+    ├── zoom-meeting.*              # Meeting join/leave, state machine
+    ├── zoom-participants.*         # Roster & active-speaker tracking
+    ├── zoom-audio-router.*         # Central audio dispatch hub
+    ├── zoom-audio-delegate.*       # Mixed / isolated audio → OBS
+    ├── zoom-participant-audio-source.* # Per-participant audio source type
+    ├── zoom-video-delegate.*       # Video frames → OBS
+    ├── zoom-share-delegate.*       # Screen share frames → OBS
+    ├── zoom-output-manager.*       # Central source registry
+    ├── zoom-output-dialog.*        # Qt output assignment dialog
+    ├── zoom-control-server.*       # TCP JSON control API (port 19870)
+    ├── zoom-settings.*             # Credential persistence
+    ├── zoom-settings-dialog.*      # Qt settings dialog
+    ├── engine-ipc.h                # Shared IPC constants + cross-platform helpers
+    └── obs-utils.*                 # OBS helper functions</code></pre>
 
-    <h3>Platform Notes</h3>
+    <h3>Platform Matrix</h3>
     <table>
-      <tr><th>Platform</th><th>Compiler</th><th>Extra Outputs</th><th>SDK Loading</th></tr>
-      <tr><td>Windows</td><td>MSVC 2022</td><td><code>ZoomObsEngine.exe</code></td><td>Out-of-process via named pipes</td></tr>
-      <tr><td>macOS</td><td>Clang 14+</td><td>None</td><td>In-process (arm64 + x86_64 fat binary)</td></tr>
+      <tr><th>Platform</th><th>Compiler</th><th>SDK Linkage</th><th>IPC Transport</th><th>Engine Built</th></tr>
+      <tr><td>Windows</td><td>MSVC 2022</td><td><code>sdk.lib</code> + <code>sdk.dll</code></td><td>Named pipes</td><td>Yes</td></tr>
+      <tr><td>macOS</td><td>Clang 14+</td><td><code>ZoomSDK.framework</code></td><td>Unix sockets</td><td>Yes</td></tr>
+      <tr><td>Linux</td><td>GCC 11+</td><td><code>libsdk.so</code></td><td>Unix sockets</td><td>Yes</td></tr>
     </table>
 
     <div class="callout tip">
-      <div class="callout-title">✅ macOS Deployment Target</div>
-      The macOS build targets <strong>macOS 12.0 Monterey</strong> and above,
-      producing a universal binary for both Apple Silicon and Intel.
+      <div class="callout-title">✅ macOS Build</div>
+      The macOS build targets <strong>macOS 12.0</strong> and produces a universal
+      binary (arm64 + x86_64). Qt6::Network is required for the control server on all platforms.
     </div>
   </section>
 

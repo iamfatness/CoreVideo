@@ -1,6 +1,7 @@
 #include "zoom-meeting.h"
 #include "zoom-participants.h"
 #include "zoom-share-delegate.h"
+#include "zoom-audio-router.h"
 #include "zoom-auth.h"
 #include <obs-module.h>
 #include <chrono>
@@ -46,7 +47,7 @@ void ZoomMeeting::leave()
 
     // Service is destroyed in onMeetingStatusChanged when DISCONNECTING/ENDED arrives.
     m_state = MeetingState::Leaving;
-    if (m_state_cb) m_state_cb(m_state);
+    fire_state_cb();
     blog(LOG_INFO, "[obs-zoom-plugin] Leaving meeting");
 }
 
@@ -103,7 +104,7 @@ bool ZoomMeeting::join_impl(const std::string &meeting_id, const std::string &pa
     }
 
     m_state = MeetingState::Joining;
-    if (m_state_cb) m_state_cb(m_state);
+    fire_state_cb();
     blog(LOG_INFO, "[obs-zoom-plugin] Joining meeting %s (attempt %d/%d)",
          meeting_id.c_str(), m_reconnect_attempts, kMaxReconnectAttempts);
     return true;
@@ -113,6 +114,20 @@ void ZoomMeeting::do_reconnect()
 {
     if (m_user_leaving || m_last_meeting_id.empty()) return;
     join_impl(m_last_meeting_id, m_last_passcode, m_last_display_name);
+}
+
+void ZoomMeeting::on_state_change(void *key, StateCallback cb)
+{
+    if (cb)
+        m_state_cbs[key] = std::move(cb);
+    else
+        m_state_cbs.erase(key);
+}
+
+void ZoomMeeting::fire_state_cb()
+{
+    for (auto &[key, cb] : m_state_cbs)
+        if (cb) cb(m_state);
 }
 
 void ZoomMeeting::schedule_reconnect()
@@ -145,7 +160,8 @@ void ZoomMeeting::onMeetingStatusChanged(ZOOMSDK::MeetingStatus status, int iRes
     switch (status) {
     case ZOOMSDK::MEETING_STATUS_INMEETING:
         m_state = MeetingState::InMeeting;
-        m_reconnect_attempts = 0; // successful join resets counter
+        m_reconnect_attempts = 0;
+        ZoomAudioRouter::instance().subscribe();
         if (m_meeting_service) {
             ZoomParticipants::instance().attach(
                 m_meeting_service->GetMeetingParticipantsController(),
@@ -165,6 +181,7 @@ void ZoomMeeting::onMeetingStatusChanged(ZOOMSDK::MeetingStatus status, int iRes
     case ZOOMSDK::MEETING_STATUS_DISCONNECTING:
     case ZOOMSDK::MEETING_STATUS_ENDED:
         m_state = MeetingState::Idle;
+        ZoomAudioRouter::instance().unsubscribe();
         ZoomParticipants::instance().detach();
         ZoomShareDelegate::instance().detach();
         if (m_meeting_service) {
@@ -177,6 +194,7 @@ void ZoomMeeting::onMeetingStatusChanged(ZOOMSDK::MeetingStatus status, int iRes
     case ZOOMSDK::MEETING_STATUS_FAILED:
         m_state = MeetingState::Failed;
         blog(LOG_ERROR, "[obs-zoom-plugin] Meeting failed, code: %d", iResult);
+        ZoomAudioRouter::instance().unsubscribe();
         ZoomParticipants::instance().detach();
         ZoomShareDelegate::instance().detach();
         if (m_meeting_service) {
@@ -205,7 +223,7 @@ void ZoomMeeting::onMeetingStatusChanged(ZOOMSDK::MeetingStatus status, int iRes
         break;
     }
 
-    if (m_state_cb) m_state_cb(m_state);
+    fire_state_cb();
 }
 
 void ZoomMeeting::onMeetingStatisticsWarningNotification(ZOOMSDK::StatisticsWarningType type)

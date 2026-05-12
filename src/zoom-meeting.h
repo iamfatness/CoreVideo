@@ -2,6 +2,7 @@
 #include <string>
 #include <functional>
 #include <thread>
+#include <unordered_map>
 #include "../third_party/zoom-sdk/h/meeting_service_interface.h"
 
 enum class MeetingState { Idle, Joining, InMeeting, Leaving, Failed };
@@ -21,7 +22,10 @@ public:
     ZOOMSDK::IMeetingService *service() const { return m_meeting_service; }
 
     using StateCallback = std::function<void(MeetingState)>;
-    void on_state_change(StateCallback cb) { m_state_cb = std::move(cb); }
+    // Register a state-change callback keyed by an opaque pointer (typically the
+    // obs_source_t or 'this' of the caller).  Pass cb = nullptr to remove.
+    void on_state_change(void *key, StateCallback cb);
+    void remove_state_change(void *key) { on_state_change(key, nullptr); }
 
     // IMeetingServiceEvent
     void onMeetingStatusChanged(ZOOMSDK::MeetingStatus status, int iResult) override;
@@ -45,8 +49,10 @@ private:
     void schedule_reconnect();
     void do_reconnect();
 
+    void fire_state_cb();
+
     MeetingState              m_state           = MeetingState::Idle;
-    StateCallback             m_state_cb;
+    std::unordered_map<void *, StateCallback> m_state_cbs;
     ZOOMSDK::IMeetingService *m_meeting_service = nullptr;
 
     // reconnect state

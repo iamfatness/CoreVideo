@@ -26,6 +26,8 @@ add_library(obs-zoom-plugin MODULE
     src/zoom-settings-dialog.cpp
     src/zoom-video-delegate.cpp
     src/zoom-audio-delegate.cpp
+    src/zoom-audio-router.cpp
+    src/zoom-participant-audio-source.cpp
     src/obs-utils.cpp
 )
 target_include_directories(obs-zoom-plugin PRIVATE

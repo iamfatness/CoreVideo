@@ -1,8 +1,8 @@
 # CoreVideo
 
-**OBS Studio plugin for live Zoom meeting video and audio capture.**
+**OBS Studio plugin for live Zoom meeting video, audio, and screen share capture.**
 
-CoreVideo integrates the Zoom Meeting SDK directly into OBS — no screen capture or virtual camera required. It subscribes to raw video (I420 YUV) and audio (48 kHz PCM) from any meeting participant or the active speaker, converts the frames, and pushes them into OBS as a first-class source.
+CoreVideo integrates the Zoom Meeting SDK directly into OBS — no screen capture or virtual camera required. It subscribes to raw video (I420 YUV) and audio (48 kHz PCM) from any meeting participant or the active speaker, converts the frames, and pushes them into OBS as first-class sources.
 
 📖 **[Full Documentation & Architecture Diagrams →](https://iamfatness.github.io/CoreVideo/)**
 
@@ -10,14 +10,18 @@ CoreVideo integrates the Zoom Meeting SDK directly into OBS — no screen captur
 
 ## Features
 
-- **Raw video capture** — I420 YUV frames from the Zoom SDK converted to BGRA for OBS
-- **Raw audio capture** — 48 kHz PCM with mono/stereo modes
-- **Participant roster** — live list of meeting participants with active-speaker detection
-- **Auto-follow speaker** — optionally track whoever is speaking instead of a fixed participant
+- **Raw video capture** — I420 YUV frames converted to BGRA for OBS textures
+- **Raw audio capture** — 48 kHz PCM with mono/stereo modes and per-participant isolation
+- **Screen share capture** — dedicated OBS source type for any active meeting screen share
+- **Per-participant audio sources** — standalone audio source type per meeting participant
+- **Participant roster** — live list with video, mute, and talking state
+- **Active speaker mode** — optionally track whoever is speaking instead of a fixed participant
+- **TCP control API** — JSON server on `127.0.0.1:19870` for external automation (status, join, leave, list/assign outputs)
+- **Output manager** — centrally reconfigure source assignments and audio modes at runtime
 - **JWT authentication** — authenticates with your Zoom SDK key, secret, and JWT token
 - **Settings dialog** — Qt GUI accessible from OBS → Tools → Zoom Plugin Settings
-- **Multi-platform** — Windows (x64) and macOS (universal arm64 + x86_64)
-- **IPC engine (Windows)** — `ZoomObsEngine.exe` hosts the SDK in a separate process, communicating via named pipes
+- **Cross-platform IPC** — named pipes on Windows, Unix domain sockets on macOS and Linux
+- **Multi-platform** — Windows (x64/arm64), macOS (universal arm64 + x86_64), Linux
 
 ## Requirements
 
@@ -25,14 +29,14 @@ CoreVideo integrates the Zoom Meeting SDK directly into OBS — no screen captur
 |---|---|---|
 | OBS Studio | 30+ | Provides `libobs` and `obs-frontend-api` |
 | CMake | 3.16+ | Build system |
-| Qt | 6.x | Core + Widgets |
+| Qt | 6.x | Core + Network + Widgets |
 | Zoom Meeting SDK | 5.x | Place in `third_party/zoom-sdk/` |
-| C++ compiler | C++17 | MSVC 2022 (Windows) / Clang 14+ (macOS) |
+| C++ compiler | C++17 | MSVC 2022 (Windows) / Clang 14+ (macOS) / GCC 11+ (Linux) |
 | Zoom Developer Account | — | Required for SDK key, secret & JWT token |
 
 ## Quick Start
 
-1. **Get the Zoom SDK** — download from the [Zoom Developer Portal](https://developers.zoom.us/docs/meeting-sdk/releases/) and place it at `third_party/zoom-sdk/`.
+1. **Get the Zoom SDK** — download from the [Zoom Developer Portal](https://developers.zoom.us/docs/meeting-sdk/releases/) and place it at `third_party/zoom-sdk/`. CMake auto-detects x64/arm64/x86 sub-layouts on Windows.
 
 2. **Configure & build**
    ```sh
@@ -51,38 +55,60 @@ CoreVideo integrates the Zoom Meeting SDK directly into OBS — no screen captur
 
 4. **Configure credentials** — open OBS → **Tools → Zoom Plugin Settings** and enter your SDK Key, SDK Secret, and JWT token.
 
-5. **Add a source** — in OBS, add a **Zoom Participant** source, enter the meeting ID and passcode, and select a participant from the live roster.
+5. **Add a source** — in OBS, add a **Zoom Participant** source, enter the meeting ID, and select a participant from the live roster.
+
+## Control API
+
+The plugin starts a TCP JSON server on `127.0.0.1:19870`. Send newline-delimited JSON:
+
+```sh
+# Check meeting status
+echo '{"cmd":"status"}' | nc 127.0.0.1 19870
+
+# List participants
+echo '{"cmd":"list_participants"}' | nc 127.0.0.1 19870
+
+# Reassign a source to a different participant at runtime
+echo '{"cmd":"assign_output","source":"Zoom Participant 1","participant_id":123,"isolate_audio":true,"audio_channels":"stereo"}' | nc 127.0.0.1 19870
+```
+
+Available commands: `help`, `status`, `list_participants`, `list_outputs`, `assign_output`, `join`, `leave`.
 
 ## Architecture Overview
 
 ```
 OBS Studio
 └── obs-zoom-plugin
-    ├── ZoomAuth          — SDK init & JWT authentication
-    ├── ZoomMeeting       — meeting join / leave
-    ├── ZoomParticipants  — roster & active-speaker tracking
-    ├── ZoomSource        — OBS source implementation
-    ├── VideoDelegate     — I420 → BGRA conversion → obs_source_output_video()
-    └── AudioDelegate     — 48kHz PCM → obs_source_output_audio()
+    ├── ZoomAuth              — SDK init & JWT authentication
+    ├── ZoomMeeting           — meeting join / leave, state machine
+    ├── ZoomParticipants      — roster & active-speaker tracking
+    ├── ZoomAudioRouter       — central audio dispatch hub (sole SDK audio subscriber)
+    ├── ZoomSource            — OBS source (video + mixed/isolated audio)
+    ├── ZoomParticipantAudioSource — standalone per-participant audio source
+    ├── ZoomShareDelegate     — screen share frames → OBS
+    ├── ZoomOutputManager     — central registry for runtime source reconfiguration
+    └── ZoomControlServer     — TCP JSON API on port 19870
 
-ZoomObsEngine.exe (Windows only)
-└── Communicates with the plugin via named pipes (JSON) + shared memory (frames)
+ZoomObsEngine  (separate process, all platforms)
+└── Hosts the Zoom SDK; communicates via:
+    ├── JSON over named pipes (Windows) or Unix sockets (macOS/Linux)
+    └── Named shared memory for video/audio frame data
 ```
 
-See the **[full documentation](https://iamfatness.github.io/CoreVideo/)** for detailed architecture diagrams covering the video pipeline, audio pipeline, Windows IPC engine, authentication flow, and meeting join sequence.
+See the **[full documentation](https://iamfatness.github.io/CoreVideo/)** for detailed architecture diagrams covering the audio router, video pipeline, audio pipeline, screen share pipeline, Windows IPC engine, control API reference, authentication flow, and meeting join sequence.
 
 ## Project Structure
 
 ```
 CoreVideo/
-├── CMakeLists.txt          # Top-level build config
+├── CMakeLists.txt                  # Build config (plugin + engine, all platforms)
 ├── buildspec/
-│   ├── macos.cmake         # macOS universal binary settings
-│   └── windows.cmake       # Windows MSVC settings
-├── data/locale/en-US.ini   # UI string translations
-├── docs/                   # GitHub Pages documentation
-├── engine/src/             # Windows engine process (ZoomObsEngine.exe)
-└── src/                    # OBS plugin source
+│   ├── macos.cmake                 # macOS universal binary settings
+│   └── windows.cmake               # Windows MSVC settings
+├── data/locale/en-US.ini           # UI string translations
+├── docs/                           # GitHub Pages documentation
+├── engine/src/                     # ZoomObsEngine (out-of-process SDK host)
+└── src/                            # OBS plugin source
 ```
 
 ## License

@@ -63,6 +63,13 @@ ZoomOutputInfo ZoomSource::output_info() const
     info.active_speaker = active_speaker_mode;
     info.isolate_audio = isolate_audio;
     info.audio_mode = audio_mode;
+    if (video_delegate) {
+        info.video_active = video_delegate->is_active();
+        info.width = video_delegate->width();
+        info.height = video_delegate->height();
+        info.frame_count = video_delegate->frame_count();
+        info.last_frame_ns = video_delegate->last_frame_ns();
+    }
     return info;
 }
 
@@ -106,7 +113,7 @@ void ZoomSource::on_meeting_state(MeetingState state)
 {
     switch (state) {
     case MeetingState::InMeeting:
-        if (!active_speaker_mode)
+        if (!active_speaker_mode && participant_id != 0)
             video_delegate->subscribe(participant_id);
         audio_delegate->subscribe();
         if (isolate_audio && !active_speaker_mode && participant_id != 0)

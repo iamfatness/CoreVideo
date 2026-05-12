@@ -4,6 +4,7 @@
 
 class QTableWidget;
 class QLineEdit;
+class QComboBox;
 
 class ZoomOutputDialog : public QDialog {
 public:
@@ -18,4 +19,6 @@ private:
     QTableWidget *m_table = nullptr;
     QTableWidget *m_participant_table = nullptr;
     QLineEdit *m_filter = nullptr;
+    QLineEdit *m_preset_name = nullptr;
+    QComboBox *m_preset_combo = nullptr;
 };

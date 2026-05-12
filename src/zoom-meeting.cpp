@@ -4,7 +4,9 @@
 #include "zoom-audio-router.h"
 #include "zoom-auth.h"
 #include <obs-module.h>
+#include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <zoom_sdk.h>
 
 #if defined(WIN32)
@@ -23,6 +25,16 @@ static std::string to_zstr(const std::string &s) { return s; }
 #endif
 
 ZoomMeeting &ZoomMeeting::instance() { static ZoomMeeting inst; return inst; }
+
+static std::string normalize_meeting_id(const std::string &meeting_id)
+{
+    std::string digits;
+    for (unsigned char ch : meeting_id) {
+        if (std::isdigit(ch))
+            digits.push_back(static_cast<char>(ch));
+    }
+    return digits;
+}
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -60,8 +72,14 @@ bool ZoomMeeting::join_impl(const std::string &meeting_id, const std::string &pa
         blog(LOG_ERROR, "[obs-zoom-plugin] Cannot join: not authenticated");
         return false;
     }
-    if (meeting_id.empty()) {
+    const std::string normalized_meeting_id = normalize_meeting_id(meeting_id);
+    if (normalized_meeting_id.empty()) {
         blog(LOG_ERROR, "[obs-zoom-plugin] Meeting ID must not be empty");
+        return false;
+    }
+    if (normalized_meeting_id.size() < 9 || normalized_meeting_id.size() > 13) {
+        blog(LOG_ERROR, "[obs-zoom-plugin] Meeting ID has invalid length: %zu",
+             normalized_meeting_id.size());
         return false;
     }
     if (m_state == MeetingState::InMeeting || m_state == MeetingState::Joining) {
@@ -88,7 +106,7 @@ bool ZoomMeeting::join_impl(const std::string &meeting_id, const std::string &pa
     join_param.userType = ZOOMSDK::SDK_UT_WITHOUT_LOGIN;
 
     ZOOMSDK::JoinParam4WithoutLogin &p = join_param.param.withoutloginuserJoin;
-    p.meetingNumber             = std::stoull(meeting_id);
+    p.meetingNumber             = std::stoull(normalized_meeting_id);
     p.userName                  = wide_name.c_str();
     p.psw                       = passcode.empty() ? nullptr : wide_passcode.c_str();
     p.isVideoOff                = true;
@@ -106,7 +124,7 @@ bool ZoomMeeting::join_impl(const std::string &meeting_id, const std::string &pa
     m_state = MeetingState::Joining;
     fire_state_cb();
     blog(LOG_INFO, "[obs-zoom-plugin] Joining meeting %s (attempt %d/%d)",
-         meeting_id.c_str(), m_reconnect_attempts, kMaxReconnectAttempts);
+         normalized_meeting_id.c_str(), m_reconnect_attempts, kMaxReconnectAttempts);
     return true;
 }
 
@@ -126,8 +144,12 @@ void ZoomMeeting::on_state_change(void *key, StateCallback cb)
 
 void ZoomMeeting::fire_state_cb()
 {
+    std::vector<StateCallback> callbacks;
+    callbacks.reserve(m_state_cbs.size());
     for (auto &[key, cb] : m_state_cbs)
-        if (cb) cb(m_state);
+        if (cb) callbacks.push_back(cb);
+    for (auto &cb : callbacks)
+        cb(m_state);
 }
 
 void ZoomMeeting::schedule_reconnect()

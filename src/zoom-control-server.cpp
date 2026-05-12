@@ -82,6 +82,18 @@ static QJsonObject output_to_json(const ZoomOutputInfo &o)
     obj["isolate_audio"] = o.isolate_audio;
     obj["audio_channels"] = o.audio_mode == AudioChannelMode::Stereo
         ? "stereo" : "mono";
+    obj["video_active"] = o.video_active;
+    obj["width"] = static_cast<int>(o.width);
+    obj["height"] = static_cast<int>(o.height);
+    obj["frame_count"] = static_cast<double>(o.frame_count);
+    obj["last_frame_ns"] = static_cast<double>(o.last_frame_ns);
+    return obj;
+}
+
+static QJsonObject preset_to_json(const std::string &name)
+{
+    QJsonObject obj;
+    obj["name"] = QString::fromStdString(name);
     return obj;
 }
 
@@ -118,6 +130,10 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
         commands.append("status");
         commands.append("list_participants");
         commands.append("list_outputs");
+        commands.append("list_presets");
+        commands.append("save_preset");
+        commands.append("apply_preset");
+        commands.append("delete_preset");
         commands.append("assign_output");
         commands.append("join");
         commands.append("leave");
@@ -129,11 +145,15 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
     }
 
     if (cmd == "status") {
+        const auto participants = ZoomParticipants::instance().roster();
+        const auto outputs = ZoomOutputManager::instance().outputs();
         write_response(socket, {
             {"ok", true},
             {"meeting_state", meeting_state_to_string(ZoomMeeting::instance().state())},
             {"active_speaker_id", static_cast<int>(
-                ZoomParticipants::instance().active_speaker_id())}
+                ZoomParticipants::instance().active_speaker_id())},
+            {"participant_count", static_cast<int>(participants.size())},
+            {"output_count", static_cast<int>(outputs.size())}
         });
         return;
     }
@@ -151,6 +171,38 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
         for (const auto &o : ZoomOutputManager::instance().outputs())
             outputs.append(output_to_json(o));
         write_response(socket, {{"ok", true}, {"outputs", outputs}});
+        return;
+    }
+
+    if (cmd == "list_presets") {
+        QJsonArray presets;
+        for (const auto &name : ZoomOutputManager::instance().preset_names())
+            presets.append(preset_to_json(name));
+        write_response(socket, {{"ok", true}, {"presets", presets}});
+        return;
+    }
+
+    if (cmd == "save_preset") {
+        const QString name = req.value("name").toString();
+        write_response(socket, {
+            {"ok", ZoomOutputManager::instance().save_preset(name.toStdString())}
+        });
+        return;
+    }
+
+    if (cmd == "apply_preset") {
+        const QString name = req.value("name").toString();
+        write_response(socket, {
+            {"ok", ZoomOutputManager::instance().apply_preset(name.toStdString())}
+        });
+        return;
+    }
+
+    if (cmd == "delete_preset") {
+        const QString name = req.value("name").toString();
+        write_response(socket, {
+            {"ok", ZoomOutputManager::instance().delete_preset(name.toStdString())}
+        });
         return;
     }
 

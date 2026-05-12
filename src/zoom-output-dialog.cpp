@@ -18,6 +18,7 @@ enum OutputColumns {
     ColumnAssignment,
     ColumnAudio,
     ColumnIsolate,
+    ColumnStatus,
     ColumnCount
 };
 
@@ -55,7 +56,7 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     m_table = new QTableWidget(this);
     m_table->setColumnCount(ColumnCount);
     m_table->setHorizontalHeaderLabels({
-        "Output", "Assignment", "Audio", "Isolated audio"
+        "Output", "Assignment", "Audio", "Isolated audio", "Status"
     });
     m_table->horizontalHeader()->setSectionResizeMode(ColumnName, QHeaderView::Stretch);
     m_table->horizontalHeader()->setSectionResizeMode(ColumnAssignment, QHeaderView::Stretch);
@@ -65,13 +66,45 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Apply |
                                          QDialogButtonBox::Close, this);
     auto *refresh_button = buttons->addButton("Refresh", QDialogButtonBox::ActionRole);
+    auto *save_preset_button = buttons->addButton("Save Preset",
+        QDialogButtonBox::ActionRole);
+    auto *load_preset_button = buttons->addButton("Load Preset",
+        QDialogButtonBox::ActionRole);
+    auto *delete_preset_button = buttons->addButton("Delete Preset",
+        QDialogButtonBox::ActionRole);
+
+    m_preset_name = new QLineEdit(this);
+    m_preset_name->setPlaceholderText("Preset name");
+    m_preset_combo = new QComboBox(this);
 
     connect(refresh_button, &QPushButton::clicked, this, [this]() { refresh(); });
+    connect(save_preset_button, &QPushButton::clicked, this, [this]() {
+        apply();
+        const std::string name = m_preset_name->text().trimmed().toStdString();
+        if (!name.empty())
+            ZoomOutputManager::instance().save_preset(name);
+        refresh();
+    });
+    connect(load_preset_button, &QPushButton::clicked, this, [this]() {
+        const std::string name = m_preset_combo->currentText().toStdString();
+        if (!name.empty())
+            ZoomOutputManager::instance().apply_preset(name);
+        refresh();
+    });
+    connect(delete_preset_button, &QPushButton::clicked, this, [this]() {
+        const std::string name = m_preset_combo->currentText().toStdString();
+        if (!name.empty())
+            ZoomOutputManager::instance().delete_preset(name);
+        refresh();
+    });
     connect(buttons->button(QDialogButtonBox::Apply), &QPushButton::clicked,
             this, [this]() { apply(); });
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
     auto *layout = new QVBoxLayout(this);
+    layout->addWidget(new QLabel("Presets", this));
+    layout->addWidget(m_preset_name);
+    layout->addWidget(m_preset_combo);
     layout->addWidget(new QLabel("Participants", this));
     layout->addWidget(m_filter);
     layout->addWidget(m_participant_table);
@@ -93,6 +126,10 @@ ZoomOutputDialog::~ZoomOutputDialog()
 void ZoomOutputDialog::refresh()
 {
     refresh_participants();
+
+    m_preset_combo->clear();
+    for (const auto &name : ZoomOutputManager::instance().preset_names())
+        m_preset_combo->addItem(QString::fromStdString(name));
 
     const auto outputs = ZoomOutputManager::instance().outputs();
     const auto roster = ZoomParticipants::instance().roster();
@@ -128,6 +165,15 @@ void ZoomOutputDialog::refresh()
         isolate->setChecked(output.isolate_audio);
         isolate->setToolTip("Use the assigned participant's isolated audio instead of the meeting mix.");
         m_table->setCellWidget(row, ColumnIsolate, isolate);
+
+        QString status = output.video_active ? "Active" : "Idle";
+        if (output.width > 0 && output.height > 0)
+            status += QString(" %1x%2").arg(output.width).arg(output.height);
+        if (output.frame_count > 0)
+            status += QString(" %1 frames").arg(output.frame_count);
+        auto *status_item = new QTableWidgetItem(status);
+        status_item->setFlags(status_item->flags() & ~Qt::ItemIsEditable);
+        m_table->setItem(row, ColumnStatus, status_item);
     }
 }
 

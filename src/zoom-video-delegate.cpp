@@ -43,6 +43,8 @@ void ZoomVideoDelegate::unsubscribe()
     ZOOMSDK::destroyRenderer(m_renderer);
     m_renderer = nullptr;
     m_active.store(false, std::memory_order_relaxed);
+    m_width.store(0, std::memory_order_relaxed);
+    m_height.store(0, std::memory_order_relaxed);
 }
 
 void ZoomVideoDelegate::onRawDataFrameReceived(YUVRawDataI420 *data)
@@ -52,12 +54,17 @@ void ZoomVideoDelegate::onRawDataFrameReceived(YUVRawDataI420 *data)
     const uint32_t w = data->GetStreamWidth();
     const uint32_t h = data->GetStreamHeight();
     if (w == 0 || h == 0) return;
+    const uint64_t now = os_gettime_ns();
+    m_width.store(w, std::memory_order_relaxed);
+    m_height.store(h, std::memory_order_relaxed);
+    m_last_frame_ns.store(now, std::memory_order_relaxed);
+    m_frame_count.fetch_add(1, std::memory_order_relaxed);
 
     obs_source_frame frame = {};
     frame.format      = VIDEO_FORMAT_I420;
     frame.width       = w;
     frame.height      = h;
-    frame.timestamp   = os_gettime_ns();
+    frame.timestamp   = now;
     frame.data[0]     = reinterpret_cast<uint8_t *>(data->GetYBuffer());
     frame.data[1]     = reinterpret_cast<uint8_t *>(data->GetUBuffer());
     frame.data[2]     = reinterpret_cast<uint8_t *>(data->GetVBuffer());

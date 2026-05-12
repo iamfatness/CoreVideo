@@ -3,6 +3,7 @@
 #include <functional>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 #include <meeting_service_interface.h>
 
 enum class MeetingState { Idle, Joining, InMeeting, Leaving, Failed };

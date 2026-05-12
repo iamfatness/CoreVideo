@@ -1,7 +1,7 @@
 #pragma once
 #include <string>
 #include <functional>
-#include "../third_party/zoom-sdk/h/auth_service_interface.h"
+#include <auth_service_interface.h>
 
 enum class ZoomAuthState { Unauthenticated, Authenticating, Authenticated, Failed };
 

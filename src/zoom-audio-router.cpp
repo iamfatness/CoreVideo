@@ -1,5 +1,5 @@
 #include "zoom-audio-router.h"
-#include "../third_party/zoom-sdk/h/zoom_rawdata_api.h"
+#include <rawdata/zoom_rawdata_api.h>
 #include <obs-module.h>
 
 ZoomAudioRouter &ZoomAudioRouter::instance()

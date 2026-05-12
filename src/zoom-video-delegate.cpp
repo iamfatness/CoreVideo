@@ -1,5 +1,5 @@
 #include "zoom-video-delegate.h"
-#include "../third_party/zoom-sdk/h/zoom_rawdata_api.h"
+#include <rawdata/zoom_rawdata_api.h>
 #include <obs-module.h>
 #include <media-io/video-io.h>
 #include <util/platform.h>

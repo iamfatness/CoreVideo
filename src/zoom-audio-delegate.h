@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <vector>
 #include <atomic>
-#include "../third_party/zoom-sdk/h/rawdata_def.h"
+#include <zoom_sdk_raw_data_def.h>
 
 enum class AudioChannelMode { Mono = 0, Stereo = 1 };
 

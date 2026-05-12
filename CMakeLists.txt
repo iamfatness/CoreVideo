@@ -9,6 +9,24 @@ set(CMAKE_AUTOMOC ON)
 
 set(ZOOM_SDK_DIR "third_party/zoom-sdk" CACHE PATH "Zoom Meeting SDK directory")
 
+if(IS_ABSOLUTE "${ZOOM_SDK_DIR}")
+    set(ZOOM_SDK_BASE "${ZOOM_SDK_DIR}")
+else()
+    set(ZOOM_SDK_BASE "${CMAKE_CURRENT_SOURCE_DIR}/${ZOOM_SDK_DIR}")
+endif()
+
+if(WIN32 AND NOT EXISTS "${ZOOM_SDK_BASE}/h/zoom_sdk.h")
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|AARCH64" AND EXISTS "${ZOOM_SDK_BASE}/zoom-sdk/arm64/h/zoom_sdk.h")
+        set(ZOOM_SDK_DIR "${ZOOM_SDK_BASE}/zoom-sdk/arm64" CACHE PATH "Zoom Meeting SDK directory" FORCE)
+    elseif(CMAKE_SIZEOF_VOID_P EQUAL 8 AND EXISTS "${ZOOM_SDK_BASE}/zoom-sdk/x64/h/zoom_sdk.h")
+        set(ZOOM_SDK_DIR "${ZOOM_SDK_BASE}/zoom-sdk/x64" CACHE PATH "Zoom Meeting SDK directory" FORCE)
+    elseif(EXISTS "${ZOOM_SDK_BASE}/zoom-sdk/x86/h/zoom_sdk.h")
+        set(ZOOM_SDK_DIR "${ZOOM_SDK_BASE}/zoom-sdk/x86" CACHE PATH "Zoom Meeting SDK directory" FORCE)
+    endif()
+endif()
+
+set(ZOOM_SDK_INCLUDE_DIR "${ZOOM_SDK_DIR}/h")
+
 # macOS distributes the Zoom SDK as a .framework bundle.
 # Point ZOOM_SDK_FRAMEWORK at the ZoomSDK.framework directory if building on Apple.
 set(ZOOM_SDK_FRAMEWORK "${ZOOM_SDK_DIR}/ZoomSDK.framework" CACHE PATH
@@ -32,7 +50,7 @@ add_library(obs-zoom-plugin MODULE
 )
 target_include_directories(obs-zoom-plugin PRIVATE
     src
-    ${ZOOM_SDK_DIR}/h
+    ${ZOOM_SDK_INCLUDE_DIR}
 )
 target_link_libraries(obs-zoom-plugin PRIVATE
     OBS::libobs
@@ -57,7 +75,7 @@ set(ENGINE_SOURCES
     engine/src/engine-video.cpp
     engine/src/engine-audio.cpp
 )
-set(ENGINE_INCLUDES src engine/src ${ZOOM_SDK_DIR}/h)
+set(ENGINE_INCLUDES src engine/src ${ZOOM_SDK_INCLUDE_DIR})
 
 if(WIN32)
     add_executable(ZoomObsEngine ${ENGINE_SOURCES})

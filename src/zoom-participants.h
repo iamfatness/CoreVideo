@@ -4,8 +4,8 @@
 #include <vector>
 #include <functional>
 #include <mutex>
-#include "../third_party/zoom-sdk/h/meeting_participants_ctrl_interface.h"
-#include "../third_party/zoom-sdk/h/meeting_audio_interface.h"
+#include <meeting_service_components/meeting_participants_ctrl_interface.h>
+#include <meeting_service_components/meeting_audio_interface.h>
 
 struct ParticipantInfo {
     uint32_t    user_id      = 0;

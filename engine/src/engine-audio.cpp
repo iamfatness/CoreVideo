@@ -1,6 +1,6 @@
 #include "engine-audio.h"
 #include "../../src/engine-ipc.h"
-#include "../../third_party/zoom-sdk/h/zoom_rawdata_api.h"
+#include <rawdata/zoom_rawdata_api.h>
 #include <cstring>
 
 EngineAudio &EngineAudio::instance() { static EngineAudio inst; return inst; }

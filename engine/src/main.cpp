@@ -1,9 +1,9 @@
 #include "../../src/engine-ipc.h"
 #include "engine-video.h"
 #include "engine-audio.h"
-#include "../../third_party/zoom-sdk/h/zoom_sdk.h"
-#include "../../third_party/zoom-sdk/h/auth_service_interface.h"
-#include "../../third_party/zoom-sdk/h/meeting_service_interface.h"
+#include <zoom_sdk.h>
+#include <auth_service_interface.h>
+#include <meeting_service_interface.h>
 #include <string>
 #include <atomic>
 

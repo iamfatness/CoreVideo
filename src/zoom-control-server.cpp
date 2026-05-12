@@ -87,6 +87,12 @@ static QJsonObject output_to_json(const ZoomOutputInfo &o)
     obj["height"] = static_cast<int>(o.height);
     obj["frame_count"] = static_cast<double>(o.frame_count);
     obj["last_frame_ns"] = static_cast<double>(o.last_frame_ns);
+    obj["audio_active"] = o.audio_active;
+    obj["audio_count"] = static_cast<double>(o.audio_count);
+    obj["last_audio_ns"] = static_cast<double>(o.last_audio_ns);
+    obj["sample_rate"] = static_cast<int>(o.sample_rate);
+    obj["channels"] = static_cast<int>(o.channels);
+    obj["audio_byte_len"] = static_cast<int>(o.audio_byte_len);
     return obj;
 }
 
@@ -94,6 +100,19 @@ static QJsonObject preset_to_json(const std::string &name)
 {
     QJsonObject obj;
     obj["name"] = QString::fromStdString(name);
+    return obj;
+}
+
+static QJsonObject preset_apply_result_to_json(
+    const ZoomPresetApplyResult &result)
+{
+    QJsonObject obj;
+    obj["preset_found"] = result.preset_found;
+    obj["applied_count"] = result.applied_count;
+    QJsonArray missing;
+    for (const auto &name : result.missing_outputs)
+        missing.append(QString::fromStdString(name));
+    obj["missing_outputs"] = missing;
     return obj;
 }
 
@@ -184,25 +203,32 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
 
     if (cmd == "save_preset") {
         const QString name = req.value("name").toString();
-        write_response(socket, {
-            {"ok", ZoomOutputManager::instance().save_preset(name.toStdString())}
-        });
+        const bool ok = ZoomOutputManager::instance().save_preset(name.toStdString());
+        QJsonObject response;
+        response["ok"] = ok;
+        if (!ok) response["error"] = "missing_name";
+        write_response(socket, response);
         return;
     }
 
     if (cmd == "apply_preset") {
         const QString name = req.value("name").toString();
-        write_response(socket, {
-            {"ok", ZoomOutputManager::instance().apply_preset(name.toStdString())}
-        });
+        const auto result = ZoomOutputManager::instance().apply_preset_result(
+            name.toStdString());
+        QJsonObject response = preset_apply_result_to_json(result);
+        response["ok"] = result.preset_found && result.applied_count > 0;
+        if (!result.preset_found) response["error"] = "unknown_preset";
+        write_response(socket, response);
         return;
     }
 
     if (cmd == "delete_preset") {
         const QString name = req.value("name").toString();
-        write_response(socket, {
-            {"ok", ZoomOutputManager::instance().delete_preset(name.toStdString())}
-        });
+        const bool ok = ZoomOutputManager::instance().delete_preset(name.toStdString());
+        QJsonObject response;
+        response["ok"] = ok;
+        if (!ok) response["error"] = "unknown_preset";
+        write_response(socket, response);
         return;
     }
 

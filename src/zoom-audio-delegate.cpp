@@ -36,6 +36,10 @@ void ZoomAudioDelegate::unsubscribe()
     ZoomAudioRouter::instance().remove_mixed_sink(this);
     ZoomAudioRouter::instance().remove_one_way_sink(this);
     m_registered = false;
+    m_last_audio_ns.store(0, std::memory_order_relaxed);
+    m_last_sample_rate.store(0, std::memory_order_relaxed);
+    m_last_channels.store(0, std::memory_order_relaxed);
+    m_last_byte_len.store(0, std::memory_order_relaxed);
 }
 
 void ZoomAudioDelegate::set_channel_mode(AudioChannelMode mode)
@@ -78,12 +82,24 @@ void ZoomAudioDelegate::on_one_way_audio(AudioRawData *data, uint32_t user_id)
 void ZoomAudioDelegate::push_audio(AudioRawData *data)
 {
     if (!data || !m_source) return;
+    note_audio(data);
     const auto mode = static_cast<AudioChannelMode>(
         m_mode.load(std::memory_order_relaxed));
     if (mode == AudioChannelMode::Stereo)
         push_stereo(data);
     else
         push_mono(data);
+}
+
+void ZoomAudioDelegate::note_audio(AudioRawData *data)
+{
+    if (!data) return;
+    m_audio_count.fetch_add(1, std::memory_order_relaxed);
+    m_last_audio_ns.store(os_gettime_ns(), std::memory_order_relaxed);
+    m_last_sample_rate.store(data->GetSampleRate(), std::memory_order_relaxed);
+    m_last_channels.store(static_cast<uint16_t>(data->GetChannelNum()),
+                          std::memory_order_relaxed);
+    m_last_byte_len.store(data->GetBufferLen(), std::memory_order_relaxed);
 }
 
 void ZoomAudioDelegate::push_mono(AudioRawData *data)

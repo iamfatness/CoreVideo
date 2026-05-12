@@ -171,6 +171,9 @@ void ZoomOutputDialog::refresh()
             status += QString(" %1x%2").arg(output.width).arg(output.height);
         if (output.frame_count > 0)
             status += QString(" %1 frames").arg(output.frame_count);
+        status += output.audio_active ? " audio" : " no audio";
+        if (output.sample_rate > 0)
+            status += QString(" %1 Hz").arg(output.sample_rate);
         auto *status_item = new QTableWidgetItem(status);
         status_item->setFlags(status_item->flags() & ~Qt::ItemIsEditable);
         m_table->setItem(row, ColumnStatus, status_item);

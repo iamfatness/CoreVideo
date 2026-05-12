@@ -167,20 +167,33 @@ bool ZoomOutputManager::save_preset(const std::string &name)
     return true;
 }
 
-bool ZoomOutputManager::apply_preset(const std::string &name)
+ZoomPresetApplyResult ZoomOutputManager::apply_preset_result(const std::string &name)
 {
+    ZoomPresetApplyResult result;
     const auto presets = load_presets();
     auto it = std::find_if(presets.begin(), presets.end(),
         [&](const ZoomOutputPreset &p) { return p.name == name; });
-    if (it == presets.end()) return false;
+    if (it == presets.end()) return result;
 
-    bool applied_any = false;
+    result.preset_found = true;
     for (const auto &output : it->outputs) {
-        applied_any |= configure_output(output.source_name, output.participant_id,
-                                        output.active_speaker, output.isolate_audio,
-                                        output.audio_mode);
+        const bool applied = configure_output(output.source_name,
+                                              output.participant_id,
+                                              output.active_speaker,
+                                              output.isolate_audio,
+                                              output.audio_mode);
+        if (applied)
+            ++result.applied_count;
+        else
+            result.missing_outputs.push_back(output.source_name);
     }
-    return applied_any;
+    return result;
+}
+
+bool ZoomOutputManager::apply_preset(const std::string &name)
+{
+    const auto result = apply_preset_result(name);
+    return result.preset_found && result.applied_count > 0;
 }
 
 bool ZoomOutputManager::delete_preset(const std::string &name)

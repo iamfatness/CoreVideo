@@ -70,6 +70,15 @@ ZoomOutputInfo ZoomSource::output_info() const
         info.frame_count = video_delegate->frame_count();
         info.last_frame_ns = video_delegate->last_frame_ns();
     }
+    if (audio_delegate) {
+        info.audio_active = audio_delegate->is_registered() &&
+                            audio_delegate->last_audio_ns() != 0;
+        info.audio_count = audio_delegate->audio_count();
+        info.last_audio_ns = audio_delegate->last_audio_ns();
+        info.sample_rate = audio_delegate->last_sample_rate();
+        info.channels = audio_delegate->last_channels();
+        info.audio_byte_len = audio_delegate->last_byte_len();
+    }
     return info;
 }
 

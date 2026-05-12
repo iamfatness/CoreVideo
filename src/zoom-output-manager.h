@@ -19,11 +19,23 @@ struct ZoomOutputInfo {
     uint32_t height = 0;
     uint64_t frame_count = 0;
     uint64_t last_frame_ns = 0;
+    bool audio_active = false;
+    uint64_t audio_count = 0;
+    uint64_t last_audio_ns = 0;
+    uint32_t sample_rate = 0;
+    uint16_t channels = 0;
+    uint32_t audio_byte_len = 0;
 };
 
 struct ZoomOutputPreset {
     std::string name;
     std::vector<ZoomOutputInfo> outputs;
+};
+
+struct ZoomPresetApplyResult {
+    bool preset_found = false;
+    int applied_count = 0;
+    std::vector<std::string> missing_outputs;
 };
 
 class ZoomOutputManager {
@@ -40,6 +52,7 @@ public:
                           bool isolate_audio,
                           AudioChannelMode audio_mode);
     bool save_preset(const std::string &name);
+    ZoomPresetApplyResult apply_preset_result(const std::string &name);
     bool apply_preset(const std::string &name);
     bool delete_preset(const std::string &name);
     std::vector<std::string> preset_names() const;

@@ -73,6 +73,24 @@ elseif(APPLE)
 endif()
 set_target_properties(obs-zoom-plugin PROPERTIES PREFIX "")
 
+# ── sdk.dll deployment (Windows only) ────────────────────────────────────────
+if(WIN32)
+    set(ZOOM_SDK_DLL "${ZOOM_SDK_BASE}/bin/sdk.dll")
+    if(EXISTS "${ZOOM_SDK_DLL}")
+        add_custom_command(TARGET obs-zoom-plugin POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${ZOOM_SDK_DLL}"
+                "$<TARGET_FILE_DIR:obs-zoom-plugin>/sdk.dll"
+            COMMENT "Copying sdk.dll to output directory"
+        )
+        install(FILES "${ZOOM_SDK_DLL}"
+            DESTINATION "${CMAKE_INSTALL_PREFIX}/obs-plugins/64bit"
+        )
+    else()
+        message(WARNING "sdk.dll not found at ${ZOOM_SDK_DLL} — copy it manually before running")
+    endif()
+endif()
+
 # ── Out-of-process capture engine ─────────────────────────────────────────────
 set(ENGINE_SOURCES
     engine/src/main.cpp

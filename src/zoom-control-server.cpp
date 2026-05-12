@@ -50,6 +50,11 @@ void ZoomControlServer::stop()
     m_server->close();
 }
 
+void ZoomControlServer::set_token(const std::string &token)
+{
+    m_token = token;
+}
+
 void ZoomControlServer::on_new_connection()
 {
     while (m_server->hasPendingConnections()) {
@@ -110,6 +115,15 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
     }
 
     const QJsonObject req = doc.object();
+
+    if (!m_token.empty()) {
+        const QString provided = req.value("token").toString();
+        if (provided.toStdString() != m_token) {
+            write_response(socket, {{"ok", false}, {"error", "unauthorized"}});
+            return;
+        }
+    }
+
     const QString cmd = req.value("cmd").toString();
 
     if (cmd == "help") {

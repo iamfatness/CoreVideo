@@ -32,8 +32,15 @@ public:
 
 private:
     ZoomAuth() = default;
-    ZoomAuthState       m_state        = ZoomAuthState::Unauthenticated;
-    StateCallback       m_callback;
-    bool                m_sdk_init     = false;
+    ZoomAuthState          m_state        = ZoomAuthState::Unauthenticated;
+    StateCallback          m_callback;
+    bool                   m_sdk_init     = false;
     ZOOMSDK::IAuthService *m_auth_service = nullptr;
+    // Kept alive for the duration of the async SDKAuth call.
+#if defined(WIN32)
+    std::wstring           m_wide_jwt;
+#else
+    std::string            m_wide_jwt;
+#endif
+    std::string            m_last_jwt; // used for auto re-auth on identity expiry
 };

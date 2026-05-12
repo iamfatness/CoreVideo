@@ -81,16 +81,18 @@ bool ZoomMeeting::join_impl(const std::string &meeting_id, const std::string &pa
     }
 
     const std::string name = display_name.empty() ? "OBS" : display_name;
-    auto wide_name     = to_zstr(name);
-    auto wide_passcode = to_zstr(passcode);
+    // Store as members so the raw pointers in JoinParam remain valid for the
+    // duration of the async Join() call.
+    m_wide_name     = to_zstr(name);
+    m_wide_passcode = to_zstr(passcode);
 
     ZOOMSDK::JoinParam join_param;
     join_param.userType = ZOOMSDK::SDK_UT_WITHOUT_LOGIN;
 
     ZOOMSDK::JoinParam4WithoutLogin &p = join_param.param.withoutloginuserJoin;
     p.meetingNumber             = std::stoull(meeting_id);
-    p.userName                  = wide_name.c_str();
-    p.psw                       = passcode.empty() ? nullptr : wide_passcode.c_str();
+    p.userName                  = m_wide_name.c_str();
+    p.psw                       = passcode.empty() ? nullptr : m_wide_passcode.c_str();
     p.isVideoOff                = true;
     p.isAudioOff                = true;
     p.isMyVoiceInMix            = false;

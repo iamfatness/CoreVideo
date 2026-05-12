@@ -2,6 +2,7 @@
 #include <functional>
 #include <unordered_map>
 #include <mutex>
+#include <vector>
 #include <zoom_sdk_raw_data_def.h>
 #include <rawdata/rawdata_audio_helper_interface.h>
 
@@ -18,19 +19,19 @@ public:
     // Mixed-feed sink — receives every mixed frame unless overridden by isolation.
     // ZoomAudioDelegate calls this when m_isolated_user == 0.
     using MixedSink  = std::function<void(AudioRawData *)>;
-    void set_mixed_sink(MixedSink cb);
-    void clear_mixed_sink();
+    void add_mixed_sink(void *key, MixedSink cb);
+    void remove_mixed_sink(void *key);
 
     // One-way sink — receives ALL per-user frames with the user_id attached.
     // ZoomAudioDelegate uses this to implement isolation: it filters by m_isolated_user.
     using OneWaySink = std::function<void(AudioRawData *, uint32_t)>;
-    void set_one_way_sink(OneWaySink cb);
-    void clear_one_way_sink();
+    void add_one_way_sink(void *key, OneWaySink cb);
+    void remove_one_way_sink(void *key);
 
     // Per-participant sinks — ZoomParticipantAudioSource registers one per user_id.
     using ParticipantSink = std::function<void(AudioRawData *)>;
-    void add_participant_sink(uint32_t user_id, ParticipantSink cb);
-    void remove_participant_sink(uint32_t user_id);
+    void add_participant_sink(uint32_t user_id, void *key, ParticipantSink cb);
+    void remove_participant_sink(uint32_t user_id, void *key);
 
     // IZoomSDKAudioRawDataDelegate
     void onMixedAudioRawDataReceived(AudioRawData *data) override;
@@ -43,8 +44,9 @@ private:
     ZoomAudioRouter() = default;
 
     std::mutex  m_mtx;
-    MixedSink   m_mixed_sink;
-    OneWaySink  m_one_way_sink;
-    std::unordered_map<uint32_t, ParticipantSink> m_participant_sinks;
+    std::unordered_map<void *, MixedSink> m_mixed_sinks;
+    std::unordered_map<void *, OneWaySink> m_one_way_sinks;
+    std::unordered_map<uint32_t, std::unordered_map<void *, ParticipantSink>>
+        m_participant_sinks;
     bool        m_subscribed = false;
 };

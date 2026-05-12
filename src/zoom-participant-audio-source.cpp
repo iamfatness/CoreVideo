@@ -93,6 +93,7 @@ void ZoomParticipantAudioSource::do_register()
 
     ZoomAudioRouter::instance().add_participant_sink(
         participant_id,
+        this,
         [src, mode, buf](AudioRawData *data) {
             if (mode == AudioChannelMode::Stereo)
                 push_stereo(src, data, *buf);
@@ -108,7 +109,7 @@ void ZoomParticipantAudioSource::do_register()
 void ZoomParticipantAudioSource::do_unregister()
 {
     if (!registered || participant_id == 0) return;
-    ZoomAudioRouter::instance().remove_participant_sink(participant_id);
+    ZoomAudioRouter::instance().remove_participant_sink(participant_id, this);
     registered = false;
 }
 

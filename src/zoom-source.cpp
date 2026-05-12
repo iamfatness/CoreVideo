@@ -3,6 +3,7 @@
 #include "zoom-participants.h"
 #include "zoom-auth.h"
 #include "zoom-settings.h"
+#include "zoom-output-manager.h"
 #include <obs-module.h>
 
 #define PROP_MEETING_ID        "meeting_id"
@@ -23,6 +24,11 @@ static AudioChannelMode audio_mode_from_data(obs_data_t *s)
 
 void ZoomSource::apply_settings(obs_data_t *settings)
 {
+    const uint32_t old_participant_id = participant_id;
+    const bool old_active_speaker_mode = active_speaker_mode;
+    const bool old_isolate_audio = isolate_audio;
+    const AudioChannelMode old_audio_mode = audio_mode;
+
     meeting_id          = obs_data_get_string(settings, PROP_MEETING_ID);
     passcode            = obs_data_get_string(settings, PROP_PASSCODE);
     participant_id      = static_cast<uint32_t>(
@@ -32,6 +38,68 @@ void ZoomSource::apply_settings(obs_data_t *settings)
     isolate_audio       = obs_data_get_bool(settings, PROP_ISOLATE_AUDIO);
     audio_mode          = audio_mode_from_data(settings);
     if (audio_delegate) audio_delegate->set_channel_mode(audio_mode);
+
+    if (video_delegate && audio_delegate &&
+        ZoomMeeting::instance().state() == MeetingState::InMeeting &&
+        (old_participant_id != participant_id ||
+         old_active_speaker_mode != active_speaker_mode ||
+         old_isolate_audio != isolate_audio ||
+         old_audio_mode != audio_mode)) {
+        resubscribe();
+    }
+}
+
+std::string ZoomSource::output_name() const
+{
+    const char *name = source ? obs_source_get_name(source) : nullptr;
+    return name ? name : std::string{};
+}
+
+ZoomOutputInfo ZoomSource::output_info() const
+{
+    ZoomOutputInfo info;
+    info.source_name = output_name();
+    info.participant_id = participant_id;
+    info.active_speaker = active_speaker_mode;
+    info.isolate_audio = isolate_audio;
+    info.audio_mode = audio_mode;
+    return info;
+}
+
+void ZoomSource::configure_output(uint32_t new_participant_id,
+                                  bool new_active_speaker_mode,
+                                  bool new_isolate_audio,
+                                  AudioChannelMode new_audio_mode)
+{
+    if (source) {
+        obs_data_t *settings = obs_source_get_settings(source);
+        obs_data_set_int(settings, PROP_PARTICIPANT_ID, new_participant_id);
+        obs_data_set_bool(settings, PROP_ACTIVE_SPEAKER, new_active_speaker_mode);
+        obs_data_set_bool(settings, PROP_ISOLATE_AUDIO, new_isolate_audio);
+        obs_data_set_int(settings, PROP_AUDIO_CHANNELS,
+                         new_audio_mode == AudioChannelMode::Stereo
+                         ? AUDIO_CH_STEREO : AUDIO_CH_MONO);
+        obs_source_update(source, settings);
+        obs_data_release(settings);
+        return;
+    }
+
+    participant_id = new_participant_id;
+    active_speaker_mode = new_active_speaker_mode;
+    isolate_audio = new_isolate_audio;
+    audio_mode = new_audio_mode;
+    if (audio_delegate) audio_delegate->set_channel_mode(audio_mode);
+    if (ZoomMeeting::instance().state() == MeetingState::InMeeting)
+        resubscribe();
+}
+
+void ZoomSource::resubscribe()
+{
+    if (!video_delegate || !audio_delegate) return;
+    video_delegate->unsubscribe();
+    audio_delegate->unsubscribe();
+    audio_delegate->set_isolated_user(0);
+    on_meeting_state(ZoomMeeting::instance().state());
 }
 
 void ZoomSource::on_meeting_state(MeetingState state)
@@ -85,8 +153,10 @@ static void *zoom_source_create(obs_data_t *settings, obs_source_t *source)
     ZoomMeeting::instance().on_state_change(ctx,
         [ctx](MeetingState s) { ctx->on_meeting_state(s); });
 
-    ZoomParticipants::instance().on_roster_change(
+    ZoomParticipants::instance().add_roster_callback(ctx,
         [ctx]() { ctx->on_active_speaker_changed(); });
+
+    ZoomOutputManager::instance().register_source(ctx);
 
     if (ctx->auto_join && !ctx->meeting_id.empty()) {
         if (ZoomAuth::instance().state() != ZoomAuthState::Authenticated) {
@@ -108,8 +178,9 @@ static void *zoom_source_create(obs_data_t *settings, obs_source_t *source)
 static void zoom_source_destroy(void *data)
 {
     auto *ctx = static_cast<ZoomSource *>(data);
+    ZoomOutputManager::instance().unregister_source(ctx);
     ZoomMeeting::instance().remove_state_change(ctx);
-    ZoomParticipants::instance().on_roster_change(nullptr);
+    ZoomParticipants::instance().remove_roster_callback(ctx);
     delete ctx;
 }
 

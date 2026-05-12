@@ -61,4 +61,13 @@ private:
     std::string m_last_display_name;
     int         m_reconnect_attempts = 0;
     bool        m_user_leaving       = false;
+
+    // Kept alive across the async Join() call (JoinParam holds raw pointers).
+#if defined(WIN32)
+    std::wstring m_wide_name;
+    std::wstring m_wide_passcode;
+#else
+    std::string  m_wide_name;
+    std::string  m_wide_passcode;
+#endif
 };

@@ -31,16 +31,14 @@ bool ZoomAuth::init(const std::string &sdk_key, const std::string &sdk_secret)
     }
 
     ZOOMSDK::InitParam init_param;
-    init_param.strWebDomain      = L"https://zoom.us";
+    init_param.strWebDomain       = L"https://zoom.us";
     init_param.enableGenerateDump = true;
     init_param.enableLogByDefault = false;
 
-    // Required to receive raw video/audio data callbacks
-#if defined(WIN32)
+    // Required on all platforms to suppress the Zoom UI and receive raw-data callbacks.
     init_param.obConfigOpts.optionalFeatures = ENABLE_CUSTOMIZED_UI_FLAG;
-#endif
 
-    // Use heap memory for video raw data — stack frames can be 1080p+ (>3 MB each)
+    // Use heap memory for video raw data — stack frames can be 1080p+ (>3 MB each).
     init_param.rawdataOpts.videoRawdataMemoryMode = ZOOMSDK::ZoomSDKRawDataMemoryModeHeap;
     init_param.rawdataOpts.audioRawdataMemoryMode = ZOOMSDK::ZoomSDKRawDataMemoryModeHeap;
 
@@ -75,10 +73,14 @@ bool ZoomAuth::authenticate(const std::string &jwt_token)
         return false;
     }
 
-    auto wide_token = to_zstr(jwt_token);
+    // Store the converted token as a member so the pointer stays valid for the
+    // entire duration of the async SDKAuth call (SDKAuth copies the AuthContext
+    // struct by value but the jwt_token field is a raw pointer).
+    m_wide_jwt = to_zstr(jwt_token);
+    m_last_jwt  = jwt_token;
 
     ZOOMSDK::AuthContext ctx;
-    ctx.jwt_token = wide_token.c_str();
+    ctx.jwt_token = m_wide_jwt.c_str();
 
     ZOOMSDK::SDKError err = m_auth_service->SDKAuth(ctx);
     if (err != ZOOMSDK::SDKERR_SUCCESS) {
@@ -107,6 +109,7 @@ void ZoomAuth::shutdown()
     ZOOMSDK::CleanUPSDK();
     m_sdk_init = false;
     m_state    = ZoomAuthState::Unauthenticated;
+    m_last_jwt.clear();
     blog(LOG_INFO, "[obs-zoom-plugin] Zoom SDK shut down");
 }
 
@@ -141,14 +144,20 @@ void ZoomAuth::onLogout()
 
 void ZoomAuth::onZoomIdentityExpired()
 {
-    blog(LOG_WARNING, "[obs-zoom-plugin] Zoom identity expired — re-authenticate");
-    m_state = ZoomAuthState::Failed;
-    if (m_callback) m_callback(m_state);
+    blog(LOG_WARNING, "[obs-zoom-plugin] Zoom identity expired — re-authenticating");
+    if (!m_last_jwt.empty()) {
+        authenticate(m_last_jwt);
+    } else {
+        m_state = ZoomAuthState::Failed;
+        if (m_callback) m_callback(m_state);
+    }
 }
 
 void ZoomAuth::onZoomAuthIdentityExpired()
 {
-    blog(LOG_WARNING, "[obs-zoom-plugin] Auth identity expiring — re-authenticate soon");
+    blog(LOG_WARNING, "[obs-zoom-plugin] Auth identity expiring — re-authenticating proactively");
+    if (!m_last_jwt.empty())
+        authenticate(m_last_jwt);
 }
 
 #if defined(WIN32)

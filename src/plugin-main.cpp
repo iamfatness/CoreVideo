@@ -26,9 +26,10 @@ bool obs_module_load(void)
     zoom_source_register();
     zoom_share_source_register();
     zoom_participant_audio_source_register();
-    ZoomControlServer::instance().start();
 
     ZoomPluginSettings s = ZoomPluginSettings::load();
+    ZoomControlServer::instance().set_token(s.control_token);
+    ZoomControlServer::instance().start(s.control_server_port);
     if (!s.sdk_key.empty() && !s.sdk_secret.empty()) {
         if (ZoomAuth::instance().init(s.sdk_key, s.sdk_secret) && !s.jwt_token.empty())
             ZoomAuth::instance().authenticate(s.jwt_token);

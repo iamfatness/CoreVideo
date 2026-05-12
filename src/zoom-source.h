@@ -4,6 +4,7 @@
 #include <memory>
 #include "zoom-video-delegate.h"
 #include "zoom-audio-delegate.h"
+#include "zoom-meeting.h"
 #define OBS_ZOOM_PLUGIN_VERSION "0.1.0"
 void zoom_source_register();
 struct ZoomSource {
@@ -16,4 +17,5 @@ struct ZoomSource {
     std::unique_ptr<ZoomVideoDelegate> video_delegate;
     std::unique_ptr<ZoomAudioDelegate> audio_delegate;
     void apply_settings(obs_data_t *settings);
+    void on_meeting_state(MeetingState state);
 };

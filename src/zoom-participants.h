@@ -63,11 +63,9 @@ public:
     void onVirtualNameTagStatusChanged(bool bOn, unsigned int userID) override;
     void onVirtualNameTagRosterInfoUpdated(unsigned int userID) override;
     void onGrantCoOwnerPrivilegeChanged(bool canGrantOther) override;
-#if defined(WIN32)
     void onCreateCompanionRelation(unsigned int parentUserID,
                                    unsigned int childUserID) override;
     void onRemoveCompanionRelation(unsigned int childUserID) override;
-#endif
 
     // IMeetingVideoCtrlEvent — used to keep has_video flag current
     void onUserVideoStatusChange(unsigned int userId,
@@ -78,14 +76,17 @@ public:
         ZOOMSDK::IList<unsigned int> *) override {}
     void onHostRequestStartVideo(
         ZOOMSDK::IRequestStartVideoHandler *) override {}
-    void onUserVideoQualityChanged(ZOOMSDK::VideoQuality,
+    void onUserVideoQualityChanged(ZOOMSDK::VideoConnectionQuality,
                                    unsigned int) override {}
-    void onVideoOrderUpdated(
-        ZOOMSDK::IVideoOrderUpdatedHelper *) override {}
-    void onLocalVideoOrderUpdated(
-        ZOOMSDK::ILocalVideoOrderUpdatedHelper *) override {}
+    void onHostVideoOrderUpdated(ZOOMSDK::IList<unsigned int> *) override {}
+    void onLocalVideoOrderUpdated(ZOOMSDK::IList<unsigned int> *) override {}
     void onFollowHostVideoOrderChanged(bool) override {}
     void onVideoAlphaChannelStatusChanged(bool) override {}
+    void onCameraControlRequestReceived(
+        unsigned int, ZOOMSDK::CameraControlRequestType,
+        ZOOMSDK::ICameraControlRequestHandler *) override {}
+    void onCameraControlRequestResult(
+        unsigned int, ZOOMSDK::CameraControlRequestResult) override {}
 
     // IMeetingAudioCtrlEvent — used for reliable active-speaker tracking
     void onUserAudioStatusChange(

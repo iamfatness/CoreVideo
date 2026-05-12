@@ -1,11 +1,13 @@
 cmake_minimum_required(VERSION 3.16)
 project(obs-zoom-plugin VERSION 0.1.0)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_AUTOMOC ON)
+
 find_package(libobs REQUIRED)
 find_package(obs-frontend-api REQUIRED)
 find_package(Qt6 COMPONENTS Core Network Widgets REQUIRED)
-set(CMAKE_AUTOMOC ON)
 
 set(ZOOM_SDK_DIR "third_party/zoom-sdk" CACHE PATH "Zoom Meeting SDK directory")
 
@@ -26,13 +28,39 @@ if(WIN32 AND NOT EXISTS "${ZOOM_SDK_BASE}/h/zoom_sdk.h")
 endif()
 
 set(ZOOM_SDK_INCLUDE_DIR "${ZOOM_SDK_DIR}/h")
+set(ZOOM_SDK_LIBRARY "${ZOOM_SDK_DIR}/lib/sdk.lib")
+
+if(WIN32)
+    if(EXISTS "${ZOOM_SDK_DIR}/bin/sdk.dll")
+        set(ZOOM_SDK_RUNTIME_DIR "${ZOOM_SDK_DIR}/bin")
+    elseif(EXISTS "${ZOOM_SDK_BASE}/bin/sdk.dll")
+        set(ZOOM_SDK_RUNTIME_DIR "${ZOOM_SDK_BASE}/bin")
+    else()
+        set(ZOOM_SDK_RUNTIME_DIR "")
+    endif()
+
+    if(NOT EXISTS "${ZOOM_SDK_INCLUDE_DIR}/zoom_sdk.h")
+        message(FATAL_ERROR
+            "Zoom SDK headers not found at ${ZOOM_SDK_INCLUDE_DIR}. "
+            "Set ZOOM_SDK_DIR to the SDK folder that contains h/zoom_sdk.h.")
+    endif()
+    if(NOT EXISTS "${ZOOM_SDK_LIBRARY}")
+        message(FATAL_ERROR
+            "Zoom SDK import library not found at ${ZOOM_SDK_LIBRARY}. "
+            "Set ZOOM_SDK_DIR to the SDK folder that contains lib/sdk.lib.")
+    endif()
+    if(ZOOM_SDK_RUNTIME_DIR STREQUAL "")
+        message(FATAL_ERROR
+            "Zoom SDK runtime folder not found. Expected bin/sdk.dll under "
+            "${ZOOM_SDK_DIR} or ${ZOOM_SDK_BASE}.")
+    endif()
+endif()
 
 # macOS distributes the Zoom SDK as a .framework bundle.
 # Point ZOOM_SDK_FRAMEWORK at the ZoomSDK.framework directory if building on Apple.
 set(ZOOM_SDK_FRAMEWORK "${ZOOM_SDK_DIR}/ZoomSDK.framework" CACHE PATH
     "Zoom Meeting SDK framework path (macOS only)")
 
-# ── OBS plugin module ─────────────────────────────────────────────────────────
 add_library(obs-zoom-plugin MODULE
     src/plugin-main.cpp
     src/zoom-source.cpp
@@ -54,6 +82,7 @@ add_library(obs-zoom-plugin MODULE
     src/zoom-interpretation-audio-source.cpp
     src/obs-utils.cpp
 )
+
 target_include_directories(obs-zoom-plugin PRIVATE
     src
     ${ZOOM_SDK_INCLUDE_DIR}
@@ -65,8 +94,9 @@ target_link_libraries(obs-zoom-plugin PRIVATE
     Qt6::Network
     Qt6::Widgets
 )
+
 if(WIN32)
-    target_link_libraries(obs-zoom-plugin PRIVATE ${ZOOM_SDK_DIR}/lib/sdk.lib)
+    target_link_libraries(obs-zoom-plugin PRIVATE ${ZOOM_SDK_LIBRARY})
 elseif(APPLE)
     target_link_libraries(obs-zoom-plugin PRIVATE
         "-framework ${ZOOM_SDK_FRAMEWORK}"
@@ -74,27 +104,21 @@ elseif(APPLE)
         "-framework Foundation"
     )
 endif()
+
 set_target_properties(obs-zoom-plugin PROPERTIES PREFIX "")
 
-# ── sdk.dll deployment (Windows only) ────────────────────────────────────────
 if(WIN32)
-    set(ZOOM_SDK_DLL "${ZOOM_SDK_BASE}/bin/sdk.dll")
-    if(EXISTS "${ZOOM_SDK_DLL}")
-        add_custom_command(TARGET obs-zoom-plugin POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${ZOOM_SDK_DLL}"
-                "$<TARGET_FILE_DIR:obs-zoom-plugin>/sdk.dll"
-            COMMENT "Copying sdk.dll to output directory"
-        )
-        install(FILES "${ZOOM_SDK_DLL}"
-            DESTINATION "${CMAKE_INSTALL_PREFIX}/obs-plugins/64bit"
-        )
-    else()
-        message(WARNING "sdk.dll not found at ${ZOOM_SDK_DLL} — copy it manually before running")
-    endif()
+    add_custom_command(TARGET obs-zoom-plugin POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${ZOOM_SDK_RUNTIME_DIR}"
+            "$<TARGET_FILE_DIR:obs-zoom-plugin>"
+        COMMENT "Copying Zoom SDK runtime files to output directory"
+    )
+    install(DIRECTORY "${ZOOM_SDK_RUNTIME_DIR}/"
+        DESTINATION "${CMAKE_INSTALL_PREFIX}/obs-plugins/64bit"
+    )
 endif()
 
-# ── Out-of-process capture engine ─────────────────────────────────────────────
 set(ENGINE_SOURCES
     engine/src/main.cpp
     engine/src/engine-video.cpp
@@ -107,7 +131,7 @@ if(WIN32)
     target_include_directories(ZoomObsEngine PRIVATE ${ENGINE_INCLUDES})
     target_link_libraries(ZoomObsEngine PRIVATE
         ws2_32 crypt32 winhttp shlwapi
-        ${ZOOM_SDK_DIR}/lib/sdk.lib
+        ${ZOOM_SDK_LIBRARY}
     )
     set_target_properties(ZoomObsEngine PROPERTIES WIN32_EXECUTABLE FALSE)
     install(TARGETS ZoomObsEngine
@@ -129,14 +153,13 @@ elseif(UNIX)
     target_include_directories(ZoomObsEngine PRIVATE ${ENGINE_INCLUDES})
     target_link_libraries(ZoomObsEngine PRIVATE
         ${ZOOM_SDK_DIR}/lib/libsdk.so
-        rt  # shm_open / shm_unlink on Linux
+        rt
     )
     install(TARGETS ZoomObsEngine
         RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}/obs-plugins/64bit"
     )
 endif()
 
-# ── Install ───────────────────────────────────────────────────────────────────
 install(TARGETS obs-zoom-plugin
     LIBRARY DESTINATION "${CMAKE_INSTALL_PREFIX}/obs-plugins/64bit"
 )

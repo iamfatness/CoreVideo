@@ -2,20 +2,23 @@
 
 ## Supported Versions
 
-Use this section to tell people about which versions of your project are
-currently being supported with security updates.
+CoreVideo is currently pre-1.0 software. Security fixes are applied to the
+default branch until a stable release channel exists.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 5.1.x   | :white_check_mark: |
-| 5.0.x   | :x:                |
-| 4.0.x   | :white_check_mark: |
-| < 4.0   | :x:                |
+| Version | Supported |
+| ------- | --------- |
+| main    | Yes       |
+| < 0.1   | No        |
 
 ## Reporting a Vulnerability
 
-Use this section to tell people how to report a vulnerability.
+Please do not open public issues for suspected vulnerabilities. Report security
+concerns privately to the project maintainer with:
 
-Tell them where to go, how often they can expect to get an update on a
-reported vulnerability, what to expect if the vulnerability is accepted or
-declined, etc.
+- A short description of the issue and affected component.
+- Steps to reproduce, proof-of-concept input, or logs when available.
+- The expected impact, especially if local control APIs, credentials, IPC, or
+  meeting media isolation are involved.
+
+The maintainer should acknowledge valid reports, investigate impact, and publish
+a fix or mitigation before public disclosure whenever possible.

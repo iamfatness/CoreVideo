@@ -132,8 +132,17 @@ static std::string json_str(const std::string &json, const std::string &key)
     auto pos = json.find(needle);
     if (pos == std::string::npos) return {};
     pos += needle.size();
-    auto end = json.find('"', pos);
-    return end == std::string::npos ? std::string{} : json.substr(pos, end - pos);
+    std::string result;
+    while (pos < json.size()) {
+        char c = json[pos++];
+        if (c == '\\') {
+            if (pos < json.size()) pos++; // skip escaped character
+            continue;
+        }
+        if (c == '"') break;
+        result += c;
+    }
+    return result;
 }
 
 static uint32_t json_uint(const std::string &json, const std::string &key)
@@ -142,7 +151,24 @@ static uint32_t json_uint(const std::string &json, const std::string &key)
     auto pos = json.find(needle);
     if (pos == std::string::npos) return 0;
     pos += needle.size();
-    return static_cast<uint32_t>(std::stoul(json.substr(pos)));
+    try {
+        return static_cast<uint32_t>(std::stoul(json.substr(pos)));
+    } catch (...) {
+        return 0;
+    }
+}
+
+// UUID may only contain alphanumerics, hyphens, and underscores to prevent
+// path traversal when used as a POSIX shared-memory name.
+static bool is_valid_source_uuid(const std::string &uuid)
+{
+    if (uuid.empty() || uuid.size() > 64) return false;
+    for (char c : uuid) {
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '-' || c == '_'))
+            return false;
+    }
+    return true;
 }
 
 // ── Auth event handler ────────────────────────────────────────────────────────
@@ -290,10 +316,18 @@ int main()
                 g_wide_name = to_zstr(display_name);
                 g_wide_psw  = to_zstr(passcode);
 
+                uint64_t meeting_number = 0;
+                try {
+                    meeting_number = std::stoull(meeting_id);
+                } catch (...) {
+                    ipc_write_line(e2p, R"({"cmd":"error","msg":"invalid_meeting_id"})");
+                    continue;
+                }
+
                 ZOOMSDK::JoinParam jp;
                 jp.userType = ZOOMSDK::SDK_UT_WITHOUT_LOGIN;
                 ZOOMSDK::JoinParam4WithoutLogin &p = jp.param.withoutloginuserJoin;
-                p.meetingNumber             = std::stoull(meeting_id);
+                p.meetingNumber             = meeting_number;
                 p.userName                  = g_wide_name.c_str();
                 p.psw                       = passcode.empty() ? nullptr : g_wide_psw.c_str();
                 p.isVideoOff                = true;
@@ -311,19 +345,20 @@ int main()
         } else if (line.find(IPC_CMD_SUBSCRIBE) != std::string::npos) {
             std::string uuid = json_str(line, "source_uuid");
             uint32_t    pid  = json_uint(line, "participant_id");
-            if (!uuid.empty()) {
+            if (is_valid_source_uuid(uuid)) {
                 video_engine.subscribe(pid, uuid, e2p);
                 EngineAudio::instance().init(e2p, uuid);
             }
 
         } else if (line.find(IPC_CMD_UNSUBSCRIBE) != std::string::npos) {
             std::string uuid = json_str(line, "source_uuid");
-            if (!uuid.empty())
+            if (is_valid_source_uuid(uuid))
                 video_engine.unsubscribe(uuid);
         }
     }
 
     if (meeting_svc) meeting_svc->Leave(ZOOMSDK::LEAVE_MEETING);
+    EngineAudio::instance().shutdown();
     ZOOMSDK::CleanUPSDK();
     ipc_teardown(p2e, e2p);
     return 0;

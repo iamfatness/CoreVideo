@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <mutex>
 #include <obs-module.h>
 #include <zoom_sdk_raw_data_def.h>
 #include <rawdata/rawdata_renderer_interface.h>
@@ -41,6 +42,9 @@ private:
     void unsubscribe_renderer();
 
     obs_source_t                    *m_source     = nullptr;
+    // m_renderer_mtx guards m_renderer against concurrent unsubscribe_renderer()
+    // and SDK-initiated onRendererBeDestroyed() on different threads.
+    std::mutex                       m_renderer_mtx;
     ZOOMSDK::IZoomSDKRenderer       *m_renderer   = nullptr;
     ZOOMSDK::IMeetingShareController *m_share_ctrl = nullptr;
     uint32_t                         m_current_source_id = 0;

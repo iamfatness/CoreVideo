@@ -227,8 +227,17 @@ static void zoom_source_update(void *data, obs_data_t *settings)
     static_cast<ZoomSource *>(data)->apply_settings(settings);
 }
 
-static uint32_t zoom_source_get_width(void *)  { return 0; }
-static uint32_t zoom_source_get_height(void *) { return 0; }
+static uint32_t zoom_source_get_width(void *data)
+{
+    auto *ctx = static_cast<ZoomSource *>(data);
+    return ctx->video_delegate ? ctx->video_delegate->width() : 0;
+}
+
+static uint32_t zoom_source_get_height(void *data)
+{
+    auto *ctx = static_cast<ZoomSource *>(data);
+    return ctx->video_delegate ? ctx->video_delegate->height() : 0;
+}
 
 static obs_properties_t *zoom_source_get_properties(void *data)
 {

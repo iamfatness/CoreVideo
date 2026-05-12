@@ -82,17 +82,29 @@ bool ZoomMeeting::join_impl(const std::string &meeting_id, const std::string &pa
         m_meeting_service->SetEvent(this);
     }
 
-    const std::string name = display_name.empty() ? "OBS" : display_name;
+    // Zoom SDK limits display names to 64 characters.
+    std::string name = display_name.empty() ? "OBS" : display_name;
+    if (name.size() > 64) name.resize(64);
+
     // Store as members so the raw pointers in JoinParam remain valid for the
     // duration of the async Join() call.
     m_wide_name     = to_zstr(name);
     m_wide_passcode = to_zstr(passcode);
 
+    uint64_t meeting_number = 0;
+    try {
+        meeting_number = std::stoull(meeting_id);
+    } catch (const std::exception &) {
+        blog(LOG_ERROR, "[obs-zoom-plugin] Invalid meeting ID '%s': not a number",
+             meeting_id.c_str());
+        return false;
+    }
+
     ZOOMSDK::JoinParam join_param;
     join_param.userType = ZOOMSDK::SDK_UT_WITHOUT_LOGIN;
 
     ZOOMSDK::JoinParam4WithoutLogin &p = join_param.param.withoutloginuserJoin;
-    p.meetingNumber             = std::stoull(meeting_id);
+    p.meetingNumber             = meeting_number;
     p.userName                  = m_wide_name.c_str();
     p.psw                       = passcode.empty() ? nullptr : m_wide_passcode.c_str();
     p.isVideoOff                = true;
@@ -165,15 +177,12 @@ void ZoomMeeting::schedule_reconnect()
     blog(LOG_INFO, "[obs-zoom-plugin] Reconnect attempt %d/%d in %d ms",
          attempt, kMaxReconnectAttempts, delay_ms);
 
-    struct Task { ZoomMeeting *self; };
-    auto *task = new Task{this};
-    std::thread([task, delay_ms]() {
+    ZoomMeeting *self = this;
+    std::thread([self, delay_ms]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
         obs_queue_task(OBS_TASK_UI, [](void *p) {
-            auto *t = static_cast<Task *>(p);
-            t->self->do_reconnect();
-            delete t;
-        }, task, false);
+            static_cast<ZoomMeeting *>(p)->do_reconnect();
+        }, self, false);
     }).detach();
 }
 

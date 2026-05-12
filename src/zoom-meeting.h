@@ -1,11 +1,11 @@
 #pragma once
 #include <string>
 #include <functional>
-#include "meeting_service_interface.h"
+#include "../third_party/zoom-sdk/h/meeting_service_interface.h"
 
 enum class MeetingState { Idle, Joining, InMeeting, Leaving, Failed };
 
-class ZoomMeeting : public ZOOM_SDK_NAMESPACE::IMeetingServiceEvent {
+class ZoomMeeting : public ZOOMSDK::IMeetingServiceEvent {
 public:
     static ZoomMeeting &instance();
 
@@ -14,35 +14,29 @@ public:
     void leave();
     MeetingState state() const { return m_state; }
 
-    ZOOM_SDK_NAMESPACE::IMeetingService *service() const { return m_meeting_service; }
+    ZOOMSDK::IMeetingService *service() const { return m_meeting_service; }
 
-    using VideoFrameCallback = std::function<void(const uint8_t *, uint32_t, uint32_t)>;
-    using AudioCallback      = std::function<void(const float *, size_t, uint32_t)>;
-    using StateCallback      = std::function<void(MeetingState)>;
-    void on_video_frame(VideoFrameCallback cb) { m_video_cb = cb; }
-    void on_audio(AudioCallback cb)            { m_audio_cb = cb; }
-    void on_state_change(StateCallback cb)     { m_state_cb = cb; }
+    using StateCallback = std::function<void(MeetingState)>;
+    void on_state_change(StateCallback cb) { m_state_cb = cb; }
 
     // IMeetingServiceEvent
-    void onMeetingStatusChanged(ZOOM_SDK_NAMESPACE::MeetingStatus status, int iResult) override;
-    void onMeetingStatisticsWarningNotification(ZOOM_SDK_NAMESPACE::StatisticsWarningType type) override;
-    void onMeetingParameterNotification(const ZOOM_SDK_NAMESPACE::MeetingParameter *meeting_param) override;
+    void onMeetingStatusChanged(ZOOMSDK::MeetingStatus status, int iResult) override;
+    void onMeetingStatisticsWarningNotification(ZOOMSDK::StatisticsWarningType type) override;
+    void onMeetingParameterNotification(const ZOOMSDK::MeetingParameter *meeting_param) override;
     void onSuspendParticipantsActivities() override;
     void onAICompanionActiveChangeNotice(bool bActive) override;
     void onMeetingTopicChanged(const zchar_t *sTopic) override;
     void onMeetingFullToWatchLiveStream(const zchar_t *sLiveStreamUrl) override;
-    void onUserNetworkStatusChanged(ZOOM_SDK_NAMESPACE::MeetingComponentType type,
-                                    ZOOM_SDK_NAMESPACE::ConnectionQuality level,
+    void onUserNetworkStatusChanged(ZOOMSDK::MeetingComponentType type,
+                                    ZOOMSDK::ConnectionQuality level,
                                     unsigned int userId, bool uplink) override;
 #if defined(WIN32)
-    void onAppSignalPanelUpdated(ZOOM_SDK_NAMESPACE::IMeetingAppSignalHandler *pHandler) override;
+    void onAppSignalPanelUpdated(ZOOMSDK::IMeetingAppSignalHandler *pHandler) override;
 #endif
 
 private:
     ZoomMeeting() = default;
-    MeetingState       m_state = MeetingState::Idle;
-    VideoFrameCallback m_video_cb;
-    AudioCallback      m_audio_cb;
-    StateCallback      m_state_cb;
-    ZOOM_SDK_NAMESPACE::IMeetingService *m_meeting_service = nullptr;
+    MeetingState              m_state           = MeetingState::Idle;
+    StateCallback             m_state_cb;
+    ZOOMSDK::IMeetingService *m_meeting_service = nullptr;
 };

@@ -6,6 +6,15 @@
 #include "../../third_party/zoom-sdk/h/auth_service_interface.h"
 #include "../../third_party/zoom-sdk/h/meeting_service_interface.h"
 #include <windows.h>
+static std::wstring to_zstr(const std::string &utf8)
+{
+    if (utf8.empty()) return {};
+    int len = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+    std::wstring wide(len, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &wide[0], len);
+    if (!wide.empty() && wide.back() == L'\0') wide.pop_back();
+    return wide;
+}
 #include <string>
 #include <atomic>
 
@@ -50,63 +59,63 @@ static uint32_t json_uint(const std::string &json, const std::string &key)
 
 // ── Auth event handler ────────────────────────────────────────────────────────
 
-class EngineAuthEvent : public ZOOM_SDK_NAMESPACE::IAuthServiceEvent {
+class EngineAuthEvent : public ZOOMSDK::IAuthServiceEvent {
 public:
     explicit EngineAuthEvent(HANDLE e2p) : m_e2p(e2p) {}
 
-    void onAuthenticationReturn(ZOOM_SDK_NAMESPACE::AuthResult ret) override {
-        if (ret == ZOOM_SDK_NAMESPACE::AUTHRET_SUCCESS)
+    void onAuthenticationReturn(ZOOMSDK::AuthResult ret) override {
+        if (ret == ZOOMSDK::AUTHRET_SUCCESS)
             write_line(m_e2p, R"({"cmd":"auth_ok"})");
         else
             write_line(m_e2p, R"({"cmd":"auth_fail","code":)" +
                        std::to_string(static_cast<int>(ret)) + "}");
     }
-    void onLoginReturnWithReason(ZOOM_SDK_NAMESPACE::LOGINSTATUS,
-                                 ZOOM_SDK_NAMESPACE::IAccountInfo *,
-                                 ZOOM_SDK_NAMESPACE::LoginFailReason) override {}
+    void onLoginReturnWithReason(ZOOMSDK::LOGINSTATUS,
+                                 ZOOMSDK::IAccountInfo *,
+                                 ZOOMSDK::LoginFailReason) override {}
     void onLogout() override {}
     void onZoomIdentityExpired() override {
         write_line(m_e2p, R"({"cmd":"error","msg":"identity_expired"})");
     }
     void onZoomAuthIdentityExpired() override {}
-    void onNotificationServiceStatus(ZOOM_SDK_NAMESPACE::SDKNotificationServiceStatus,
-                                     ZOOM_SDK_NAMESPACE::SDKNotificationServiceError) override {}
+    void onNotificationServiceStatus(ZOOMSDK::SDKNotificationServiceStatus,
+                                     ZOOMSDK::SDKNotificationServiceError) override {}
 private:
     HANDLE m_e2p;
 };
 
 // ── Meeting event handler ─────────────────────────────────────────────────────
 
-class EngineMeetingEvent : public ZOOM_SDK_NAMESPACE::IMeetingServiceEvent {
+class EngineMeetingEvent : public ZOOMSDK::IMeetingServiceEvent {
 public:
     explicit EngineMeetingEvent(HANDLE e2p) : m_e2p(e2p) {}
 
-    void onMeetingStatusChanged(ZOOM_SDK_NAMESPACE::MeetingStatus status, int iResult) override {
+    void onMeetingStatusChanged(ZOOMSDK::MeetingStatus status, int iResult) override {
         switch (status) {
-        case ZOOM_SDK_NAMESPACE::MEETING_STATUS_INMEETING:
+        case ZOOMSDK::MEETING_STATUS_INMEETING:
             write_line(m_e2p, R"({"cmd":"joined"})");
             break;
-        case ZOOM_SDK_NAMESPACE::MEETING_STATUS_DISCONNECTING:
-        case ZOOM_SDK_NAMESPACE::MEETING_STATUS_ENDED:
+        case ZOOMSDK::MEETING_STATUS_DISCONNECTING:
+        case ZOOMSDK::MEETING_STATUS_ENDED:
             write_line(m_e2p, R"({"cmd":"left"})");
             break;
-        case ZOOM_SDK_NAMESPACE::MEETING_STATUS_FAILED:
+        case ZOOMSDK::MEETING_STATUS_FAILED:
             write_line(m_e2p, R"({"cmd":"error","msg":"meeting_failed","code":)" +
                        std::to_string(iResult) + "}");
             break;
         default: break;
         }
     }
-    void onMeetingStatisticsWarningNotification(ZOOM_SDK_NAMESPACE::StatisticsWarningType) override {}
-    void onMeetingParameterNotification(const ZOOM_SDK_NAMESPACE::MeetingParameter *) override {}
+    void onMeetingStatisticsWarningNotification(ZOOMSDK::StatisticsWarningType) override {}
+    void onMeetingParameterNotification(const ZOOMSDK::MeetingParameter *) override {}
     void onSuspendParticipantsActivities() override {}
     void onAICompanionActiveChangeNotice(bool) override {}
     void onMeetingTopicChanged(const zchar_t *) override {}
     void onMeetingFullToWatchLiveStream(const zchar_t *) override {}
-    void onUserNetworkStatusChanged(ZOOM_SDK_NAMESPACE::MeetingComponentType,
-                                    ZOOM_SDK_NAMESPACE::ConnectionQuality,
+    void onUserNetworkStatusChanged(ZOOMSDK::MeetingComponentType,
+                                    ZOOMSDK::ConnectionQuality,
                                     unsigned int, bool) override {}
-    void onAppSignalPanelUpdated(ZOOM_SDK_NAMESPACE::IMeetingAppSignalHandler *) override {}
+    void onAppSignalPanelUpdated(ZOOMSDK::IMeetingAppSignalHandler *) override {}
 private:
     HANDLE m_e2p;
 };
@@ -127,8 +136,8 @@ int main()
 
     write_line(e2p, R"({"cmd":"ready"})");
 
-    ZOOM_SDK_NAMESPACE::IAuthService    *auth_svc    = nullptr;
-    ZOOM_SDK_NAMESPACE::IMeetingService *meeting_svc = nullptr;
+    ZOOMSDK::IAuthService    *auth_svc    = nullptr;
+    ZOOMSDK::IMeetingService *meeting_svc = nullptr;
     EngineAuthEvent    auth_event(e2p);
     EngineMeetingEvent meeting_event(e2p);
     EngineVideo        video_engine;
@@ -146,16 +155,19 @@ int main()
             // {"cmd":"init","jwt":"<token>"}
             std::string jwt = json_str(line, "jwt");
 
-            ZOOM_SDK_NAMESPACE::InitParam init_param;
-            init_param.strWebDomain      = L"https://zoom.us";
+            ZOOMSDK::InitParam init_param;
+            init_param.strWebDomain       = L"https://zoom.us";
             init_param.enableGenerateDump = true;
-            ZOOM_SDK_NAMESPACE::InitSDK(init_param);
+            init_param.obConfigOpts.optionalFeatures = ENABLE_CUSTOMIZED_UI_FLAG;
+            init_param.rawdataOpts.videoRawdataMemoryMode = ZOOMSDK::ZoomSDKRawDataMemoryModeHeap;
+            init_param.rawdataOpts.audioRawdataMemoryMode = ZOOMSDK::ZoomSDKRawDataMemoryModeHeap;
+            ZOOMSDK::InitSDK(init_param);
 
-            ZOOM_SDK_NAMESPACE::CreateAuthService(&auth_svc);
+            ZOOMSDK::CreateAuthService(&auth_svc);
             if (auth_svc) {
                 auth_svc->SetEvent(&auth_event);
                 std::wstring wjwt(jwt.begin(), jwt.end());
-                ZOOM_SDK_NAMESPACE::AuthContext ctx;
+                ZOOMSDK::AuthContext ctx;
                 ctx.jwt_token = wjwt.c_str();
                 auth_svc->SDKAuth(ctx);
             } else {
@@ -170,30 +182,30 @@ int main()
             if (display_name.empty()) display_name = "OBS";
 
             if (!meeting_svc) {
-                ZOOM_SDK_NAMESPACE::CreateMeetingService(&meeting_svc);
+                ZOOMSDK::CreateMeetingService(&meeting_svc);
                 if (meeting_svc) meeting_svc->SetEvent(&meeting_event);
             }
             if (meeting_svc && !meeting_id.empty()) {
                 std::wstring wname(display_name.begin(), display_name.end());
                 std::wstring wpsw(passcode.begin(), passcode.end());
 
-                ZOOM_SDK_NAMESPACE::JoinParam jp;
-                jp.userType = ZOOM_SDK_NAMESPACE::SDK_UT_WITHOUT_LOGIN;
-                ZOOM_SDK_NAMESPACE::JoinParam4WithoutLogin &p = jp.param.withoutloginuserJoin;
+                ZOOMSDK::JoinParam jp;
+                jp.userType = ZOOMSDK::SDK_UT_WITHOUT_LOGIN;
+                ZOOMSDK::JoinParam4WithoutLogin &p = jp.param.withoutloginuserJoin;
                 p.meetingNumber             = std::stoull(meeting_id);
                 p.userName                  = wname.c_str();
                 p.psw                       = passcode.empty() ? nullptr : wpsw.c_str();
                 p.isVideoOff                = true;
                 p.isAudioOff                = true;
                 p.isMyVoiceInMix            = false;
-                p.eAudioRawdataSamplingRate = ZOOM_SDK_NAMESPACE::AudioRawdataSamplingRate_48K;
-                p.eVideoRawdataColorspace   = ZOOM_SDK_NAMESPACE::VideoRawdataColorspace_BT709_F;
+                p.eAudioRawdataSamplingRate = ZOOMSDK::AudioRawdataSamplingRate_48K;
+                p.eVideoRawdataColorspace   = ZOOMSDK::VideoRawdataColorspace_BT709_F;
                 meeting_svc->Join(jp);
             }
 
         } else if (line.find(IPC_CMD_LEAVE) != std::string::npos) {
             if (meeting_svc)
-                meeting_svc->Leave(ZOOM_SDK_NAMESPACE::LEAVE_MEETING);
+                meeting_svc->Leave(ZOOMSDK::LEAVE_MEETING);
 
         } else if (line.find(IPC_CMD_SUBSCRIBE) != std::string::npos) {
             // {"cmd":"subscribe","source_uuid":"<uuid>","participant_id":<id>}
@@ -212,8 +224,8 @@ int main()
         }
     }
 
-    if (meeting_svc) meeting_svc->Leave(ZOOM_SDK_NAMESPACE::LEAVE_MEETING);
-    ZOOM_SDK_NAMESPACE::CleanUPSDK();
+    if (meeting_svc) meeting_svc->Leave(ZOOMSDK::LEAVE_MEETING);
+    ZOOMSDK::CleanUPSDK();
     CloseHandle(p2e);
     CloseHandle(e2p);
     return 0;

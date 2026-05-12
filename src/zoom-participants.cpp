@@ -52,9 +52,10 @@ void ZoomParticipants::detach()
 ParticipantInfo ZoomParticipants::user_to_info(ZOOMSDK::IUserInfo *u)
 {
     ParticipantInfo info;
-    info.user_id   = u->GetUserID();
-    info.has_video = u->IsVideoOn();
+    info.user_id    = u->GetUserID();
+    info.has_video  = u->IsVideoOn();
     info.is_talking = u->IsTalking();
+    info.is_muted   = u->IsAudioMuted();
 
     const zchar_t *name = u->GetUserName();
 #if defined(WIN32)

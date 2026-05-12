@@ -165,15 +165,12 @@ void ZoomMeeting::schedule_reconnect()
     blog(LOG_INFO, "[obs-zoom-plugin] Reconnect attempt %d/%d in %d ms",
          attempt, kMaxReconnectAttempts, delay_ms);
 
-    struct Task { ZoomMeeting *self; };
-    auto *task = new Task{this};
-    std::thread([task, delay_ms]() {
+    ZoomMeeting *self = this;
+    std::thread([self, delay_ms]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
         obs_queue_task(OBS_TASK_UI, [](void *p) {
-            auto *t = static_cast<Task *>(p);
-            t->self->do_reconnect();
-            delete t;
-        }, task, false);
+            static_cast<ZoomMeeting *>(p)->do_reconnect();
+        }, self, false);
     }).detach();
 }
 

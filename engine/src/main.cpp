@@ -324,6 +324,7 @@ int main()
     }
 
     if (meeting_svc) meeting_svc->Leave(ZOOMSDK::LEAVE_MEETING);
+    EngineAudio::instance().shutdown();
     ZOOMSDK::CleanUPSDK();
     ipc_teardown(p2e, e2p);
     return 0;

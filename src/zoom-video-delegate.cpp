@@ -13,10 +13,11 @@ ZoomVideoDelegate::~ZoomVideoDelegate()
 
 bool ZoomVideoDelegate::subscribe(uint32_t participant_id, VideoResolution res)
 {
-    if (m_renderer) unsubscribe();
+    unsubscribe();
 
-    ZOOMSDK::SDKError err = ZOOMSDK::createRenderer(&m_renderer, this);
-    if (err != ZOOMSDK::SDKERR_SUCCESS || !m_renderer) {
+    ZOOMSDK::IZoomSDKRenderer *renderer = nullptr;
+    ZOOMSDK::SDKError err = ZOOMSDK::createRenderer(&renderer, this);
+    if (err != ZOOMSDK::SDKERR_SUCCESS || !renderer) {
         blog(LOG_ERROR, "[obs-zoom-plugin] createRenderer failed: %d", static_cast<int>(err));
         return false;
     }
@@ -27,16 +28,19 @@ bool ZoomVideoDelegate::subscribe(uint32_t participant_id, VideoResolution res)
     case VideoResolution::P720:  sdk_res = ZOOMSDK::ZoomSDKResolution_720P;  break;
     default:                     sdk_res = ZOOMSDK::ZoomSDKResolution_1080P; break;
     }
-    m_renderer->setRawDataResolution(sdk_res);
+    renderer->setRawDataResolution(sdk_res);
 
-    err = m_renderer->subscribe(participant_id, ZOOMSDK::RAW_DATA_TYPE_VIDEO);
+    err = renderer->subscribe(participant_id, ZOOMSDK::RAW_DATA_TYPE_VIDEO);
     if (err != ZOOMSDK::SDKERR_SUCCESS) {
         blog(LOG_ERROR, "[obs-zoom-plugin] renderer->subscribe failed: %d", static_cast<int>(err));
-        ZOOMSDK::destroyRenderer(m_renderer);
-        m_renderer = nullptr;
+        ZOOMSDK::destroyRenderer(renderer);
         return false;
     }
 
+    {
+        std::lock_guard<std::mutex> lk(m_renderer_mtx);
+        m_renderer = renderer;
+    }
     static const char *res_names[] = {"360P", "720P", "1080P"};
     blog(LOG_INFO, "[obs-zoom-plugin] Video subscribed for participant %u at %s",
          participant_id, res_names[static_cast<int>(res)]);
@@ -45,11 +49,18 @@ bool ZoomVideoDelegate::subscribe(uint32_t participant_id, VideoResolution res)
 
 void ZoomVideoDelegate::unsubscribe()
 {
-    if (!m_renderer) return;
-    m_renderer->unSubscribe();
-    ZOOMSDK::destroyRenderer(m_renderer);
-    m_renderer = nullptr;
+    ZOOMSDK::IZoomSDKRenderer *r = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(m_renderer_mtx);
+        r = m_renderer;
+        m_renderer = nullptr;
+    }
+    if (!r) return;
     m_active.store(false, std::memory_order_relaxed);
+    m_width.store(0, std::memory_order_relaxed);
+    m_height.store(0, std::memory_order_relaxed);
+    r->unSubscribe();
+    ZOOMSDK::destroyRenderer(r);
 }
 
 void ZoomVideoDelegate::onRawDataFrameReceived(YUVRawDataI420 *data)
@@ -59,6 +70,8 @@ void ZoomVideoDelegate::onRawDataFrameReceived(YUVRawDataI420 *data)
     const uint32_t w = data->GetStreamWidth();
     const uint32_t h = data->GetStreamHeight();
     if (w == 0 || h == 0) return;
+    m_width.store(w, std::memory_order_relaxed);
+    m_height.store(h, std::memory_order_relaxed);
 
     obs_source_frame frame = {};
     frame.format      = VIDEO_FORMAT_I420;
@@ -84,7 +97,14 @@ void ZoomVideoDelegate::onRawDataStatusChanged(RawDataStatus status)
 
 void ZoomVideoDelegate::onRendererBeDestroyed()
 {
+    // The SDK is destroying the renderer; null our pointer without calling
+    // destroyRenderer() ourselves (that would double-free).
+    {
+        std::lock_guard<std::mutex> lk(m_renderer_mtx);
+        m_renderer = nullptr;
+    }
     m_active.store(false, std::memory_order_relaxed);
-    m_renderer = nullptr;
+    m_width.store(0, std::memory_order_relaxed);
+    m_height.store(0, std::memory_order_relaxed);
     blog(LOG_INFO, "[obs-zoom-plugin] Video renderer destroyed by SDK");
 }

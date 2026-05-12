@@ -33,7 +33,9 @@ bool ZoomControlServer::start(quint16 port)
     }
 
     if (!m_server->listen(QHostAddress::LocalHost, port)) {
-        blog(LOG_WARNING, "[obs-zoom-plugin] Control server failed on 127.0.0.1:%u: %s",
+        blog(LOG_ERROR,
+             "[obs-zoom-plugin] Control server failed to bind on 127.0.0.1:%u: %s "
+             "— TCP control API unavailable. Check that no other process owns this port.",
              static_cast<unsigned>(port),
              m_server->errorString().toUtf8().constData());
         return false;

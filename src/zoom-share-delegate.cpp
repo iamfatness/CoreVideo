@@ -65,27 +65,43 @@ void ZoomShareDelegate::subscribe_to(uint32_t share_source_id)
     if (m_current_source_id == share_source_id) return;
     unsubscribe_renderer();
 
-    ZOOMSDK::SDKError err = ZOOMSDK::createRenderer(&m_renderer, this);
-    if (err != ZOOMSDK::SDKERR_SUCCESS || !m_renderer) return;
-
-    m_renderer->setRawDataResolution(ZOOMSDK::ZoomSDKResolution_1080P);
-    err = m_renderer->subscribe(share_source_id, ZOOMSDK::RAW_DATA_TYPE_SHARE);
-    if (err != ZOOMSDK::SDKERR_SUCCESS) {
-        ZOOMSDK::destroyRenderer(m_renderer);
-        m_renderer = nullptr;
+    ZOOMSDK::IZoomSDKRenderer *renderer = nullptr;
+    ZOOMSDK::SDKError err = ZOOMSDK::createRenderer(&renderer, this);
+    if (err != ZOOMSDK::SDKERR_SUCCESS || !renderer) {
+        blog(LOG_ERROR, "[obs-zoom-plugin] Share createRenderer failed: %d",
+             static_cast<int>(err));
         return;
     }
-    m_current_source_id = share_source_id;
+
+    renderer->setRawDataResolution(ZOOMSDK::ZoomSDKResolution_1080P);
+    err = renderer->subscribe(share_source_id, ZOOMSDK::RAW_DATA_TYPE_SHARE);
+    if (err != ZOOMSDK::SDKERR_SUCCESS) {
+        blog(LOG_ERROR, "[obs-zoom-plugin] Share renderer->subscribe failed: %d",
+             static_cast<int>(err));
+        ZOOMSDK::destroyRenderer(renderer);
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(m_renderer_mtx);
+        m_renderer = renderer;
+        m_current_source_id = share_source_id;
+    }
     blog(LOG_INFO, "[obs-zoom-plugin] Share subscribed (source_id=%u)", share_source_id);
 }
 
 void ZoomShareDelegate::unsubscribe_renderer()
 {
-    if (!m_renderer) return;
-    m_renderer->unSubscribe();
-    ZOOMSDK::destroyRenderer(m_renderer);
-    m_renderer = nullptr;
-    m_current_source_id = 0;
+    ZOOMSDK::IZoomSDKRenderer *r = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(m_renderer_mtx);
+        r = m_renderer;
+        m_renderer = nullptr;
+        m_current_source_id = 0;
+    }
+    if (!r) return;
+    r->unSubscribe();
+    ZOOMSDK::destroyRenderer(r);
 }
 
 // ── IZoomSDKRendererDelegate ─────────────────────────────────────────────────
@@ -119,6 +135,8 @@ void ZoomShareDelegate::onRawDataStatusChanged(RawDataStatus status)
 
 void ZoomShareDelegate::onRendererBeDestroyed()
 {
+    // SDK is destroying the renderer — null our pointer; don't call destroyRenderer().
+    std::lock_guard<std::mutex> lk(m_renderer_mtx);
     m_renderer = nullptr;
     m_current_source_id = 0;
 }

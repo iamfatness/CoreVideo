@@ -1,0 +1,21 @@
+build/
+build_*/
+.cache/
+.vscode/
+.idea/
+*.user
+# Zoom SDK (download separately — see README)
+third_party/zoom-sdk/
+# CMake artefacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!cmake/*.cmake
+!buildspec/*.cmake
+# Compiled output
+*.so
+*.dylib
+*.dll
+*.pdb

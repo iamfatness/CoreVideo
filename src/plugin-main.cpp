@@ -7,6 +7,8 @@
 #include "zoom-auth.h"
 #include "zoom-settings.h"
 #include "zoom-settings-dialog.h"
+#include "zoom-output-dialog.h"
+#include "zoom-control-server.h"
 #include <QMainWindow>
 
 OBS_DECLARE_MODULE()
@@ -24,6 +26,7 @@ bool obs_module_load(void)
     zoom_source_register();
     zoom_share_source_register();
     zoom_participant_audio_source_register();
+    ZoomControlServer::instance().start();
 
     ZoomPluginSettings s = ZoomPluginSettings::load();
     if (!s.sdk_key.empty() && !s.sdk_secret.empty()) {
@@ -34,6 +37,12 @@ bool obs_module_load(void)
     obs_frontend_add_tools_menu_item("Zoom Plugin Settings", [](void *) {
         auto *main_win = static_cast<QMainWindow *>(obs_frontend_get_main_window());
         ZoomSettingsDialog dlg(main_win);
+        dlg.exec();
+    }, nullptr);
+
+    obs_frontend_add_tools_menu_item("Zoom Output Manager", [](void *) {
+        auto *main_win = static_cast<QMainWindow *>(obs_frontend_get_main_window());
+        ZoomOutputDialog dlg(main_win);
         dlg.exec();
     }, nullptr);
 
@@ -50,5 +59,6 @@ bool obs_module_load(void)
 void obs_module_unload(void)
 {
     blog(LOG_INFO, "[obs-zoom-plugin] Unloading plugin");
+    ZoomControlServer::instance().stop();
     ZoomAuth::instance().shutdown();
 }

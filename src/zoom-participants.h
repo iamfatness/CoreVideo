@@ -4,6 +4,7 @@
 #include <vector>
 #include <functional>
 #include <mutex>
+#include <unordered_map>
 #include <meeting_service_components/meeting_participants_ctrl_interface.h>
 #include <meeting_service_components/meeting_audio_interface.h>
 
@@ -12,6 +13,7 @@ struct ParticipantInfo {
     std::string display_name;
     bool        has_video    = false;
     bool        is_talking   = false;
+    bool        is_muted     = false;
 };
 
 class ZoomParticipants : public ZOOMSDK::IMeetingParticipantsCtrlEvent,
@@ -27,7 +29,8 @@ public:
     uint32_t active_speaker_id() const;
 
     using RosterCallback = std::function<void()>;
-    void on_roster_change(RosterCallback cb) { m_cb = std::move(cb); }
+    void add_roster_callback(void *key, RosterCallback cb);
+    void remove_roster_callback(void *key);
 
     // IMeetingParticipantsCtrlEvent
     void onUserJoin(ZOOMSDK::IList<unsigned int> *lstUserID,
@@ -83,5 +86,5 @@ private:
     mutable std::mutex              m_mtx;
     std::vector<ParticipantInfo>    m_roster;
     uint32_t                        m_active_speaker = 0;
-    RosterCallback                  m_cb;
+    std::unordered_map<void *, RosterCallback> m_cbs;
 };

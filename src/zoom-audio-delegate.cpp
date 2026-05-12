@@ -20,9 +20,9 @@ bool ZoomAudioDelegate::subscribe()
     if (m_registered) return true;
 
     ZoomAudioRouter &router = ZoomAudioRouter::instance();
-    router.set_mixed_sink(
+    router.add_mixed_sink(this,
         [this](AudioRawData *d) { on_mixed_audio(d); });
-    router.set_one_way_sink(
+    router.add_one_way_sink(this,
         [this](AudioRawData *d, uint32_t uid) { on_one_way_audio(d, uid); });
 
     m_registered = true;
@@ -33,8 +33,8 @@ bool ZoomAudioDelegate::subscribe()
 void ZoomAudioDelegate::unsubscribe()
 {
     if (!m_registered) return;
-    ZoomAudioRouter::instance().clear_mixed_sink();
-    ZoomAudioRouter::instance().clear_one_way_sink();
+    ZoomAudioRouter::instance().remove_mixed_sink(this);
+    ZoomAudioRouter::instance().remove_one_way_sink(this);
     m_registered = false;
 }
 

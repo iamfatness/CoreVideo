@@ -33,9 +33,12 @@ void ZoomParticipants::detach()
         m_ctrl->SetEvent(nullptr);
         m_ctrl = nullptr;
     }
-    std::lock_guard<std::mutex> lk(m_mtx);
-    m_roster.clear();
-    m_active_speaker = 0;
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        m_roster.clear();
+        m_active_speaker = 0;
+    }
+    fire();
 }
 
 ParticipantInfo ZoomParticipants::user_to_info(ZOOMSDK::IUserInfo *u)
@@ -85,7 +88,29 @@ void ZoomParticipants::rebuild_roster()
 
 void ZoomParticipants::fire()
 {
-    if (m_cb) m_cb();
+    std::vector<RosterCallback> callbacks;
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        for (auto &[key, cb] : m_cbs)
+            if (cb) callbacks.push_back(cb);
+    }
+    for (auto &cb : callbacks)
+        cb();
+}
+
+void ZoomParticipants::add_roster_callback(void *key, RosterCallback cb)
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    if (cb)
+        m_cbs[key] = std::move(cb);
+    else
+        m_cbs.erase(key);
+}
+
+void ZoomParticipants::remove_roster_callback(void *key)
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    m_cbs.erase(key);
 }
 
 std::vector<ParticipantInfo> ZoomParticipants::roster() const
@@ -190,12 +215,45 @@ void ZoomParticipants::onUserActiveAudioChange(ZOOMSDK::IList<unsigned int> *lst
     {
         std::lock_guard<std::mutex> lk(m_mtx);
         m_active_speaker = (lst && lst->GetCount() > 0) ? lst->GetItem(0) : 0;
+        for (auto &p : m_roster)
+            p.is_talking = false;
+        if (lst) {
+            for (int i = 0; i < lst->GetCount(); ++i) {
+                const uint32_t uid = lst->GetItem(i);
+                for (auto &p : m_roster) {
+                    if (p.user_id == uid) {
+                        p.is_talking = true;
+                        break;
+                    }
+                }
+            }
+        }
     }
     fire();
 }
 
 void ZoomParticipants::onUserAudioStatusChange(
-    ZOOMSDK::IList<ZOOMSDK::IUserAudioStatus *> *, const zchar_t *) {}
+    ZOOMSDK::IList<ZOOMSDK::IUserAudioStatus *> *lst, const zchar_t *)
+{
+    if (!lst) return;
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        for (int i = 0; i < lst->GetCount(); ++i) {
+            auto *status = lst->GetItem(i);
+            if (!status) continue;
+            const uint32_t uid = status->GetUserId();
+            const auto audio_status = status->GetStatus();
+            for (auto &p : m_roster) {
+                if (p.user_id != uid) continue;
+                p.is_muted = audio_status == ZOOMSDK::Audio_Muted ||
+                             audio_status == ZOOMSDK::Audio_Muted_ByHost ||
+                             audio_status == ZOOMSDK::Audio_MutedAll_ByHost;
+                break;
+            }
+        }
+    }
+    fire();
+}
 void ZoomParticipants::onHostRequestStartAudio(ZOOMSDK::IRequestStartAudioHandler *) {}
 void ZoomParticipants::onJoin3rdPartyTelephonyAudio(const zchar_t *) {}
 void ZoomParticipants::onMuteOnEntryStatusChange(bool) {}

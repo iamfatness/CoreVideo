@@ -12,9 +12,10 @@ struct ZoomSource {
     std::string   meeting_id;
     std::string   passcode;
     uint32_t      participant_id  = 0;
-    bool          auto_join       = false;
+    bool          auto_join           = false;
     bool          active_speaker_mode = false;
-    AudioChannelMode audio_mode   = AudioChannelMode::Mono;
+    bool          isolate_audio       = false;
+    AudioChannelMode audio_mode       = AudioChannelMode::Mono;
     std::unique_ptr<ZoomVideoDelegate> video_delegate;
     std::unique_ptr<ZoomAudioDelegate> audio_delegate;
     void apply_settings(obs_data_t *settings);

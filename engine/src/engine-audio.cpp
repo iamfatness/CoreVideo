@@ -5,9 +5,9 @@
 
 EngineAudio &EngineAudio::instance() { static EngineAudio inst; return inst; }
 
-bool EngineAudio::init(HANDLE e2p_pipe, const std::string &source_uuid)
+bool EngineAudio::init(IpcFd e2p_fd, const std::string &source_uuid)
 {
-    m_e2p_pipe    = e2p_pipe;
+    m_e2p_fd      = e2p_fd;
     m_source_uuid = source_uuid;
 
     if (m_subscribed) return true;
@@ -28,46 +28,34 @@ void EngineAudio::shutdown()
     ZOOMSDK::IZoomSDKAudioRawDataHelper *helper = ZOOMSDK::GetAudioRawdataHelper();
     if (helper) helper->unSubscribe();
     m_subscribed = false;
-    if (m_shm_ptr)    { UnmapViewOfFile(m_shm_ptr);  m_shm_ptr    = nullptr; }
-    if (m_shm_handle) { CloseHandle(m_shm_handle);   m_shm_handle = nullptr; }
+    shm_region_destroy(m_shm);
 }
 
 void EngineAudio::ensure_shm(uint32_t byte_len)
 {
     const size_t total = sizeof(ShmAudioHeader) + byte_len;
-    if (m_shm_handle && m_shm_size >= total) return;
-
-    if (m_shm_ptr)    { UnmapViewOfFile(m_shm_ptr);  m_shm_ptr    = nullptr; }
-    if (m_shm_handle) { CloseHandle(m_shm_handle);   m_shm_handle = nullptr; }
+    if (m_shm.ptr && m_shm.size >= total) return;
 
     const std::string region_name = IPC_SHM_PREFIX + m_source_uuid + "_audio";
-    m_shm_handle = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr,
-                                      PAGE_READWRITE, 0,
-                                      static_cast<DWORD>(total),
-                                      region_name.c_str());
-    m_shm_ptr  = MapViewOfFile(m_shm_handle, FILE_MAP_WRITE, 0, 0, total);
-    m_shm_size = total;
+    shm_region_create(m_shm, region_name, total);
 }
 
 void EngineAudio::onMixedAudioRawDataReceived(AudioRawData *data)
 {
-    if (!data || !m_shm_handle) return;
+    if (!data || m_e2p_fd == kIpcInvalidFd) return;
     const uint32_t byte_len = data->GetBufferLen();
     ensure_shm(byte_len);
-    if (!m_shm_ptr) return;
+    if (!m_shm.ptr) return;
 
-    auto *hdr        = static_cast<ShmAudioHeader *>(m_shm_ptr);
+    auto *hdr        = static_cast<ShmAudioHeader *>(m_shm.ptr);
     hdr->sample_rate = data->GetSampleRate();
     hdr->channels    = static_cast<uint16_t>(data->GetChannelNum());
     hdr->byte_len    = byte_len;
-    std::memcpy(static_cast<char *>(m_shm_ptr) + sizeof(ShmAudioHeader),
+    std::memcpy(static_cast<char *>(m_shm.ptr) + sizeof(ShmAudioHeader),
                 data->GetBuffer(), byte_len);
 
-    const std::string msg =
-        R"({"cmd":"audio","source_uuid":")" + m_source_uuid + "\"}";
-    DWORD written;
-    WriteFile(m_e2p_pipe, (msg + "\n").c_str(),
-              static_cast<DWORD>(msg.size() + 1), &written, nullptr);
+    ipc_write_line(m_e2p_fd,
+        R"({"cmd":"audio","source_uuid":")" + m_source_uuid + "\"}");
 }
 
 void EngineAudio::onOneWayAudioRawDataReceived(AudioRawData *, uint32_t) {}

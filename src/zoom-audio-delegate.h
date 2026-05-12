@@ -20,6 +20,10 @@ public:
     void set_channel_mode(AudioChannelMode mode);
     AudioChannelMode channel_mode() const;
 
+    // 0 = use mixed audio; non-zero = isolate this participant's audio stream
+    void set_isolated_user(uint32_t user_id);
+    uint32_t isolated_user() const;
+
     // IZoomSDKAudioRawDataDelegate
     void onMixedAudioRawDataReceived(AudioRawData *data) override;
     void onOneWayAudioRawDataReceived(AudioRawData *data, uint32_t user_id) override;
@@ -28,11 +32,13 @@ public:
                                                  const zchar_t *pLanguageName) override;
 
 private:
+    void push_audio(AudioRawData *data);
     void push_mono(AudioRawData *data);
     void push_stereo(AudioRawData *data);
 
     obs_source_t        *m_source;
     std::atomic<int>     m_mode;
+    std::atomic<uint32_t> m_isolated_user{0};
     std::vector<int16_t> m_stereo_buf;
     bool                 m_subscribed = false;
 };

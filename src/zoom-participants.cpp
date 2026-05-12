@@ -10,17 +10,25 @@ ZoomParticipants &ZoomParticipants::instance()
     return inst;
 }
 
-void ZoomParticipants::attach(ZOOMSDK::IMeetingParticipantsController *ctrl)
+void ZoomParticipants::attach(ZOOMSDK::IMeetingParticipantsController *part_ctrl,
+                              ZOOMSDK::IMeetingAudioController       *audio_ctrl)
 {
-    m_ctrl = ctrl;
-    if (!ctrl) return;
-    ctrl->SetEvent(this);
-    rebuild_roster();
+    m_ctrl = part_ctrl;
+    if (part_ctrl) {
+        part_ctrl->SetEvent(this);
+        rebuild_roster();
+    }
+    m_audio_ctrl = audio_ctrl;
+    if (audio_ctrl) audio_ctrl->SetEvent(this);
     fire();
 }
 
 void ZoomParticipants::detach()
 {
+    if (m_audio_ctrl) {
+        m_audio_ctrl->SetEvent(nullptr);
+        m_audio_ctrl = nullptr;
+    }
     if (m_ctrl) {
         m_ctrl->SetEvent(nullptr);
         m_ctrl = nullptr;
@@ -174,3 +182,20 @@ void ZoomParticipants::onGrantCoOwnerPrivilegeChanged(bool) {}
 void ZoomParticipants::onCreateCompanionRelation(unsigned int, unsigned int) {}
 void ZoomParticipants::onRemoveCompanionRelation(unsigned int) {}
 #endif
+
+// ── IMeetingAudioCtrlEvent ────────────────────────────────────────────────────
+
+void ZoomParticipants::onUserActiveAudioChange(ZOOMSDK::IList<unsigned int> *lst)
+{
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        m_active_speaker = (lst && lst->GetCount() > 0) ? lst->GetItem(0) : 0;
+    }
+    fire();
+}
+
+void ZoomParticipants::onUserAudioStatusChange(
+    ZOOMSDK::IList<ZOOMSDK::IUserAudioStatus *> *, const zchar_t *) {}
+void ZoomParticipants::onHostRequestStartAudio(ZOOMSDK::IRequestStartAudioHandler *) {}
+void ZoomParticipants::onJoin3rdPartyTelephonyAudio(const zchar_t *) {}
+void ZoomParticipants::onMuteOnEntryStatusChange(bool) {}

@@ -5,6 +5,7 @@
 #include <functional>
 #include <mutex>
 #include "../third_party/zoom-sdk/h/meeting_participants_ctrl_interface.h"
+#include "../third_party/zoom-sdk/h/meeting_audio_interface.h"
 
 struct ParticipantInfo {
     uint32_t    user_id      = 0;
@@ -13,11 +14,13 @@ struct ParticipantInfo {
     bool        is_talking   = false;
 };
 
-class ZoomParticipants : public ZOOMSDK::IMeetingParticipantsCtrlEvent {
+class ZoomParticipants : public ZOOMSDK::IMeetingParticipantsCtrlEvent,
+                         public ZOOMSDK::IMeetingAudioCtrlEvent {
 public:
     static ZoomParticipants &instance();
 
-    void attach(ZOOMSDK::IMeetingParticipantsController *ctrl);
+    void attach(ZOOMSDK::IMeetingParticipantsController *part_ctrl,
+                ZOOMSDK::IMeetingAudioController       *audio_ctrl);
     void detach();
 
     std::vector<ParticipantInfo> roster() const;
@@ -60,13 +63,23 @@ public:
     void onRemoveCompanionRelation(unsigned int childUserID) override;
 #endif
 
+    // IMeetingAudioCtrlEvent — used for reliable active-speaker tracking
+    void onUserAudioStatusChange(
+        ZOOMSDK::IList<ZOOMSDK::IUserAudioStatus *> *lstAudioStatusChange,
+        const zchar_t *strAudioStatusList) override;
+    void onUserActiveAudioChange(ZOOMSDK::IList<unsigned int> *plstActiveAudio) override;
+    void onHostRequestStartAudio(ZOOMSDK::IRequestStartAudioHandler *handler_) override;
+    void onJoin3rdPartyTelephonyAudio(const zchar_t *audioInfo) override;
+    void onMuteOnEntryStatusChange(bool bEnabled) override;
+
 private:
     ZoomParticipants() = default;
     void rebuild_roster();
     ParticipantInfo user_to_info(ZOOMSDK::IUserInfo *u);
     void fire();
 
-    ZOOMSDK::IMeetingParticipantsController *m_ctrl = nullptr;
+    ZOOMSDK::IMeetingParticipantsController *m_ctrl       = nullptr;
+    ZOOMSDK::IMeetingAudioController        *m_audio_ctrl = nullptr;
     mutable std::mutex              m_mtx;
     std::vector<ParticipantInfo>    m_roster;
     uint32_t                        m_active_speaker = 0;

@@ -3,7 +3,7 @@
 #include <string>
 #include <unordered_map>
 #include <memory>
-#include <windows.h>
+#include "../../src/engine-ipc.h"
 #include "../../third_party/zoom-sdk/h/rawdata_def.h"
 #include "../../third_party/zoom-sdk/h/rawdata_renderer_interface.h"
 
@@ -15,7 +15,7 @@ class ParticipantSubscription : public ZOOMSDK::IZoomSDKRendererDelegate {
 public:
     ParticipantSubscription(uint32_t participant_id,
                             const std::string &source_uuid,
-                            HANDLE e2p_pipe);
+                            IpcFd e2p_fd);
     ~ParticipantSubscription();
 
     void onRawDataFrameReceived(YUVRawDataI420 *data) override;
@@ -27,18 +27,16 @@ private:
 
     uint32_t    m_participant_id;
     std::string m_source_uuid;
-    HANDLE      m_e2p_pipe;
+    IpcFd       m_e2p_fd;
     ZOOMSDK::IZoomSDKRenderer *m_renderer = nullptr;
-    HANDLE      m_shm_handle = nullptr;
-    void       *m_shm_ptr    = nullptr;
-    size_t      m_shm_size   = 0;
+    ShmRegion   m_shm;
 };
 
 class EngineVideo {
 public:
     void subscribe(uint32_t participant_id,
                    const std::string &source_uuid,
-                   HANDLE e2p_pipe);
+                   IpcFd e2p_fd);
     void unsubscribe(const std::string &source_uuid);
 
 private:

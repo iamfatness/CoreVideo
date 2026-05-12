@@ -1,11 +1,16 @@
 #include "../../src/engine-ipc.h"
 #include "engine-video.h"
 #include "engine-audio.h"
-// zoom_sdk.h provides InitSDK, CreateAuthService, CreateMeetingService — copy from SDK h/ folder
 #include "../../third_party/zoom-sdk/h/zoom_sdk.h"
 #include "../../third_party/zoom-sdk/h/auth_service_interface.h"
 #include "../../third_party/zoom-sdk/h/meeting_service_interface.h"
-#include <windows.h>
+#include <string>
+#include <atomic>
+
+// ── Platform setup ────────────────────────────────────────────────────────────
+#if defined(WIN32)
+#  include <windows.h>
+
 static std::wstring to_zstr(const std::string &utf8)
 {
     if (utf8.empty()) return {};
@@ -15,26 +20,76 @@ static std::wstring to_zstr(const std::string &utf8)
     if (!wide.empty() && wide.back() == L'\0') wide.pop_back();
     return wide;
 }
-#include <string>
-#include <atomic>
 
-// ── Simple line I/O over named pipes ─────────────────────────────────────────
-
-static std::string read_line(HANDLE pipe)
+static bool ipc_setup(IpcFd &p2e, IpcFd &e2p)
 {
-    std::string line; char ch; DWORD n;
-    while (ReadFile(pipe, &ch, 1, &n, nullptr) && n == 1) {
-        if (ch == '\n') break;
-        line += ch;
+    p2e = CreateNamedPipeA(PIPE_P2E, PIPE_ACCESS_INBOUND,
+                           PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                           1, 65536, 65536, 0, nullptr);
+    e2p = CreateNamedPipeA(PIPE_E2P, PIPE_ACCESS_OUTBOUND,
+                           PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                           1, 65536, 65536, 0, nullptr);
+    if (p2e == INVALID_HANDLE_VALUE || e2p == INVALID_HANDLE_VALUE) return false;
+    ConnectNamedPipe(p2e, nullptr);
+    ConnectNamedPipe(e2p, nullptr);
+    return true;
+}
+
+static void ipc_teardown(IpcFd p2e, IpcFd e2p)
+{
+    CloseHandle(p2e);
+    CloseHandle(e2p);
+}
+
+#else // POSIX (macOS / Linux)
+#  include <sys/socket.h>
+#  include <sys/un.h>
+#  include <unistd.h>
+#  include <cstring>
+
+static std::string to_zstr(const std::string &s) { return s; }
+
+static int unix_listen(const char *path)
+{
+    int srv = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (srv < 0) return -1;
+
+    struct sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    unlink(path); // remove stale socket file
+    if (bind(srv, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0 ||
+        listen(srv, 1) < 0) {
+        close(srv);
+        return -1;
     }
-    return line;
+    return srv;
 }
 
-static void write_line(HANDLE pipe, const std::string &msg)
+static bool ipc_setup(IpcFd &p2e, IpcFd &e2p)
 {
-    std::string out = msg + "\n"; DWORD written;
-    WriteFile(pipe, out.c_str(), static_cast<DWORD>(out.size()), &written, nullptr);
+    int srv_p2e = unix_listen(SOCK_P2E);
+    int srv_e2p = unix_listen(SOCK_E2P);
+    if (srv_p2e < 0 || srv_e2p < 0) {
+        if (srv_p2e >= 0) close(srv_p2e);
+        if (srv_e2p >= 0) close(srv_e2p);
+        return false;
+    }
+    p2e = accept(srv_p2e, nullptr, nullptr);
+    e2p = accept(srv_e2p, nullptr, nullptr);
+    close(srv_p2e);
+    close(srv_e2p);
+    return p2e >= 0 && e2p >= 0;
 }
+
+static void ipc_teardown(IpcFd p2e, IpcFd e2p)
+{
+    close(p2e);
+    close(e2p);
+    unlink(SOCK_P2E);
+    unlink(SOCK_E2P);
+}
+#endif // platform
 
 // ── Minimal JSON field extraction (no external dependency) ───────────────────
 
@@ -61,47 +116,47 @@ static uint32_t json_uint(const std::string &json, const std::string &key)
 
 class EngineAuthEvent : public ZOOMSDK::IAuthServiceEvent {
 public:
-    explicit EngineAuthEvent(HANDLE e2p) : m_e2p(e2p) {}
+    explicit EngineAuthEvent(IpcFd e2p) : m_e2p(e2p) {}
 
     void onAuthenticationReturn(ZOOMSDK::AuthResult ret) override {
         if (ret == ZOOMSDK::AUTHRET_SUCCESS)
-            write_line(m_e2p, R"({"cmd":"auth_ok"})");
+            ipc_write_line(m_e2p, R"({"cmd":"auth_ok"})");
         else
-            write_line(m_e2p, R"({"cmd":"auth_fail","code":)" +
-                       std::to_string(static_cast<int>(ret)) + "}");
+            ipc_write_line(m_e2p, R"({"cmd":"auth_fail","code":)" +
+                           std::to_string(static_cast<int>(ret)) + "}");
     }
     void onLoginReturnWithReason(ZOOMSDK::LOGINSTATUS,
                                  ZOOMSDK::IAccountInfo *,
                                  ZOOMSDK::LoginFailReason) override {}
     void onLogout() override {}
     void onZoomIdentityExpired() override {
-        write_line(m_e2p, R"({"cmd":"error","msg":"identity_expired"})");
+        ipc_write_line(m_e2p, R"({"cmd":"error","msg":"identity_expired"})");
     }
     void onZoomAuthIdentityExpired() override {}
     void onNotificationServiceStatus(ZOOMSDK::SDKNotificationServiceStatus,
                                      ZOOMSDK::SDKNotificationServiceError) override {}
 private:
-    HANDLE m_e2p;
+    IpcFd m_e2p;
 };
 
 // ── Meeting event handler ─────────────────────────────────────────────────────
 
 class EngineMeetingEvent : public ZOOMSDK::IMeetingServiceEvent {
 public:
-    explicit EngineMeetingEvent(HANDLE e2p) : m_e2p(e2p) {}
+    explicit EngineMeetingEvent(IpcFd e2p) : m_e2p(e2p) {}
 
     void onMeetingStatusChanged(ZOOMSDK::MeetingStatus status, int iResult) override {
         switch (status) {
         case ZOOMSDK::MEETING_STATUS_INMEETING:
-            write_line(m_e2p, R"({"cmd":"joined"})");
+            ipc_write_line(m_e2p, R"({"cmd":"joined"})");
             break;
         case ZOOMSDK::MEETING_STATUS_DISCONNECTING:
         case ZOOMSDK::MEETING_STATUS_ENDED:
-            write_line(m_e2p, R"({"cmd":"left"})");
+            ipc_write_line(m_e2p, R"({"cmd":"left"})");
             break;
         case ZOOMSDK::MEETING_STATUS_FAILED:
-            write_line(m_e2p, R"({"cmd":"error","msg":"meeting_failed","code":)" +
-                       std::to_string(iResult) + "}");
+            ipc_write_line(m_e2p, R"({"cmd":"error","msg":"meeting_failed","code":)" +
+                           std::to_string(iResult) + "}");
             break;
         default: break;
         }
@@ -115,26 +170,22 @@ public:
     void onUserNetworkStatusChanged(ZOOMSDK::MeetingComponentType,
                                     ZOOMSDK::ConnectionQuality,
                                     unsigned int, bool) override {}
+#if defined(WIN32)
     void onAppSignalPanelUpdated(ZOOMSDK::IMeetingAppSignalHandler *) override {}
+#endif
 private:
-    HANDLE m_e2p;
+    IpcFd m_e2p;
 };
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 int main()
 {
-    // Create pipes first so the plugin can connect
-    HANDLE p2e = CreateNamedPipeA(PIPE_P2E, PIPE_ACCESS_INBOUND,
-                                  PIPE_TYPE_BYTE|PIPE_READMODE_BYTE|PIPE_WAIT,
-                                  1, 65536, 65536, 0, nullptr);
-    HANDLE e2p = CreateNamedPipeA(PIPE_E2P, PIPE_ACCESS_OUTBOUND,
-                                  PIPE_TYPE_BYTE|PIPE_READMODE_BYTE|PIPE_WAIT,
-                                  1, 65536, 65536, 0, nullptr);
-    ConnectNamedPipe(p2e, nullptr);
-    ConnectNamedPipe(e2p, nullptr);
+    IpcFd p2e = kIpcInvalidFd;
+    IpcFd e2p = kIpcInvalidFd;
+    if (!ipc_setup(p2e, e2p)) return 1;
 
-    write_line(e2p, R"({"cmd":"ready"})");
+    ipc_write_line(e2p, R"({"cmd":"ready"})");
 
     ZOOMSDK::IAuthService    *auth_svc    = nullptr;
     ZOOMSDK::IMeetingService *meeting_svc = nullptr;
@@ -145,18 +196,21 @@ int main()
     std::atomic<bool> running{true};
 
     while (running) {
-        std::string line = read_line(p2e);
+        std::string line = ipc_read_line(p2e);
         if (line.empty()) continue;
 
         if (line.find(IPC_CMD_QUIT) != std::string::npos) {
             running = false;
 
         } else if (line.find(IPC_CMD_INIT) != std::string::npos) {
-            // {"cmd":"init","jwt":"<token>"}
             std::string jwt = json_str(line, "jwt");
 
             ZOOMSDK::InitParam init_param;
-            init_param.strWebDomain       = L"https://zoom.us";
+#if defined(WIN32)
+            init_param.strWebDomain = L"https://zoom.us";
+#else
+            init_param.strWebDomain = "https://zoom.us";
+#endif
             init_param.enableGenerateDump = true;
             init_param.obConfigOpts.optionalFeatures = ENABLE_CUSTOMIZED_UI_FLAG;
             init_param.rawdataOpts.videoRawdataMemoryMode = ZOOMSDK::ZoomSDKRawDataMemoryModeHeap;
@@ -166,16 +220,15 @@ int main()
             ZOOMSDK::CreateAuthService(&auth_svc);
             if (auth_svc) {
                 auth_svc->SetEvent(&auth_event);
-                std::wstring wjwt(jwt.begin(), jwt.end());
+                auto wjwt = to_zstr(jwt);
                 ZOOMSDK::AuthContext ctx;
                 ctx.jwt_token = wjwt.c_str();
                 auth_svc->SDKAuth(ctx);
             } else {
-                write_line(e2p, R"({"cmd":"auth_fail","code":-1})");
+                ipc_write_line(e2p, R"({"cmd":"auth_fail","code":-1})");
             }
 
         } else if (line.find(IPC_CMD_JOIN) != std::string::npos) {
-            // {"cmd":"join","meeting_id":"<id>","passcode":"<pw>","display_name":"OBS"}
             std::string meeting_id   = json_str(line, "meeting_id");
             std::string passcode     = json_str(line, "passcode");
             std::string display_name = json_str(line, "display_name");
@@ -186,8 +239,8 @@ int main()
                 if (meeting_svc) meeting_svc->SetEvent(&meeting_event);
             }
             if (meeting_svc && !meeting_id.empty()) {
-                std::wstring wname(display_name.begin(), display_name.end());
-                std::wstring wpsw(passcode.begin(), passcode.end());
+                auto wname = to_zstr(display_name);
+                auto wpsw  = to_zstr(passcode);
 
                 ZOOMSDK::JoinParam jp;
                 jp.userType = ZOOMSDK::SDK_UT_WITHOUT_LOGIN;
@@ -208,16 +261,14 @@ int main()
                 meeting_svc->Leave(ZOOMSDK::LEAVE_MEETING);
 
         } else if (line.find(IPC_CMD_SUBSCRIBE) != std::string::npos) {
-            // {"cmd":"subscribe","source_uuid":"<uuid>","participant_id":<id>}
             std::string uuid = json_str(line, "source_uuid");
             uint32_t    pid  = json_uint(line, "participant_id");
-            if (!uuid.empty())
+            if (!uuid.empty()) {
                 video_engine.subscribe(pid, uuid, e2p);
-
-            EngineAudio::instance().init(e2p, uuid);
+                EngineAudio::instance().init(e2p, uuid);
+            }
 
         } else if (line.find(IPC_CMD_UNSUBSCRIBE) != std::string::npos) {
-            // {"cmd":"unsubscribe","source_uuid":"<uuid>"}
             std::string uuid = json_str(line, "source_uuid");
             if (!uuid.empty())
                 video_engine.unsubscribe(uuid);
@@ -226,7 +277,6 @@ int main()
 
     if (meeting_svc) meeting_svc->Leave(ZOOMSDK::LEAVE_MEETING);
     ZOOMSDK::CleanUPSDK();
-    CloseHandle(p2e);
-    CloseHandle(e2p);
+    ipc_teardown(p2e, e2p);
     return 0;
 }

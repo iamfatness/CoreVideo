@@ -22,6 +22,8 @@ jobs:
           $ver = "30.2.2"
           Invoke-WebRequest -Uri "https://github.com/obsproject/obs-studio/releases/download/$ver/OBS-Studio-$ver-Windows.zip" -OutFile obs.zip
           Expand-Archive obs.zip -DestinationPath C:\obs-studio
+          # Show cmake layout so failures are diagnosable
+          Get-ChildItem C:\obs-studio -Recurse -Filter "*.cmake" | Select-Object -First 20 | ForEach-Object { $_.FullName }
         shell: powershell
 
       - name: Download Zoom Windows SDK
@@ -38,14 +40,34 @@ jobs:
         shell: powershell
 
       - name: Configure
-        run: >
-          cmake -B build -G "Visual Studio 17 2022" -A x64
-          -DCMAKE_BUILD_TYPE=Release
-          -DZOOM_SDK_DIR=third_party/zoom-sdk
-          -DCMAKE_PREFIX_PATH="C:/obs-studio"
-          -DZOOM_EMBED_SDK_KEY="${{ secrets.ZOOM_EMBED_SDK_KEY }}"
-          -DZOOM_EMBED_SDK_SECRET="${{ secrets.ZOOM_EMBED_SDK_SECRET }}"
-          -DZOOM_EMBED_JWT_TOKEN="${{ secrets.ZOOM_EMBED_JWT_TOKEN }}"
+        shell: powershell
+        run: |
+          # OBS 30.x ships cmake config files at cmake\LibObs\ and cmake\obs-frontend-api\
+          # Probe both the flat zip root and the common nested layout.
+          $obsRoot   = "C:\obs-studio"
+          $cmakeRoot = "$obsRoot\cmake"
+
+          $libobsDir = if (Test-Path "$cmakeRoot\LibObs\LibObsConfig.cmake") {
+              "$cmakeRoot\LibObs"
+          } elseif (Test-Path "$obsRoot\lib\cmake\LibObs\LibObsConfig.cmake") {
+              "$obsRoot\lib\cmake\LibObs"
+          } else { $cmakeRoot }
+
+          $frontendDir = if (Test-Path "$cmakeRoot\obs-frontend-api\obs-frontend-apiConfig.cmake") {
+              "$cmakeRoot\obs-frontend-api"
+          } elseif (Test-Path "$obsRoot\lib\cmake\obs-frontend-api\obs-frontend-apiConfig.cmake") {
+              "$obsRoot\lib\cmake\obs-frontend-api"
+          } else { $cmakeRoot }
+
+          cmake -B build -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DZOOM_SDK_DIR=third_party/zoom-sdk `
+            -DCMAKE_PREFIX_PATH="$obsRoot" `
+            -DLibObs_DIR="$libobsDir" `
+            "-Dobs-frontend-api_DIR=$frontendDir" `
+            "-DZOOM_EMBED_SDK_KEY=${{ secrets.ZOOM_EMBED_SDK_KEY }}" `
+            "-DZOOM_EMBED_SDK_SECRET=${{ secrets.ZOOM_EMBED_SDK_SECRET }}" `
+            "-DZOOM_EMBED_JWT_TOKEN=${{ secrets.ZOOM_EMBED_JWT_TOKEN }}"
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -75,12 +97,21 @@ jobs:
       - name: Install dependencies
         run: |
           brew install cmake qt@6
-          # Download OBS Studio (for headers + libs)
           OBS_VER=30.2.2
-          curl -L "https://github.com/obsproject/obs-studio/releases/download/${OBS_VER}/obs-studio-${OBS_VER}-macos-arm64.dmg" -o obs.dmg
+          # Prefer the universal build so we can produce a universal plugin.
+          # Fall back to arm64 if the universal asset is absent for this version.
+          UNIVERSAL_URL="https://github.com/obsproject/obs-studio/releases/download/${OBS_VER}/obs-studio-${OBS_VER}-macos-universal.dmg"
+          ARM64_URL="https://github.com/obsproject/obs-studio/releases/download/${OBS_VER}/obs-studio-${OBS_VER}-macos-arm64.dmg"
+          if curl --head --silent --fail "$UNIVERSAL_URL" -o /dev/null; then
+            curl -L "$UNIVERSAL_URL" -o obs.dmg
+          else
+            curl -L "$ARM64_URL" -o obs.dmg
+          fi
           hdiutil attach obs.dmg -mountpoint /Volumes/OBS -nobrowse -quiet
           cp -r /Volumes/OBS/OBS.app /tmp/OBS.app
           hdiutil detach /Volumes/OBS -quiet
+          # Show cmake layout so failures are diagnosable
+          find /tmp/OBS.app -name "*.cmake" | head -20 || true
 
       - name: Download Zoom macOS SDK
         env:
@@ -93,16 +124,38 @@ jobs:
           fi
 
       - name: Configure
-        run: >
-          cmake -B build
-          -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
-          -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
-          -DZOOM_SDK_DIR=third_party/zoom-sdk
-          -DCMAKE_PREFIX_PATH="/tmp/OBS.app/Contents/Resources;$(brew --prefix qt@6)"
-          -DZOOM_EMBED_SDK_KEY="${{ secrets.ZOOM_EMBED_SDK_KEY }}"
-          -DZOOM_EMBED_SDK_SECRET="${{ secrets.ZOOM_EMBED_SDK_SECRET }}"
-          -DZOOM_EMBED_JWT_TOKEN="${{ secrets.ZOOM_EMBED_JWT_TOKEN }}"
+        run: |
+          OBS_RESOURCES="/tmp/OBS.app/Contents/Resources"
+          OBS_CMAKE="$OBS_RESOURCES/cmake"
+          QT_PREFIX="$(brew --prefix qt@6)"
+
+          # Probe both flat cmake/ and lib/cmake/ layouts used across OBS versions.
+          find_cmake_dir() {
+            local config_name="$1"
+            for candidate in \
+                "$OBS_CMAKE/$config_name" \
+                "$OBS_RESOURCES/lib/cmake/$config_name"; do
+              if [ -f "$candidate/${config_name}Config.cmake" ]; then
+                echo "$candidate"; return
+              fi
+            done
+            echo "$OBS_CMAKE"
+          }
+
+          LIBOBS_DIR=$(find_cmake_dir LibObs)
+          FRONTEND_DIR=$(find_cmake_dir obs-frontend-api)
+
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
+            -DZOOM_SDK_DIR=third_party/zoom-sdk \
+            "-DCMAKE_PREFIX_PATH=$OBS_RESOURCES;$QT_PREFIX" \
+            "-DLibObs_DIR=$LIBOBS_DIR" \
+            "-Dobs-frontend-api_DIR=$FRONTEND_DIR" \
+            "-DZOOM_EMBED_SDK_KEY=${{ secrets.ZOOM_EMBED_SDK_KEY }}" \
+            "-DZOOM_EMBED_SDK_SECRET=${{ secrets.ZOOM_EMBED_SDK_SECRET }}" \
+            "-DZOOM_EMBED_JWT_TOKEN=${{ secrets.ZOOM_EMBED_JWT_TOKEN }}"
 
       - name: Build
         run: cmake --build build --parallel

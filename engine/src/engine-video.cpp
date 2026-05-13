@@ -1,6 +1,6 @@
 #include "engine-video.h"
 #include "../../src/engine-ipc.h"
-#include <rawdata/zoom_rawdata_api.h>
+#include <zoom_rawdata_api.h>
 #include <cstring>
 
 ParticipantSubscription::ParticipantSubscription(uint32_t participant_id,

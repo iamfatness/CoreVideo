@@ -4,9 +4,9 @@
 #include <zoom_sdk.h>
 #include <auth_service_interface.h>
 #include <meeting_service_interface.h>
-#include <meeting_service_components/meeting_participants_ctrl_interface.h>
-#include <meeting_service_components/meeting_audio_interface.h>
-#include <meeting_service_components/meeting_video_interface.h>
+#include <meeting_participants_ctrl_interface.h>
+#include <meeting_audio_interface.h>
+#include <meeting_video_interface.h>
 #include <algorithm>
 #include <string>
 #include <atomic>
@@ -426,8 +426,10 @@ public:
         ipc_write_line(m_e2p, R"({"cmd":"error","msg":"identity_expired"})");
     }
     void onZoomAuthIdentityExpired() override {}
+#if defined(WIN32)
     void onNotificationServiceStatus(ZOOMSDK::SDKNotificationServiceStatus,
                                      ZOOMSDK::SDKNotificationServiceError) override {}
+#endif
 private:
     IpcFd m_e2p;
 };
@@ -532,7 +534,9 @@ int main()
             init_param.strWebDomain = "https://zoom.us";
 #endif
             init_param.enableGenerateDump = true;
+#if defined(WIN32)
             init_param.obConfigOpts.optionalFeatures = ENABLE_CUSTOMIZED_UI_FLAG;
+#endif
             init_param.rawdataOpts.videoRawdataMemoryMode = ZOOMSDK::ZoomSDKRawDataMemoryModeHeap;
             init_param.rawdataOpts.audioRawdataMemoryMode = ZOOMSDK::ZoomSDKRawDataMemoryModeHeap;
             ZOOMSDK::InitSDK(init_param);

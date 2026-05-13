@@ -6,7 +6,9 @@
 #include "zoom-settings.h"
 #include "zoom-settings-dialog.h"
 #include "zoom-output-dialog.h"
+#include "zoom-dock.h"
 #include "zoom-control-server.h"
+#include "zoom-osc-server.h"
 #include <QMainWindow>
 
 OBS_DECLARE_MODULE()
@@ -26,6 +28,7 @@ bool obs_module_load(void)
     ZoomPluginSettings s = ZoomPluginSettings::load();
     ZoomControlServer::instance().set_token(s.control_token);
     ZoomControlServer::instance().start(s.control_server_port);
+    ZoomOscServer::instance().start(s.osc_server_port);
 
     obs_frontend_add_tools_menu_item("Zoom Plugin Settings", [](void *) {
         auto *main_win = static_cast<QMainWindow *>(obs_frontend_get_main_window());
@@ -41,6 +44,11 @@ bool obs_module_load(void)
 
     obs_frontend_add_event_callback(
         [](enum obs_frontend_event event, void *) {
+            if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
+                auto *main_win = static_cast<QMainWindow *>(obs_frontend_get_main_window());
+                auto *dock = new ZoomDock(main_win);
+                obs_frontend_add_dock(dock);
+            }
             if (event == OBS_FRONTEND_EVENT_EXIT)
                 ZoomEngineClient::instance().stop();
         }, nullptr);
@@ -53,5 +61,6 @@ void obs_module_unload(void)
 {
     blog(LOG_INFO, "[obs-zoom-plugin] Unloading plugin");
     ZoomControlServer::instance().stop();
+    ZoomOscServer::instance().stop();
     ZoomEngineClient::instance().stop();
 }

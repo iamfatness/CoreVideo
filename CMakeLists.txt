@@ -70,7 +70,9 @@ add_library(obs-zoom-plugin MODULE
     src/zoom-output-manager.cpp
     src/zoom-output-dialog.cpp
     src/zoom-output-profile.cpp
+    src/zoom-dock.cpp
     src/zoom-control-server.cpp
+    src/zoom-osc-server.cpp
     src/obs-utils.cpp
 )
 

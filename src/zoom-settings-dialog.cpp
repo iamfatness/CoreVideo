@@ -1,6 +1,7 @@
 #include "zoom-settings-dialog.h"
 #include "zoom-settings.h"
 #include "zoom-control-server.h"
+#include "zoom-osc-server.h"
 #include <QVBoxLayout>
 #include <QFormLayout>
 #include <QDialogButtonBox>
@@ -82,6 +83,8 @@ void ZoomSettingsDialog::onSave()
     s.save();
 
     ZoomControlServer::instance().set_token(s.control_token);
+    ZoomOscServer::instance().stop();
+    ZoomOscServer::instance().start(s.osc_server_port);
 
     accept();
 }

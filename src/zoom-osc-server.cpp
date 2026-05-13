@@ -1,7 +1,6 @@
 #include "zoom-osc-server.h"
-#include "zoom-meeting.h"
+#include "zoom-engine-client.h"
 #include "zoom-output-manager.h"
-#include "zoom-participants.h"
 #include <QHostAddress>
 #include <QUdpSocket>
 #include <obs-module.h>
@@ -205,13 +204,13 @@ void ZoomOscServer::dispatch(const QString &address,
         const std::string meeting_id   = args[0].s;
         const std::string passcode     = args.size() >= 2 ? args[1].s : "";
         const std::string display_name = args.size() >= 3 ? args[2].s : "OBS";
-        ZoomMeeting::instance().join(meeting_id, passcode, display_name);
+        ZoomEngineClient::instance().join(meeting_id, passcode, display_name);
         return;
     }
 
     // /zoom/leave
     if (address == "/zoom/leave") {
-        ZoomMeeting::instance().leave();
+        ZoomEngineClient::instance().leave();
         return;
     }
 
@@ -306,8 +305,8 @@ static std::string meeting_state_str(MeetingState s)
 
 void ZoomOscServer::send_status(const QHostAddress &to, quint16 port)
 {
-    const std::string state = meeting_state_str(ZoomMeeting::instance().state());
-    const uint32_t spk      = ZoomParticipants::instance().active_speaker_id();
+    const std::string state = meeting_state_str(ZoomEngineClient::instance().state());
+    const uint32_t spk      = ZoomEngineClient::instance().active_speaker_id();
 
     // /zoom/status/meeting_state ,s <state>
     {
@@ -339,7 +338,7 @@ void ZoomOscServer::send_outputs(const QHostAddress &to, quint16 port)
 
 void ZoomOscServer::send_participants(const QHostAddress &to, quint16 port)
 {
-    for (const auto &p : ZoomParticipants::instance().roster()) {
+    for (const auto &p : ZoomEngineClient::instance().roster()) {
         // /zoom/participant ,isiii id name has_video is_talking is_muted
         std::vector<OscArg> a(5);
         a[0].type = OscArg::Int32;  a[0].i = static_cast<int32_t>(p.user_id);

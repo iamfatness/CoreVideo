@@ -61,19 +61,17 @@ static QString participant_label(const ParticipantInfo &p)
 
 // ── Constructor ───────────────────────────────────────────────────────────────
 ZoomDock::ZoomDock(QWidget *parent)
-    : QDockWidget("Zoom Control", parent)
+    : QWidget(parent)
 {
-    setObjectName("ZoomControlDock");
     setMinimumWidth(340);
 
-    auto *root    = new QWidget(this);
-    auto *vLayout = new QVBoxLayout(root);
+    auto *vLayout = new QVBoxLayout(this);
     vLayout->setContentsMargins(6, 6, 6, 6);
     vLayout->setSpacing(6);
 
     // ── Status row ────────────────────────────────────────────────────────────
-    m_state_dot   = new QLabel("●", root);
-    m_state_label = new QLabel("Not connected", root);
+    m_state_dot   = new QLabel("●", this);
+    m_state_label = new QLabel("Not connected", this);
     m_state_dot->setStyleSheet("color: #666666; font-size: 18px;");
 
     auto *status_row = new QHBoxLayout;
@@ -82,16 +80,16 @@ ZoomDock::ZoomDock(QWidget *parent)
     vLayout->addLayout(status_row);
 
     // ── Active speaker ────────────────────────────────────────────────────────
-    m_speaker_label = new QLabel("—", root);
+    m_speaker_label = new QLabel("—", this);
     m_speaker_label->setStyleSheet("color: #aaaaaa; font-style: italic;");
 
     auto *speaker_row = new QHBoxLayout;
-    speaker_row->addWidget(new QLabel("Active speaker:", root));
+    speaker_row->addWidget(new QLabel("Active speaker:", this));
     speaker_row->addWidget(m_speaker_label, 1);
     vLayout->addLayout(speaker_row);
 
     // ── Join controls ─────────────────────────────────────────────────────────
-    auto *join_group  = new QGroupBox("Join Meeting", root);
+    auto *join_group  = new QGroupBox("Join Meeting", this);
     auto *join_layout = new QVBoxLayout(join_group);
 
     m_meeting_id = new QLineEdit(join_group);
@@ -118,7 +116,7 @@ ZoomDock::ZoomDock(QWidget *parent)
     connect(m_leave_btn, &QPushButton::clicked, this, [this]() { on_leave_clicked(); });
 
     // ── Output table ──────────────────────────────────────────────────────────
-    auto *output_group  = new QGroupBox("Outputs", root);
+    auto *output_group  = new QGroupBox("Outputs", this);
     auto *output_layout = new QVBoxLayout(output_group);
 
     m_output_table = new QTableWidget(output_group);
@@ -139,7 +137,7 @@ ZoomDock::ZoomDock(QWidget *parent)
     output_layout->addWidget(m_apply_btn);
     vLayout->addWidget(output_group, 1);
 
-    setWidget(root);
+    
 
     // ── Subscribe to roster / state changes ──────────────────────────────────
     auto self  = this;

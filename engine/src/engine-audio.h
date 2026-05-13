@@ -2,8 +2,8 @@
 #include <cstdint>
 #include <string>
 #include "../../src/engine-ipc.h"
-#include <zoom_sdk_raw_data_def.h>
-#include <rawdata/rawdata_audio_helper_interface.h>
+#include <rawdata_def.h>
+#include <rawdata_audio_helper_interface.h>
 
 class EngineAudio : public ZOOMSDK::IZoomSDKAudioRawDataDelegate {
 public:

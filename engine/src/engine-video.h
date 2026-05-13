@@ -4,8 +4,8 @@
 #include <unordered_map>
 #include <memory>
 #include "../../src/engine-ipc.h"
-#include <zoom_sdk_raw_data_def.h>
-#include <rawdata/rawdata_renderer_interface.h>
+#include <rawdata_def.h>
+#include <rawdata_renderer_interface.h>
 
 class ParticipantSubscription : public ZOOMSDK::IZoomSDKRendererDelegate {
 public:

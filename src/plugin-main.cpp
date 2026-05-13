@@ -47,7 +47,7 @@ bool obs_module_load(void)
             if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
                 auto *main_win = static_cast<QMainWindow *>(obs_frontend_get_main_window());
                 auto *dock = new ZoomDock(main_win);
-                obs_frontend_add_dock(dock);
+                obs_frontend_add_dock_by_id("ZoomControlDock", "Zoom Control", dock);
             }
             if (event == OBS_FRONTEND_EVENT_EXIT)
                 ZoomEngineClient::instance().stop();

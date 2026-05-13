@@ -1,6 +1,6 @@
 #pragma once
 
-#include <QDockWidget>
+#include <QWidget>
 #include <atomic>
 #include <memory>
 
@@ -11,7 +11,7 @@ class QTableWidget;
 class QComboBox;
 class QCheckBox;
 
-class ZoomDock : public QDockWidget {
+class ZoomDock : public QWidget {
     Q_OBJECT
 public:
     explicit ZoomDock(QWidget *parent = nullptr);

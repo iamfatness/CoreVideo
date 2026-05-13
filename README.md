@@ -2,7 +2,7 @@
 
 **OBS Studio plugin for live Zoom meeting video, audio, screen share, and language interpretation.**
 
-CoreVideo integrates the Zoom Meeting SDK directly into OBS — no screen capture or virtual camera required. It receives raw I420 video and 48 kHz PCM audio from any meeting participant, converts the frames, and pushes them into OBS as native sources. Two external control interfaces (TCP JSON + UDP OSC) and named output profiles enable full broadcast automation.
+CoreVideo integrates the Zoom Meeting SDK into OBS — no screen capture or virtual camera required. The SDK runs in a dedicated `ZoomObsEngine` child process; the OBS plugin communicates with it through a `ZoomEngineClient` singleton over cross-platform IPC (named pipes on Windows, Unix sockets on macOS/Linux) with frame data delivered through named shared memory. It receives raw I420 video and 48 kHz PCM audio from any meeting participant and pushes them into OBS as native sources. Two external control interfaces (TCP JSON + UDP OSC) and named output profiles enable full broadcast automation.
 
 📖 **[Full Documentation & Architecture Diagrams →](https://iamfatness.github.io/CoreVideo/)**
 
@@ -114,7 +114,7 @@ The effective delay before each switch is `max(hold_remaining, sensitivity_remai
 
 ### Audio isolation interaction
 
-When **Isolate Audio** is also enabled, every speaker switch immediately calls `set_isolated_user(new_pid)` so the audio track always follows the same participant as the video.
+When **Isolate Audio** is also enabled, every speaker switch sends an updated `subscribe` command to the engine with the new participant ID and `isolate_audio=true`, so the audio track always follows the same participant as the video.
 
 ## Output Profiles
 
@@ -130,28 +130,28 @@ Use **OBS → Tools → Zoom Output Manager** to save, load, and delete profiles
 
 ```
 OBS Studio
-└── obs-zoom-plugin
-    ├── ZoomAuth              — JWT auth, observable state, auto re-auth on expiry
-    ├── ZoomMeeting           — meeting state machine
-    ├── ZoomParticipants      — roster, mute/video/talking state, active-speaker tracking
-    ├── ZoomAudioRouter       — sole SDK audio subscriber; fans out to all sinks
-    ├── ZoomSource            — video + audio per participant (360p/720p/1080p, loss mode,
-    │                           debounced active-speaker, isolation, display name)
-    ├── ZoomParticipantAudioSource — standalone per-participant audio OBS source
-    ├── ZoomInterpAudioSource — language interpretation channel OBS source
-    ├── ZoomShareDelegate     — screen share frames → OBS
+└── obs-zoom-plugin  (no Zoom SDK dependency)
+    ├── ZoomEngineClient  ★  — singleton; owns IPC channels and engine process lifecycle;
+    │                          tracks roster + active speaker from engine events;
+    │                          dispatches per-source on_frame / on_audio callbacks
+    ├── ZoomSource            — video + audio per participant; reads I420 + PCM from
+    │                           ShmRegion; debounced active-speaker mode; 360p/720p/1080p
     ├── ZoomOutputManager     — central source registry for runtime reconfiguration
     ├── ZoomOutputProfile     — named JSON profile persistence
     ├── ZoomControlServer     — TCP JSON API on port 19870 (hardened token auth)
-    └── ZoomOscServer         — UDP OSC API on port 19871
+    └── zoom-types.h          — shared enums: MeetingState, VideoResolution, ParticipantInfo…
 
-ZoomObsEngine  (separate process, all platforms)
-└── Hosts Zoom SDK; communicates via:
+ZoomObsEngine  (separate child process — owns ALL Zoom SDK access)
+├── Zoom SDK (auth, meeting join/leave, participant/speaker tracking, raw video + audio)
+└── Communicates with plugin via:
     ├── JSON over named pipes (Windows) or Unix sockets (macOS/Linux)
-    └── Named shared memory for video/audio frame data
+    │   Plugin→Engine: init · join · leave · subscribe · unsubscribe · quit
+    │   Engine→Plugin: ready · auth_ok · joined · left · frame · audio
+    │                  participants · active_speaker · error
+    └── Named shared memory (ZoomObsPlugin_<uuid>) for bulk frame data
 ```
 
-See the **[full documentation](https://iamfatness.github.io/CoreVideo/)** for all architecture diagrams including the audio router fan-out, video pipeline with loss modes and preview callback, screen share pipeline, debounced active-speaker flow, TCP + OSC API references, output profile format, and IPC protocol.
+See the **[full documentation](https://iamfatness.github.io/CoreVideo/)** for all architecture diagrams including the ZoomEngineClient deep-dive, video/audio pipelines, screen share pipeline, debounced active-speaker flow, TCP + OSC API references, output profile format, and full IPC protocol reference.
 
 ## Project Structure
 
@@ -163,25 +163,23 @@ CoreVideo/
 │   └── windows.cmake
 ├── data/locale/en-US.ini
 ├── docs/                                   # GitHub Pages documentation
-├── engine/src/                             # ZoomObsEngine (Windows, macOS, Linux)
-└── src/                                    # OBS plugin source
-    ├── zoom-source.*                       # Main participant source
-    ├── zoom-auth.*                         # JWT auth
-    ├── zoom-meeting.*                      # Meeting state machine
-    ├── zoom-participants.*                 # Roster + active speaker
-    ├── zoom-audio-router.*                 # Audio dispatch hub
-    ├── zoom-audio-delegate.*               # Mixed / isolated audio
-    ├── zoom-participant-audio-source.*     # Per-participant audio source
-    ├── zoom-interpretation-audio-source.*  # Language interpretation source
-    ├── zoom-video-delegate.*               # Video frames + resolution + loss mode
-    ├── zoom-share-delegate.*               # Screen share source
+├── engine/src/                             # ZoomObsEngine process (owns ALL SDK access)
+│   ├── main.cpp                            # IPC event loop + SDK init + roster/speaker tracking
+│   ├── engine-video.cpp/h                  # IZoomSDKRenderer → shared memory
+│   └── engine-audio.cpp/h                  # SDK audio → shared memory
+└── src/                                    # OBS plugin (no SDK dependency)
+    ├── plugin-main.cpp                     # Module load/unload, engine lifecycle
+    ├── zoom-source.*                       # Main participant source (reads ShmRegion)
+    ├── zoom-engine-client.*                # Singleton: IPC to engine, roster, callbacks
+    ├── zoom-types.h                        # Shared enums + structs
     ├── zoom-output-manager.*               # Source registry
     ├── zoom-output-profile.*               # Named profile persistence
     ├── zoom-output-dialog.*                # Qt Output Manager dialog
-    ├── zoom-control-server.*               # TCP JSON API
-    ├── zoom-osc-server.*                   # UDP OSC API
+    ├── zoom-control-server.*               # TCP JSON API (port 19870)
     ├── zoom-settings.*                     # Settings persistence
-    └── zoom-settings-dialog.*              # Qt Settings dialog
+    ├── zoom-settings-dialog.*              # Qt Settings dialog
+    ├── engine-ipc.h                        # IPC constants + cross-platform helpers
+    └── obs-utils.*                         # OBS helper functions
 ```
 
 ## Security

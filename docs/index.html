@@ -142,7 +142,7 @@
   <div class="nav-section">Architecture</div>
   <a href="#arch-system">System Overview</a>
   <a href="#arch-components">Plugin Components</a>
-  <a href="#arch-audio-router">Audio Router</a>
+  <a href="#arch-audio-router">ZoomEngineClient</a>
   <a href="#arch-ipc">IPC Engine</a>
   <a href="#arch-video">Video Pipeline</a>
   <a href="#arch-audio">Audio Pipeline</a>
@@ -259,10 +259,12 @@
   <section id="arch-system">
     <h2>Architecture: System Overview</h2>
     <p>
-      CoreVideo bridges OBS and Zoom across four layers: the in-process
-      <strong>plugin</strong>, the out-of-process <strong>engine</strong>,
-      the <strong>TCP JSON control server</strong>, and the <strong>UDP OSC
-      server</strong> for hardware integrations.
+      All Zoom SDK access now lives exclusively in <code>ZoomObsEngine</code>.
+      The plugin communicates with it entirely through
+      <code>ZoomEngineClient</code> — a singleton that launches the engine
+      process, owns the IPC channels, and distributes roster events and
+      frame notifications to registered sources. The plugin itself contains
+      no Zoom SDK headers or linkage.
     </p>
     <div class="diagram-wrap">
       <div class="mermaid">
@@ -271,56 +273,48 @@ graph TB
       subgraph OBS["OBS Studio"]
         Canvas["Canvas / Output"]
         VSrc["Zoom Participant\nSource"]
-        ASrc["Zoom Participant\nAudio Source"]
-        ISrc["Zoom Interpretation\nAudio Source"]
-        SSrc["Zoom Share\nSource"]
-        Canvas --> VSrc & ASrc & ISrc & SSrc
+        Canvas --> VSrc
       end
 
-      subgraph Plugin["obs-zoom-plugin"]
+      subgraph Plugin["obs-zoom-plugin  (no SDK dependency)"]
         PM["plugin-main"]
-        ZS["ZoomSource"]
-        ZAR["ZoomAudioRouter"]
+        ZEC["ZoomEngineClient\n★ central singleton"]
+        ZS["ZoomSource\n(reads ShmRegion directly)"]
         ZOM["ZoomOutputManager"]
-        ZOP["ZoomOutputProfile\n(named JSON profiles)"]
+        ZOP["ZoomOutputProfile"]
         ZCS["ZoomControlServer\nTCP 127.0.0.1:19870"]
-        ZOSC["ZoomOscServer\nUDP 127.0.0.1:19871"]
-        ZSD["ZoomShareDelegate"]
-        ZPart["ZoomParticipants"]
-        ZMeet["ZoomMeeting"]
-        ZAuth["ZoomAuth"]
-        ZIAS["ZoomInterpAudioSource"]
+
+        PM --> ZEC & ZCS
+        ZEC --> ZS
+        ZS --> ZOM
+        ZOM --> ZOP
+        ZCS --> ZOM & ZEC
       end
 
-      subgraph Engine["ZoomObsEngine (separate process)"]
+      subgraph Engine["ZoomObsEngine  (owns ALL SDK access)"]
         ELoop["IPC Loop"]
-        EVid["EngineVideo"]
-        EAud["EngineAudio"]
-        SDK["Zoom Meeting SDK"]
-        ELoop --> EVid & EAud --> SDK
-      end
-
-      subgraph External["External Control"]
-        TCP["Script / Dashboard\nTCP JSON"]
-        OSC["Lighting Console\nBroadcast Hardware\nUDP OSC"]
+        EVid["EngineVideo\n(shared memory write)"]
+        EAud["EngineAudio\n(shared memory write)"]
+        EPart["Participant &amp;\nSpeaker tracking"]
+        SDK["Zoom Meeting SDK\nAuth · Meeting · Raw data"]
+        ELoop --> EVid & EAud & EPart --> SDK
       end
 
       subgraph ZoomCloud["Zoom Cloud"]
         Mtg["Live Meeting"]
       end
+
+      subgraph External["External Control"]
+        Ctrl["Script / Dashboard\nTCP JSON :19870"]
+      end
     end
 
     OBS -->|loads| Plugin
-    VSrc & ASrc & SSrc <--> ZS & ZAR & ZSD
-    ISrc <--> ZIAS
-    ZS --> ZOM
-    ZOM <--> ZOP
-    PM --> ZCS & ZOSC & ZAuth & ZMeet & ZPart
-    Plugin <-->|"JSON IPC\npipe / socket"| ELoop
-    EVid & EAud <-->|"Shared Memory"| Plugin
+    VSrc <--> ZS
+    Plugin <-->|"JSON IPC\n(pipe / socket)"| ELoop
+    EVid & EAud -->|"Named Shared Memory\nBGRA frames · PCM audio"| ZS
     SDK <-->|HTTPS/WSS| Mtg
-    TCP <-->|"TCP :19870"| ZCS
-    OSC <-->|"UDP :19871"| ZOSC
+    Ctrl <-->|TCP| ZCS
 
     style OBS fill:#0d2137,stroke:#2f81f7,color:#e6edf3
     style Plugin fill:#1a2332,stroke:#388bfd,color:#e6edf3
@@ -328,67 +322,60 @@ graph TB
     style ZoomCloud fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
     style External fill:#2d2000,stroke:#d29922,color:#e6edf3
       </div>
-      <div class="diagram-caption">Fig 1 — Full system view: OBS sources, plugin modules, engine process, dual control APIs, and Zoom cloud.</div>
+      <div class="diagram-caption">Fig 1 — All SDK access is in ZoomObsEngine. The plugin communicates entirely through ZoomEngineClient over IPC.</div>
     </div>
   </section>
 
   <section id="arch-components">
     <h2>Architecture: Plugin Components</h2>
     <p>
-      All SDK state is held in singletons. Per-source objects
-      (<code>ZoomVideoDelegate</code>, <code>ZoomAudioDelegate</code>) are owned
-      by each <code>ZoomSource</code> instance. The audio router is the sole SDK
-      audio subscriber and fans out frames to all registered sinks.
+      After the architectural refactor, all Zoom SDK access lives in
+      <code>ZoomObsEngine</code> (a separate process). The plugin-side class
+      hierarchy is significantly simpler: <code>ZoomEngineClient</code> is the
+      single singleton that owns IPC and roster state, while each
+      <code>ZoomSource</code> reads video and audio frames directly from named
+      shared memory (<code>ShmRegion</code>).
     </p>
     <div class="diagram-wrap">
       <div class="mermaid">
 classDiagram
+    class ZoomEngineClient {
+        &lt;&lt;Singleton&gt;&gt;
+        +start(jwt_token) bool
+        +stop()
+        +join(meeting_id, passcode, display_name) bool
+        +leave()
+        +subscribe(source_uuid, participant_id)
+        +unsubscribe(source_uuid)
+        +state() MeetingState
+        +active_speaker_id() uint32_t
+        +roster() vector~ParticipantInfo~
+        +register_source(uuid, callbacks)
+        +unregister_source(uuid)
+        +add_roster_callback(key, cb)
+        +remove_roster_callback(key)
+    }
     class ZoomSource {
+        +source_uuid : string
         +meeting_id, passcode, display_name
-        +output_display_name
         +participant_id, active_speaker_mode
         +isolate_audio, audio_mode
         +resolution : VideoResolution
         +video_loss_mode : VideoLossMode
-        +speaker_sensitivity_ms : 300
-        +speaker_hold_ms : 2000
+        +speaker_sensitivity_ms : uint32_t
+        +speaker_hold_ms : uint32_t
         +apply_settings(settings)
         +configure_output(...)
-        +resubscribe()
+        +subscribe() / unsubscribe()
+        +on_engine_frame(w, h)
+        +on_engine_audio(byte_len)
         +set_preview_cb(cb)
     }
-    class ZoomVideoDelegate {
-        +subscribe(pid, resolution)
-        +unsubscribe()
-        +set_loss_mode(mode)
-        +set_preview_cb(cb)
-        +onRawDataFrameReceived(data)
-    }
-    class ZoomAudioDelegate {
-        +init(source, mode, isolate)
-        +onMixedAudioRawDataReceived(data)
-    }
-    class ZoomAudioRouter {
-        &lt;&lt;Singleton&gt;&gt;
-        +add_mixed_sink(key, cb)
-        +add_one_way_sink(key, cb)
-        +add_participant_sink(uid, key, cb)
-    }
-    class ZoomParticipantAudioSource {
-        +participant_id
-        +audio_mode
-        +do_register() / do_unregister()
-    }
-    class ZoomInterpAudioSource {
-        +language : string
-        +do_register() / do_unregister()
-    }
-    class ZoomShareDelegate {
-        &lt;&lt;Singleton&gt;&gt;
-        +attach(ctrl) / detach()
-        +set_obs_source(source)
-        +onRawDataFrameReceived(data)
-        +onSharingStatus(info)
+    class ShmRegion {
+        +open(name) bool
+        +close()
+        +data() uint8_t*
+        +size() size_t
     }
     class ZoomOutputManager {
         &lt;&lt;Singleton&gt;&gt;
@@ -409,80 +396,84 @@ classDiagram
         +start(port=19870)
         +set_token(token)
     }
-    class ZoomOscServer {
-        &lt;&lt;Singleton&gt;&gt;
-        +start(port=19871)
-    }
-    class ZoomAuth {
-        &lt;&lt;Singleton&gt;&gt;
-        +init(key, secret)
-        +authenticate(jwt)
-        +add_state_callback(key, cb)
-        +state() ZoomAuthState
-    }
-    class ZoomMeeting {
-        &lt;&lt;Singleton&gt;&gt;
-        +join(id, passcode, name)
-        +leave()
-        +state() MeetingState
-    }
-    class ZoomParticipants {
-        &lt;&lt;Singleton&gt;&gt;
-        +roster() vector~ParticipantInfo~
-        +active_speaker_id()
-        +add_roster_callback(key, cb)
-    }
 
-    ZoomSource --> ZoomVideoDelegate
-    ZoomSource --> ZoomAudioDelegate
+    ZoomSource --> ZoomEngineClient : subscribe / unsubscribe
+    ZoomSource --> ShmRegion : reads video + audio frames
     ZoomSource --> ZoomOutputManager
-    ZoomAudioRouter --> ZoomAudioDelegate
-    ZoomAudioRouter --> ZoomParticipantAudioSource
     ZoomOutputManager --> ZoomOutputProfile
-    ZoomOutputManager <-- ZoomControlServer
-    ZoomOutputManager <-- ZoomOscServer
+    ZoomOutputManager &lt;-- ZoomControlServer
+    ZoomEngineClient ..> ZoomSource : on_frame / on_audio callbacks
       </div>
-      <div class="diagram-caption">Fig 2 — Full class diagram of all plugin components and their relationships.</div>
+      <div class="diagram-caption">Fig 2 — Plugin class diagram after refactor. ZoomEngineClient owns IPC; ZoomSource reads frames from shared memory.</div>
     </div>
   </section>
 
   <section id="arch-audio-router">
-    <h2>Architecture: Audio Router</h2>
+    <h2>Architecture: ZoomEngineClient</h2>
     <p>
-      <code>ZoomAudioRouter</code> is the <strong>single subscriber</strong> to the
-      Zoom SDK's audio raw-data helper. All audio consumers register sinks through
-      it, avoiding the SDK's one-subscriber limit.
+      <code>ZoomEngineClient</code> is the plugin-side singleton that manages the
+      entire engine process lifecycle. It launches <code>ZoomObsEngine</code> as a
+      child process, connects the two IPC channels, runs a dedicated reader thread
+      for incoming events, and dispatches per-source frame/audio callbacks.
+      All Zoom SDK state (auth, meeting, roster, active speaker) is owned by the
+      engine; the client tracks it locally by processing the event stream.
     </p>
     <div class="diagram-wrap">
       <div class="mermaid">
-graph LR
-    SDK["Zoom SDK\nAudio"]
-
-    subgraph Router["ZoomAudioRouter"]
-        MIX["onMixedAudioRawDataReceived"]
-        OW["onOneWayAudioRawDataReceived"]
+graph TB
+    subgraph Plugin["obs-zoom-plugin process"]
+        ZEC["ZoomEngineClient\n★ singleton"]
+        Reader["reader_loop()\n(dedicated thread)"]
+        S1["ZoomSource A\n(ShmRegion video+audio)"]
+        S2["ZoomSource B\n(ShmRegion video+audio)"]
+        ZEC --> Reader
+        ZEC -->|"on_frame / on_audio callbacks"| S1
+        ZEC -->|"on_frame / on_audio callbacks"| S2
     end
 
-    SDK -->|"mixed frames"| MIX
-    SDK -->|"per-user frames"| OW
+    subgraph IPC["IPC"]
+        P2E["Plugin → Engine\njson cmds"]
+        E2P["Engine → Plugin\njson events"]
+        SHM["Named Shared Memory\nZoomObsPlugin_&lt;uuid&gt;"]
+    end
 
-    MIX -->|MixedSink| AD_M["ZoomAudioDelegate\n(mixed mode)"]
-    OW  -->|OneWaySink| AD_I["ZoomAudioDelegate\n(isolated mode,\nfilters by user_id)"]
-    OW  -->|"ParticipantSink\nuser_id=101"| PAS1["ZoomParticipant\nAudioSource #1"]
-    OW  -->|"ParticipantSink\nuser_id=202"| PAS2["ZoomParticipant\nAudioSource #2"]
-    OW  -->|InterpSink| INTERP["ZoomInterp\nAudioSource\n(language channel)"]
+    subgraph Engine["ZoomObsEngine process"]
+        SDK3["Zoom SDK\n(ALL SDK access)"]
+        ETrack["Participant &amp;\nSpeaker tracking"]
+        SDK3 --- ETrack
+    end
 
-    style Router fill:#1a2332,stroke:#388bfd,color:#e6edf3
+    ZEC -- "init · join · leave · subscribe · unsubscribe · quit" --> P2E --> Engine
+    Engine -- "ready · auth_ok · joined · left · frame · audio\nparticipants · active_speaker · error" --> E2P --> Reader
+    Engine -- "write frames" --> SHM
+    S1 & S2 -- "mmap read" --> SHM
+
+    style Plugin fill:#0d2137,stroke:#2f81f7,color:#e6edf3
+    style Engine fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
+    style IPC fill:#2d1f00,stroke:#d29922,color:#e6edf3
       </div>
-      <div class="diagram-caption">Fig 3 — ZoomAudioRouter dispatches SDK audio frames to all registered consumers.</div>
+      <div class="diagram-caption">Fig 3 — ZoomEngineClient launches the engine, owns IPC channels, and dispatches callbacks to each ZoomSource.</div>
     </div>
+
+    <h3>Lifecycle</h3>
     <table>
-      <tr><th>Sink type</th><th>Registered by</th><th>Receives</th></tr>
-      <tr><td><code>MixedSink</code></td><td><code>ZoomAudioDelegate</code> (non-isolated)</td><td>Every mixed-meeting frame</td></tr>
-      <tr><td><code>OneWaySink</code></td><td><code>ZoomAudioDelegate</code> (isolated)</td><td>All per-user frames; filtered by <code>m_isolated_user</code></td></tr>
-      <tr><td><code>ParticipantSink</code></td><td><code>ZoomParticipantAudioSource</code></td><td>Only frames for that <code>user_id</code></td></tr>
-      <tr><td>Interpretation sink</td><td><code>ZoomInterpAudioSource</code></td><td>Selected language interpretation channel</td></tr>
+      <tr><th>Call</th><th>Effect</th></tr>
+      <tr><td><code>ZoomEngineClient::instance().start(jwt)</code></td><td>Launches engine process, connects pipes/sockets (up to 300 retries × 100 ms), sends <code>init</code> with JWT</td></tr>
+      <tr><td><code>join(meeting_id, passcode, name)</code></td><td>Sends <code>join</code> command; blocks until <code>joined</code> event or failure</td></tr>
+      <tr><td><code>subscribe(uuid, pid)</code></td><td>Sends <code>subscribe</code>; engine begins writing frames to <code>ZoomObsPlugin_&lt;uuid&gt;</code> shared memory</td></tr>
+      <tr><td><code>unsubscribe(uuid)</code></td><td>Stops frame delivery; ZoomSource releases its ShmRegion</td></tr>
+      <tr><td><code>leave()</code> / <code>stop()</code></td><td>Sends <code>leave</code> / <code>quit</code>; reader thread joins</td></tr>
     </table>
+
+    <h3>Roster and Active Speaker</h3>
+    <p>
+      The engine sends a <code>participants</code> event whenever the roster changes
+      and an <code>active_speaker</code> event when the speaking participant changes.
+      <code>ZoomEngineClient</code> updates its internal roster and active-speaker ID
+      from these events, then fires all registered <code>RosterCallback</code>
+      functions. <code>ZoomSource</code> instances in active-speaker mode listen via
+      <code>add_roster_callback()</code> and run the debounce algorithm on every change.
+    </p>
   </section>
 
   <section id="arch-ipc">
@@ -491,15 +482,14 @@ graph LR
       <code>ZoomObsEngine</code> runs as a separate process on all platforms.
       Control messages use newline-delimited JSON over platform IPC channels.
       Frame data flows through named shared memory to avoid copying large buffers.
+      <code>ZoomEngineClient</code> in the plugin abstracts all IPC details.
     </p>
     <div class="diagram-wrap">
       <div class="mermaid">
 graph LR
     subgraph Plugin["obs-zoom-plugin"]
-        ZVD2["VideoDelegate"]
-        ZAD2["AudioDelegate"]
-        SHM_R["Read Shared Memory"]
-        ZVD2 & ZAD2 --> SHM_R
+        ZEC2["ZoomEngineClient"]
+        SHM_R["ZoomSource\nShmRegion (mmap read)"]
     end
 
     subgraph IPC["IPC Channels"]
@@ -509,16 +499,16 @@ graph LR
     end
 
     subgraph Engine["ZoomObsEngine"]
-        ELoop["IPC Loop"]
+        ELoop["IPC Loop\n+ reader_loop"]
         EVid["EngineVideo"]
         EAud["EngineAudio"]
-        SDK2["Zoom SDK"]
+        SDK2["Zoom SDK\n(all SDK access)"]
         ELoop --> EVid & EAud --> SDK2
     end
 
-    Plugin -- "init · join · leave · subscribe · unsubscribe · quit" --> P2E --> ELoop
-    ELoop -- "ready · auth_ok · auth_fail · joined · left · frame · audio · error" --> E2P --> Plugin
-    EVid & EAud -- "write" --> SHM --> SHM_R
+    ZEC2 -- "init · join · leave · subscribe · unsubscribe · quit" --> P2E --> ELoop
+    ELoop -- "ready · auth_ok · auth_fail · joined · left · frame · audio\nparticipants · active_speaker · error" --> E2P --> ZEC2
+    EVid & EAud -- "write I420 + PCM" --> SHM --> SHM_R
 
     style Plugin fill:#0d2137,stroke:#2f81f7,color:#e6edf3
     style Engine fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
@@ -539,23 +529,29 @@ graph LR
       <div class="mermaid">
 flowchart LR
     CAM["Participant\nCamera"] --> ZC["Zoom Cloud"]
-    ZC -->|decoded I420| VD["ZoomVideoDelegate\nsubscribe(pid, resolution)"]
-    VD -->|"VideoLossMode:\nLastFrame / Black"| LOSS["Loss handling"]
-    LOSS -->|"I420 → BGRA\nPreviewCallback ≤5fps"| OBS_V["OBS Video\nobs_source_output_video()"]
+    ZC -->|decoded I420| EV["Engine EngineVideo\n(IZoomSDKRenderer)"]
+    EV -->|"write I420 to\nShmRegion"| SHM2["Shared Memory\nZoomObsPlugin_&lt;uuid&gt;"]
+    SHM2 -->|"frame event\n{uuid, w, h}"| ZEC3["ZoomEngineClient\non_engine_frame cb"]
+    ZEC3 --> ZS5["ZoomSource\non_engine_frame()"]
+    ZS5 -->|"VideoLossMode:\nLastFrame / Black"| LOSS["Loss handling"]
+    LOSS -->|"I420 planar\nPreviewCallback ≤5fps"| OBS_V["OBS Video\nobs_source_output_video()"]
 
     style CAM fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
     style ZC fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
-    style VD fill:#0d2137,stroke:#2f81f7,color:#e6edf3
+    style EV fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
+    style SHM2 fill:#2d1f00,stroke:#d29922,color:#e6edf3
+    style ZEC3 fill:#0d2137,stroke:#2f81f7,color:#e6edf3
+    style ZS5 fill:#0d2137,stroke:#2f81f7,color:#e6edf3
     style LOSS fill:#1a2332,stroke:#388bfd,color:#e6edf3
     style OBS_V fill:#1a2137,stroke:#388bfd,color:#e6edf3
       </div>
-      <div class="diagram-caption">Fig 5 — Video path with configurable resolution, loss mode, and low-fps preview callback.</div>
+      <div class="diagram-caption">Fig 5 — Video path: engine writes I420 to shared memory; ZoomSource reads via ShmRegion and forwards to OBS.</div>
     </div>
     <table>
       <tr><th>Property</th><th>Options</th><th>Notes</th></tr>
-      <tr><td>Resolution</td><td><code>P360</code> / <code>P720</code> / <code>P1080</code></td><td>Passed to <code>IZoomSDKRenderer::subscribe()</code></td></tr>
-      <tr><td>Input format</td><td>I420 YUV planar</td><td>BT.709 full-range</td></tr>
-      <tr><td>Output format</td><td>BGRA 32-bit</td><td><code>VIDEO_FORMAT_BGRA</code></td></tr>
+      <tr><td>Resolution</td><td><code>P360</code> / <code>P720</code> / <code>P1080</code></td><td>Sent to engine in <code>subscribe</code> command; passed to SDK renderer</td></tr>
+      <tr><td>Frame format in SHM</td><td>I420 YUV planar</td><td>Written by engine directly; ZoomSource reads planes from ShmRegion</td></tr>
+      <tr><td>Output to OBS</td><td>I420 planar</td><td><code>VIDEO_FORMAT_I420</code> via <code>obs_source_output_video()</code></td></tr>
       <tr><td>Video loss — LastFrame</td><td>Hold last decoded frame</td><td>Default OBS behaviour</td></tr>
       <tr><td>Video loss — Black</td><td>Push black I420 immediately</td><td>Useful for clean cuts</td></tr>
       <tr><td>Preview callback</td><td>≤ 5 fps raw I420</td><td>Used by OBS UI thumbnail / output dialog</td></tr>
@@ -564,58 +560,71 @@ flowchart LR
 
   <section id="arch-audio">
     <h2>Architecture: Audio Pipeline</h2>
+    <p>
+      Audio processing now lives entirely in the engine process. The engine writes
+      PCM chunks to a per-source shared memory region and sends an <code>audio</code>
+      event. <code>ZoomSource</code> reads the chunk from <code>m_audio_shm</code> and
+      pushes it to OBS. Stereo sources use an internal <code>m_stereo_buf</code> to
+      interleave channels before output.
+    </p>
     <div class="diagram-wrap">
       <div class="mermaid">
 flowchart TB
-    SDK3["Zoom SDK"]
-    Router2["ZoomAudioRouter"]
+    SDK4["Zoom SDK\n(inside engine)"]
+    EAud2["EngineAudio\n(mixed + per-user)"]
 
-    SDK3 -->|mixed| Router2
-    SDK3 -->|per-user| Router2
+    SDK4 -->|raw PCM| EAud2
 
-    Router2 -->|MixedSink| AD_M2["ZoomAudioDelegate\n(meeting mix)"]
-    Router2 -->|OneWaySink| AD_I2["ZoomAudioDelegate\n(isolated participant)"]
-    Router2 -->|ParticipantSink| PAS_N["ZoomParticipantAudioSource\n(per participant)"]
-    Router2 -->|InterpSink| INTERP2["ZoomInterpAudioSource\n(language channel)"]
+    EAud2 -->|"write PCM to SHM\n+ send audio event"| SHM3["Shared Memory\nZoomObsPlugin_&lt;uuid&gt;"]
+    SHM3 -->|"on_engine_audio(byte_len)"| ZS6["ZoomSource\n(m_audio_shm)"]
 
-    AD_M2  -->|obs_source_output_audio| OBS1["OBS Audio\n(ZoomSource)"]
-    AD_I2  -->|obs_source_output_audio| OBS1
-    PAS_N  -->|obs_source_output_audio| OBS2["OBS Audio\n(Participant)"]
-    INTERP2 -->|obs_source_output_audio| OBS3["OBS Audio\n(Interpretation)"]
+    ZS6 -->|"Mono: direct S16\nStereo: interleaved"| OBS_A["OBS Audio\nobs_source_output_audio()"]
 
-    style SDK3 fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
-    style Router2 fill:#0d2137,stroke:#2f81f7,color:#e6edf3
+    style SDK4 fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
+    style EAud2 fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
+    style SHM3 fill:#2d1f00,stroke:#d29922,color:#e6edf3
+    style ZS6 fill:#0d2137,stroke:#2f81f7,color:#e6edf3
       </div>
-      <div class="diagram-caption">Fig 6 — Audio fan-out: mixed, isolated-participant, per-participant, and language interpretation tracks.</div>
+      <div class="diagram-caption">Fig 6 — Audio pipeline: engine mixes/isolates audio in-process and delivers chunks through shared memory.</div>
     </div>
     <table>
       <tr><th>Property</th><th>Value</th></tr>
       <tr><td>Sample rate</td><td>48 000 Hz</td></tr>
       <tr><td>Format</td><td>S16LE</td></tr>
       <tr><td>Mono</td><td>Mixed feed downmixed to one channel</td></tr>
-      <tr><td>Stereo</td><td>Left/right separation preserved</td></tr>
-      <tr><td>Isolated</td><td>Per-user one-way feed filtered to a single participant</td></tr>
-      <tr><td>Interpretation</td><td>Selected language channel from Zoom's interpretation service</td></tr>
+      <tr><td>Stereo</td><td>Left/right separation via <code>m_stereo_buf</code> interleave in ZoomSource</td></tr>
+      <tr><td>Isolated audio</td><td>Configured per-source via <code>isolate_audio</code> flag in <code>subscribe</code> command</td></tr>
     </table>
   </section>
 
   <section id="arch-share">
     <h2>Architecture: Screen Share Pipeline</h2>
+    <p>
+      Screen share handling now lives entirely inside <code>ZoomObsEngine</code>.
+      The engine's <code>IMeetingShareCtrlEvent</code> handler detects share-start
+      events, attaches an <code>IZoomSDKRenderer</code> to the share source, and
+      writes I420 frames to a dedicated shared memory region. The plugin receives
+      <code>frame</code> events on the share source UUID and forwards them to OBS
+      exactly like participant video.
+    </p>
     <div class="diagram-wrap">
       <div class="mermaid">
 flowchart LR
     SC2["Screen Share\nIn Meeting"] --> ZC3["Zoom Cloud"]
-    ZC3 -->|onSharingStatus| SCtrl["IMeetingShareCtrlEvent\nZoomShareDelegate"]
-    SCtrl -->|subscribe_to\nshare_source_id| Rnd["IZoomSDKRenderer"]
-    Rnd -->|"onRawDataFrameReceived\nI420"| SDelegate2["ZoomShareDelegate\nI420 → BGRA"]
-    SDelegate2 -->|obs_source_output_video| OBS_SS["OBS Zoom\nShare Source"]
+    ZC3 -->|onSharingStatus| EShare["Engine\nShareDelegate\n(inside ZoomObsEngine)"]
+    EShare -->|subscribe share renderer| Rnd["IZoomSDKRenderer"]
+    Rnd -->|"I420 frames"| SHM4["Shared Memory\nZoomObsPlugin_share"]
+    SHM4 -->|"frame event"| ZEC4["ZoomEngineClient\n→ ZoomSource (share)"]
+    ZEC4 -->|obs_source_output_video| OBS_SS["OBS Zoom\nShare Source"]
 
     style SC2 fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
     style ZC3 fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
-    style SDelegate2 fill:#0d2137,stroke:#2f81f7,color:#e6edf3
+    style EShare fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
+    style SHM4 fill:#2d1f00,stroke:#d29922,color:#e6edf3
+    style ZEC4 fill:#0d2137,stroke:#2f81f7,color:#e6edf3
     style OBS_SS fill:#1a2137,stroke:#388bfd,color:#e6edf3
       </div>
-      <div class="diagram-caption">Fig 7 — Screen share: share events trigger renderer subscription; frames forwarded to a dedicated OBS source.</div>
+      <div class="diagram-caption">Fig 7 — Screen share: engine-side delegate writes I420 to shared memory; plugin receives via ZoomEngineClient frame callback.</div>
     </div>
   </section>
 
@@ -628,28 +637,32 @@ flowchart LR
 sequenceDiagram
     participant OBS as OBS Studio
     participant PM as plugin-main
-    participant ZA as ZoomAuth
+    participant ZEC5 as ZoomEngineClient
     participant ZS2 as ZoomSettings
+    participant Engine as ZoomObsEngine
     participant SDK as Zoom SDK
 
     OBS->>PM: obs_module_load()
-    PM->>ZS2: load() → {key, secret, jwt, ports, token}
+    PM->>ZS2: load() → {jwt, ports, token}
     PM->>ZoomControlServer: start(control_server_port)
-    PM->>ZoomOscServer: start(osc_server_port)
     alt Credentials present
-        PM->>ZA: init(sdk_key, sdk_secret)
-        ZA->>SDK: InitSDK()
-        PM->>ZA: authenticate(jwt_token)
-        ZA->>SDK: SDKAuth({jwt})
-        SDK-->>ZA: onAuthenticationReturn(SUCCESS)
-        Note over ZA: fires StateCallback to all subscribers
+        PM->>ZEC5: instance().start(jwt_token)
+        ZEC5->>Engine: launch_engine() [fork/CreateProcess]
+        ZEC5->>ZEC5: connect_ipc() [up to 300 × 100ms retries]
+        Engine-->>ZEC5: {"cmd":"ready"}
+        ZEC5->>Engine: {"cmd":"init","jwt":"…"}
+        Engine->>SDK: InitSDK() + SDKAuth({jwt})
+        SDK-->>Engine: onAuthenticationReturn(SUCCESS)
+        Engine-->>ZEC5: {"cmd":"auth_ok"}
+        Note over ZEC5: state → InMeeting-capable
     end
     opt Identity expires later
-        SDK-->>ZA: onZoomIdentityExpired()
-        ZA->>SDK: SDKAuth(m_last_jwt)
+        SDK-->>Engine: onZoomIdentityExpired()
+        Engine->>SDK: SDKAuth(last_jwt)
+        Engine-->>ZEC5: {"cmd":"auth_ok"}
     end
       </div>
-      <div class="diagram-caption">Fig 8 — Auth at load time, control server startup, and automatic re-authentication on identity expiry.</div>
+      <div class="diagram-caption">Fig 8 — Auth at load time via ZoomEngineClient launching the engine process, with automatic re-authentication on identity expiry.</div>
     </div>
   </section>
 
@@ -661,39 +674,44 @@ sequenceDiagram
     participant U as User / Control API
     participant ZS3 as ZoomSource
     participant ZOM2 as ZoomOutputManager
-    participant ZM as ZoomMeeting
-    participant ZAR3 as ZoomAudioRouter
+    participant ZEC6 as ZoomEngineClient
     participant Engine as ZoomObsEngine
 
     U->>ZS3: activate source
     ZS3->>ZOM2: register_source(this)
-    ZS3->>ZM: join(meeting_id, passcode, display_name)
-    ZM->>Engine: {"cmd":"join",...}
-    Engine-->>ZM: {"cmd":"joined"}
-
-    ZS3->>ZoomVideoDelegate: subscribe(pid, resolution)
-    ZS3->>ZAR3: add_mixed_sink / add_one_way_sink
+    ZS3->>ZEC6: join(meeting_id, passcode, display_name)
+    ZEC6->>Engine: {"cmd":"join","meeting_id":"…"}
+    Engine-->>ZEC6: {"cmd":"joined"}
+    ZS3->>ZEC6: subscribe(source_uuid, participant_id)
+    ZEC6->>Engine: {"cmd":"subscribe","source_uuid":"…","participant_id":N}
 
     loop Live capture
-        Engine-->>ZoomVideoDelegate: frame via shared memory
-        ZoomVideoDelegate->>OBS: obs_source_output_video()
-        ZAR3-->>ZoomAudioDelegate: dispatch audio
-        ZoomAudioDelegate->>OBS: obs_source_output_audio()
+        Engine-->>ZEC6: {"cmd":"frame","uuid":"…","w":W,"h":H}
+        ZEC6-->>ZS3: on_engine_frame(w, h)
+        ZS3->>ZS3: read I420 from m_video_shm
+        ZS3->>OBS: obs_source_output_video()
+        Engine-->>ZEC6: {"cmd":"audio","uuid":"…","byte_len":B}
+        ZEC6-->>ZS3: on_engine_audio(byte_len)
+        ZS3->>ZS3: read PCM from m_audio_shm
+        ZS3->>OBS: obs_source_output_audio()
     end
 
     opt Active speaker changes
-        ZoomParticipants-->>ZS3: on_active_speaker_changed()
-        Note over ZS3: debounce: sensitivity_ms + hold_ms
-        ZS3->>ZoomVideoDelegate: subscribe(new_pid, resolution)
+        Engine-->>ZEC6: {"cmd":"active_speaker","participant_id":X}
+        ZEC6-->>ZS3: roster_callback (active_speaker_id updated)
+        Note over ZS3: on_active_speaker_changed()\ndebounce: sensitivity_ms + hold_ms
+        ZS3->>ZEC6: unsubscribe(uuid) + subscribe(uuid, new_pid)
+        ZEC6->>Engine: unsubscribe + subscribe cmds
     end
 
     U->>ZS3: deactivate
     ZS3->>ZOM2: unregister_source(this)
-    ZS3->>ZoomVideoDelegate: unsubscribe()
-    ZS3->>ZAR3: remove sinks
-    ZS3->>ZM: leave()
+    ZS3->>ZEC6: unsubscribe(source_uuid)
+    ZEC6->>Engine: {"cmd":"unsubscribe","source_uuid":"…"}
+    ZS3->>ZEC6: leave()
+    ZEC6->>Engine: {"cmd":"leave"}
       </div>
-      <div class="diagram-caption">Fig 9 — Meeting join, live capture, debounced active-speaker switching, and teardown.</div>
+      <div class="diagram-caption">Fig 9 — Meeting join, live capture via shared memory, debounced active-speaker switching, and teardown.</div>
     </div>
   </section>
 
@@ -710,7 +728,8 @@ sequenceDiagram
 
     <h3>Debounce Algorithm</h3>
     <p>
-      Every time <code>ZoomParticipants</code> fires a roster callback, the source
+      Every time <code>ZoomEngineClient</code> dispatches a roster callback (triggered
+      by an <code>active_speaker</code> or <code>participants</code> IPC event), the source
       runs <code>on_active_speaker_changed()</code>. Two independent timers must
       both be satisfied before a switch is committed:
     </p>
@@ -739,7 +758,7 @@ stateDiagram-v2
     state "Active Speaker Mode ON" as ASM {
         [*] --> Watching
 
-        Watching --> Evaluating : ZoomParticipants fires\nnew active_speaker_id\n(≠ current participant)
+        Watching --> Evaluating : ZoomEngineClient fires roster cb\nnew active_speaker_id\n(≠ current participant)
 
         Evaluating --> Switching : delay = max(hold_remain, sense_remain) == 0\nAND speaker still active
 
@@ -764,13 +783,13 @@ stateDiagram-v2
     <div class="diagram-wrap">
       <div class="mermaid">
 sequenceDiagram
-    participant ZP as ZoomParticipants
+    participant ZP as ZoomEngineClient\n(roster_callback)
     participant ZS4 as ZoomSource
     participant Thread as Background Thread
     participant UI as OBS UI Thread
     participant VD as VideoDelegate
 
-    ZP-->>ZS4: roster callback\n(new active_speaker_id = X)
+    ZP-->>ZS4: roster callback\n(active_speaker_id from engine event = X)
     ZS4->>ZS4: on_active_speaker_changed()\npending = X, candidate_since = now
 
     alt delay == 0
@@ -827,9 +846,9 @@ sequenceDiagram
     <h3>Audio Isolation Interaction</h3>
     <p>
       When <strong>Isolate Audio</strong> is also enabled, every speaker switch
-      calls <code>audio_delegate->set_isolated_user(new_pid)</code> immediately
-      after the video subscription updates, so the audio track always follows
-      the same participant as the video.
+      triggers a new <code>subscribe</code> command to the engine with the updated
+      participant ID and the <code>isolate_audio</code> flag, so the engine adjusts
+      the audio feed to follow the same participant as the video.
     </p>
 
     <h3>UI Behaviour</h3>
@@ -979,7 +998,9 @@ sequenceDiagram
       <tr><td><code>joined</code></td><td><code>{"cmd":"joined"}</code></td><td>In meeting</td></tr>
       <tr><td><code>left</code></td><td><code>{"cmd":"left"}</code></td><td>Meeting ended</td></tr>
       <tr><td><code>frame</code></td><td><code>{"cmd":"frame","uuid":"…","shm":"…","w":W,"h":H}</code></td><td>Video frame in shared memory</td></tr>
-      <tr><td><code>audio</code></td><td><code>{"cmd":"audio","uuid":"…","shm":"…"}</code></td><td>Audio chunk in shared memory</td></tr>
+      <tr><td><code>audio</code></td><td><code>{"cmd":"audio","uuid":"…","shm":"…","byte_len":B}</code></td><td>Audio chunk in shared memory</td></tr>
+      <tr><td><code>participants</code></td><td><code>{"cmd":"participants","active_speaker_id":N,"participants":[{"user_id":N,"display_name":"…","has_video":bool,"is_talking":bool,"is_muted":bool},…]}</code></td><td>Full roster snapshot whenever roster changes</td></tr>
+      <tr><td><code>active_speaker</code></td><td><code>{"cmd":"active_speaker","participant_id":N}</code></td><td>Active speaking participant changed</td></tr>
       <tr><td><code>error</code></td><td><code>{"cmd":"error","msg":"…","code":N}</code></td><td>SDK / meeting error</td></tr>
     </table>
   </section>
@@ -1085,30 +1106,22 @@ sequenceDiagram
 │   └── windows.cmake
 ├── data/locale/en-US.ini
 ├── docs/                                   # GitHub Pages documentation
-├── engine/src/                             # ZoomObsEngine (all platforms)
-│   ├── main.cpp                            # IPC event loop
-│   ├── engine-video.cpp/h
-│   └── engine-audio.cpp/h
-└── src/
-    ├── plugin-main.cpp
-    ├── zoom-source.*                       # Main video+audio source
-    ├── zoom-auth.*                         # JWT auth + observable state
-    ├── zoom-meeting.*                      # Meeting state machine
-    ├── zoom-participants.*                 # Roster, active speaker, callbacks
-    ├── zoom-audio-router.*                 # Central audio dispatch hub
-    ├── zoom-audio-delegate.*               # Mixed / isolated audio → OBS
-    ├── zoom-participant-audio-source.*     # Per-participant audio OBS source
-    ├── zoom-interpretation-audio-source.*  # Language interpretation OBS source
-    ├── zoom-video-delegate.*               # Video frames, resolution, loss mode, preview
-    ├── zoom-share-delegate.*               # Screen share → OBS
+├── engine/src/                             # ZoomObsEngine process (owns ALL SDK access)
+│   ├── main.cpp                            # IPC event loop + SDK init + roster tracking
+│   ├── engine-video.cpp/h                  # IZoomSDKRenderer → shared memory
+│   └── engine-audio.cpp/h                  # SDK audio → shared memory
+└── src/                                    # OBS plugin (no SDK dependency)
+    ├── plugin-main.cpp                     # Module load/unload, engine lifecycle
+    ├── zoom-source.*                       # Main video+audio OBS source (reads ShmRegion)
+    ├── zoom-engine-client.*                # Singleton: IPC to engine, roster, callbacks
+    ├── zoom-types.h                        # Shared enums + structs (MeetingState, ParticipantInfo…)
     ├── zoom-output-manager.*               # Central source registry
     ├── zoom-output-profile.*               # Named JSON profile persistence
     ├── zoom-output-dialog.*                # Qt Output Manager dialog
-    ├── zoom-control-server.*               # TCP JSON control API
-    ├── zoom-osc-server.*                   # UDP OSC control API
+    ├── zoom-control-server.*               # TCP JSON control API (port 19870)
     ├── zoom-settings.*                     # Credential + port persistence
     ├── zoom-settings-dialog.*              # Qt Settings dialog
-    ├── engine-ipc.h                        # IPC constants + cross-platform helpers
+    ├── engine-ipc.h                        # IPC constants + cross-platform pipe/socket helpers
     └── obs-utils.*                         # OBS helper functions</code></pre>
 
     <h3>Platform Matrix</h3>

@@ -5,6 +5,13 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
+# ── Embedded credentials (set via -D or CI secrets; empty = user must enter) ──
+set(ZOOM_EMBED_SDK_KEY    "" CACHE STRING "Pre-embedded Zoom SDK key")
+set(ZOOM_EMBED_SDK_SECRET "" CACHE STRING "Pre-embedded Zoom SDK secret")
+set(ZOOM_EMBED_JWT_TOKEN  "" CACHE STRING "Pre-embedded Zoom JWT token")
+configure_file(src/zoom-credentials.h.in
+               "${CMAKE_CURRENT_BINARY_DIR}/zoom-credentials.h" @ONLY)
+
 find_package(libobs REQUIRED)
 find_package(obs-frontend-api REQUIRED)
 find_package(Qt6 COMPONENTS Core Network Widgets REQUIRED)
@@ -78,6 +85,7 @@ add_library(obs-zoom-plugin MODULE
 
 target_include_directories(obs-zoom-plugin PRIVATE
     src
+    "${CMAKE_CURRENT_BINARY_DIR}"
 )
 target_link_libraries(obs-zoom-plugin PRIVATE
     OBS::libobs
@@ -147,8 +155,50 @@ elseif(UNIX)
 endif()
 
 install(TARGETS obs-zoom-plugin
-    LIBRARY DESTINATION "${CMAKE_INSTALL_PREFIX}/obs-plugins/64bit"
+    LIBRARY DESTINATION "obs-plugins/64bit"
 )
 install(DIRECTORY data/
-    DESTINATION "${CMAKE_INSTALL_PREFIX}/data/obs-plugins/obs-zoom-plugin"
+    DESTINATION "data/obs-plugins/obs-zoom-plugin"
 )
+
+# ── CPack packaging ────────────────────────────────────────────────────────────
+set(CPACK_PACKAGE_NAME              "CoreVideo")
+set(CPACK_PACKAGE_VENDOR            "CoreVideo")
+set(CPACK_PACKAGE_DESCRIPTION_SHORT "OBS Studio plugin for live Zoom meeting capture")
+set(CPACK_PACKAGE_VERSION           "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "CoreVideo")
+set(CPACK_RESOURCE_FILE_LICENSE     "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE" )
+
+if(WIN32)
+    # ── Windows NSIS installer ────────────────────────────────────────────────
+    set(CPACK_GENERATOR "NSIS")
+    set(CPACK_NSIS_DISPLAY_NAME      "CoreVideo OBS Plugin")
+    set(CPACK_NSIS_PACKAGE_NAME      "CoreVideo")
+    set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
+    set(CPACK_NSIS_MODIFY_PATH OFF)
+
+    # Auto-detect OBS install dir; default to Program Files if not found.
+    set(CPACK_NSIS_EXTRA_INSTALL_COMMANDS "
+        StrCpy \\\$INSTDIR '$PROGRAMFILES64\\\\obs-studio'
+        IfFileExists \\\$INSTDIR 0 use_default
+        Goto done_detect
+        use_default:
+        StrCpy \\\$INSTDIR '$PROGRAMFILES64\\\\obs-studio'
+        done_detect:
+    ")
+
+    # Install the Zoom SDK runtime DLLs alongside the plugin.
+    if(ZOOM_SDK_RUNTIME_DIR AND EXISTS "${ZOOM_SDK_RUNTIME_DIR}")
+        install(DIRECTORY "${ZOOM_SDK_RUNTIME_DIR}/"
+            DESTINATION "obs-plugins/64bit"
+        )
+    endif()
+
+elseif(APPLE)
+    # ── macOS productbuild .pkg ───────────────────────────────────────────────
+    set(CPACK_GENERATOR "productbuild")
+    set(CPACK_PACKAGING_INSTALL_PREFIX "/Applications/OBS.app/Contents/Resources")
+    set(CPACK_PRODUCTBUILD_IDENTIFIER  "com.corevideo.obs-zoom-plugin")
+endif()
+
+include(CPack)

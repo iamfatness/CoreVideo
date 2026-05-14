@@ -25,7 +25,8 @@ ZoomPluginSettings ZoomPluginSettings::load()
     s.osc_server_port = static_cast<uint16_t>(
         config_get_uint(cfg, SECTION, "OscServerPort"));
     if (s.osc_server_port == 0) s.osc_server_port = 19871;
-    s.control_token = config_get_string(cfg, SECTION, "ControlToken") ?: "";
+    const char *control_token = config_get_string(cfg, SECTION, "ControlToken");
+    s.control_token = control_token ? control_token : "";
     s.hw_accel_mode = static_cast<HwAccelMode>(
         config_get_int(cfg, SECTION, "HwAccelMode"));
 

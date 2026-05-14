@@ -72,6 +72,13 @@ struct ZoomSource {
     void clear_preview_cb();
     void release_shared_memory();
 
+    HwVideoPipeline m_hw_pipeline;
+    // Per-source OBS hotkey IDs.
+    obs_hotkey_id m_hk_join_id       = OBS_INVALID_HOTKEY_ID;
+    obs_hotkey_id m_hk_leave_id      = OBS_INVALID_HOTKEY_ID;
+    obs_hotkey_id m_hk_active_on_id  = OBS_INVALID_HOTKEY_ID;
+    obs_hotkey_id m_hk_active_off_id = OBS_INVALID_HOTKEY_ID;
+
 private:
     void output_black_frame();
 
@@ -85,10 +92,4 @@ private:
     uint64_t m_preview_last_ns = 0;
     std::atomic<bool> m_subscribed{false};
     std::atomic<uint32_t> m_current_subscription_id{0};
-    HwVideoPipeline m_hw_pipeline;
-    // Per-source OBS hotkey IDs.
-    obs_hotkey_id m_hk_join_id       = OBS_INVALID_HOTKEY_ID;
-    obs_hotkey_id m_hk_leave_id      = OBS_INVALID_HOTKEY_ID;
-    obs_hotkey_id m_hk_active_on_id  = OBS_INVALID_HOTKEY_ID;
-    obs_hotkey_id m_hk_active_off_id = OBS_INVALID_HOTKEY_ID;
 };

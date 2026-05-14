@@ -134,6 +134,9 @@ if(COREVIDEO_BUILD_PLUGIN)
         src
         "${CMAKE_CURRENT_BINARY_DIR}"
     )
+    if(WIN32)
+        target_compile_definitions(obs-zoom-plugin PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    endif()
     target_link_libraries(obs-zoom-plugin PRIVATE
         OBS::libobs
         OBS::obs-frontend-api

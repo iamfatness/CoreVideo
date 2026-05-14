@@ -63,21 +63,24 @@ if(WIN32)
 endif()
 
 # Decide whether we have everything we need to build the engine binary.
-# The plugin DLL itself never includes Zoom SDK headers; only the engine does.
-# When the SDK isn't present we still build the plugin (useful for CI smoke
-# tests and OBS API development) and skip the engine target with a warning.
+# Build-time check: only headers + import lib are required to compile/link.
+# Runtime check (bin/sdk.dll): only needed to package and run; if absent,
+# the engine still builds but sdk.dll must be placed alongside it manually.
 set(BUILD_ZOOM_ENGINE OFF)
 if(WIN32)
-    if(EXISTS "${ZOOM_SDK_INCLUDE_DIR}/zoom_sdk.h"
-        AND EXISTS "${ZOOM_SDK_LIBRARY}"
-        AND NOT "${ZOOM_SDK_RUNTIME_DIR}" STREQUAL "")
+    if(EXISTS "${ZOOM_SDK_INCLUDE_DIR}/zoom_sdk.h" AND EXISTS "${ZOOM_SDK_LIBRARY}")
         set(BUILD_ZOOM_ENGINE ON)
     else()
         message(WARNING
             "Zoom SDK not found under '${ZOOM_SDK_DIR}'. "
             "Building plugin DLL only; ZoomObsEngine.exe will not be produced. "
-            "Set ZOOM_SDK_DIR to a directory containing h/zoom_sdk.h + lib/sdk.lib + bin/sdk.dll "
-            "to enable the engine target.")
+            "Set ZOOM_SDK_DIR to a directory containing h/zoom_sdk.h + lib/sdk.lib.")
+    endif()
+    if(BUILD_ZOOM_ENGINE AND "${ZOOM_SDK_RUNTIME_DIR}" STREQUAL "")
+        message(WARNING
+            "Zoom SDK runtime DLLs not found (expected bin/sdk.dll under '${ZOOM_SDK_DIR}'). "
+            "ZoomObsEngine.exe will be built but sdk.dll will not be packaged automatically — "
+            "place the Zoom SDK bin/ DLLs alongside ZoomObsEngine.exe before running.")
     endif()
 elseif(APPLE)
     if(EXISTS "${ZOOM_SDK_DIR}/ZoomSDK.framework")
@@ -163,17 +166,19 @@ if(BUILD_ZOOM_ENGINE)
             ${ZOOM_SDK_LIBRARY}
         )
         set_target_properties(ZoomObsEngine PROPERTIES WIN32_EXECUTABLE FALSE)
-        add_custom_command(TARGET ZoomObsEngine POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_directory
-                "${ZOOM_SDK_RUNTIME_DIR}"
-                "$<TARGET_FILE_DIR:ZoomObsEngine>"
-            COMMENT "Copying Zoom SDK runtime files to output directory"
-        )
+        if(NOT "${ZOOM_SDK_RUNTIME_DIR}" STREQUAL "")
+            add_custom_command(TARGET ZoomObsEngine POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    "${ZOOM_SDK_RUNTIME_DIR}"
+                    "$<TARGET_FILE_DIR:ZoomObsEngine>"
+                COMMENT "Copying Zoom SDK runtime files to output directory"
+            )
+            install(DIRECTORY "${ZOOM_SDK_RUNTIME_DIR}/"
+                DESTINATION "${CMAKE_INSTALL_PREFIX}/obs-plugins/64bit"
+            )
+        endif()
         install(TARGETS ZoomObsEngine
             RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}/obs-plugins/64bit"
-        )
-        install(DIRECTORY "${ZOOM_SDK_RUNTIME_DIR}/"
-            DESTINATION "${CMAKE_INSTALL_PREFIX}/obs-plugins/64bit"
         )
     elseif(APPLE)
         add_executable(ZoomObsEngine ${ENGINE_SOURCES})

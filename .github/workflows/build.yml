@@ -98,6 +98,13 @@ jobs:
             $lines -join "`n" | Set-Content "$dir\$($pkg.name)Config.cmake"
           }
 
+      - name: Install Qt6
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: '6.7.3'
+          arch: win64_msvc2019_64
+          cache: true
+
       - name: Download Zoom Windows SDK
         env:
           ZOOM_SDK_DOWNLOAD_URL: ${{ secrets.ZOOM_SDK_WINDOWS_URL }}
@@ -119,7 +126,7 @@ jobs:
             '-A', 'x64',
             '-DCMAKE_BUILD_TYPE=Release',
             '-DZOOM_SDK_DIR=third_party/zoom-sdk',
-            '-DCMAKE_PREFIX_PATH=C:/obs-runtime',
+            "-DCMAKE_PREFIX_PATH=C:/obs-runtime;$env:QT_ROOT_DIR",
             '-DLibObs_DIR=C:/obs-runtime/cmake/LibObs',
             '-Dobs-frontend-api_DIR=C:/obs-runtime/cmake/obs-frontend-api',
             "-DZOOM_EMBED_SDK_KEY=${{ secrets.ZOOM_EMBED_SDK_KEY }}",

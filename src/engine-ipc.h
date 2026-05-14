@@ -38,7 +38,9 @@ struct ShmAudioHeader { uint32_t sample_rate; uint16_t channels; uint32_t byte_l
 // ── Platform-agnostic file-descriptor type ───────────────────────────────────
 #if defined(WIN32)
    using IpcFd = HANDLE;
-   static constexpr IpcFd kIpcInvalidFd = INVALID_HANDLE_VALUE;
+   // INVALID_HANDLE_VALUE is a reinterpret_cast and not a constant expression
+   // on MSVC — use inline const instead of constexpr.
+   inline const IpcFd kIpcInvalidFd = INVALID_HANDLE_VALUE;
 #else
 #  include <unistd.h>
    using IpcFd = int;

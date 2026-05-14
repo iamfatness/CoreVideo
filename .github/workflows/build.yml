@@ -28,48 +28,42 @@ jobs:
         with:
           arch: x64
 
-      # Download the OBS portable zip.  It sometimes ships cmake config files
-      # (fast path); if not, we generate them from the DLL export tables.
+      # Download the OBS portable zip for the DLLs (needed to generate import
+      # libs via dumpbin).  Always use sparse-checkout for headers and always
+      # write our own cmake config files — the portable zip's bundled configs
+      # do not set INTERFACE_INCLUDE_DIRECTORIES so headers would never be found.
       - name: Get OBS SDK (headers + import libs)
         shell: powershell
         run: |
           $ver = "30.2.2"
           $obs = "C:\obs-runtime"
+          $sdk = "C:\obs-sdk"
 
+          # ── OBS portable zip (needed for obs.dll / obs-frontend-api.dll) ─────
           Invoke-WebRequest `
               "https://github.com/obsproject/obs-studio/releases/download/$ver/OBS-Studio-$ver-Windows.zip" `
               -OutFile obs.zip
           Expand-Archive obs.zip $obs -Force
 
-          # Fast path: cmake config files already present in the portable zip.
-          if (Test-Path "$obs\cmake\LibObs\LibObsConfig.cmake") {
-              Write-Host "CMake configs found in portable zip — using directly."
-              "OBS_SDK_DIR=$obs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-              exit 0
-          }
-
-          Write-Host "Generating CMake configs from DLL export tables."
-
-          # Sparse-checkout only the headers we need.
+          # ── Headers via sparse checkout ───────────────────────────────────────
           git clone --depth 1 --branch $ver --filter=blob:none --sparse `
               https://github.com/obsproject/obs-studio.git C:\obs-source
           Push-Location C:\obs-source
           git sparse-checkout set libobs UI/obs-frontend-api
           Pop-Location
 
-          $sdk = "C:\obs-sdk"
           New-Item -Force -ItemType Directory "$sdk\include\obs" | Out-Null
           Copy-Item "C:\obs-source\libobs\*.h"                             "$sdk\include\obs\"
           Copy-Item "C:\obs-source\UI\obs-frontend-api\obs-frontend-api.h" "$sdk\include\obs\"
 
-          # Generate import libs from DLL export tables.
+          # ── Import libs from DLL export tables ────────────────────────────────
           New-Item -Force -ItemType Directory "$sdk\lib" | Out-Null
           foreach ($name in @("obs", "obs-frontend-api")) {
               $dll = "$obs\bin\64bit\$name.dll"
               if (-not (Test-Path $dll)) { Write-Warning "$dll not found — skipping"; continue }
 
-              $def  = "$sdk\lib\$name.def"
-              $lib  = "$sdk\lib\$name.lib"
+              $def = "$sdk\lib\$name.def"
+              $lib = "$sdk\lib\$name.lib"
 
               $exports = @("EXPORTS")
               (dumpbin /nologo /exports $dll) | ForEach-Object {
@@ -81,7 +75,7 @@ jobs:
               lib /nologo /def:$def /out:$lib /machine:x64
           }
 
-          # Write CMake config files (one per package).
+          # ── CMake config files (always generated — never use the zip's copies) ─
           $sdkFwd = $sdk -replace '\\', '/'
           $obsFwd = $obs -replace '\\', '/'
           foreach ($pkg in @(

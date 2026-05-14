@@ -83,8 +83,15 @@ void ZoomSettingsDialog::onSave()
     s.save();
 
     ZoomControlServer::instance().set_token(s.control_token);
+
     ZoomOscServer::instance().stop();
-    ZoomOscServer::instance().start(s.osc_server_port);
+    if (!ZoomOscServer::instance().start(s.osc_server_port)) {
+        QMessageBox::warning(this, "OSC Server",
+            QString("Failed to bind OSC server on port %1.\n"
+                    "Check that the port is not already in use.")
+                .arg(s.osc_server_port));
+        return;
+    }
 
     accept();
 }

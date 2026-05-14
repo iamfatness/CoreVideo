@@ -11,8 +11,10 @@
 #if defined(WIN32)
 #include <windows.h>
 #else
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -84,6 +86,21 @@ bool ZoomEngineClient::start(const std::string &jwt_token)
 
     if (!launch_engine() || !connect_ipc()) {
         disconnect_ipc();
+        // Engine may have been launched before IPC connection failed — kill it.
+#if defined(WIN32)
+        if (m_process) {
+            TerminateProcess(static_cast<HANDLE>(m_process), 1);
+            WaitForSingleObject(static_cast<HANDLE>(m_process), 3000);
+            CloseHandle(static_cast<HANDLE>(m_process));
+            m_process = nullptr;
+        }
+#else
+        if (m_pid > 0) {
+            kill(m_pid, SIGTERM);
+            waitpid(m_pid, nullptr, 0);
+            m_pid = -1;
+        }
+#endif
         return false;
     }
 
@@ -105,6 +122,11 @@ void ZoomEngineClient::stop()
     if (m_process) {
         CloseHandle(static_cast<HANDLE>(m_process));
         m_process = nullptr;
+    }
+#else
+    if (m_pid > 0) {
+        waitpid(m_pid, nullptr, 0);
+        m_pid = -1;
     }
 #endif
 }

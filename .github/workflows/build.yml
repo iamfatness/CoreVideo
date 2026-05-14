@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
     tags:     ['v*']
   pull_request:
     branches: [main]
@@ -138,18 +138,38 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
+      - name: List build outputs
+        if: always()
+        shell: powershell
+        run: |
+          Write-Host "=== build/ tree ==="
+          Get-ChildItem -Recurse build -ErrorAction SilentlyContinue |
+            Where-Object { -not $_.PSIsContainer } |
+            Select-Object FullName,Length |
+            Format-Table -AutoSize
+
       - name: Package (NSIS installer)
-        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.version != '')
+        shell: powershell
         run: |
           cd build
           cpack -C Release -G NSIS
 
       - name: Upload installer artifact
-        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.version != '')
         uses: actions/upload-artifact@v4
         with:
           name: CoreVideo-Windows
           path: build/CoreVideo-*.exe
+          if-no-files-found: warn
+
+      - name: Upload plugin DLL (always)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: CoreVideo-Windows-plugin
+          path: |
+            build/Release/obs-zoom-plugin.dll
+            build/Release/ZoomObsEngine.exe
+          if-no-files-found: warn
 
   # ── macOS ──────────────────────────────────────────────────────────────────
   build-macos:
@@ -227,18 +247,33 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
+      - name: List build outputs
+        if: always()
+        run: |
+          echo "=== build/ tree ==="
+          find build -maxdepth 3 -type f | head -100 || true
+
       - name: Package (.dmg)
-        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.version != '')
         run: |
           cd build
           cpack -C Release -G DragNDrop
 
       - name: Upload installer artifact
-        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.version != '')
         uses: actions/upload-artifact@v4
         with:
           name: CoreVideo-macOS
           path: build/CoreVideo-*.dmg
+          if-no-files-found: warn
+
+      - name: Upload plugin bundle (always)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: CoreVideo-macOS-plugin
+          path: |
+            build/obs-zoom-plugin*
+            build/ZoomObsEngine*
+          if-no-files-found: warn
 
   # ── Release ────────────────────────────────────────────────────────────────
   release:

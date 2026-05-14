@@ -139,6 +139,8 @@ if(APPLE)
         "-framework CoreFoundation"
         "-framework Foundation"
     )
+    # Symbols provided by OBS at plugin load time; no link-time libobs needed.
+    target_link_options(obs-zoom-plugin PRIVATE "-undefined dynamic_lookup")
 endif()
 
 set_target_properties(obs-zoom-plugin PROPERTIES PREFIX "")
@@ -203,44 +205,20 @@ install(DIRECTORY data/
 )
 
 # ── CPack packaging ────────────────────────────────────────────────────────────
+# Produces a ZIP that users extract directly into their OBS Studio folder.
+#
+# Windows: extract into  C:\Program Files\obs-studio\
+# macOS:   extract into  /Applications/OBS.app/Contents/Resources/
+#          or ~/Library/Application Support/obs-studio/
+#
+# The ZIP contains the standard OBS plugin layout:
+#   obs-plugins/64bit/<plugin>.(dll|so)
+#   data/obs-plugins/obs-zoom-plugin/locale/en-US.ini
+set(CPACK_GENERATOR                 "ZIP")
 set(CPACK_PACKAGE_NAME              "CoreVideo")
 set(CPACK_PACKAGE_VENDOR            "CoreVideo")
 set(CPACK_PACKAGE_DESCRIPTION_SHORT "OBS Studio plugin for live Zoom meeting capture")
 set(CPACK_PACKAGE_VERSION           "${PROJECT_VERSION}")
-set(CPACK_PACKAGE_INSTALL_DIRECTORY "CoreVideo")
-set(CPACK_RESOURCE_FILE_LICENSE     "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE" )
-
-if(WIN32)
-    # ── Windows NSIS installer ────────────────────────────────────────────────
-    set(CPACK_GENERATOR "NSIS")
-    set(CPACK_NSIS_DISPLAY_NAME      "CoreVideo OBS Plugin")
-    set(CPACK_NSIS_PACKAGE_NAME      "CoreVideo")
-    set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
-    set(CPACK_NSIS_MODIFY_PATH OFF)
-
-    # Auto-detect OBS install dir; default to Program Files if not found.
-    set(CPACK_NSIS_EXTRA_INSTALL_COMMANDS "
-        StrCpy \\\$INSTDIR '$PROGRAMFILES64\\\\obs-studio'
-        IfFileExists \\\$INSTDIR 0 use_default
-        Goto done_detect
-        use_default:
-        StrCpy \\\$INSTDIR '$PROGRAMFILES64\\\\obs-studio'
-        done_detect:
-    ")
-
-    # Install the Zoom SDK runtime DLLs alongside the plugin.
-    if(ZOOM_SDK_RUNTIME_DIR AND EXISTS "${ZOOM_SDK_RUNTIME_DIR}")
-        install(DIRECTORY "${ZOOM_SDK_RUNTIME_DIR}/"
-            DESTINATION "obs-plugins/64bit"
-        )
-    endif()
-
-elseif(APPLE)
-    # ── macOS DragNDrop .dmg ──────────────────────────────────────────────────
-    # Users copy obs-plugins/ and data/ into OBS.app/Contents/Resources manually.
-    set(CPACK_GENERATOR "DragNDrop")
-    set(CPACK_DMG_VOLUME_NAME "CoreVideo ${PROJECT_VERSION}")
-    set(CPACK_DMG_FORMAT "UDZO")
-endif()
+set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY OFF)
 
 include(CPack)

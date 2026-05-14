@@ -28,65 +28,79 @@ jobs:
         with:
           arch: x64
 
-      # Sparse-checkout OBS source for headers only (much faster than a full clone).
-      # Then download the portable OBS zip solely to extract obs.dll / obs-frontend-api.dll
-      # and generate MSVC import libs from their export tables.
-      - name: Get OBS headers and import libs
+      # Download the OBS portable zip.  It sometimes ships cmake config files
+      # (fast path); if not, we generate them from the DLL export tables.
+      - name: Get OBS SDK (headers + import libs)
         shell: powershell
         run: |
-          $ver   = "30.2.2"
-          $sdk   = "C:\obs-sdk"
+          $ver = "30.2.2"
+          $obs = "C:\obs-runtime"
 
-          # ── Headers from sparse checkout ─────────────────────────────────────
+          Invoke-WebRequest `
+              "https://github.com/obsproject/obs-studio/releases/download/$ver/OBS-Studio-$ver-Windows.zip" `
+              -OutFile obs.zip
+          Expand-Archive obs.zip $obs -Force
+
+          # Fast path: cmake config files already present in the portable zip.
+          if (Test-Path "$obs\cmake\LibObs\LibObsConfig.cmake") {
+              Write-Host "CMake configs found in portable zip — using directly."
+              "OBS_SDK_DIR=$obs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+              exit 0
+          }
+
+          Write-Host "Generating CMake configs from DLL export tables."
+
+          # Sparse-checkout only the headers we need.
           git clone --depth 1 --branch $ver --filter=blob:none --sparse `
               https://github.com/obsproject/obs-studio.git C:\obs-source
           Push-Location C:\obs-source
           git sparse-checkout set libobs UI/obs-frontend-api
           Pop-Location
 
+          $sdk = "C:\obs-sdk"
           New-Item -Force -ItemType Directory "$sdk\include\obs" | Out-Null
-          Copy-Item C:\obs-source\libobs\*.h                             "$sdk\include\obs\"
-          Copy-Item C:\obs-source\UI\obs-frontend-api\obs-frontend-api.h "$sdk\include\obs\"
+          Copy-Item "C:\obs-source\libobs\*.h"                             "$sdk\include\obs\"
+          Copy-Item "C:\obs-source\UI\obs-frontend-api\obs-frontend-api.h" "$sdk\include\obs\"
 
-          # ── Import libs from portable zip DLLs ───────────────────────────────
-          Invoke-WebRequest `
-              "https://github.com/obsproject/obs-studio/releases/download/$ver/OBS-Studio-$ver-Windows.zip" `
-              -OutFile obs.zip
-          Expand-Archive obs.zip C:\obs-runtime -Force
-
+          # Generate import libs from DLL export tables.
           New-Item -Force -ItemType Directory "$sdk\lib" | Out-Null
           foreach ($name in @("obs", "obs-frontend-api")) {
-            $dll = "C:\obs-runtime\bin\64bit\$name.dll"
-            $def = "$sdk\lib\$name.def"
-            $lib = "$sdk\lib\$name.lib"
-            if (-not (Test-Path $dll)) { Write-Warning "$dll not found — skipping"; continue }
+              $dll = "$obs\bin\64bit\$name.dll"
+              if (-not (Test-Path $dll)) { Write-Warning "$dll not found — skipping"; continue }
 
-            $exports = @("EXPORTS")
-            (dumpbin /nologo /exports $dll) | ForEach-Object {
-              if ($_ -match "^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)\s*$") {
-                $exports += "  $($Matches[1])"
+              $def  = "$sdk\lib\$name.def"
+              $lib  = "$sdk\lib\$name.lib"
+
+              $exports = @("EXPORTS")
+              (dumpbin /nologo /exports $dll) | ForEach-Object {
+                  if ($_ -match "^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)\s*$") {
+                      $exports += "  $($Matches[1])"
+                  }
               }
-            }
-            $exports | Set-Content $def
-            lib /nologo /def:$def /out:$lib /machine:x64
+              $exports | Set-Content $def -Encoding ASCII
+              lib /nologo /def:$def /out:$lib /machine:x64
           }
 
-          # ── CMake config files ────────────────────────────────────────────────
-          $sdkSlash = $sdk -replace '\\', '/'
+          # Write CMake config files (one per package).
+          $sdkFwd = $sdk -replace '\\', '/'
+          $obsFwd = $obs -replace '\\', '/'
           foreach ($pkg in @(
-            @{ name = "LibObs";           target = "OBS::libobs";           dll = "obs"              },
-            @{ name = "obs-frontend-api"; target = "OBS::obs-frontend-api"; dll = "obs-frontend-api" }
+              @{ name = "LibObs";           target = "OBS::libobs";           dll = "obs"              },
+              @{ name = "obs-frontend-api"; target = "OBS::obs-frontend-api"; dll = "obs-frontend-api" }
           )) {
-            $dir = "$sdk\cmake\$($pkg.name)"
-            New-Item -Force -ItemType Directory $dir | Out-Null
-            @(
-              "add_library($($pkg.target) UNKNOWN IMPORTED GLOBAL)",
-              "set_target_properties($($pkg.target) PROPERTIES",
-              "  IMPORTED_LOCATION             ""$sdkSlash/lib/$($pkg.dll).lib""",
-              "  INTERFACE_INCLUDE_DIRECTORIES ""$sdkSlash/include""",
-              ")",
-              "set($($pkg.name)_FOUND TRUE)"
-            ) -join "`n" | Set-Content "$dir\$($pkg.name)Config.cmake"
+              $dir = "$sdk\cmake\$($pkg.name)"
+              New-Item -Force -ItemType Directory $dir | Out-Null
+
+              $content = @"
+add_library($($pkg.target) SHARED IMPORTED GLOBAL)
+set_target_properties($($pkg.target) PROPERTIES
+  IMPORTED_IMPLIB               "$sdkFwd/lib/$($pkg.dll).lib"
+  IMPORTED_LOCATION             "$obsFwd/bin/64bit/$($pkg.dll).dll"
+  INTERFACE_INCLUDE_DIRECTORIES "$sdkFwd/include"
+)
+set($($pkg.name)_FOUND TRUE)
+"@
+              Set-Content -Path "$dir\$($pkg.name)Config.cmake" -Value $content -Encoding UTF8
           }
 
           "OBS_SDK_DIR=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -104,25 +118,47 @@ jobs:
         shell: powershell
         run: |
           if ($env:ZOOM_SDK_DOWNLOAD_URL) {
-            Invoke-WebRequest $env:ZOOM_SDK_DOWNLOAD_URL -OutFile zoom-sdk.zip
-            Expand-Archive zoom-sdk.zip third_party/zoom-sdk-extracted
-            $inner = Get-ChildItem third_party/zoom-sdk-extracted -Directory | Select-Object -First 1
-            Move-Item $inner.FullName third_party/zoom-sdk
+              Invoke-WebRequest $env:ZOOM_SDK_DOWNLOAD_URL -OutFile zoom-sdk.zip
+              Expand-Archive zoom-sdk.zip third_party/zoom-sdk-extracted
+              $inner = Get-ChildItem third_party/zoom-sdk-extracted -Directory | Select-Object -First 1
+              Move-Item $inner.FullName third_party/zoom-sdk
           }
+
+      - name: Diagnose OBS SDK layout
+        if: always()
+        shell: powershell
+        run: |
+          Write-Host "=== OBS_SDK_DIR=$env:OBS_SDK_DIR ==="
+          Get-ChildItem -Recurse "$env:OBS_SDK_DIR\cmake" -ErrorAction SilentlyContinue |
+              Select-Object FullName | Format-Table -AutoSize
+          Get-ChildItem "$env:OBS_SDK_DIR\lib" -ErrorAction SilentlyContinue |
+              Select-Object Name,Length | Format-Table -AutoSize
+          Get-Item "$env:OBS_SDK_DIR\cmake\LibObs\LibObsConfig.cmake" -ErrorAction SilentlyContinue |
+              Select-Object FullName | Format-Table -AutoSize
 
       - name: Configure
         shell: powershell
         run: |
+          $obsDir  = "$env:OBS_SDK_DIR"
+          $obsLibs = "$obsDir\cmake\LibObs"
+          $obsFe   = "$obsDir\cmake\obs-frontend-api"
+
+          # Fallback: if cmake configs are in the portable zip root, use that.
+          if (-not (Test-Path $obsLibs)) {
+              $obsLibs = "C:\obs-runtime\cmake\LibObs"
+              $obsFe   = "C:\obs-runtime\cmake\obs-frontend-api"
+          }
+
           cmake -B build `
-            -G "Visual Studio 17 2022" -A x64 `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DZOOM_SDK_DIR=third_party/zoom-sdk `
-            "-DCMAKE_PREFIX_PATH=$env:OBS_SDK_DIR;$env:QT_ROOT_DIR" `
-            "-DLibObs_DIR=$env:OBS_SDK_DIR/cmake/LibObs" `
-            "-Dobs-frontend-api_DIR=$env:OBS_SDK_DIR/cmake/obs-frontend-api" `
-            "-DZOOM_EMBED_SDK_KEY=${{ secrets.ZOOM_EMBED_SDK_KEY }}" `
-            "-DZOOM_EMBED_SDK_SECRET=${{ secrets.ZOOM_EMBED_SDK_SECRET }}" `
-            "-DZOOM_EMBED_JWT_TOKEN=${{ secrets.ZOOM_EMBED_JWT_TOKEN }}"
+              -G "Visual Studio 17 2022" -A x64 `
+              -DCMAKE_BUILD_TYPE=Release `
+              -DZOOM_SDK_DIR=third_party/zoom-sdk `
+              "-DCMAKE_PREFIX_PATH=$obsDir;$env:QT_ROOT_DIR" `
+              "-DLibObs_DIR=$obsLibs" `
+              "-Dobs-frontend-api_DIR=$obsFe" `
+              "-DZOOM_EMBED_SDK_KEY=${{ secrets.ZOOM_EMBED_SDK_KEY }}" `
+              "-DZOOM_EMBED_SDK_SECRET=${{ secrets.ZOOM_EMBED_SDK_SECRET }}" `
+              "-DZOOM_EMBED_JWT_TOKEN=${{ secrets.ZOOM_EMBED_JWT_TOKEN }}"
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -140,6 +176,14 @@ jobs:
           path: CoreVideo-Windows-x64.zip
           if-no-files-found: warn
 
+      - name: Upload build logs on failure
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: CoreVideo-Windows-build-logs
+          path: build/
+          if-no-files-found: ignore
+
   # ── macOS ──────────────────────────────────────────────────────────────────
   build-macos:
     name: macOS Universal
@@ -152,16 +196,20 @@ jobs:
       - name: Install dependencies
         run: brew install cmake qt@6
 
-      # Sparse-checkout OBS source for headers only.
-      # The plugin is built as a MODULE with -undefined dynamic_lookup so no
-      # libobs link-time library is needed — symbols are resolved by OBS at load time.
+      # Download OBS source archive for headers only.
+      # The plugin links with -undefined dynamic_lookup so no libobs is
+      # needed at link time — OBS resolves all obs_* symbols at load time.
       - name: Get OBS headers
         run: |
           OBS_VER=30.2.2
-          git clone --depth 1 --branch "${OBS_VER}" --filter=blob:none --sparse \
-              https://github.com/obsproject/obs-studio.git /tmp/obs-source
-          cd /tmp/obs-source
-          git sparse-checkout set libobs UI/obs-frontend-api
+          curl -fL \
+              "https://github.com/obsproject/obs-studio/archive/refs/tags/${OBS_VER}.tar.gz" \
+              -o obs-source.tar.gz
+          mkdir -p /tmp/obs-source
+          tar -xzf obs-source.tar.gz --strip-components=1 \
+              -C /tmp/obs-source \
+              "obs-studio-${OBS_VER}/libobs" \
+              "obs-studio-${OBS_VER}/UI/obs-frontend-api"
 
           mkdir -p /tmp/obs-sdk/include/obs \
                    /tmp/obs-sdk/cmake/LibObs \
@@ -170,46 +218,51 @@ jobs:
           cp /tmp/obs-source/libobs/*.h                             /tmp/obs-sdk/include/obs/
           cp /tmp/obs-source/UI/obs-frontend-api/obs-frontend-api.h /tmp/obs-sdk/include/obs/
 
-          # Interface-only CMake targets — no library needed; -undefined dynamic_lookup handles it.
-          cat > /tmp/obs-sdk/cmake/LibObs/LibObsConfig.cmake << 'EOF'
-          add_library(OBS::libobs INTERFACE IMPORTED GLOBAL)
-          set_target_properties(OBS::libobs PROPERTIES
-              INTERFACE_INCLUDE_DIRECTORIES "/tmp/obs-sdk/include")
-          set(LibObs_FOUND TRUE)
-          EOF
+          # Write cmake config files using printf (avoids heredoc quoting issues).
+          printf '%s\n' \
+              'add_library(OBS::libobs INTERFACE IMPORTED GLOBAL)' \
+              'set_target_properties(OBS::libobs PROPERTIES' \
+              '    INTERFACE_INCLUDE_DIRECTORIES "/tmp/obs-sdk/include")' \
+              'set(LibObs_FOUND TRUE)' \
+              > /tmp/obs-sdk/cmake/LibObs/LibObsConfig.cmake
 
-          cat > /tmp/obs-sdk/cmake/obs-frontend-api/obs-frontend-apiConfig.cmake << 'EOF'
-          add_library(OBS::obs-frontend-api INTERFACE IMPORTED GLOBAL)
-          set_target_properties(OBS::obs-frontend-api PROPERTIES
-              INTERFACE_INCLUDE_DIRECTORIES "/tmp/obs-sdk/include")
-          set(obs-frontend-api_FOUND TRUE)
-          EOF
+          printf '%s\n' \
+              'add_library(OBS::obs-frontend-api INTERFACE IMPORTED GLOBAL)' \
+              'set_target_properties(OBS::obs-frontend-api PROPERTIES' \
+              '    INTERFACE_INCLUDE_DIRECTORIES "/tmp/obs-sdk/include")' \
+              'set(obs-frontend-api_FOUND TRUE)' \
+              > /tmp/obs-sdk/cmake/obs-frontend-api/obs-frontend-apiConfig.cmake
+
+          echo "=== LibObsConfig.cmake ==="
+          cat /tmp/obs-sdk/cmake/LibObs/LibObsConfig.cmake
+          echo "=== obs-frontend-apiConfig.cmake ==="
+          cat /tmp/obs-sdk/cmake/obs-frontend-api/obs-frontend-apiConfig.cmake
 
       - name: Download Zoom macOS SDK
         env:
           ZOOM_SDK_DOWNLOAD_URL: ${{ secrets.ZOOM_SDK_MACOS_URL }}
         run: |
           if [ -n "$ZOOM_SDK_DOWNLOAD_URL" ]; then
-            curl -L "$ZOOM_SDK_DOWNLOAD_URL" -o zoom-sdk.zip
-            unzip zoom-sdk.zip -d third_party/zoom-sdk-extracted
-            mv "third_party/zoom-sdk-extracted/$(ls third_party/zoom-sdk-extracted | head -1)" \
-               third_party/zoom-sdk
+              curl -L "$ZOOM_SDK_DOWNLOAD_URL" -o zoom-sdk.zip
+              unzip zoom-sdk.zip -d third_party/zoom-sdk-extracted
+              mv "third_party/zoom-sdk-extracted/$(ls third_party/zoom-sdk-extracted | head -1)" \
+                 third_party/zoom-sdk
           fi
 
       - name: Configure
         run: |
           QT_PREFIX="$(brew --prefix qt@6)"
           cmake -B build \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
-            -DZOOM_SDK_DIR=third_party/zoom-sdk \
-            "-DCMAKE_PREFIX_PATH=/tmp/obs-sdk;$QT_PREFIX" \
-            "-DLibObs_DIR=/tmp/obs-sdk/cmake/LibObs" \
-            "-Dobs-frontend-api_DIR=/tmp/obs-sdk/cmake/obs-frontend-api" \
-            "-DZOOM_EMBED_SDK_KEY=${{ secrets.ZOOM_EMBED_SDK_KEY }}" \
-            "-DZOOM_EMBED_SDK_SECRET=${{ secrets.ZOOM_EMBED_SDK_SECRET }}" \
-            "-DZOOM_EMBED_JWT_TOKEN=${{ secrets.ZOOM_EMBED_JWT_TOKEN }}"
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+              -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
+              -DZOOM_SDK_DIR=third_party/zoom-sdk \
+              "-DCMAKE_PREFIX_PATH=/tmp/obs-sdk;$QT_PREFIX" \
+              "-DLibObs_DIR=/tmp/obs-sdk/cmake/LibObs" \
+              "-Dobs-frontend-api_DIR=/tmp/obs-sdk/cmake/obs-frontend-api" \
+              "-DZOOM_EMBED_SDK_KEY=${{ secrets.ZOOM_EMBED_SDK_KEY }}" \
+              "-DZOOM_EMBED_SDK_SECRET=${{ secrets.ZOOM_EMBED_SDK_SECRET }}" \
+              "-DZOOM_EMBED_JWT_TOKEN=${{ secrets.ZOOM_EMBED_JWT_TOKEN }}"
 
       - name: Build
         run: cmake --build build --parallel
@@ -225,6 +278,14 @@ jobs:
           name: CoreVideo-macOS
           path: CoreVideo-macOS-universal.zip
           if-no-files-found: warn
+
+      - name: Upload build logs on failure
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: CoreVideo-macOS-build-logs
+          path: build/
+          if-no-files-found: ignore
 
   # ── Release ────────────────────────────────────────────────────────────────
   release:
@@ -243,13 +304,13 @@ jobs:
         id: release_name
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "name=CoreVideo ${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
-            echo "tag=${{ github.event.inputs.version }}"           >> "$GITHUB_OUTPUT"
-            echo "pre=${{ contains(github.event.inputs.version, '-') }}" >> "$GITHUB_OUTPUT"
+              echo "name=CoreVideo ${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+              echo "tag=${{ github.event.inputs.version }}"           >> "$GITHUB_OUTPUT"
+              echo "pre=${{ contains(github.event.inputs.version, '-') }}" >> "$GITHUB_OUTPUT"
           else
-            echo "name=CoreVideo ${{ github.ref_name }}"  >> "$GITHUB_OUTPUT"
-            echo "tag=${{ github.ref_name }}"             >> "$GITHUB_OUTPUT"
-            echo "pre=${{ contains(github.ref_name, '-') }}" >> "$GITHUB_OUTPUT"
+              echo "name=CoreVideo ${{ github.ref_name }}"  >> "$GITHUB_OUTPUT"
+              echo "tag=${{ github.ref_name }}"             >> "$GITHUB_OUTPUT"
+              echo "pre=${{ contains(github.ref_name, '-') }}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Publish release

@@ -4,8 +4,6 @@ build_*/
 .vscode/
 .idea/
 *.user
-# Zoom SDK (download separately — see README)
-third_party/zoom-sdk/
 # CMake artefacts
 CMakeCache.txt
 CMakeFiles/
@@ -14,8 +12,11 @@ Makefile
 *.cmake
 !cmake/*.cmake
 !buildspec/*.cmake
-# Compiled output
+# Compiled output (but allow the Zoom SDK binaries committed under third_party)
 *.so
 *.dylib
 *.dll
 *.pdb
+!third_party/**/*.dll
+!third_party/**/*.so
+!third_party/**/*.dylib

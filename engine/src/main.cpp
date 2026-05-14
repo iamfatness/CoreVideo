@@ -1,4 +1,5 @@
 #include "../../src/engine-ipc.h"
+#include "engine-writer.h"
 #include "engine-video.h"
 #include "engine-audio.h"
 #include <zoom_sdk.h>
@@ -287,7 +288,7 @@ public:
                 }
             }
         }
-        ipc_write_line(m_e2p, R"({"cmd":"active_speaker","participant_id":)" +
+        EngineIpc::write( R"({"cmd":"active_speaker","participant_id":)" +
                        std::to_string(active) + "}");
         send_roster();
     }
@@ -299,7 +300,7 @@ public:
             std::lock_guard<std::mutex> lk(m_mtx);
             if (m_active_speaker == 0) m_active_speaker = userId;
         }
-        ipc_write_line(m_e2p, R"({"cmd":"active_speaker","participant_id":)" +
+        EngineIpc::write( R"({"cmd":"active_speaker","participant_id":)" +
                        std::to_string(userId) + "}");
     }
 
@@ -393,7 +394,7 @@ private:
                 R"(,"is_muted":)" + (p.is_muted ? "true" : "false") + "}";
         }
         msg += "]}";
-        ipc_write_line(m_e2p, msg);
+        EngineIpc::write( msg);
     }
 
     IpcFd m_e2p;
@@ -413,9 +414,9 @@ public:
 
     void onAuthenticationReturn(ZOOMSDK::AuthResult ret) override {
         if (ret == ZOOMSDK::AUTHRET_SUCCESS)
-            ipc_write_line(m_e2p, R"({"cmd":"auth_ok"})");
+            EngineIpc::write( R"({"cmd":"auth_ok"})");
         else
-            ipc_write_line(m_e2p, R"({"cmd":"auth_fail","code":)" +
+            EngineIpc::write( R"({"cmd":"auth_fail","code":)" +
                            std::to_string(static_cast<int>(ret)) + "}");
     }
     void onLoginReturnWithReason(ZOOMSDK::LOGINSTATUS,
@@ -423,7 +424,7 @@ public:
                                  ZOOMSDK::LoginFailReason) override {}
     void onLogout() override {}
     void onZoomIdentityExpired() override {
-        ipc_write_line(m_e2p, R"({"cmd":"error","msg":"identity_expired"})");
+        EngineIpc::write( R"({"cmd":"error","msg":"identity_expired"})");
     }
     void onZoomAuthIdentityExpired() override {}
 #if defined(WIN32)
@@ -446,7 +447,7 @@ public:
     void onMeetingStatusChanged(ZOOMSDK::MeetingStatus status, int iResult) override {
         switch (status) {
         case ZOOMSDK::MEETING_STATUS_INMEETING:
-            ipc_write_line(m_e2p, R"({"cmd":"joined"})");
+            EngineIpc::write( R"({"cmd":"joined"})");
             if (m_participants && m_meeting_svc && *m_meeting_svc) {
                 m_participants->attach(
                     (*m_meeting_svc)->GetMeetingParticipantsController(),
@@ -457,11 +458,11 @@ public:
         case ZOOMSDK::MEETING_STATUS_DISCONNECTING:
         case ZOOMSDK::MEETING_STATUS_ENDED:
             if (m_participants) m_participants->detach();
-            ipc_write_line(m_e2p, R"({"cmd":"left"})");
+            EngineIpc::write( R"({"cmd":"left"})");
             break;
         case ZOOMSDK::MEETING_STATUS_FAILED:
             if (m_participants) m_participants->detach();
-            ipc_write_line(m_e2p, R"({"cmd":"error","msg":"meeting_failed","code":)" +
+            EngineIpc::write( R"({"cmd":"error","msg":"meeting_failed","code":)" +
                            std::to_string(iResult) + "}");
             break;
         default: break;
@@ -492,8 +493,9 @@ int main()
     IpcFd p2e = kIpcInvalidFd;
     IpcFd e2p = kIpcInvalidFd;
     if (!ipc_setup(p2e, e2p)) return 1;
+    EngineIpc::init(e2p); // must be called before any SDK callbacks can fire
 
-    ipc_write_line(e2p, R"({"cmd":"ready"})");
+    EngineIpc::write(R"({"cmd":"ready"})");
 
     ZOOMSDK::IAuthService    *auth_svc    = nullptr;
     ZOOMSDK::IMeetingService *meeting_svc = nullptr;
@@ -549,7 +551,7 @@ int main()
                 ctx.jwt_token = g_wide_jwt.c_str();
                 auth_svc->SDKAuth(ctx);
             } else {
-                ipc_write_line(e2p, R"({"cmd":"auth_fail","code":-1})");
+                EngineIpc::write( R"({"cmd":"auth_fail","code":-1})");
             }
 
         } else if (line.find(IPC_CMD_JOIN) != std::string::npos) {
@@ -572,7 +574,7 @@ int main()
                 try {
                     meeting_number = std::stoull(meeting_id);
                 } catch (...) {
-                    ipc_write_line(e2p, R"({"cmd":"error","msg":"invalid_meeting_id"})");
+                    EngineIpc::write( R"({"cmd":"error","msg":"invalid_meeting_id"})");
                     continue;
                 }
 

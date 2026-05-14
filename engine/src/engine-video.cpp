@@ -1,5 +1,5 @@
 #include "engine-video.h"
-#include "../../src/engine-ipc.h"
+#include "engine-writer.h"
 #include <zoom_rawdata_api.h>
 #include <cstring>
 
@@ -55,7 +55,7 @@ void ParticipantSubscription::onRawDataFrameReceived(YUVRawDataI420 *data)
     std::memcpy(pixels + y_len,           data->GetUBuffer(), y_len / 4);
     std::memcpy(pixels + y_len + y_len/4, data->GetVBuffer(), y_len / 4);
 
-    ipc_write_line(m_e2p_fd,
+    EngineIpc::write(
         R"({"cmd":"frame","source_uuid":")" + m_source_uuid +
         R"(","w":)" + std::to_string(w) + R"(,"h":)" + std::to_string(h) + "}");
 }

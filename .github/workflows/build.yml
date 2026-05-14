@@ -206,18 +206,18 @@ set($($pkg.name)_FOUND TRUE)
       - name: Build
         run: cmake --build build --parallel
 
-      - name: Package (.pkg)
+      - name: Package (.dmg)
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           cd build
-          cpack -C Release -G productbuild
+          cpack -C Release -G DragNDrop
 
       - name: Upload installer artifact
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
           name: CoreVideo-macOS
-          path: build/CoreVideo-*.pkg
+          path: build/CoreVideo-*.dmg
 
   # ── Release ────────────────────────────────────────────────────────────────
   release:
@@ -241,4 +241,4 @@ set($($pkg.name)_FOUND TRUE)
           generate_release_notes: true
           files: |
             artifacts/CoreVideo-Windows/*.exe
-            artifacts/CoreVideo-macOS/*.pkg
+            artifacts/CoreVideo-macOS/*.dmg

@@ -1,5 +1,17 @@
 # CoreVideo
 
+> **LICENSING REQUIREMENT — READ BEFORE USE**
+>
+> Capturing raw video and audio from Zoom meetings via the Meeting SDK requires
+> a **Zoom Enhanced Media license** (or equivalent raw-data-enabled license) on
+> the Zoom account that is hosting or joining the meeting. Operating without
+> this license violates the [Zoom Marketplace developer agreement](https://marketplace.zoom.us/docs/api-reference/developer-agreement)
+> and will cause the SDK to return a raw-data permission error at runtime.
+>
+> Contact your Zoom account representative or visit
+> [Zoom Plans](https://zoom.us/pricing) to verify your entitlements before
+> deploying this plugin in a production environment.
+
 **OBS Studio plugin for live Zoom meeting video, audio, screen share, and language interpretation.**
 
 CoreVideo integrates the Zoom Meeting SDK directly into OBS — no screen capture or virtual camera required. It receives raw I420 video and 48 kHz PCM audio from any meeting participant, converts the frames, and pushes them into OBS as native sources. Two external control interfaces (TCP JSON + UDP OSC) and named output profiles enable full broadcast automation.
@@ -33,7 +45,7 @@ CoreVideo integrates the Zoom Meeting SDK directly into OBS — no screen captur
 | OBS Studio | 30+ | `libobs` + `obs-frontend-api` |
 | CMake | 3.16+ | Build system |
 | Qt | 6.x | Core + Network + Widgets |
-| Zoom Meeting SDK | 5.x | Place in `third_party/zoom-sdk/` |
+| Zoom Meeting SDK | **5.17.x** (tested) | Place in `third_party/zoom-sdk/`. Raw data API surface changes between minor versions; pin to 5.17.x unless you have tested a newer release. |
 | C++ compiler | C++17 | MSVC 2022 / Clang 14+ / GCC 11+ |
 | Zoom Developer Account | — | SDK key, secret & JWT token |
 

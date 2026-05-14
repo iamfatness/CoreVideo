@@ -98,6 +98,13 @@ jobs:
             $lines -join "`n" | Set-Content "$dir\$($pkg.name)Config.cmake"
           }
 
+      - name: Install Qt6
+        shell: powershell
+        run: |
+          pip install aqtinstall
+          aqt install-qt windows desktop 6.7.3 win64_msvc2019_64 --outputdir C:\Qt
+          "QT_ROOT_DIR=C:\Qt\6.7.3\msvc2019_64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Download Zoom Windows SDK
         env:
           ZOOM_SDK_DOWNLOAD_URL: ${{ secrets.ZOOM_SDK_WINDOWS_URL }}
@@ -119,7 +126,7 @@ jobs:
             '-A', 'x64',
             '-DCMAKE_BUILD_TYPE=Release',
             '-DZOOM_SDK_DIR=third_party/zoom-sdk',
-            '-DCMAKE_PREFIX_PATH=C:/obs-runtime',
+            "-DCMAKE_PREFIX_PATH=C:/obs-runtime;$env:QT_ROOT_DIR",
             '-DLibObs_DIR=C:/obs-runtime/cmake/LibObs',
             '-Dobs-frontend-api_DIR=C:/obs-runtime/cmake/obs-frontend-api',
             "-DZOOM_EMBED_SDK_KEY=${{ secrets.ZOOM_EMBED_SDK_KEY }}",
@@ -157,14 +164,15 @@ jobs:
         run: |
           brew install cmake qt@6
           OBS_VER=30.2.2
-          # Prefer the universal build so we can produce a universal plugin.
-          # Fall back to arm64 if the universal asset is absent for this version.
-          UNIVERSAL_URL="https://github.com/obsproject/obs-studio/releases/download/${OBS_VER}/obs-studio-${OBS_VER}-macos-universal.dmg"
-          ARM64_URL="https://github.com/obsproject/obs-studio/releases/download/${OBS_VER}/obs-studio-${OBS_VER}-macos-arm64.dmg"
-          if curl --head --silent --fail "$UNIVERSAL_URL" -o /dev/null; then
-            curl -L "$UNIVERSAL_URL" -o obs.dmg
+          # OBS releases use "OBS-Studio-X.X.X-macOS-Apple.dmg" for arm64
+          # and "OBS-Studio-X.X.X-macOS-Intel.dmg" for x86_64.
+          # The macos-14 runner is arm64; prefer Apple Silicon, fall back to Intel.
+          APPLE_URL="https://github.com/obsproject/obs-studio/releases/download/${OBS_VER}/OBS-Studio-${OBS_VER}-macOS-Apple.dmg"
+          INTEL_URL="https://github.com/obsproject/obs-studio/releases/download/${OBS_VER}/OBS-Studio-${OBS_VER}-macOS-Intel.dmg"
+          if curl --head --silent --fail "$APPLE_URL" -o /dev/null; then
+            curl -fL "$APPLE_URL" -o obs.dmg
           else
-            curl -L "$ARM64_URL" -o obs.dmg
+            curl -fL "$INTEL_URL" -o obs.dmg
           fi
           hdiutil attach obs.dmg -mountpoint /Volumes/OBS -nobrowse -quiet
           cp -r /Volumes/OBS/OBS.app /tmp/OBS.app

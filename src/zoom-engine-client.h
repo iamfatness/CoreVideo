@@ -21,6 +21,9 @@ public:
 
     bool start(const std::string &jwt_token);
     void stop();
+    // Same as stop() but does not set the user-leaving flag and does not
+    // cancel a pending recovery. Used by ZoomReconnectManager between retries.
+    void stop_for_reconnect();
 
     bool join(const std::string &meeting_id, const std::string &passcode,
               const std::string &display_name);
@@ -65,7 +68,7 @@ private:
     std::unordered_map<std::string, SourceCallbacks> m_sources;
     std::unordered_map<void *, RosterCallback> m_roster_callbacks;
     // Tracks whether the user deliberately requested a leave/stop (suppresses recovery).
-    bool m_user_leaving = false;
+    std::atomic<bool> m_user_leaving{false};
     std::string m_last_jwt; // stored so reconnect manager can access it
 
 #if defined(WIN32)

@@ -12,6 +12,9 @@
 #include "zoom-osc-server.h"
 #include <QMainWindow>
 #include <QPointer>
+#if !defined(WIN32)
+#include <csignal>
+#endif
 
 static QPointer<ZoomDock> g_dock;
 
@@ -26,6 +29,13 @@ MODULE_EXPORT const char *obs_module_description(void)
 bool obs_module_load(void)
 {
     blog(LOG_INFO, "[obs-zoom-plugin] Loading plugin v%s", OBS_ZOOM_PLUGIN_VERSION);
+
+#if !defined(WIN32)
+    // Writing to a closed pipe (engine crashed) raises SIGPIPE on POSIX,
+    // which would kill the host OBS process. Ignore it so the write returns
+    // EPIPE instead and we can route the failure through normal error paths.
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
 
     zoom_source_register();
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine-ipc.h"
+#include "hw-video-pipeline.h"
 #include "zoom-output-manager.h"
 #include "zoom-types.h"
 #include <obs-module.h>
@@ -31,6 +32,8 @@ struct ZoomSource {
     VideoLossMode video_loss_mode = VideoLossMode::LastFrame;
     uint32_t speaker_sensitivity_ms = 300;
     uint32_t speaker_hold_ms = 2000;
+    // -1 = use global plugin setting; otherwise overrides per-source.
+    int hw_accel_override = -1;
 
     void apply_settings(obs_data_t *settings);
     std::string output_name() const;
@@ -64,4 +67,5 @@ private:
     uint64_t m_preview_last_ns = 0;
     bool m_subscribed = false;
     uint32_t m_current_subscription_id = 0;
+    HwVideoPipeline m_hw_pipeline;
 };

@@ -1,6 +1,7 @@
 #pragma once
 #include <QDialog>
 
+class QComboBox;
 class QLineEdit;
 class QSpinBox;
 
@@ -19,4 +20,5 @@ private:
     QSpinBox  *m_control_port_spin      = nullptr;
     QSpinBox  *m_osc_port_spin          = nullptr;
     QLineEdit *m_control_token_edit     = nullptr;
+    QComboBox *m_hw_accel_combo         = nullptr;
 };

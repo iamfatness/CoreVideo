@@ -23,11 +23,15 @@ struct ZoomSource {
     std::string passcode;
     std::string display_name;
     std::string output_display_name;
-    uint32_t participant_id = 0;
+    // These scalars are written from the OBS UI thread (apply_settings,
+    // configure_output) and read from the IPC reader thread
+    // (on_engine_audio, on_roster_changed). Make them atomic so the
+    // cross-thread reads are race-free without serializing the whole struct.
+    std::atomic<uint32_t> participant_id{0};
     bool auto_join = false;
-    bool active_speaker_mode = false;
+    std::atomic<bool> active_speaker_mode{false};
     bool isolate_audio = false;
-    AudioChannelMode audio_mode = AudioChannelMode::Mono;
+    std::atomic<AudioChannelMode> audio_mode{AudioChannelMode::Mono};
     VideoResolution resolution = VideoResolution::P1080;
     VideoLossMode video_loss_mode = VideoLossMode::LastFrame;
     uint32_t speaker_sensitivity_ms = 300;
@@ -66,7 +70,7 @@ private:
     std::vector<int16_t> m_stereo_buf;
     ZoomPreviewCallback m_preview_cb;
     uint64_t m_preview_last_ns = 0;
-    bool m_subscribed = false;
-    uint32_t m_current_subscription_id = 0;
+    std::atomic<bool> m_subscribed{false};
+    std::atomic<uint32_t> m_current_subscription_id{0};
     HwVideoPipeline m_hw_pipeline;
 };

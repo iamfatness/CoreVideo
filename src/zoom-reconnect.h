@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -19,6 +20,14 @@ struct ZoomReconnectPolicy {
     bool  on_auth_fail       = false;
 };
 
+// Manages automatic reconnection after engine crashes / meeting disconnects.
+// Thread model:
+//   - Public API may be called from any thread.
+//   - A single, owned timer thread sleeps until the scheduled retry time, then
+//     marshals execute_retry() to the OBS UI thread via obs_queue_task.
+//   - Cancellation uses a monotonically increasing generation counter so
+//     a stale wake-up cannot fire a retry that was already cancelled or
+//     superseded by a newer schedule_retry call.
 class ZoomReconnectManager {
 public:
     static ZoomReconnectManager &instance();
@@ -31,6 +40,8 @@ public:
                        const std::string &meeting_id,
                        const std::string &passcode,
                        const std::string &display_name);
+    // Clear stored credentials (called on explicit stop/leave).
+    void clear_session();
 
     // Called when an unexpected disconnect occurs.
     void trigger(RecoveryReason reason);
@@ -48,13 +59,15 @@ public:
     int  next_retry_ms() const;
 
 private:
-    ZoomReconnectManager() = default;
+    ZoomReconnectManager();
     ~ZoomReconnectManager();
 
-    void schedule_retry(int delay_ms);
-    void execute_retry(); // always runs on OBS UI thread
+    void schedule_retry_locked(int delay_ms); // must hold m_mtx
+    void execute_retry(uint64_t generation);  // always runs on OBS UI thread
+    void timer_loop();
+    void reset_state_locked();                // must hold m_mtx
 
-    int compute_delay(int attempt) const;
+    int compute_delay_locked(int attempt) const; // must hold m_mtx
 
     mutable std::mutex          m_mtx;
     ZoomReconnectPolicy         m_policy;
@@ -67,9 +80,12 @@ private:
     std::atomic<int>            m_attempt{0};
     std::chrono::steady_clock::time_point m_retry_at;
 
-    // Timer thread state (guarded by m_mtx)
+    // Timer thread state (guarded by m_mtx unless otherwise noted)
     std::thread                 m_timer;
     std::condition_variable     m_cv;
-    bool                        m_timer_cancel  = false;
-    bool                        m_destroyed     = false;
+    bool                        m_pending     = false;  // a retry is scheduled
+    bool                        m_stop_thread = false;  // shut the timer thread down
+    // Generation: every call to schedule_retry_locked or cancel bumps this.
+    // execute_retry compares against the latest value and bails on mismatch.
+    uint64_t                    m_generation  = 0;
 };

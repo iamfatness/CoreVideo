@@ -6,6 +6,12 @@ on:
     tags:     ['v*']
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. v0.1.0) — leave blank to skip GitHub Release'
+        required: false
+        default: ''
 
 jobs:
   # ── Windows ────────────────────────────────────────────────────────────────
@@ -119,13 +125,13 @@ set($($pkg.name)_FOUND TRUE)
         run: cmake --build build --config Release --parallel
 
       - name: Package (NSIS installer)
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.version != '')
         run: |
           cd build
           cpack -C Release -G NSIS
 
       - name: Upload installer artifact
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.version != '')
         uses: actions/upload-artifact@v4
         with:
           name: CoreVideo-Windows
@@ -207,13 +213,13 @@ set($($pkg.name)_FOUND TRUE)
         run: cmake --build build --parallel
 
       - name: Package (.dmg)
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.version != '')
         run: |
           cd build
           cpack -C Release -G DragNDrop
 
       - name: Upload installer artifact
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.version != '')
         uses: actions/upload-artifact@v4
         with:
           name: CoreVideo-macOS
@@ -224,7 +230,7 @@ set($($pkg.name)_FOUND TRUE)
     name: Create GitHub Release
     needs: [build-windows, build-macos]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.version != '')
     permissions:
       contents: write
     steps:
@@ -232,12 +238,26 @@ set($($pkg.name)_FOUND TRUE)
         with:
           path: artifacts
 
+      - name: Resolve release name
+        id: release_name
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "name=CoreVideo ${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "tag=${{ github.event.inputs.version }}"           >> "$GITHUB_OUTPUT"
+            echo "pre=${{ contains(github.event.inputs.version, '-') }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=CoreVideo ${{ github.ref_name }}"  >> "$GITHUB_OUTPUT"
+            echo "tag=${{ github.ref_name }}"             >> "$GITHUB_OUTPUT"
+            echo "pre=${{ contains(github.ref_name, '-') }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          name: CoreVideo ${{ github.ref_name }}
+          tag_name: ${{ steps.release_name.outputs.tag }}
+          name: ${{ steps.release_name.outputs.name }}
           draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ steps.release_name.outputs.pre == 'true' }}
           generate_release_notes: true
           files: |
             artifacts/CoreVideo-Windows/*.exe

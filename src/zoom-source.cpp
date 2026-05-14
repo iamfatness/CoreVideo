@@ -111,6 +111,10 @@ void ZoomSource::apply_settings(obs_data_t *settings)
     }
 
     if (hw_accel_override != old_hw_accel_override) {
+        // Serialize against the IPC reader thread which uses m_hw_pipeline in
+        // on_engine_frame(). Without this lock, shutdown() can free filter
+        // graph state while another thread is mid-process() → use-after-free.
+        std::lock_guard<std::mutex> lk(m_mtx);
         m_hw_pipeline.shutdown();
         const HwAccelMode effective = hw_accel_override >= 0
             ? static_cast<HwAccelMode>(hw_accel_override)
@@ -207,6 +211,13 @@ void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height)
     const uint32_t y_len = hdr->y_len;
     if (!source || w == 0 || h == 0 || y_len != w * h) return;
 
+    // Bound the read: the header may claim a frame larger than the region
+    // we have mapped (engine wrote a bigger frame than the size we used to
+    // open the SHM). Reject those rather than walking past the mapping.
+    const size_t needed_bytes = sizeof(ShmFrameHeader) +
+        static_cast<size_t>(y_len) + static_cast<size_t>(y_len) / 2;
+    if (needed_bytes > m_video_shm.size) return;
+
     const auto *pixels = static_cast<const uint8_t *>(m_video_shm.ptr) + sizeof(ShmFrameHeader);
     const auto *y_ptr = pixels;
     const auto *u_ptr = pixels + y_len;
@@ -263,6 +274,7 @@ void ZoomSource::on_engine_audio(uint32_t event_byte_len)
     auto *hdr = static_cast<const ShmAudioHeader *>(m_audio_shm.ptr);
     const uint32_t byte_len = hdr->byte_len;
     if (!source || byte_len == 0) return;
+    if (sizeof(ShmAudioHeader) + byte_len > m_audio_shm.size) return;
     const auto *pcm = reinterpret_cast<const int16_t *>(
         static_cast<const uint8_t *>(m_audio_shm.ptr) + sizeof(ShmAudioHeader));
 

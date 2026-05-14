@@ -88,9 +88,9 @@ jobs:
             $lines = @(
               "add_library($($pkg.target) SHARED IMPORTED GLOBAL)",
               "set_target_properties($($pkg.target) PROPERTIES",
-              "  IMPORTED_IMPLIB   `"$obsSlash/lib/$($pkg.dll).lib`"",
-              "  IMPORTED_LOCATION `"$obsSlash/bin/64bit/$($pkg.dll).dll`"",
-              "  INTERFACE_INCLUDE_DIRECTORIES `"$obsSlash/include`"",
+              "  IMPORTED_IMPLIB   ""$obsSlash/lib/$($pkg.dll).lib""",
+              "  IMPORTED_LOCATION ""$obsSlash/bin/64bit/$($pkg.dll).dll""",
+              "  INTERFACE_INCLUDE_DIRECTORIES ""$obsSlash/include""",
               ")",
               "set($($pkg.name)_FOUND TRUE)"
             )

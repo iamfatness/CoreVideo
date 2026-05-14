@@ -4,7 +4,16 @@
 #include <functional>
 #include <string>
 
-enum class MeetingState { Idle, Joining, InMeeting, Leaving, Failed };
+enum class MeetingState { Idle, Joining, InMeeting, Leaving, Recovering, Failed };
+enum class RecoveryReason {
+    EngineCrash,
+    MeetingDisconnect,
+    NetworkDrop,
+    AuthFailure,
+    SdkError,
+    HostEndedMeeting,
+    LicenseError,
+};
 enum class AudioChannelMode { Mono = 0, Stereo = 1 };
 enum class VideoResolution { P360 = 0, P720 = 1, P1080 = 2 };
 enum class VideoLossMode { LastFrame = 0, Black = 1 };

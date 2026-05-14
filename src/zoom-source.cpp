@@ -55,11 +55,12 @@ static VideoResolution resolution_from_data(obs_data_t *s)
 static const char *meeting_state_to_text(MeetingState state)
 {
     switch (state) {
-    case MeetingState::Idle: return "ZoomStatus.Idle";
-    case MeetingState::Joining: return "ZoomStatus.Joining";
-    case MeetingState::InMeeting: return "ZoomStatus.InMeeting";
-    case MeetingState::Leaving: return "ZoomStatus.Leaving";
-    case MeetingState::Failed: return "ZoomStatus.Failed";
+    case MeetingState::Idle:       return "ZoomStatus.Idle";
+    case MeetingState::Joining:    return "ZoomStatus.Joining";
+    case MeetingState::InMeeting:  return "ZoomStatus.InMeeting";
+    case MeetingState::Leaving:    return "ZoomStatus.Leaving";
+    case MeetingState::Recovering: return "ZoomStatus.Joining"; // reuse "Joining..." locale string
+    case MeetingState::Failed:     return "ZoomStatus.Failed";
     }
     return "ZoomStatus.Idle";
 }

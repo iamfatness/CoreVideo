@@ -33,6 +33,7 @@ private:
 
     // Build and send a simple OSC bundle reply to sender.
     void send_status(const QHostAddress &to, quint16 port);
+    void send_recovery_status(const QHostAddress &to, quint16 port);
     void send_outputs(const QHostAddress &to, quint16 port);
     void send_participants(const QHostAddress &to, quint16 port);
 

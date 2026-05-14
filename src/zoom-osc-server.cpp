@@ -1,6 +1,7 @@
 #include "zoom-osc-server.h"
 #include "zoom-engine-client.h"
 #include "zoom-output-manager.h"
+#include "zoom-reconnect.h"
 #include <QHostAddress>
 #include <QUdpSocket>
 #include <obs-module.h>
@@ -183,6 +184,12 @@ void ZoomOscServer::dispatch(const QString &address,
         return;
     }
 
+    // /zoom/recovery/status  →  reply with recovery state
+    if (address == "/zoom/recovery/status") {
+        send_recovery_status(sender, sender_port);
+        return;
+    }
+
     // /zoom/list_outputs  →  reply with all configured outputs
     if (address == "/zoom/list_outputs") {
         send_outputs(sender, sender_port);
@@ -298,6 +305,7 @@ static std::string meeting_state_str(MeetingState s)
     case MeetingState::Joining:    return "joining";
     case MeetingState::InMeeting:  return "in_meeting";
     case MeetingState::Leaving:    return "leaving";
+    case MeetingState::Recovering: return "recovering";
     case MeetingState::Failed:     return "failed";
     }
     return "unknown";
@@ -334,6 +342,21 @@ void ZoomOscServer::send_outputs(const QHostAddress &to, quint16 port)
         a[4].type = OscArg::Int32;  a[4].i = o.isolate_audio  ? 1 : 0;
         m_socket->writeDatagram(build_osc("/zoom/output", "sisii", a), to, port);
     }
+}
+
+void ZoomOscServer::send_recovery_status(const QHostAddress &to, quint16 port)
+{
+    const auto &rm = ZoomReconnectManager::instance();
+    // /zoom/recovery/status ,iii active attempt max_attempts
+    std::vector<OscArg> a(3);
+    a[0].type = OscArg::Int32; a[0].i = rm.is_recovering() ? 1 : 0;
+    a[1].type = OscArg::Int32; a[1].i = rm.attempt_count();
+    a[2].type = OscArg::Int32; a[2].i = rm.policy().max_attempts;
+    m_socket->writeDatagram(build_osc("/zoom/recovery/status", "iii", a), to, port);
+    // /zoom/recovery/next_retry_ms ,i ms_remaining
+    std::vector<OscArg> b(1);
+    b[0].type = OscArg::Int32; b[0].i = rm.next_retry_ms();
+    m_socket->writeDatagram(build_osc("/zoom/recovery/next_retry_ms", "i", b), to, port);
 }
 
 void ZoomOscServer::send_participants(const QHostAddress &to, quint16 port)

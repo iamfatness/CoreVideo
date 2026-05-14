@@ -1,6 +1,7 @@
 #pragma once
 #include <QDialog>
 
+class QCheckBox;
 class QComboBox;
 class QLineEdit;
 class QSpinBox;
@@ -21,4 +22,12 @@ private:
     QSpinBox  *m_osc_port_spin          = nullptr;
     QLineEdit *m_control_token_edit     = nullptr;
     QComboBox *m_hw_accel_combo         = nullptr;
+    // Auto-reconnect
+    QCheckBox *m_rc_enabled_cb          = nullptr;
+    QSpinBox  *m_rc_max_attempts_spin   = nullptr;
+    QSpinBox  *m_rc_base_delay_spin     = nullptr;
+    QSpinBox  *m_rc_max_delay_spin      = nullptr;
+    QCheckBox *m_rc_on_crash_cb         = nullptr;
+    QCheckBox *m_rc_on_disc_cb          = nullptr;
+    QCheckBox *m_rc_on_auth_cb          = nullptr;
 };

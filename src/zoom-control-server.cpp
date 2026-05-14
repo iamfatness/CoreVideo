@@ -1,6 +1,7 @@
 #include "zoom-control-server.h"
 #include "zoom-engine-client.h"
 #include "zoom-output-manager.h"
+#include "zoom-reconnect.h"
 #include "zoom-settings.h"
 #include <QHostAddress>
 #include <QJsonArray>
@@ -136,11 +137,12 @@ static QJsonObject participant_to_json(const ParticipantInfo &p)
 static QString meeting_state_to_string(MeetingState state)
 {
     switch (state) {
-    case MeetingState::Idle: return "idle";
-    case MeetingState::Joining: return "joining";
-    case MeetingState::InMeeting: return "in_meeting";
-    case MeetingState::Leaving: return "leaving";
-    case MeetingState::Failed: return "failed";
+    case MeetingState::Idle:       return "idle";
+    case MeetingState::Joining:    return "joining";
+    case MeetingState::InMeeting:  return "in_meeting";
+    case MeetingState::Leaving:    return "leaving";
+    case MeetingState::Recovering: return "recovering";
+    case MeetingState::Failed:     return "failed";
     }
     return "unknown";
 }
@@ -186,11 +188,18 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
     }
 
     if (cmd == "status") {
+        const auto &rm = ZoomReconnectManager::instance();
+        QJsonObject recovery;
+        recovery["active"]        = rm.is_recovering();
+        recovery["attempt"]       = rm.attempt_count();
+        recovery["max_attempts"]  = rm.policy().max_attempts;
+        recovery["next_retry_ms"] = rm.next_retry_ms();
         write_response(socket, {
             {"ok", true},
             {"meeting_state", meeting_state_to_string(ZoomEngineClient::instance().state())},
             {"active_speaker_id", static_cast<double>(
-                ZoomEngineClient::instance().active_speaker_id())}
+                ZoomEngineClient::instance().active_speaker_id())},
+            {"recovery", recovery}
         });
         return;
     }

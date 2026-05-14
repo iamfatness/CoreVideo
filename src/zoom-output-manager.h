@@ -31,6 +31,9 @@ public:
                           bool isolate_audio,
                           AudioChannelMode audio_mode);
 
+    // Re-send subscribe commands for all active sources after engine recovery.
+    void resubscribe_all();
+
     // Preview callbacks — call from the UI thread only.
     void set_preview_cb(const std::string &source_name,
                         ZoomPreviewCallback cb);

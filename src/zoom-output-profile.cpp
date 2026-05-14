@@ -78,7 +78,11 @@ bool save(const std::string &name, const std::vector<ZoomOutputInfo> &outputs)
 
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
-    f.write(QJsonDocument(arr).toJson(QJsonDocument::Indented));
+    const QByteArray data = QJsonDocument(arr).toJson(QJsonDocument::Indented);
+    if (f.write(data) != static_cast<qint64>(data.size())) {
+        blog(LOG_ERROR, "[obs-zoom-plugin] Failed to write profile '%s'", name.c_str());
+        return false;
+    }
     blog(LOG_INFO, "[obs-zoom-plugin] Saved output profile '%s'", name.c_str());
     return true;
 }

@@ -357,19 +357,24 @@ private:
 
     void rebuild_roster()
     {
-        std::lock_guard<std::mutex> lk(m_mtx);
-        m_roster.clear();
-        m_active_speaker = 0;
+        // Call SDK getters outside our mutex to avoid re-entrant deadlock:
+        // the SDK may fire a callback from within GetParticipantsList() on
+        // some platforms, which would try to re-acquire m_mtx.
         if (!m_ctrl) return;
         auto *list = m_ctrl->GetParticipantsList();
         if (!list) return;
+        std::vector<ParticipantInfo> new_roster;
+        new_roster.reserve(static_cast<size_t>(list->GetCount()));
         for (int i = 0; i < list->GetCount(); ++i) {
             auto *user = m_ctrl->GetUserByUserID(list->GetItem(i));
             if (!user) continue;
-            auto info = user_to_info(user);
-            m_roster.push_back(info);
-            if (info.is_talking) m_active_speaker = info.user_id;
+            new_roster.push_back(user_to_info(user));
         }
+        std::lock_guard<std::mutex> lk(m_mtx);
+        m_roster = std::move(new_roster);
+        m_active_speaker = 0;
+        for (const auto &p : m_roster)
+            if (p.is_talking) { m_active_speaker = p.user_id; break; }
     }
 
     void send_roster()

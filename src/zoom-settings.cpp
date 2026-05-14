@@ -26,6 +26,8 @@ ZoomPluginSettings ZoomPluginSettings::load()
         config_get_uint(cfg, SECTION, "OscServerPort"));
     if (s.osc_server_port == 0) s.osc_server_port = 19871;
     s.control_token = config_get_string(cfg, SECTION, "ControlToken") ?: "";
+    s.hw_accel_mode = static_cast<HwAccelMode>(
+        config_get_int(cfg, SECTION, "HwAccelMode"));
     return s;
 }
 
@@ -38,5 +40,6 @@ void ZoomPluginSettings::save() const
     config_set_uint  (cfg, SECTION, "ControlServerPort", control_server_port);
     config_set_uint  (cfg, SECTION, "OscServerPort",     osc_server_port);
     config_set_string(cfg, SECTION, "ControlToken",      control_token.c_str());
+    config_set_int   (cfg, SECTION, "HwAccelMode",       static_cast<int>(hw_accel_mode));
     config_save_safe(cfg, "tmp", nullptr);
 }

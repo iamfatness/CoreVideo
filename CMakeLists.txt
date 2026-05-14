@@ -16,6 +16,19 @@ find_package(libobs REQUIRED)
 find_package(obs-frontend-api REQUIRED)
 find_package(Qt6 COMPONENTS Core Network Widgets REQUIRED)
 
+# ── Optional FFmpeg hardware-accelerated video conversion ─────────────────────
+option(ENABLE_FFMPEG_HW_ACCEL
+    "Enable FFmpeg hardware-accelerated I420→NV12 video conversion (LGPL dynamic link required)"
+    OFF)
+
+if(ENABLE_FFMPEG_HW_ACCEL)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
+        libavfilter>=7
+        libavutil>=57
+    )
+endif()
+
 set(ZOOM_SDK_DIR "third_party/zoom-sdk" CACHE PATH "Zoom Meeting SDK directory")
 
 if(IS_ABSOLUTE "${ZOOM_SDK_DIR}")
@@ -81,6 +94,7 @@ add_library(obs-zoom-plugin MODULE
     src/zoom-control-server.cpp
     src/zoom-osc-server.cpp
     src/obs-utils.cpp
+    src/hw-video-pipeline.cpp
 )
 
 target_include_directories(obs-zoom-plugin PRIVATE
@@ -94,6 +108,11 @@ target_link_libraries(obs-zoom-plugin PRIVATE
     Qt6::Network
     Qt6::Widgets
 )
+
+if(ENABLE_FFMPEG_HW_ACCEL)
+    target_link_libraries(obs-zoom-plugin PRIVATE PkgConfig::FFMPEG)
+    target_compile_definitions(obs-zoom-plugin PRIVATE COREVIDEO_HW_ACCEL)
+endif()
 
 if(APPLE)
     target_link_libraries(obs-zoom-plugin PRIVATE

@@ -23,6 +23,7 @@
 #define PROP_AUDIO_CHANNELS       "audio_channels"
 #define PROP_RESOLUTION           "resolution"
 #define PROP_STATUS               "status_label"
+#define PROP_HW_ACCEL_MODE        "hw_accel_mode"
 
 #define VIDEO_LOSS_LAST_FRAME 0
 #define VIDEO_LOSS_BLACK      1
@@ -83,6 +84,7 @@ void ZoomSource::apply_settings(obs_data_t *settings)
     const bool old_active_speaker_mode = active_speaker_mode;
     const AudioChannelMode old_audio_mode = audio_mode;
     const VideoResolution old_resolution = resolution;
+    const int old_hw_accel_override = hw_accel_override;
 
     meeting_id = obs_data_get_string(settings, PROP_MEETING_ID);
     passcode = obs_data_get_string(settings, PROP_PASSCODE);
@@ -99,11 +101,21 @@ void ZoomSource::apply_settings(obs_data_t *settings)
     resolution = resolution_from_data(settings);
     video_loss_mode = obs_data_get_int(settings, PROP_VIDEO_LOSS_MODE) == VIDEO_LOSS_BLACK
         ? VideoLossMode::Black : VideoLossMode::LastFrame;
+    hw_accel_override = static_cast<int>(obs_data_get_int(settings, PROP_HW_ACCEL_MODE));
 
     if (m_subscribed && (old_participant_id != participant_id ||
         old_active_speaker_mode != active_speaker_mode ||
         old_audio_mode != audio_mode || old_resolution != resolution)) {
         subscribe();
+    }
+
+    if (hw_accel_override != old_hw_accel_override) {
+        m_hw_pipeline.shutdown();
+        const HwAccelMode effective = hw_accel_override >= 0
+            ? static_cast<HwAccelMode>(hw_accel_override)
+            : ZoomPluginSettings::load().hw_accel_mode;
+        if (effective != HwAccelMode::None)
+            m_hw_pipeline.init(effective);
     }
 }
 
@@ -195,17 +207,37 @@ void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height)
     if (!source || w == 0 || h == 0 || y_len != w * h) return;
 
     const auto *pixels = static_cast<const uint8_t *>(m_video_shm.ptr) + sizeof(ShmFrameHeader);
+    const auto *y_ptr = pixels;
+    const auto *u_ptr = pixels + y_len;
+    const auto *v_ptr = pixels + y_len + y_len / 4;
+    const uint64_t ts = os_gettime_ns();
+
+    // Try hardware-accelerated I420→NV12 conversion; fall back to CPU I420 path.
     obs_source_frame frame = {};
-    frame.format = VIDEO_FORMAT_I420;
-    frame.width = w;
-    frame.height = h;
-    frame.timestamp = os_gettime_ns();
-    frame.data[0] = const_cast<uint8_t *>(pixels);
-    frame.data[1] = const_cast<uint8_t *>(pixels + y_len);
-    frame.data[2] = const_cast<uint8_t *>(pixels + y_len + y_len / 4);
-    frame.linesize[0] = w;
-    frame.linesize[1] = w / 2;
-    frame.linesize[2] = w / 2;
+    frame.timestamp = ts;
+
+    bool hw_ok = false;
+#ifdef COREVIDEO_HW_ACCEL
+    if (m_hw_pipeline.active_mode() != HwAccelMode::None) {
+        hw_ok = m_hw_pipeline.process(y_ptr, u_ptr, v_ptr,
+                                      static_cast<int>(w), static_cast<int>(h),
+                                      static_cast<int>(w), static_cast<int>(w / 2),
+                                      static_cast<int>(w / 2), frame);
+    }
+#endif
+
+    if (!hw_ok) {
+        frame.format     = VIDEO_FORMAT_I420;
+        frame.width      = w;
+        frame.height     = h;
+        frame.data[0]    = const_cast<uint8_t *>(y_ptr);
+        frame.data[1]    = const_cast<uint8_t *>(u_ptr);
+        frame.data[2]    = const_cast<uint8_t *>(v_ptr);
+        frame.linesize[0] = w;
+        frame.linesize[1] = w / 2;
+        frame.linesize[2] = w / 2;
+    }
+
     obs_source_output_video(source, &frame);
     m_width.store(w, std::memory_order_relaxed);
     m_height.store(h, std::memory_order_relaxed);
@@ -213,7 +245,7 @@ void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height)
     const uint64_t now_ns = os_gettime_ns();
     if (m_preview_cb && now_ns - m_preview_last_ns >= kPreviewIntervalNs) {
         m_preview_last_ns = now_ns;
-        m_preview_cb(w, h, pixels, pixels + y_len, pixels + y_len + y_len / 4, w, w / 2);
+        m_preview_cb(w, h, y_ptr, u_ptr, v_ptr, w, w / 2);
     }
 }
 
@@ -298,8 +330,17 @@ static void *zoom_source_create(obs_data_t *settings, obs_source_t *source)
         [ctx]() { ctx->on_roster_changed(); });
     ZoomOutputManager::instance().register_source(ctx);
 
+    const ZoomPluginSettings s = ZoomPluginSettings::load();
+
+    {
+        const HwAccelMode effective = ctx->hw_accel_override >= 0
+            ? static_cast<HwAccelMode>(ctx->hw_accel_override)
+            : s.hw_accel_mode;
+        if (effective != HwAccelMode::None)
+            ctx->m_hw_pipeline.init(effective);
+    }
+
     if (ctx->auto_join && !ctx->meeting_id.empty()) {
-        const ZoomPluginSettings s = ZoomPluginSettings::load();
         if (ZoomEngineClient::instance().start(s.jwt_token)) {
             ZoomEngineClient::instance().join(ctx->meeting_id, ctx->passcode,
                 ctx->display_name.empty() ? "OBS" : ctx->display_name);
@@ -317,6 +358,7 @@ static void zoom_source_destroy(void *data)
     ZoomEngineClient::instance().remove_roster_callback(ctx);
     ZoomEngineClient::instance().unregister_source(ctx->source_uuid);
     ctx->release_shared_memory();
+    ctx->m_hw_pipeline.shutdown();
     delete ctx;
 }
 
@@ -402,6 +444,23 @@ static obs_properties_t *zoom_source_get_properties(void *data)
     obs_property_list_add_int(loss, obs_module_text("ZoomSource.VideoLossBlack"),
                               VIDEO_LOSS_BLACK);
 
+    obs_property_t *hw = obs_properties_add_list(props, PROP_HW_ACCEL_MODE,
+        obs_module_text("ZoomSource.HwAccelMode"),
+        OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(hw, obs_module_text("ZoomSource.HwAccelGlobal"),  -1);
+    obs_property_list_add_int(hw, obs_module_text("ZoomSource.HwAccelNone"),
+                              static_cast<int>(HwAccelMode::None));
+    obs_property_list_add_int(hw, obs_module_text("ZoomSource.HwAccelAuto"),
+                              static_cast<int>(HwAccelMode::Auto));
+    obs_property_list_add_int(hw, obs_module_text("ZoomSource.HwAccelCuda"),
+                              static_cast<int>(HwAccelMode::Cuda));
+    obs_property_list_add_int(hw, obs_module_text("ZoomSource.HwAccelVaapi"),
+                              static_cast<int>(HwAccelMode::Vaapi));
+    obs_property_list_add_int(hw, obs_module_text("ZoomSource.HwAccelVideoToolbox"),
+                              static_cast<int>(HwAccelMode::VideoToolbox));
+    obs_property_list_add_int(hw, obs_module_text("ZoomSource.HwAccelQsv"),
+                              static_cast<int>(HwAccelMode::Qsv));
+
     obs_properties_add_button(props, "btn_join",
         obs_module_text("ZoomSource.JoinMeeting"),
         [](obs_properties_t *, obs_property_t *, void *d) -> bool {
@@ -441,6 +500,7 @@ static void zoom_source_get_defaults(obs_data_t *settings)
     obs_data_set_default_int(settings, PROP_AUDIO_CHANNELS, AUDIO_CH_MONO);
     obs_data_set_default_int(settings, PROP_RESOLUTION, RES_1080P);
     obs_data_set_default_int(settings, PROP_VIDEO_LOSS_MODE, VIDEO_LOSS_LAST_FRAME);
+    obs_data_set_default_int(settings, PROP_HW_ACCEL_MODE, -1);  // use global
 }
 
 void zoom_source_register()

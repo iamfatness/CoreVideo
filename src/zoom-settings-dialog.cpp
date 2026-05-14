@@ -6,6 +6,7 @@
 #include <QFormLayout>
 #include <QDialogButtonBox>
 #include <QGroupBox>
+#include <QComboBox>
 #include <QLineEdit>
 #include <QSpinBox>
 #include <QLabel>
@@ -59,6 +60,31 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     auto *osc_group = new QGroupBox("OSC Server (127.0.0.1 UDP)", this);
     osc_group->setLayout(osc_form);
 
+    m_hw_accel_combo = new QComboBox(this);
+    m_hw_accel_combo->addItem("Disabled (CPU only)",          static_cast<int>(HwAccelMode::None));
+    m_hw_accel_combo->addItem("Auto (detect best available)", static_cast<int>(HwAccelMode::Auto));
+    m_hw_accel_combo->addItem("CUDA (NVIDIA)",                static_cast<int>(HwAccelMode::Cuda));
+    m_hw_accel_combo->addItem("VAAPI (Intel / AMD on Linux)", static_cast<int>(HwAccelMode::Vaapi));
+    m_hw_accel_combo->addItem("VideoToolbox (Apple)",         static_cast<int>(HwAccelMode::VideoToolbox));
+    m_hw_accel_combo->addItem("QSV (Intel Quick Sync)",       static_cast<int>(HwAccelMode::Qsv));
+    // Pre-select the current setting.
+    for (int i = 0; i < m_hw_accel_combo->count(); ++i) {
+        if (m_hw_accel_combo->itemData(i).toInt() == static_cast<int>(s.hw_accel_mode)) {
+            m_hw_accel_combo->setCurrentIndex(i);
+            break;
+        }
+    }
+#ifndef COREVIDEO_HW_ACCEL
+    m_hw_accel_combo->setEnabled(false);
+    m_hw_accel_combo->setToolTip("Rebuild with ENABLE_FFMPEG_HW_ACCEL=ON to enable");
+#endif
+
+    auto *hw_form = new QFormLayout;
+    hw_form->addRow(new QLabel("Mode:", this), m_hw_accel_combo);
+
+    auto *hw_group = new QGroupBox("Hardware Video Acceleration", this);
+    hw_group->setLayout(hw_form);
+
     auto *buttons = new QDialogButtonBox(
         QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
     connect(buttons, &QDialogButtonBox::accepted, this, &ZoomSettingsDialog::onSave);
@@ -68,6 +94,7 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     layout->addWidget(sdk_group);
     layout->addWidget(ctrl_group);
     layout->addWidget(osc_group);
+    layout->addWidget(hw_group);
     layout->addWidget(buttons);
 }
 
@@ -80,6 +107,8 @@ void ZoomSettingsDialog::onSave()
     s.control_server_port = static_cast<uint16_t>(m_control_port_spin->value());
     s.osc_server_port     = static_cast<uint16_t>(m_osc_port_spin->value());
     s.control_token       = m_control_token_edit->text().toStdString();
+    s.hw_accel_mode       = static_cast<HwAccelMode>(
+        m_hw_accel_combo->currentData().toInt());
     s.save();
 
     ZoomControlServer::instance().set_token(s.control_token);

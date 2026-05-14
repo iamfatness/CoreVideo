@@ -23,7 +23,7 @@ jobs:
         with:
           submodules: recursive
 
-      # Puts dumpbin.exe and lib.exe on PATH — needed to synthesise import libs.
+      # Puts dumpbin.exe and lib.exe on PATH - needed to synthesise import libs.
       - name: Set up MSVC tools
         uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -41,17 +41,16 @@ jobs:
           Invoke-WebRequest @params
           Expand-Archive obs.zip $obs -Force
 
-          # ── Fast path: portable zip already contains cmake config files ──────
+          # Fast path: portable zip already contains cmake config files
           if (Test-Path "$obs\cmake\LibObs\LibObsConfig.cmake") {
-            Write-Host "cmake config files found in portable zip — nothing extra to do."
+            Write-Host "cmake config files found in portable zip - nothing extra to do."
             exit 0
           }
 
           Write-Host "Portable zip has no cmake dev files. Bootstrapping from OBS source + DLL exports."
 
-          # ── Headers: sparse-checkout only libobs + frontend-api ──────────────
-          git clone --depth 1 --branch $ver --filter=blob:none --sparse `
-            https://github.com/obsproject/obs-studio.git C:\obs-source
+          # Headers: sparse-checkout only libobs + frontend-api
+          git clone --depth 1 --branch $ver --filter=blob:none --sparse https://github.com/obsproject/obs-studio.git C:\obs-source
           Push-Location C:\obs-source
           git sparse-checkout set libobs UI/obs-frontend-api
           Pop-Location
@@ -60,13 +59,13 @@ jobs:
           Copy-Item C:\obs-source\libobs\*.h                                    "$obs\include\obs\"
           Copy-Item C:\obs-source\UI\obs-frontend-api\obs-frontend-api.h        "$obs\include\obs\"
 
-          # ── Import libs: generate from DLL export tables via dumpbin + lib ───
+          # Import libs: generate from DLL export tables via dumpbin + lib
           New-Item -Force -ItemType Directory "$obs\lib" | Out-Null
           foreach ($name in @("obs", "obs-frontend-api")) {
             $dll = "$obs\bin\64bit\$name.dll"
             $def = "$obs\lib\$name.def"
             $lib = "$obs\lib\$name.lib"
-            if (-not (Test-Path $dll)) { Write-Warning "$dll not found — skipping"; continue }
+            if (-not (Test-Path $dll)) { Write-Warning "$dll not found - skipping"; continue }
 
             $exports = @("EXPORTS")
             (dumpbin /nologo /exports $dll) | ForEach-Object {
@@ -79,7 +78,7 @@ jobs:
             lib /nologo /def:$def /out:$lib /machine:x64
           }
 
-          # ── cmake config files: one per package ──────────────────────────────
+          # cmake config files: one per package
           $obsSlash = $obs -replace '\\', '/'
           foreach ($pkg in @(
             @{ name = "LibObs";           target = "OBS::libobs";            dll = "obs"              },
@@ -114,15 +113,20 @@ jobs:
       - name: Configure
         shell: powershell
         run: |
-          cmake -B build -G "Visual Studio 17 2022" -A x64 `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DZOOM_SDK_DIR=third_party/zoom-sdk `
-            -DCMAKE_PREFIX_PATH="C:/obs-runtime" `
-            -DLibObs_DIR="C:/obs-runtime/cmake/LibObs" `
-            "-Dobs-frontend-api_DIR=C:/obs-runtime/cmake/obs-frontend-api" `
-            "-DZOOM_EMBED_SDK_KEY=${{ secrets.ZOOM_EMBED_SDK_KEY }}" `
-            "-DZOOM_EMBED_SDK_SECRET=${{ secrets.ZOOM_EMBED_SDK_SECRET }}" `
+          $cmakeArgs = @(
+            '-B', 'build',
+            '-G', 'Visual Studio 17 2022',
+            '-A', 'x64',
+            '-DCMAKE_BUILD_TYPE=Release',
+            '-DZOOM_SDK_DIR=third_party/zoom-sdk',
+            '-DCMAKE_PREFIX_PATH=C:/obs-runtime',
+            '-DLibObs_DIR=C:/obs-runtime/cmake/LibObs',
+            '-Dobs-frontend-api_DIR=C:/obs-runtime/cmake/obs-frontend-api',
+            "-DZOOM_EMBED_SDK_KEY=${{ secrets.ZOOM_EMBED_SDK_KEY }}",
+            "-DZOOM_EMBED_SDK_SECRET=${{ secrets.ZOOM_EMBED_SDK_SECRET }}",
             "-DZOOM_EMBED_JWT_TOKEN=${{ secrets.ZOOM_EMBED_JWT_TOKEN }}"
+          )
+          cmake @cmakeArgs
 
       - name: Build
         run: cmake --build build --config Release --parallel

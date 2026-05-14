@@ -46,6 +46,7 @@ private:
     bool connect_ipc();
     void disconnect_ipc();
     void reader_loop();
+    void monitor_loop();
     void handle_event(const std::string &line);
     void write_json(const std::string &json);
 
@@ -53,6 +54,7 @@ private:
     IpcFd m_p2e = kIpcInvalidFd;
     IpcFd m_e2p = kIpcInvalidFd;
     std::thread m_reader;
+    std::thread m_monitor;
     std::atomic<bool> m_running{false};
     std::atomic<MeetingState> m_state{MeetingState::Idle};
     uint32_t m_active_speaker_id = 0;

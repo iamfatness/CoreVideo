@@ -214,10 +214,11 @@ if(WIN32)
     endif()
 
 elseif(APPLE)
-    # ── macOS productbuild .pkg ───────────────────────────────────────────────
-    set(CPACK_GENERATOR "productbuild")
-    set(CPACK_PACKAGING_INSTALL_PREFIX "/Applications/OBS.app/Contents/Resources")
-    set(CPACK_PRODUCTBUILD_IDENTIFIER  "com.corevideo.obs-zoom-plugin")
+    # ── macOS DragNDrop .dmg ──────────────────────────────────────────────────
+    # Users copy obs-plugins/ and data/ into OBS.app/Contents/Resources manually.
+    set(CPACK_GENERATOR "DragNDrop")
+    set(CPACK_DMG_VOLUME_NAME "CoreVideo ${PROJECT_VERSION}")
+    set(CPACK_DMG_FORMAT "UDZO")
 endif()
 
 include(CPack)

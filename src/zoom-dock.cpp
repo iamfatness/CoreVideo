@@ -1,6 +1,7 @@
 #include "zoom-dock.h"
 #include "zoom-engine-client.h"
 #include "zoom-output-manager.h"
+#include "zoom-reconnect.h"
 #include "zoom-settings.h"
 #include <QAbstractItemView>
 #include <QCheckBox>
@@ -13,6 +14,7 @@
 #include <QMetaObject>
 #include <QPushButton>
 #include <QTableWidget>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 #include <algorithm>
@@ -30,22 +32,24 @@ enum DockOutputColumns {
 static const char *state_dot_style(MeetingState s)
 {
     switch (s) {
-    case MeetingState::InMeeting: return "color: #22cc44; font-size: 18px;";
+    case MeetingState::InMeeting:  return "color: #22cc44; font-size: 18px;";
     case MeetingState::Joining:
-    case MeetingState::Leaving:   return "color: #f0a000; font-size: 18px;";
-    case MeetingState::Failed:    return "color: #ee3333; font-size: 18px;";
-    default:                      return "color: #666666; font-size: 18px;";
+    case MeetingState::Leaving:    return "color: #f0a000; font-size: 18px;";
+    case MeetingState::Recovering: return "color: #f0a000; font-size: 18px;";
+    case MeetingState::Failed:     return "color: #ee3333; font-size: 18px;";
+    default:                       return "color: #666666; font-size: 18px;";
     }
 }
 
 static const char *state_label_text(MeetingState s)
 {
     switch (s) {
-    case MeetingState::Idle:      return "Not connected";
-    case MeetingState::Joining:   return "Joining…";
-    case MeetingState::InMeeting: return "In meeting";
-    case MeetingState::Leaving:   return "Leaving…";
-    case MeetingState::Failed:    return "Connection failed";
+    case MeetingState::Idle:       return "Not connected";
+    case MeetingState::Joining:    return "Joining...";
+    case MeetingState::InMeeting:  return "In meeting";
+    case MeetingState::Leaving:    return "Leaving...";
+    case MeetingState::Recovering: return "Recovering...";
+    case MeetingState::Failed:     return "Connection failed";
     }
     return "";
 }
@@ -115,6 +119,30 @@ ZoomDock::ZoomDock(QWidget *parent)
     connect(m_join_btn,  &QPushButton::clicked, this, [this]() { on_join_clicked(); });
     connect(m_leave_btn, &QPushButton::clicked, this, [this]() { on_leave_clicked(); });
 
+    // ── Recovery panel ────────────────────────────────────────────────────────
+    m_recovery_label = new QLabel("", this);
+    m_recovery_label->setStyleSheet("color: #f0a000;");
+    m_recovery_label->setWordWrap(true);
+
+    m_cancel_rec_btn = new QPushButton("Cancel Recovery", this);
+    connect(m_cancel_rec_btn, &QPushButton::clicked,
+            this, [this]() { on_cancel_recovery_clicked(); });
+
+    auto *rec_row = new QHBoxLayout;
+    rec_row->addWidget(m_recovery_label, 1);
+    rec_row->addWidget(m_cancel_rec_btn);
+    vLayout->addLayout(rec_row);
+
+    m_countdown_timer = new QTimer(this);
+    m_countdown_timer->setInterval(500);
+    connect(m_countdown_timer, &QTimer::timeout, this, [this]() {
+        update_recovery_panel();
+    });
+
+    // Hidden until recovery begins.
+    m_recovery_label->setVisible(false);
+    m_cancel_rec_btn->setVisible(false);
+
     // ── Output table ──────────────────────────────────────────────────────────
     auto *output_group  = new QGroupBox("Outputs", this);
     auto *output_layout = new QVBoxLayout(output_group);
@@ -160,16 +188,51 @@ ZoomDock::~ZoomDock()
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
+void ZoomDock::update_recovery_panel()
+{
+    const bool recovering = ZoomReconnectManager::instance().is_recovering();
+    m_recovery_label->setVisible(recovering);
+    m_cancel_rec_btn->setVisible(recovering);
+
+    if (!recovering) {
+        m_countdown_timer->stop();
+        return;
+    }
+
+    const int attempt = ZoomReconnectManager::instance().attempt_count();
+    const int max_att = ZoomReconnectManager::instance().policy().max_attempts;
+    const int ms_left = ZoomReconnectManager::instance().next_retry_ms();
+
+    if (ms_left > 0) {
+        m_recovery_label->setText(
+            QString("Reconnecting in %1s... (attempt %2/%3)")
+                .arg((ms_left + 999) / 1000)
+                .arg(attempt + 1)
+                .arg(max_att));
+    } else {
+        m_recovery_label->setText(
+            QString("Reconnecting... (attempt %1/%2)")
+                .arg(attempt)
+                .arg(max_att));
+    }
+
+    if (!m_countdown_timer->isActive())
+        m_countdown_timer->start();
+}
+
 void ZoomDock::update_state_indicator()
 {
     const MeetingState s = ZoomEngineClient::instance().state();
     m_state_dot->setStyleSheet(state_dot_style(s));
     m_state_label->setText(state_label_text(s));
 
-    const bool in_meeting = (s == MeetingState::InMeeting);
+    const bool in_meeting    = (s == MeetingState::InMeeting);
+    const bool recovering    = (s == MeetingState::Recovering);
     const bool transitioning = (s == MeetingState::Joining || s == MeetingState::Leaving);
-    m_join_btn->setEnabled(!in_meeting && !transitioning);
+    m_join_btn->setEnabled(!in_meeting && !transitioning && !recovering);
     m_leave_btn->setEnabled(in_meeting);
+
+    update_recovery_panel();
 
     // Active speaker name
     const uint32_t spk_id = ZoomEngineClient::instance().active_speaker_id();
@@ -275,5 +338,11 @@ void ZoomDock::on_join_clicked()
 void ZoomDock::on_leave_clicked()
 {
     ZoomEngineClient::instance().leave();
+    update_state_indicator();
+}
+
+void ZoomDock::on_cancel_recovery_clicked()
+{
+    ZoomReconnectManager::instance().cancel();
     update_state_indicator();
 }

@@ -25,6 +25,9 @@ public:
     bool join(const std::string &meeting_id, const std::string &passcode,
               const std::string &display_name);
     void leave();
+
+    // Used by ZoomReconnectManager to drive state transitions.
+    void set_state(MeetingState s) { m_state.store(s, std::memory_order_release); }
     void subscribe(const std::string &source_uuid, uint32_t participant_id);
     void unsubscribe(const std::string &source_uuid);
 
@@ -61,6 +64,9 @@ private:
     std::vector<ParticipantInfo> m_roster;
     std::unordered_map<std::string, SourceCallbacks> m_sources;
     std::unordered_map<void *, RosterCallback> m_roster_callbacks;
+    // Tracks whether the user deliberately requested a leave/stop (suppresses recovery).
+    bool m_user_leaving = false;
+    std::string m_last_jwt; // stored so reconnect manager can access it
 
 #if defined(WIN32)
     void *m_process = nullptr;

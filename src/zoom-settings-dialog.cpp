@@ -2,10 +2,12 @@
 #include "zoom-settings.h"
 #include "zoom-control-server.h"
 #include "zoom-osc-server.h"
+#include "zoom-reconnect.h"
 #include <QVBoxLayout>
 #include <QFormLayout>
 #include <QDialogButtonBox>
 #include <QGroupBox>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QLineEdit>
 #include <QSpinBox>
@@ -85,6 +87,47 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     auto *hw_group = new QGroupBox("Hardware Video Acceleration", this);
     hw_group->setLayout(hw_form);
 
+    // ── Auto-Reconnect ────────────────────────────────────────────────────────
+    const ZoomReconnectPolicy &rp = s.reconnect_policy;
+
+    m_rc_enabled_cb = new QCheckBox("Enable auto-reconnect", this);
+    m_rc_enabled_cb->setChecked(rp.enabled);
+
+    m_rc_max_attempts_spin = new QSpinBox(this);
+    m_rc_max_attempts_spin->setRange(1, 20);
+    m_rc_max_attempts_spin->setValue(rp.max_attempts);
+
+    m_rc_base_delay_spin = new QSpinBox(this);
+    m_rc_base_delay_spin->setRange(500, 30000);
+    m_rc_base_delay_spin->setSingleStep(500);
+    m_rc_base_delay_spin->setSuffix(" ms");
+    m_rc_base_delay_spin->setValue(rp.base_delay_ms);
+
+    m_rc_max_delay_spin = new QSpinBox(this);
+    m_rc_max_delay_spin->setRange(1000, 120000);
+    m_rc_max_delay_spin->setSingleStep(1000);
+    m_rc_max_delay_spin->setSuffix(" ms");
+    m_rc_max_delay_spin->setValue(rp.max_delay_ms);
+
+    m_rc_on_crash_cb = new QCheckBox("On engine crash", this);
+    m_rc_on_crash_cb->setChecked(rp.on_engine_crash);
+    m_rc_on_disc_cb  = new QCheckBox("On meeting disconnect / network drop", this);
+    m_rc_on_disc_cb->setChecked(rp.on_disconnect);
+    m_rc_on_auth_cb  = new QCheckBox("On authentication failure (may loop if credentials are wrong)", this);
+    m_rc_on_auth_cb->setChecked(rp.on_auth_fail);
+
+    auto *rc_form = new QFormLayout;
+    rc_form->addRow("",                           m_rc_enabled_cb);
+    rc_form->addRow("Max attempts:",              m_rc_max_attempts_spin);
+    rc_form->addRow("Initial retry delay:",       m_rc_base_delay_spin);
+    rc_form->addRow("Max retry delay:",           m_rc_max_delay_spin);
+    rc_form->addRow("Reconnect triggers:",        m_rc_on_crash_cb);
+    rc_form->addRow("",                           m_rc_on_disc_cb);
+    rc_form->addRow("",                           m_rc_on_auth_cb);
+
+    auto *rc_group = new QGroupBox("Auto-Reconnect", this);
+    rc_group->setLayout(rc_form);
+
     auto *buttons = new QDialogButtonBox(
         QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
     connect(buttons, &QDialogButtonBox::accepted, this, &ZoomSettingsDialog::onSave);
@@ -95,6 +138,7 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     layout->addWidget(ctrl_group);
     layout->addWidget(osc_group);
     layout->addWidget(hw_group);
+    layout->addWidget(rc_group);
     layout->addWidget(buttons);
 }
 
@@ -109,7 +153,15 @@ void ZoomSettingsDialog::onSave()
     s.control_token       = m_control_token_edit->text().toStdString();
     s.hw_accel_mode       = static_cast<HwAccelMode>(
         m_hw_accel_combo->currentData().toInt());
+    s.reconnect_policy.enabled        = m_rc_enabled_cb->isChecked();
+    s.reconnect_policy.max_attempts   = m_rc_max_attempts_spin->value();
+    s.reconnect_policy.base_delay_ms  = m_rc_base_delay_spin->value();
+    s.reconnect_policy.max_delay_ms   = m_rc_max_delay_spin->value();
+    s.reconnect_policy.on_engine_crash = m_rc_on_crash_cb->isChecked();
+    s.reconnect_policy.on_disconnect   = m_rc_on_disc_cb->isChecked();
+    s.reconnect_policy.on_auth_fail    = m_rc_on_auth_cb->isChecked();
     s.save();
+    ZoomReconnectManager::instance().set_policy(s.reconnect_policy);
 
     ZoomControlServer::instance().set_token(s.control_token);
 

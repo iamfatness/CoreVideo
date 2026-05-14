@@ -1,4 +1,5 @@
 #include "zoom-engine-client.h"
+#include "zoom-reconnect.h"
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -83,6 +84,8 @@ bool ZoomEngineClient::start(const std::string &jwt_token)
         blog(LOG_ERROR, "[obs-zoom-plugin] Cannot start Zoom engine: JWT token is empty");
         return false;
     }
+    m_last_jwt = jwt_token;
+    m_user_leaving = false;
 
     // Join threads from any previous session (e.g. after a crash).
     if (m_reader.joinable())  m_reader.join();
@@ -117,6 +120,7 @@ bool ZoomEngineClient::start(const std::string &jwt_token)
 
 void ZoomEngineClient::stop()
 {
+    m_user_leaving = true;
     if (m_running.exchange(false, std::memory_order_acq_rel)) {
         write_json(R"({"cmd":"quit"})");
         disconnect_ipc();
@@ -152,11 +156,17 @@ void ZoomEngineClient::monitor_loop()
     // If m_running is still true the engine exited without being asked to.
     if (m_running.exchange(false, std::memory_order_acq_rel)) {
         blog(LOG_ERROR,
-             "[obs-zoom-plugin] ZoomObsEngine exited unexpectedly (code %d) — "
-             "use the Join button to reconnect",
+             "[obs-zoom-plugin] ZoomObsEngine exited unexpectedly (code %d)",
              exit_code);
-        m_state.store(MeetingState::Failed, std::memory_order_release);
         disconnect_ipc(); // unblocks reader_loop so it exits cleanly
+
+        RecoveryReason reason = RecoveryReason::EngineCrash;
+        if (exit_code == 2) reason = RecoveryReason::AuthFailure;
+        else if (exit_code == 3) reason = RecoveryReason::SdkError;
+        else if (exit_code == 4) reason = RecoveryReason::LicenseError;
+
+        m_state.store(MeetingState::Recovering, std::memory_order_release);
+        ZoomReconnectManager::instance().trigger(reason);
     }
 }
 
@@ -167,6 +177,9 @@ bool ZoomEngineClient::join(const std::string &meeting_id,
     if (!m_running.load(std::memory_order_acquire)) return false;
     if (meeting_id.empty()) return false;
     m_state.store(MeetingState::Joining, std::memory_order_release);
+    // Always keep session params up to date for recovery.
+    ZoomReconnectManager::instance().store_session(
+        m_last_jwt, meeting_id, passcode, display_name);
     write_json(R"({"cmd":"join","meeting_id":")" + json_escape(meeting_id) +
         R"(","passcode":")" + json_escape(passcode) +
         R"(","display_name":")" + json_escape(display_name) + "\"}");
@@ -176,6 +189,8 @@ bool ZoomEngineClient::join(const std::string &meeting_id,
 void ZoomEngineClient::leave()
 {
     if (!m_running.load(std::memory_order_acquire)) return;
+    m_user_leaving = true;
+    ZoomReconnectManager::instance().cancel(); // suppress any in-progress recovery
     m_state.store(MeetingState::Leaving, std::memory_order_release);
     write_json(R"({"cmd":"leave"})");
 }
@@ -310,6 +325,7 @@ void ZoomEngineClient::handle_event(const std::string &line)
     }
     if (cmd == "joined") {
         m_state.store(MeetingState::InMeeting, std::memory_order_release);
+        ZoomReconnectManager::instance().on_join_success();
         return;
     }
     if (cmd == "left") {
@@ -322,8 +338,25 @@ void ZoomEngineClient::handle_event(const std::string &line)
         return;
     }
     if (cmd == "error" || cmd == "auth_fail") {
-        m_state.store(MeetingState::Failed, std::memory_order_release);
         blog(LOG_ERROR, "[obs-zoom-plugin] Zoom engine event: %s", line.c_str());
+        const QString reason = obj.value("reason").toString();
+        // Permanent failures: auth, license, host-ended.
+        if (cmd == "auth_fail" || reason == "auth_fail") {
+            m_state.store(MeetingState::Failed, std::memory_order_release);
+            ZoomReconnectManager::instance().on_join_failed(true);
+        } else if (reason == "license") {
+            m_state.store(MeetingState::Failed, std::memory_order_release);
+            ZoomReconnectManager::instance().trigger(RecoveryReason::LicenseError);
+        } else if (reason == "host_ended") {
+            ZoomReconnectManager::instance().trigger(RecoveryReason::HostEndedMeeting);
+        } else {
+            // Retriable failure — let reconnect manager decide.
+            if (!m_user_leaving) {
+                ZoomReconnectManager::instance().on_join_failed(false);
+            } else {
+                m_state.store(MeetingState::Failed, std::memory_order_release);
+            }
+        }
         return;
     }
 

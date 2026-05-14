@@ -10,6 +10,7 @@ class QPushButton;
 class QTableWidget;
 class QComboBox;
 class QCheckBox;
+class QTimer;
 
 class ZoomDock : public QWidget {
     Q_OBJECT
@@ -24,7 +25,9 @@ private:
 
     void on_join_clicked();
     void on_leave_clicked();
+    void on_cancel_recovery_clicked();
     void update_state_indicator();
+    void update_recovery_panel();
 
     // Meeting control bar
     QLabel      *m_state_dot    = nullptr;
@@ -36,6 +39,11 @@ private:
 
     // Active speaker
     QLabel      *m_speaker_label = nullptr;
+
+    // Recovery status panel (shown only when Recovering)
+    QLabel      *m_recovery_label    = nullptr;
+    QPushButton *m_cancel_rec_btn    = nullptr;
+    QTimer      *m_countdown_timer   = nullptr;
 
     // Output table (replaces the modal Output Manager)
     QTableWidget *m_output_table = nullptr;

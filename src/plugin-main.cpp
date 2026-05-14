@@ -3,6 +3,7 @@
 #include <util/platform.h>
 #include "zoom-source.h"
 #include "zoom-engine-client.h"
+#include "zoom-reconnect.h"
 #include "zoom-settings.h"
 #include "zoom-settings-dialog.h"
 #include "zoom-output-dialog.h"
@@ -29,6 +30,7 @@ bool obs_module_load(void)
     zoom_source_register();
 
     ZoomPluginSettings s = ZoomPluginSettings::load();
+    ZoomReconnectManager::instance().set_policy(s.reconnect_policy);
     ZoomControlServer::instance().set_token(s.control_token);
     if (!ZoomControlServer::instance().start(s.control_server_port))
         blog(LOG_WARNING, "[obs-zoom-plugin] TCP control server unavailable — continuing without it");

@@ -64,6 +64,13 @@ void ZoomOutputManager::clear_preview_cb(const std::string &source_name)
     }
 }
 
+void ZoomOutputManager::resubscribe_all()
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    for (auto *src : m_sources)
+        if (src && src->is_subscribed()) src->subscribe();
+}
+
 void ZoomOutputManager::clear_all_preview_cbs()
 {
     std::lock_guard<std::mutex> lk(m_mtx);

@@ -50,6 +50,7 @@ struct ZoomSource {
 
     uint32_t width() const { return m_width.load(std::memory_order_relaxed); }
     uint32_t height() const { return m_height.load(std::memory_order_relaxed); }
+    bool is_subscribed() const { return m_subscribed; }
     void set_preview_cb(ZoomPreviewCallback cb);
     void clear_preview_cb();
     void release_shared_memory();

@@ -85,6 +85,7 @@ add_library(obs-zoom-plugin MODULE
     src/plugin-main.cpp
     src/zoom-source.cpp
     src/zoom-engine-client.cpp
+    src/zoom-reconnect.cpp
     src/zoom-settings.cpp
     src/zoom-settings-dialog.cpp
     src/zoom-output-manager.cpp

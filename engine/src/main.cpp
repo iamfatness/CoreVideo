@@ -5,9 +5,21 @@
 #include <zoom_sdk.h>
 #include <auth_service_interface.h>
 #include <meeting_service_interface.h>
-#include <meeting_participants_ctrl_interface.h>
+#if __has_include(<meeting_service_components/meeting_audio_interface.h>)
+#include <meeting_service_components/meeting_audio_interface.h>
+#else
 #include <meeting_audio_interface.h>
+#endif
+#if __has_include(<meeting_service_components/meeting_participants_ctrl_interface.h>)
+#include <meeting_service_components/meeting_participants_ctrl_interface.h>
+#else
+#include <meeting_participants_ctrl_interface.h>
+#endif
+#if __has_include(<meeting_service_components/meeting_video_interface.h>)
+#include <meeting_service_components/meeting_video_interface.h>
+#else
 #include <meeting_video_interface.h>
+#endif
 #include <algorithm>
 #include <string>
 #include <atomic>

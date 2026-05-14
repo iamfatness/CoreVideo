@@ -4,8 +4,16 @@
 #include <unordered_map>
 #include <memory>
 #include "../../src/engine-ipc.h"
+#if __has_include(<zoom_sdk_raw_data_def.h>)
+#include <zoom_sdk_raw_data_def.h>
+#else
 #include <rawdata_def.h>
+#endif
+#if __has_include(<rawdata/rawdata_renderer_interface.h>)
+#include <rawdata/rawdata_renderer_interface.h>
+#else
 #include <rawdata_renderer_interface.h>
+#endif
 
 class ParticipantSubscription : public ZOOMSDK::IZoomSDKRendererDelegate {
 public:
@@ -15,7 +23,7 @@ public:
     ~ParticipantSubscription();
 
     void onRawDataFrameReceived(YUVRawDataI420 *data) override;
-    void onRawDataStatusChanged(RawDataStatus status) override;
+    void onRawDataStatusChanged(ZOOMSDK::IZoomSDKRendererDelegate::RawDataStatus status) override;
     void onRendererBeDestroyed() override;
 
 private:

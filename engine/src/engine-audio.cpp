@@ -1,6 +1,10 @@
 #include "engine-audio.h"
 #include "engine-writer.h"
+#if __has_include(<rawdata/zoom_rawdata_api.h>)
+#include <rawdata/zoom_rawdata_api.h>
+#else
 #include <zoom_rawdata_api.h>
+#endif
 #include <cstring>
 
 EngineAudio &EngineAudio::instance() { static EngineAudio inst; return inst; }

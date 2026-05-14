@@ -1,6 +1,10 @@
 #include "engine-video.h"
 #include "engine-writer.h"
+#if __has_include(<rawdata/zoom_rawdata_api.h>)
+#include <rawdata/zoom_rawdata_api.h>
+#else
 #include <zoom_rawdata_api.h>
+#endif
 #include <cstring>
 
 ParticipantSubscription::ParticipantSubscription(uint32_t participant_id,
@@ -60,7 +64,7 @@ void ParticipantSubscription::onRawDataFrameReceived(YUVRawDataI420 *data)
         R"(","w":)" + std::to_string(w) + R"(,"h":)" + std::to_string(h) + "}");
 }
 
-void ParticipantSubscription::onRawDataStatusChanged(RawDataStatus) {}
+void ParticipantSubscription::onRawDataStatusChanged(ZOOMSDK::IZoomSDKRendererDelegate::RawDataStatus) {}
 
 void ParticipantSubscription::onRendererBeDestroyed()
 {

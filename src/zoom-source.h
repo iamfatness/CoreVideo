@@ -38,6 +38,12 @@ struct ZoomSource {
     uint32_t speaker_hold_ms = 2000;
     // -1 = use global plugin setting; otherwise overrides per-source.
     int hw_accel_override = -1;
+    // ZoomISO-style assignment options.
+    std::atomic<AssignmentMode> assignment{AssignmentMode::Participant};
+    std::atomic<uint32_t>       spotlight_slot{1};
+    // Failover: if the primary participant leaves the meeting (and we're in
+    // Participant mode), switch to this secondary participant. 0 = no failover.
+    std::atomic<uint32_t>       failover_participant_id{0};
 
     void apply_settings(obs_data_t *settings);
     std::string output_name() const;
@@ -46,6 +52,13 @@ struct ZoomSource {
                           bool new_active_speaker_mode,
                           bool new_isolate_audio,
                           AudioChannelMode new_audio_mode);
+    // Extended variant accepting full ZoomISO-style assignment information.
+    void configure_output_ex(AssignmentMode mode,
+                             uint32_t new_participant_id,
+                             uint32_t new_spotlight_slot,
+                             uint32_t new_failover_participant_id,
+                             bool new_isolate_audio,
+                             AudioChannelMode new_audio_mode);
     void subscribe();
     void unsubscribe();
     void on_roster_changed();
@@ -73,4 +86,9 @@ private:
     std::atomic<bool> m_subscribed{false};
     std::atomic<uint32_t> m_current_subscription_id{0};
     HwVideoPipeline m_hw_pipeline;
+    // Per-source OBS hotkey IDs.
+    obs_hotkey_id m_hk_join_id       = OBS_INVALID_HOTKEY_ID;
+    obs_hotkey_id m_hk_leave_id      = OBS_INVALID_HOTKEY_ID;
+    obs_hotkey_id m_hk_active_on_id  = OBS_INVALID_HOTKEY_ID;
+    obs_hotkey_id m_hk_active_off_id = OBS_INVALID_HOTKEY_ID;
 };

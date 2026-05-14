@@ -64,6 +64,26 @@ void ZoomOutputManager::clear_preview_cb(const std::string &source_name)
     }
 }
 
+bool ZoomOutputManager::configure_output_ex(const std::string &source_name,
+                                            AssignmentMode mode,
+                                            uint32_t participant_id,
+                                            uint32_t spotlight_slot,
+                                            uint32_t failover_participant_id,
+                                            bool isolate_audio,
+                                            AudioChannelMode audio_mode)
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    for (auto *source : m_sources) {
+        if (!source) continue;
+        if (source->output_name() != source_name) continue;
+        source->configure_output_ex(mode, participant_id, spotlight_slot,
+                                    failover_participant_id, isolate_audio,
+                                    audio_mode);
+        return true;
+    }
+    return false;
+}
+
 void ZoomOutputManager::resubscribe_all()
 {
     std::lock_guard<std::mutex> lk(m_mtx);

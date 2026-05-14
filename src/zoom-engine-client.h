@@ -26,8 +26,15 @@ public:
     void stop_for_reconnect();
 
     bool join(const std::string &meeting_id, const std::string &passcode,
-              const std::string &display_name);
+              const std::string &display_name,
+              MeetingKind kind = MeetingKind::Meeting);
     void leave();
+
+    // Subscribe a source to a "spotlight slot" (1-based) instead of a fixed
+    // participant. The engine resolves which participant owns that slot.
+    void subscribe_spotlight(const std::string &source_uuid, uint32_t slot);
+    // Subscribe a source to the active screen-share feed.
+    void subscribe_screenshare(const std::string &source_uuid);
 
     // Used by ZoomReconnectManager to drive state transitions.
     void set_state(MeetingState s) { m_state.store(s, std::memory_order_release); }

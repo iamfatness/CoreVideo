@@ -34,9 +34,11 @@ jobs:
         run: |
           $ver = "30.2.2"
           $obs = "C:\obs-runtime"
-          Invoke-WebRequest `
-            "https://github.com/obsproject/obs-studio/releases/download/$ver/OBS-Studio-$ver-Windows.zip" `
-            -OutFile obs.zip
+          $params = @{
+            Uri     = "https://github.com/obsproject/obs-studio/releases/download/$ver/OBS-Studio-$ver-Windows.zip"
+            OutFile = "obs.zip"
+          }
+          Invoke-WebRequest @params
           Expand-Archive obs.zip $obs -Force
 
           # ── Fast path: portable zip already contains cmake config files ──────

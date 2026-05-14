@@ -1,5 +1,5 @@
 #include "engine-audio.h"
-#include "../../src/engine-ipc.h"
+#include "engine-writer.h"
 #include <zoom_rawdata_api.h>
 #include <cstring>
 
@@ -54,7 +54,7 @@ void EngineAudio::onMixedAudioRawDataReceived(AudioRawData *data)
     std::memcpy(static_cast<char *>(m_shm.ptr) + sizeof(ShmAudioHeader),
                 data->GetBuffer(), byte_len);
 
-    ipc_write_line(m_e2p_fd,
+    EngineIpc::write(
         R"({"cmd":"audio","source_uuid":")" + m_source_uuid +
         R"(","byte_len":)" + std::to_string(byte_len) + "}");
 }

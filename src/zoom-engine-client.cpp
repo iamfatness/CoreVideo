@@ -11,8 +11,10 @@
 #if defined(WIN32)
 #include <windows.h>
 #else
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -82,31 +84,80 @@ bool ZoomEngineClient::start(const std::string &jwt_token)
         return false;
     }
 
+    // Join threads from any previous session (e.g. after a crash).
+    if (m_reader.joinable())  m_reader.join();
+    if (m_monitor.joinable()) m_monitor.join();
+
     if (!launch_engine() || !connect_ipc()) {
         disconnect_ipc();
+        // Engine may have been launched before IPC connection failed — kill it.
+#if defined(WIN32)
+        if (m_process) {
+            TerminateProcess(static_cast<HANDLE>(m_process), 1);
+            WaitForSingleObject(static_cast<HANDLE>(m_process), 3000);
+            CloseHandle(static_cast<HANDLE>(m_process));
+            m_process = nullptr;
+        }
+#else
+        if (m_pid > 0) {
+            kill(m_pid, SIGTERM);
+            waitpid(m_pid, nullptr, 0);
+            m_pid = -1;
+        }
+#endif
         return false;
     }
 
     m_running.store(true, std::memory_order_release);
-    m_reader = std::thread([this]() { reader_loop(); });
+    m_reader  = std::thread([this]() { reader_loop(); });
+    m_monitor = std::thread([this]() { monitor_loop(); });
     write_json(R"({"cmd":"init","jwt":")" + json_escape(jwt_token) + "\"}");
     return true;
 }
 
 void ZoomEngineClient::stop()
 {
-    if (!m_running.exchange(false, std::memory_order_acq_rel)) return;
-    write_json(R"({"cmd":"quit"})");
-    disconnect_ipc();
-    if (m_reader.joinable()) m_reader.join();
+    if (m_running.exchange(false, std::memory_order_acq_rel)) {
+        write_json(R"({"cmd":"quit"})");
+        disconnect_ipc();
+    }
+    // Always join both threads — safe even if they already exited.
+    if (m_reader.joinable())  m_reader.join();
+    if (m_monitor.joinable()) m_monitor.join(); // also reaps the child process
     m_state.store(MeetingState::Idle, std::memory_order_release);
+}
 
+void ZoomEngineClient::monitor_loop()
+{
+    // Wait for the engine process to exit.
+    int exit_code = 0;
 #if defined(WIN32)
     if (m_process) {
+        WaitForSingleObject(static_cast<HANDLE>(m_process), INFINITE);
+        DWORD code = 0;
+        GetExitCodeProcess(static_cast<HANDLE>(m_process), &code);
+        exit_code = static_cast<int>(code);
         CloseHandle(static_cast<HANDLE>(m_process));
         m_process = nullptr;
     }
+#else
+    if (m_pid > 0) {
+        int status = 0;
+        waitpid(m_pid, &status, 0);
+        exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        m_pid = -1;
+    }
 #endif
+
+    // If m_running is still true the engine exited without being asked to.
+    if (m_running.exchange(false, std::memory_order_acq_rel)) {
+        blog(LOG_ERROR,
+             "[obs-zoom-plugin] ZoomObsEngine exited unexpectedly (code %d) — "
+             "use the Join button to reconnect",
+             exit_code);
+        m_state.store(MeetingState::Failed, std::memory_order_release);
+        disconnect_ipc(); // unblocks reader_loop so it exits cleanly
+    }
 }
 
 bool ZoomEngineClient::join(const std::string &meeting_id,

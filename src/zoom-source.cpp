@@ -24,6 +24,9 @@
 #define PROP_RESOLUTION           "resolution"
 #define PROP_STATUS               "status_label"
 #define PROP_HW_ACCEL_MODE        "hw_accel_mode"
+#define PROP_ASSIGNMENT_MODE      "assignment_mode"
+#define PROP_SPOTLIGHT_SLOT       "spotlight_slot"
+#define PROP_FAILOVER_PARTICIPANT "failover_participant_id"
 
 #define VIDEO_LOSS_LAST_FRAME 0
 #define VIDEO_LOSS_BLACK      1
@@ -86,6 +89,9 @@ void ZoomSource::apply_settings(obs_data_t *settings)
     const AudioChannelMode old_audio_mode = audio_mode;
     const VideoResolution old_resolution = resolution;
     const int old_hw_accel_override = hw_accel_override;
+    const AssignmentMode old_assignment = assignment.load(std::memory_order_acquire);
+    const uint32_t old_spotlight_slot = spotlight_slot.load(std::memory_order_acquire);
+    const uint32_t old_failover = failover_participant_id.load(std::memory_order_acquire);
 
     meeting_id = obs_data_get_string(settings, PROP_MEETING_ID);
     passcode = obs_data_get_string(settings, PROP_PASSCODE);
@@ -103,10 +109,36 @@ void ZoomSource::apply_settings(obs_data_t *settings)
     video_loss_mode = obs_data_get_int(settings, PROP_VIDEO_LOSS_MODE) == VIDEO_LOSS_BLACK
         ? VideoLossMode::Black : VideoLossMode::LastFrame;
     hw_accel_override = static_cast<int>(obs_data_get_int(settings, PROP_HW_ACCEL_MODE));
+    {
+        const int mode_int = static_cast<int>(
+            obs_data_get_int(settings, PROP_ASSIGNMENT_MODE));
+        AssignmentMode mode = AssignmentMode::Participant;
+        if (mode_int == 1) mode = AssignmentMode::ActiveSpeaker;
+        else if (mode_int == 2) mode = AssignmentMode::SpotlightIndex;
+        else if (mode_int == 3) mode = AssignmentMode::ScreenShare;
+        // Back-compat: the older bool PROP_ACTIVE_SPEAKER overrides if the
+        // user has it checked and no explicit assignment mode is set.
+        if (mode == AssignmentMode::Participant && active_speaker_mode)
+            mode = AssignmentMode::ActiveSpeaker;
+        assignment.store(mode, std::memory_order_release);
+        spotlight_slot.store(static_cast<uint32_t>(std::max<int64_t>(1,
+            obs_data_get_int(settings, PROP_SPOTLIGHT_SLOT))),
+            std::memory_order_release);
+        failover_participant_id.store(static_cast<uint32_t>(
+            obs_data_get_int(settings, PROP_FAILOVER_PARTICIPANT)),
+            std::memory_order_release);
+    }
+
+    const AssignmentMode new_assignment = assignment.load(std::memory_order_acquire);
+    const uint32_t new_spot = spotlight_slot.load(std::memory_order_acquire);
+    const uint32_t new_failover = failover_participant_id.load(std::memory_order_acquire);
 
     if (m_subscribed && (old_participant_id != participant_id ||
         old_active_speaker_mode != active_speaker_mode ||
-        old_audio_mode != audio_mode || old_resolution != resolution)) {
+        old_audio_mode != audio_mode || old_resolution != resolution ||
+        old_assignment != new_assignment ||
+        old_spotlight_slot != new_spot ||
+        old_failover != new_failover)) {
         subscribe();
     }
 
@@ -139,6 +171,9 @@ ZoomOutputInfo ZoomSource::output_info() const
     info.active_speaker = active_speaker_mode;
     info.isolate_audio = isolate_audio;
     info.audio_mode = audio_mode;
+    info.assignment = assignment.load(std::memory_order_acquire);
+    info.spotlight_slot = spotlight_slot.load(std::memory_order_acquire);
+    info.failover_participant_id = failover_participant_id.load(std::memory_order_acquire);
     return info;
 }
 
@@ -167,14 +202,81 @@ void ZoomSource::configure_output(uint32_t new_participant_id,
     if (m_subscribed) subscribe();
 }
 
+void ZoomSource::configure_output_ex(AssignmentMode mode,
+                                     uint32_t new_participant_id,
+                                     uint32_t new_spotlight_slot,
+                                     uint32_t new_failover_participant_id,
+                                     bool new_isolate_audio,
+                                     AudioChannelMode new_audio_mode)
+{
+    const bool active_speaker = (mode == AssignmentMode::ActiveSpeaker);
+    if (source) {
+        obs_data_t *settings = obs_source_get_settings(source);
+        obs_data_set_int(settings, PROP_ASSIGNMENT_MODE, static_cast<int>(mode));
+        obs_data_set_int(settings, PROP_PARTICIPANT_ID, new_participant_id);
+        obs_data_set_bool(settings, PROP_ACTIVE_SPEAKER, active_speaker);
+        obs_data_set_int(settings, PROP_SPOTLIGHT_SLOT, new_spotlight_slot);
+        obs_data_set_int(settings, PROP_FAILOVER_PARTICIPANT, new_failover_participant_id);
+        obs_data_set_bool(settings, PROP_ISOLATE_AUDIO, new_isolate_audio);
+        obs_data_set_int(settings, PROP_AUDIO_CHANNELS,
+                         new_audio_mode == AudioChannelMode::Stereo
+                         ? AUDIO_CH_STEREO : AUDIO_CH_MONO);
+        obs_source_update(source, settings);
+        obs_data_release(settings);
+        return;
+    }
+
+    assignment.store(mode, std::memory_order_release);
+    participant_id = new_participant_id;
+    active_speaker_mode = active_speaker;
+    spotlight_slot.store(new_spotlight_slot, std::memory_order_release);
+    failover_participant_id.store(new_failover_participant_id, std::memory_order_release);
+    isolate_audio = new_isolate_audio;
+    audio_mode = new_audio_mode;
+    if (m_subscribed) subscribe();
+}
+
 void ZoomSource::subscribe()
 {
     if (source_uuid.empty()) source_uuid = make_source_uuid();
-    const uint32_t subscribe_id =
-        effective_participant_id(participant_id, active_speaker_mode);
-    ZoomEngineClient::instance().subscribe(source_uuid, subscribe_id);
-    m_current_subscription_id = subscribe_id;
-    m_subscribed = true;
+
+    const AssignmentMode mode = assignment.load(std::memory_order_acquire);
+    switch (mode) {
+    case AssignmentMode::SpotlightIndex: {
+        const uint32_t slot = spotlight_slot.load(std::memory_order_acquire);
+        ZoomEngineClient::instance().subscribe_spotlight(source_uuid, slot);
+        // Use a sentinel so on_roster_changed re-subscribes only when we
+        // actually want to change the dispatch.
+        m_current_subscription_id = 0xFFFF0000u | slot;
+        m_subscribed = true;
+        return;
+    }
+    case AssignmentMode::ScreenShare:
+        ZoomEngineClient::instance().subscribe_screenshare(source_uuid);
+        m_current_subscription_id = 0xFFFFFFFFu;
+        m_subscribed = true;
+        return;
+    case AssignmentMode::ActiveSpeaker:
+    case AssignmentMode::Participant:
+    default: {
+        // Resolve target participant. If primary is missing from the current
+        // roster and we have a failover ID, use it.
+        uint32_t target = effective_participant_id(participant_id,
+                                                    active_speaker_mode);
+        const uint32_t failover = failover_participant_id.load(std::memory_order_acquire);
+        if (target != 0 && failover != 0 && !active_speaker_mode) {
+            const auto roster = ZoomEngineClient::instance().roster();
+            const bool primary_present = std::any_of(
+                roster.begin(), roster.end(),
+                [&](const ParticipantInfo &p) { return p.user_id == target; });
+            if (!primary_present) target = failover;
+        }
+        ZoomEngineClient::instance().subscribe(source_uuid, target);
+        m_current_subscription_id = target;
+        m_subscribed = true;
+        return;
+    }
+    }
 }
 
 void ZoomSource::unsubscribe()
@@ -187,11 +289,35 @@ void ZoomSource::unsubscribe()
 
 void ZoomSource::on_roster_changed()
 {
-    if (!m_subscribed || !active_speaker_mode) return;
-    const uint32_t subscribe_id =
-        effective_participant_id(participant_id, active_speaker_mode);
-    if (subscribe_id == 0 || subscribe_id == m_current_subscription_id) return;
-    subscribe();
+    if (!m_subscribed) return;
+
+    const AssignmentMode mode = assignment.load(std::memory_order_acquire);
+    // Spotlight & screen-share assignments are resolved by the engine on
+    // every roster change; nothing for the plugin to do here.
+    if (mode == AssignmentMode::SpotlightIndex ||
+        mode == AssignmentMode::ScreenShare) return;
+
+    if (active_speaker_mode) {
+        const uint32_t subscribe_id =
+            effective_participant_id(participant_id, active_speaker_mode);
+        if (subscribe_id == 0 || subscribe_id == m_current_subscription_id) return;
+        subscribe();
+        return;
+    }
+
+    // Failover handling: if our primary participant is no longer in the
+    // roster but we have a configured failover, re-subscribe.
+    const uint32_t failover = failover_participant_id.load(std::memory_order_acquire);
+    if (failover == 0) return;
+    const uint32_t primary = participant_id.load(std::memory_order_acquire);
+    if (primary == 0) return;
+
+    const auto roster = ZoomEngineClient::instance().roster();
+    const bool primary_present = std::any_of(
+        roster.begin(), roster.end(),
+        [primary](const ParticipantInfo &p) { return p.user_id == primary; });
+    const uint32_t want = primary_present ? primary : failover;
+    if (want != m_current_subscription_id) subscribe();
 }
 
 void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height)
@@ -360,12 +486,60 @@ static void *zoom_source_create(obs_data_t *settings, obs_source_t *source)
             ctx->subscribe();
         }
     }
+
+    // ── Register per-source OBS hotkeys ────────────────────────────────────
+    ctx->m_hk_join_id = obs_hotkey_register_source(source,
+        "ZoomSource.Hotkey.Join",
+        obs_module_text("ZoomSource.Hotkey.Join"),
+        [](void *data, obs_hotkey_id, obs_hotkey_t *, bool pressed) {
+            if (!pressed) return;
+            auto *c = static_cast<ZoomSource *>(data);
+            const ZoomPluginSettings s = ZoomPluginSettings::load();
+            if (ZoomEngineClient::instance().start(s.jwt_token) &&
+                ZoomEngineClient::instance().join(c->meeting_id, c->passcode,
+                    c->display_name.empty() ? "OBS" : c->display_name)) {
+                c->subscribe();
+            }
+        }, ctx);
+    ctx->m_hk_leave_id = obs_hotkey_register_source(source,
+        "ZoomSource.Hotkey.Leave",
+        obs_module_text("ZoomSource.Hotkey.Leave"),
+        [](void *, obs_hotkey_id, obs_hotkey_t *, bool pressed) {
+            if (!pressed) return;
+            ZoomEngineClient::instance().leave();
+        }, ctx);
+    ctx->m_hk_active_on_id = obs_hotkey_register_source(source,
+        "ZoomSource.Hotkey.ActiveOn",
+        obs_module_text("ZoomSource.Hotkey.ActiveOn"),
+        [](void *data, obs_hotkey_id, obs_hotkey_t *, bool pressed) {
+            if (!pressed) return;
+            auto *c = static_cast<ZoomSource *>(data);
+            c->configure_output_ex(AssignmentMode::ActiveSpeaker, 0, 1,
+                                   c->failover_participant_id.load(),
+                                   c->isolate_audio, c->audio_mode);
+        }, ctx);
+    ctx->m_hk_active_off_id = obs_hotkey_register_source(source,
+        "ZoomSource.Hotkey.ActiveOff",
+        obs_module_text("ZoomSource.Hotkey.ActiveOff"),
+        [](void *data, obs_hotkey_id, obs_hotkey_t *, bool pressed) {
+            if (!pressed) return;
+            auto *c = static_cast<ZoomSource *>(data);
+            c->configure_output_ex(AssignmentMode::Participant,
+                                   c->participant_id.load(), 1,
+                                   c->failover_participant_id.load(),
+                                   c->isolate_audio, c->audio_mode);
+        }, ctx);
+
     return ctx;
 }
 
 static void zoom_source_destroy(void *data)
 {
     auto *ctx = static_cast<ZoomSource *>(data);
+    if (ctx->m_hk_join_id       != OBS_INVALID_HOTKEY_ID) obs_hotkey_unregister(ctx->m_hk_join_id);
+    if (ctx->m_hk_leave_id      != OBS_INVALID_HOTKEY_ID) obs_hotkey_unregister(ctx->m_hk_leave_id);
+    if (ctx->m_hk_active_on_id  != OBS_INVALID_HOTKEY_ID) obs_hotkey_unregister(ctx->m_hk_active_on_id);
+    if (ctx->m_hk_active_off_id != OBS_INVALID_HOTKEY_ID) obs_hotkey_unregister(ctx->m_hk_active_off_id);
     ZoomOutputManager::instance().unregister_source(ctx);
     ctx->unsubscribe();
     ZoomEngineClient::instance().remove_roster_callback(ctx);
@@ -431,6 +605,39 @@ static obs_properties_t *zoom_source_get_properties(void *data)
         obs_module_text("ZoomSource.SpeakerSensitivity"), 0, 3000, 50);
     obs_properties_add_int(props, PROP_SPEAKER_HOLD,
         obs_module_text("ZoomSource.SpeakerHold"), 0, 10000, 100);
+
+    // ── ZoomISO-style assignment options ─────────────────────────────────────
+    obs_property_t *amode = obs_properties_add_list(props, PROP_ASSIGNMENT_MODE,
+        obs_module_text("ZoomSource.AssignmentMode"),
+        OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(amode,
+        obs_module_text("ZoomSource.Assignment.Participant"),
+        static_cast<long long>(AssignmentMode::Participant));
+    obs_property_list_add_int(amode,
+        obs_module_text("ZoomSource.Assignment.ActiveSpeaker"),
+        static_cast<long long>(AssignmentMode::ActiveSpeaker));
+    obs_property_list_add_int(amode,
+        obs_module_text("ZoomSource.Assignment.SpotlightIndex"),
+        static_cast<long long>(AssignmentMode::SpotlightIndex));
+    obs_property_list_add_int(amode,
+        obs_module_text("ZoomSource.Assignment.ScreenShare"),
+        static_cast<long long>(AssignmentMode::ScreenShare));
+
+    obs_properties_add_int(props, PROP_SPOTLIGHT_SLOT,
+        obs_module_text("ZoomSource.SpotlightSlot"), 1, 9, 1);
+
+    obs_property_t *failover = obs_properties_add_list(props, PROP_FAILOVER_PARTICIPANT,
+        obs_module_text("ZoomSource.Failover"),
+        OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(failover,
+        obs_module_text("ZoomSource.NoFailover"), 0);
+    for (const auto &p : ZoomEngineClient::instance().roster()) {
+        std::string label = p.display_name.empty()
+            ? "ID " + std::to_string(p.user_id)
+            : p.display_name + " (" + std::to_string(p.user_id) + ")";
+        obs_property_list_add_int(failover, label.c_str(),
+                                  static_cast<long long>(p.user_id));
+    }
     obs_properties_add_bool(props, PROP_ISOLATE_AUDIO,
         obs_module_text("ZoomSource.IsolateAudio"));
     obs_properties_add_bool(props, PROP_AUTO_JOIN,
@@ -514,6 +721,10 @@ static void zoom_source_get_defaults(obs_data_t *settings)
     obs_data_set_default_int(settings, PROP_RESOLUTION, RES_1080P);
     obs_data_set_default_int(settings, PROP_VIDEO_LOSS_MODE, VIDEO_LOSS_LAST_FRAME);
     obs_data_set_default_int(settings, PROP_HW_ACCEL_MODE, -1);  // use global
+    obs_data_set_default_int(settings, PROP_ASSIGNMENT_MODE,
+                             static_cast<int>(AssignmentMode::Participant));
+    obs_data_set_default_int(settings, PROP_SPOTLIGHT_SLOT, 1);
+    obs_data_set_default_int(settings, PROP_FAILOVER_PARTICIPANT, 0);
 }
 
 void zoom_source_register()

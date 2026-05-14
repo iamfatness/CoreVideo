@@ -188,7 +188,8 @@ void ZoomEngineClient::monitor_loop()
 
 bool ZoomEngineClient::join(const std::string &meeting_id,
                             const std::string &passcode,
-                            const std::string &display_name)
+                            const std::string &display_name,
+                            MeetingKind kind)
 {
     if (!m_running.load(std::memory_order_acquire)) return false;
     if (meeting_id.empty()) return false;
@@ -196,10 +197,26 @@ bool ZoomEngineClient::join(const std::string &meeting_id,
     // Always keep session params up to date for recovery.
     ZoomReconnectManager::instance().store_session(
         m_last_jwt, meeting_id, passcode, display_name);
+    const char *kind_str = (kind == MeetingKind::Webinar) ? "webinar" : "meeting";
     write_json(R"({"cmd":"join","meeting_id":")" + json_escape(meeting_id) +
         R"(","passcode":")" + json_escape(passcode) +
-        R"(","display_name":")" + json_escape(display_name) + "\"}");
+        R"(","display_name":")" + json_escape(display_name) +
+        R"(","kind":")" + kind_str + "\"}");
     return true;
+}
+
+void ZoomEngineClient::subscribe_spotlight(const std::string &source_uuid, uint32_t slot)
+{
+    if (!m_running.load(std::memory_order_acquire) || source_uuid.empty()) return;
+    write_json(R"({"cmd":"subscribe","source_uuid":")" + json_escape(source_uuid) +
+        R"(","mode":"spotlight","slot":)" + std::to_string(slot) + "}");
+}
+
+void ZoomEngineClient::subscribe_screenshare(const std::string &source_uuid)
+{
+    if (!m_running.load(std::memory_order_acquire) || source_uuid.empty()) return;
+    write_json(R"({"cmd":"subscribe","source_uuid":")" + json_escape(source_uuid) +
+        R"(","mode":"screenshare"})");
 }
 
 void ZoomEngineClient::leave()
@@ -393,6 +410,11 @@ void ZoomEngineClient::handle_event(const std::string &line)
                 p.has_video = po.value("has_video").toBool();
                 p.is_talking = po.value("is_talking").toBool();
                 p.is_muted = po.value("is_muted").toBool();
+                p.is_host = po.value("is_host").toBool();
+                p.is_co_host = po.value("is_co_host").toBool();
+                p.raised_hand = po.value("raised_hand").toBool();
+                p.spotlight_index = static_cast<uint32_t>(po.value("spotlight").toInt());
+                p.is_sharing_screen = po.value("is_sharing_screen").toBool();
                 m_roster.push_back(std::move(p));
             }
             for (const auto &entry : m_roster_callbacks)

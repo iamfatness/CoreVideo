@@ -23,53 +23,46 @@ jobs:
         with:
           submodules: recursive
 
-      # Puts dumpbin.exe and lib.exe on PATH - needed to synthesise import libs.
       - name: Set up MSVC tools
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      - name: Install OBS Studio
+      # Sparse-checkout OBS source for headers only (much faster than a full clone).
+      # Then download the portable OBS zip solely to extract obs.dll / obs-frontend-api.dll
+      # and generate MSVC import libs from their export tables.
+      - name: Get OBS headers and import libs
         shell: powershell
         run: |
-          $ver = "30.2.2"
-          $obs = "C:\obs-runtime"
-          $params = @{
-            Uri     = "https://github.com/obsproject/obs-studio/releases/download/$ver/OBS-Studio-$ver-Windows.zip"
-            OutFile = "obs.zip"
-          }
-          Invoke-WebRequest @params
-          Expand-Archive obs.zip $obs -Force
+          $ver   = "30.2.2"
+          $sdk   = "C:\obs-sdk"
 
-          # Fast path: portable zip already contains cmake config files
-          if (Test-Path "$obs\cmake\LibObs\LibObsConfig.cmake") {
-            Write-Host "cmake config files found in portable zip - nothing extra to do."
-            exit 0
-          }
-
-          Write-Host "Portable zip has no cmake dev files. Bootstrapping from OBS source + DLL exports."
-
-          # Headers: sparse-checkout only libobs + frontend-api
-          git clone --depth 1 --branch $ver --filter=blob:none --sparse https://github.com/obsproject/obs-studio.git C:\obs-source
+          # ── Headers from sparse checkout ─────────────────────────────────────
+          git clone --depth 1 --branch $ver --filter=blob:none --sparse `
+              https://github.com/obsproject/obs-studio.git C:\obs-source
           Push-Location C:\obs-source
           git sparse-checkout set libobs UI/obs-frontend-api
           Pop-Location
 
-          New-Item -Force -ItemType Directory "$obs\include\obs" | Out-Null
-          Copy-Item C:\obs-source\libobs\*.h                                    "$obs\include\obs\"
-          Copy-Item C:\obs-source\UI\obs-frontend-api\obs-frontend-api.h        "$obs\include\obs\"
+          New-Item -Force -ItemType Directory "$sdk\include\obs" | Out-Null
+          Copy-Item C:\obs-source\libobs\*.h                             "$sdk\include\obs\"
+          Copy-Item C:\obs-source\UI\obs-frontend-api\obs-frontend-api.h "$sdk\include\obs\"
 
-          # Import libs: generate from DLL export tables via dumpbin + lib
-          New-Item -Force -ItemType Directory "$obs\lib" | Out-Null
+          # ── Import libs from portable zip DLLs ───────────────────────────────
+          Invoke-WebRequest `
+              "https://github.com/obsproject/obs-studio/releases/download/$ver/OBS-Studio-$ver-Windows.zip" `
+              -OutFile obs.zip
+          Expand-Archive obs.zip C:\obs-runtime -Force
+
+          New-Item -Force -ItemType Directory "$sdk\lib" | Out-Null
           foreach ($name in @("obs", "obs-frontend-api")) {
-            $dll = "$obs\bin\64bit\$name.dll"
-            $def = "$obs\lib\$name.def"
-            $lib = "$obs\lib\$name.lib"
-            if (-not (Test-Path $dll)) { Write-Warning "$dll not found - skipping"; continue }
+            $dll = "C:\obs-runtime\bin\64bit\$name.dll"
+            $def = "$sdk\lib\$name.def"
+            $lib = "$sdk\lib\$name.lib"
+            if (-not (Test-Path $dll)) { Write-Warning "$dll not found — skipping"; continue }
 
             $exports = @("EXPORTS")
             (dumpbin /nologo /exports $dll) | ForEach-Object {
-              # dumpbin lines: "  <ordinal>  <hint>  <RVA>  <name>"
               if ($_ -match "^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)\s*$") {
                 $exports += "  $($Matches[1])"
               }
@@ -78,25 +71,25 @@ jobs:
             lib /nologo /def:$def /out:$lib /machine:x64
           }
 
-          # cmake config files: one per package
-          $obsSlash = $obs -replace '\\', '/'
+          # ── CMake config files ────────────────────────────────────────────────
+          $sdkSlash = $sdk -replace '\\', '/'
           foreach ($pkg in @(
-            @{ name = "LibObs";           target = "OBS::libobs";            dll = "obs"              },
-            @{ name = "obs-frontend-api"; target = "OBS::obs-frontend-api";  dll = "obs-frontend-api" }
+            @{ name = "LibObs";           target = "OBS::libobs";           dll = "obs"              },
+            @{ name = "obs-frontend-api"; target = "OBS::obs-frontend-api"; dll = "obs-frontend-api" }
           )) {
-            $dir = "$obs\cmake\$($pkg.name)"
+            $dir = "$sdk\cmake\$($pkg.name)"
             New-Item -Force -ItemType Directory $dir | Out-Null
-            $lines = @(
-              "add_library($($pkg.target) SHARED IMPORTED GLOBAL)",
+            @(
+              "add_library($($pkg.target) UNKNOWN IMPORTED GLOBAL)",
               "set_target_properties($($pkg.target) PROPERTIES",
-              "  IMPORTED_IMPLIB   ""$obsSlash/lib/$($pkg.dll).lib""",
-              "  IMPORTED_LOCATION ""$obsSlash/bin/64bit/$($pkg.dll).dll""",
-              "  INTERFACE_INCLUDE_DIRECTORIES ""$obsSlash/include""",
+              "  IMPORTED_LOCATION             ""$sdkSlash/lib/$($pkg.dll).lib""",
+              "  INTERFACE_INCLUDE_DIRECTORIES ""$sdkSlash/include""",
               ")",
               "set($($pkg.name)_FOUND TRUE)"
-            )
-            $lines -join "`n" | Set-Content "$dir\$($pkg.name)Config.cmake"
+            ) -join "`n" | Set-Content "$dir\$($pkg.name)Config.cmake"
           }
+
+          "OBS_SDK_DIR=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install Qt6
         shell: powershell
@@ -120,55 +113,31 @@ jobs:
       - name: Configure
         shell: powershell
         run: |
-          $cmakeArgs = @(
-            '-B', 'build',
-            '-G', 'Visual Studio 17 2022',
-            '-A', 'x64',
-            '-DCMAKE_BUILD_TYPE=Release',
-            '-DZOOM_SDK_DIR=third_party/zoom-sdk',
-            "-DCMAKE_PREFIX_PATH=C:/obs-runtime;$env:QT_ROOT_DIR",
-            '-DLibObs_DIR=C:/obs-runtime/cmake/LibObs',
-            '-Dobs-frontend-api_DIR=C:/obs-runtime/cmake/obs-frontend-api',
-            "-DZOOM_EMBED_SDK_KEY=${{ secrets.ZOOM_EMBED_SDK_KEY }}",
-            "-DZOOM_EMBED_SDK_SECRET=${{ secrets.ZOOM_EMBED_SDK_SECRET }}",
+          cmake -B build `
+            -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DZOOM_SDK_DIR=third_party/zoom-sdk `
+            "-DCMAKE_PREFIX_PATH=$env:OBS_SDK_DIR;$env:QT_ROOT_DIR" `
+            "-DLibObs_DIR=$env:OBS_SDK_DIR/cmake/LibObs" `
+            "-Dobs-frontend-api_DIR=$env:OBS_SDK_DIR/cmake/obs-frontend-api" `
+            "-DZOOM_EMBED_SDK_KEY=${{ secrets.ZOOM_EMBED_SDK_KEY }}" `
+            "-DZOOM_EMBED_SDK_SECRET=${{ secrets.ZOOM_EMBED_SDK_SECRET }}" `
             "-DZOOM_EMBED_JWT_TOKEN=${{ secrets.ZOOM_EMBED_JWT_TOKEN }}"
-          )
-          cmake @cmakeArgs
 
       - name: Build
         run: cmake --build build --config Release --parallel
 
-      - name: List build outputs
-        if: always()
+      - name: Package as ZIP
         shell: powershell
         run: |
-          Write-Host "=== build/ tree ==="
-          Get-ChildItem -Recurse build -ErrorAction SilentlyContinue |
-            Where-Object { -not $_.PSIsContainer } |
-            Select-Object FullName,Length |
-            Format-Table -AutoSize
+          cmake --install build --config Release --prefix install
+          Compress-Archive -Path install\* -DestinationPath CoreVideo-Windows-x64.zip
 
-      - name: Package (NSIS installer)
-        shell: powershell
-        run: |
-          cd build
-          cpack -C Release -G NSIS
-
-      - name: Upload installer artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: CoreVideo-Windows
-          path: build/CoreVideo-*.exe
-          if-no-files-found: warn
-
-      - name: Upload plugin DLL (always)
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: CoreVideo-Windows-plugin
-          path: |
-            build/Release/obs-zoom-plugin.dll
-            build/Release/ZoomObsEngine.exe
+          path: CoreVideo-Windows-x64.zip
           if-no-files-found: warn
 
   # ── macOS ──────────────────────────────────────────────────────────────────
@@ -181,24 +150,40 @@ jobs:
           submodules: recursive
 
       - name: Install dependencies
+        run: brew install cmake qt@6
+
+      # Sparse-checkout OBS source for headers only.
+      # The plugin is built as a MODULE with -undefined dynamic_lookup so no
+      # libobs link-time library is needed — symbols are resolved by OBS at load time.
+      - name: Get OBS headers
         run: |
-          brew install cmake qt@6
           OBS_VER=30.2.2
-          # OBS releases use "OBS-Studio-X.X.X-macOS-Apple.dmg" for arm64
-          # and "OBS-Studio-X.X.X-macOS-Intel.dmg" for x86_64.
-          # The macos-14 runner is arm64; prefer Apple Silicon, fall back to Intel.
-          APPLE_URL="https://github.com/obsproject/obs-studio/releases/download/${OBS_VER}/OBS-Studio-${OBS_VER}-macOS-Apple.dmg"
-          INTEL_URL="https://github.com/obsproject/obs-studio/releases/download/${OBS_VER}/OBS-Studio-${OBS_VER}-macOS-Intel.dmg"
-          if curl --head --silent --fail "$APPLE_URL" -o /dev/null; then
-            curl -fL "$APPLE_URL" -o obs.dmg
-          else
-            curl -fL "$INTEL_URL" -o obs.dmg
-          fi
-          hdiutil attach obs.dmg -mountpoint /Volumes/OBS -nobrowse -quiet
-          cp -r /Volumes/OBS/OBS.app /tmp/OBS.app
-          hdiutil detach /Volumes/OBS -quiet
-          # Show cmake layout so failures are diagnosable
-          find /tmp/OBS.app -name "*.cmake" | head -20 || true
+          git clone --depth 1 --branch "${OBS_VER}" --filter=blob:none --sparse \
+              https://github.com/obsproject/obs-studio.git /tmp/obs-source
+          cd /tmp/obs-source
+          git sparse-checkout set libobs UI/obs-frontend-api
+
+          mkdir -p /tmp/obs-sdk/include/obs \
+                   /tmp/obs-sdk/cmake/LibObs \
+                   /tmp/obs-sdk/cmake/obs-frontend-api
+
+          cp /tmp/obs-source/libobs/*.h                             /tmp/obs-sdk/include/obs/
+          cp /tmp/obs-source/UI/obs-frontend-api/obs-frontend-api.h /tmp/obs-sdk/include/obs/
+
+          # Interface-only CMake targets — no library needed; -undefined dynamic_lookup handles it.
+          cat > /tmp/obs-sdk/cmake/LibObs/LibObsConfig.cmake << 'EOF'
+          add_library(OBS::libobs INTERFACE IMPORTED GLOBAL)
+          set_target_properties(OBS::libobs PROPERTIES
+              INTERFACE_INCLUDE_DIRECTORIES "/tmp/obs-sdk/include")
+          set(LibObs_FOUND TRUE)
+          EOF
+
+          cat > /tmp/obs-sdk/cmake/obs-frontend-api/obs-frontend-apiConfig.cmake << 'EOF'
+          add_library(OBS::obs-frontend-api INTERFACE IMPORTED GLOBAL)
+          set_target_properties(OBS::obs-frontend-api PROPERTIES
+              INTERFACE_INCLUDE_DIRECTORIES "/tmp/obs-sdk/include")
+          set(obs-frontend-api_FOUND TRUE)
+          EOF
 
       - name: Download Zoom macOS SDK
         env:
@@ -207,39 +192,21 @@ jobs:
           if [ -n "$ZOOM_SDK_DOWNLOAD_URL" ]; then
             curl -L "$ZOOM_SDK_DOWNLOAD_URL" -o zoom-sdk.zip
             unzip zoom-sdk.zip -d third_party/zoom-sdk-extracted
-            mv third_party/zoom-sdk-extracted/$(ls third_party/zoom-sdk-extracted | head -1) third_party/zoom-sdk
+            mv "third_party/zoom-sdk-extracted/$(ls third_party/zoom-sdk-extracted | head -1)" \
+               third_party/zoom-sdk
           fi
 
       - name: Configure
         run: |
-          OBS_RESOURCES="/tmp/OBS.app/Contents/Resources"
-          OBS_CMAKE="$OBS_RESOURCES/cmake"
           QT_PREFIX="$(brew --prefix qt@6)"
-
-          # Probe both flat cmake/ and lib/cmake/ layouts used across OBS versions.
-          find_cmake_dir() {
-            local config_name="$1"
-            for candidate in \
-                "$OBS_CMAKE/$config_name" \
-                "$OBS_RESOURCES/lib/cmake/$config_name"; do
-              if [ -f "$candidate/${config_name}Config.cmake" ]; then
-                echo "$candidate"; return
-              fi
-            done
-            echo "$OBS_CMAKE"
-          }
-
-          LIBOBS_DIR=$(find_cmake_dir LibObs)
-          FRONTEND_DIR=$(find_cmake_dir obs-frontend-api)
-
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
             -DZOOM_SDK_DIR=third_party/zoom-sdk \
-            "-DCMAKE_PREFIX_PATH=$OBS_RESOURCES;$QT_PREFIX" \
-            "-DLibObs_DIR=$LIBOBS_DIR" \
-            "-Dobs-frontend-api_DIR=$FRONTEND_DIR" \
+            "-DCMAKE_PREFIX_PATH=/tmp/obs-sdk;$QT_PREFIX" \
+            "-DLibObs_DIR=/tmp/obs-sdk/cmake/LibObs" \
+            "-Dobs-frontend-api_DIR=/tmp/obs-sdk/cmake/obs-frontend-api" \
             "-DZOOM_EMBED_SDK_KEY=${{ secrets.ZOOM_EMBED_SDK_KEY }}" \
             "-DZOOM_EMBED_SDK_SECRET=${{ secrets.ZOOM_EMBED_SDK_SECRET }}" \
             "-DZOOM_EMBED_JWT_TOKEN=${{ secrets.ZOOM_EMBED_JWT_TOKEN }}"
@@ -247,32 +214,16 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
-      - name: List build outputs
-        if: always()
+      - name: Package as ZIP
         run: |
-          echo "=== build/ tree ==="
-          find build -maxdepth 3 -type f | head -100 || true
+          cmake --install build --prefix install
+          cd install && zip -r ../CoreVideo-macOS-universal.zip .
 
-      - name: Package (.dmg)
-        run: |
-          cd build
-          cpack -C Release -G DragNDrop
-
-      - name: Upload installer artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: CoreVideo-macOS
-          path: build/CoreVideo-*.dmg
-          if-no-files-found: warn
-
-      - name: Upload plugin bundle (always)
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: CoreVideo-macOS-plugin
-          path: |
-            build/obs-zoom-plugin*
-            build/ZoomObsEngine*
+          path: CoreVideo-macOS-universal.zip
           if-no-files-found: warn
 
   # ── Release ────────────────────────────────────────────────────────────────
@@ -310,5 +261,5 @@ jobs:
           prerelease: ${{ steps.release_name.outputs.pre == 'true' }}
           generate_release_notes: true
           files: |
-            artifacts/CoreVideo-Windows/*.exe
-            artifacts/CoreVideo-macOS/*.dmg
+            artifacts/CoreVideo-Windows/CoreVideo-Windows-x64.zip
+            artifacts/CoreVideo-macOS/CoreVideo-macOS-universal.zip

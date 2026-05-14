@@ -36,6 +36,8 @@ private:
     QLineEdit   *m_passcode     = nullptr;
     QPushButton *m_join_btn     = nullptr;
     QPushButton *m_leave_btn    = nullptr;
+    QCheckBox   *m_webinar_cb   = nullptr;
+    QLineEdit   *m_participant_filter = nullptr;
 
     // Active speaker
     QLabel      *m_speaker_label = nullptr;

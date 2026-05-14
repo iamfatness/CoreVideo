@@ -111,8 +111,11 @@ ZoomDock::ZoomDock(QWidget *parent)
     join_btn_row->addWidget(m_join_btn);
     join_btn_row->addWidget(m_leave_btn);
 
+    m_webinar_cb = new QCheckBox("Join as Webinar / Zoom Events", join_group);
+
     join_layout->addWidget(m_meeting_id);
     join_layout->addWidget(m_passcode);
+    join_layout->addWidget(m_webinar_cb);
     join_layout->addLayout(join_btn_row);
     vLayout->addWidget(join_group);
 
@@ -146,6 +149,13 @@ ZoomDock::ZoomDock(QWidget *parent)
     // ── Output table ──────────────────────────────────────────────────────────
     auto *output_group  = new QGroupBox("Outputs", this);
     auto *output_layout = new QVBoxLayout(output_group);
+
+    m_participant_filter = new QLineEdit(output_group);
+    m_participant_filter->setPlaceholderText("Filter participants...");
+    m_participant_filter->setClearButtonEnabled(true);
+    connect(m_participant_filter, &QLineEdit::textChanged,
+            this, [this](const QString &) { refresh_outputs(); });
+    output_layout->addWidget(m_participant_filter);
 
     m_output_table = new QTableWidget(output_group);
     m_output_table->setColumnCount(DColCount);
@@ -276,11 +286,49 @@ void ZoomDock::refresh_outputs()
         auto *assignment = new QComboBox(m_output_table);
         assignment->addItem("Active speaker", "active");
         assignment->addItem("None", "user:0");
-        for (const auto &p : roster)
+        // Spotlight slots (ZoomISO-style)
+        for (int slot = 1; slot <= 4; ++slot)
+            assignment->addItem(QString("Spotlight %1").arg(slot),
+                                QString("spotlight:%1").arg(slot));
+        assignment->addItem("Screen share", "screenshare");
+
+        // Apply the filter from the search box, but always keep the currently
+        // selected item visible (otherwise the user would lose context).
+        const QString filter = m_participant_filter
+            ? m_participant_filter->text().trimmed().toLower()
+            : QString();
+        for (const auto &p : roster) {
+            if (!filter.isEmpty()) {
+                const QString name = QString::fromStdString(p.display_name).toLower();
+                const QString idstr = QString::number(p.user_id);
+                if (!name.contains(filter) && !idstr.contains(filter))
+                    continue;
+            }
             assignment->addItem(participant_label(p), QString("user:%1").arg(p.user_id));
-        const QString current = output.active_speaker
-            ? "active"
-            : QString("user:%1").arg(output.participant_id);
+        }
+
+        QString current;
+        switch (output.assignment) {
+        case AssignmentMode::ActiveSpeaker:  current = "active"; break;
+        case AssignmentMode::SpotlightIndex: current = QString("spotlight:%1").arg(output.spotlight_slot); break;
+        case AssignmentMode::ScreenShare:    current = "screenshare"; break;
+        case AssignmentMode::Participant:
+        default:
+            current = output.active_speaker
+                ? "active"
+                : QString("user:%1").arg(output.participant_id);
+            break;
+        }
+        // If the current selection got filtered out, re-add it so it's visible.
+        if (assignment->findData(current) < 0 && current.startsWith("user:")) {
+            const uint32_t pid = current.mid(5).toUInt();
+            for (const auto &p : roster) {
+                if (p.user_id == pid) {
+                    assignment->addItem(participant_label(p), current);
+                    break;
+                }
+            }
+        }
         const int idx = assignment->findData(current);
         if (idx >= 0) assignment->setCurrentIndex(idx);
         m_output_table->setCellWidget(row, DColAssignment, assignment);
@@ -309,12 +357,35 @@ void ZoomDock::apply_outputs()
 
         const std::string source_name = name_item->data(Qt::UserRole).toString().toStdString();
         const QString ad = assignment->currentData().toString();
-        const bool active_speaker = (ad == "active");
-        const uint32_t participant_id = ad.startsWith("user:") ? ad.mid(5).toUInt() : 0;
         const auto audio_mode = static_cast<AudioChannelMode>(audio->currentData().toInt());
 
-        ZoomOutputManager::instance().configure_output(
-            source_name, participant_id, active_speaker,
+        AssignmentMode mode = AssignmentMode::Participant;
+        uint32_t participant_id = 0;
+        uint32_t spotlight_slot = 1;
+
+        if (ad == "active") {
+            mode = AssignmentMode::ActiveSpeaker;
+        } else if (ad == "screenshare") {
+            mode = AssignmentMode::ScreenShare;
+        } else if (ad.startsWith("spotlight:")) {
+            mode = AssignmentMode::SpotlightIndex;
+            spotlight_slot = ad.mid(10).toUInt();
+        } else if (ad.startsWith("user:")) {
+            participant_id = ad.mid(5).toUInt();
+            mode = AssignmentMode::Participant;
+        }
+
+        // Preserve the existing failover by reading current output info.
+        uint32_t failover = 0;
+        for (const auto &o : ZoomOutputManager::instance().outputs()) {
+            if (o.source_name == source_name) {
+                failover = o.failover_participant_id;
+                break;
+            }
+        }
+
+        ZoomOutputManager::instance().configure_output_ex(
+            source_name, mode, participant_id, spotlight_slot, failover,
             isolate->isChecked(), audio_mode);
     }
 }
@@ -327,10 +398,14 @@ void ZoomDock::on_join_clicked()
     const ZoomPluginSettings s = ZoomPluginSettings::load();
     if (!ZoomEngineClient::instance().start(s.jwt_token)) return;
 
+    const MeetingKind kind = (m_webinar_cb && m_webinar_cb->isChecked())
+        ? MeetingKind::Webinar : MeetingKind::Meeting;
+
     ZoomEngineClient::instance().join(
         meeting_id.toStdString(),
         m_passcode->text().toStdString(),
-        "OBS");
+        "OBS",
+        kind);
 
     update_state_indicator();
 }

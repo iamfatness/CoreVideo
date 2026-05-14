@@ -12,7 +12,7 @@ set(ZOOM_EMBED_JWT_TOKEN  "" CACHE STRING "Pre-embedded Zoom JWT token")
 configure_file(src/zoom-credentials.h.in
                "${CMAKE_CURRENT_BINARY_DIR}/zoom-credentials.h" @ONLY)
 
-find_package(libobs REQUIRED)
+find_package(LibObs REQUIRED)
 find_package(obs-frontend-api REQUIRED)
 find_package(Qt6 COMPONENTS Core Network Widgets REQUIRED)
 

@@ -5,10 +5,10 @@
 #ifndef _MEETING_SERVICE_INTERFACE_H_
 #define _MEETING_SERVICE_INTERFACE_H_
 #include "zoom_sdk_def.h"
+BEGIN_ZOOM_SDK_NAMESPACE
 #if defined(WIN32)
 class IZoomRealNameAuthMeetingHelper;
 #endif
-BEGIN_ZOOM_SDK_NAMESPACE
 /**
  * @brief Enumeration of meeting status.
  * Here are more detailed structural descriptions.
@@ -611,7 +611,7 @@ typedef struct tagMeetingASVStatisticInfo
 	}
 }MeetingASVStatisticInfo;
 
-#if defined(WIN32)
+#if defined(WIN32) && !defined(ZOOMSDK_HAS_SDK_VIEW_ENUMS)
 /**
  * @brief Enumeration of SDK view type, primary displayer and secondary displayer.
  * Here are more detailed structural descriptions.

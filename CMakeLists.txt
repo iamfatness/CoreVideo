@@ -3,7 +3,9 @@ project(obs-zoom-plugin VERSION 0.1.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_AUTOMOC ON)
+
+option(COREVIDEO_BUILD_PLUGIN "Build the OBS plugin module" ON)
+option(COREVIDEO_BUILD_ENGINE "Build the ZoomObsEngine helper process" ON)
 
 # ── Embedded credentials (set via -D or CI secrets; empty = user must enter) ──
 set(ZOOM_EMBED_SDK_KEY    "" CACHE STRING "Pre-embedded Zoom SDK key")
@@ -14,9 +16,12 @@ configure_file(src/zoom-credentials.h.in
 configure_file(src/obs-zoom-version.h.in
                "${CMAKE_CURRENT_BINARY_DIR}/obs-zoom-version.h" @ONLY)
 
-find_package(LibObs REQUIRED)
-find_package(obs-frontend-api REQUIRED)
-find_package(Qt6 COMPONENTS Core Network Widgets REQUIRED)
+if(COREVIDEO_BUILD_PLUGIN)
+    set(CMAKE_AUTOMOC ON)
+    find_package(LibObs REQUIRED)
+    find_package(obs-frontend-api REQUIRED)
+    find_package(Qt6 COMPONENTS Core Network Widgets REQUIRED)
+endif()
 
 # ── Optional FFmpeg hardware-accelerated video conversion ─────────────────────
 option(ENABLE_FFMPEG_HW_ACCEL
@@ -67,7 +72,9 @@ endif()
 # Runtime check (bin/sdk.dll): only needed to package and run; if absent,
 # the engine still builds but sdk.dll must be placed alongside it manually.
 set(BUILD_ZOOM_ENGINE OFF)
-if(WIN32)
+if(NOT COREVIDEO_BUILD_ENGINE)
+    message(STATUS "ZoomObsEngine build disabled by COREVIDEO_BUILD_ENGINE=OFF")
+elseif(WIN32)
     if(EXISTS "${ZOOM_SDK_INCLUDE_DIR}/zoom_sdk.h" AND EXISTS "${ZOOM_SDK_LIBRARY}")
         set(BUILD_ZOOM_ENGINE ON)
     else()
@@ -105,50 +112,52 @@ endif()
 set(ZOOM_SDK_FRAMEWORK "${ZOOM_SDK_DIR}/ZoomSDK.framework" CACHE PATH
     "Zoom Meeting SDK framework path (macOS only)")
 
-add_library(obs-zoom-plugin MODULE
-    src/plugin-main.cpp
-    src/zoom-source.cpp
-    src/zoom-engine-client.cpp
-    src/zoom-reconnect.cpp
-    src/zoom-settings.cpp
-    src/zoom-settings-dialog.cpp
-    src/zoom-output-manager.cpp
-    src/zoom-output-dialog.cpp
-    src/zoom-output-profile.cpp
-    src/zoom-dock.cpp
-    src/zoom-control-server.cpp
-    src/zoom-osc-server.cpp
-    src/obs-utils.cpp
-    src/hw-video-pipeline.cpp
-)
-
-target_include_directories(obs-zoom-plugin PRIVATE
-    src
-    "${CMAKE_CURRENT_BINARY_DIR}"
-)
-target_link_libraries(obs-zoom-plugin PRIVATE
-    OBS::libobs
-    OBS::obs-frontend-api
-    Qt6::Core
-    Qt6::Network
-    Qt6::Widgets
-)
-
-if(ENABLE_FFMPEG_HW_ACCEL)
-    target_link_libraries(obs-zoom-plugin PRIVATE PkgConfig::FFMPEG)
-    target_compile_definitions(obs-zoom-plugin PRIVATE COREVIDEO_HW_ACCEL)
-endif()
-
-if(APPLE)
-    target_link_libraries(obs-zoom-plugin PRIVATE
-        "-framework CoreFoundation"
-        "-framework Foundation"
+if(COREVIDEO_BUILD_PLUGIN)
+    add_library(obs-zoom-plugin MODULE
+        src/plugin-main.cpp
+        src/zoom-source.cpp
+        src/zoom-engine-client.cpp
+        src/zoom-reconnect.cpp
+        src/zoom-settings.cpp
+        src/zoom-settings-dialog.cpp
+        src/zoom-output-manager.cpp
+        src/zoom-output-dialog.cpp
+        src/zoom-output-profile.cpp
+        src/zoom-dock.cpp
+        src/zoom-control-server.cpp
+        src/zoom-osc-server.cpp
+        src/obs-utils.cpp
+        src/hw-video-pipeline.cpp
     )
-    # Symbols provided by OBS at plugin load time; no link-time libobs needed.
-    target_link_options(obs-zoom-plugin PRIVATE "-undefined dynamic_lookup")
-endif()
 
-set_target_properties(obs-zoom-plugin PROPERTIES PREFIX "")
+    target_include_directories(obs-zoom-plugin PRIVATE
+        src
+        "${CMAKE_CURRENT_BINARY_DIR}"
+    )
+    target_link_libraries(obs-zoom-plugin PRIVATE
+        OBS::libobs
+        OBS::obs-frontend-api
+        Qt6::Core
+        Qt6::Network
+        Qt6::Widgets
+    )
+
+    if(ENABLE_FFMPEG_HW_ACCEL)
+        target_link_libraries(obs-zoom-plugin PRIVATE PkgConfig::FFMPEG)
+        target_compile_definitions(obs-zoom-plugin PRIVATE COREVIDEO_HW_ACCEL)
+    endif()
+
+    if(APPLE)
+        target_link_libraries(obs-zoom-plugin PRIVATE
+            "-framework CoreFoundation"
+            "-framework Foundation"
+        )
+        # Symbols provided by OBS at plugin load time; no link-time libobs needed.
+        target_link_options(obs-zoom-plugin PRIVATE "-undefined dynamic_lookup")
+    endif()
+
+    set_target_properties(obs-zoom-plugin PROPERTIES PREFIX "")
+endif()
 
 set(ENGINE_SOURCES
     engine/src/main.cpp
@@ -204,12 +213,14 @@ if(BUILD_ZOOM_ENGINE)
     endif()
 endif()
 
-install(TARGETS obs-zoom-plugin
-    LIBRARY DESTINATION "obs-plugins/64bit"
-)
-install(DIRECTORY data/
-    DESTINATION "data/obs-plugins/obs-zoom-plugin"
-)
+if(COREVIDEO_BUILD_PLUGIN)
+    install(TARGETS obs-zoom-plugin
+        LIBRARY DESTINATION "obs-plugins/64bit"
+    )
+    install(DIRECTORY data/
+        DESTINATION "data/obs-plugins/obs-zoom-plugin"
+    )
+endif()
 
 # ── CPack packaging ────────────────────────────────────────────────────────────
 # Produces a ZIP that users extract directly into their OBS Studio folder.

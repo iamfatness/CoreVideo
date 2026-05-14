@@ -63,6 +63,40 @@ CoreVideo integrates the Zoom Meeting SDK into OBS — no screen capture or virt
    cmake --build build --config Release
    ```
 
+   On Windows, run CMake from a Visual Studio Developer PowerShell or use an
+   explicit Visual Studio generator:
+   ```powershell
+   cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+     -DZOOM_SDK_DIR=third_party/zoom-sdk `
+     -DCMAKE_PREFIX_PATH="C:/path/to/obs-studio-build;C:/path/to/Qt/6.x/msvc2022_64"
+
+   cmake --build build --config Release
+   ```
+
+   To validate the Zoom SDK helper process before wiring up OBS and Qt, build
+   only the engine:
+   ```powershell
+   cmake -S . -B build-engine -G "Visual Studio 17 2022" -A x64 `
+     -DCOREVIDEO_BUILD_PLUGIN=OFF `
+     -DZOOM_SDK_DIR=third_party/zoom-sdk
+
+   cmake --build build-engine --config Release --target ZoomObsEngine
+   ```
+
+   If MSBuild reports `Item has already been added. Key in dictionary: 'Path'
+   Key being added: 'PATH'`, normalize the process environment before running
+   CMake from PowerShell:
+   ```powershell
+   Remove-Item Env:PATH -ErrorAction SilentlyContinue
+   $env:Path = "C:\Program Files\CMake\bin;C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0"
+   ```
+
+   A normal OBS installation under `C:\Program Files\obs-studio` contains the
+   runtime binaries, not the development CMake packages. For the full plugin
+   build, `CMAKE_PREFIX_PATH` must include an OBS build/install tree that
+   contains `LibObsConfig.cmake` and `obs-frontend-apiConfig.cmake`, plus a
+   matching Qt 6 MSVC package.
+
 3. **Install into OBS**
    ```sh
    cmake --install build --prefix "/path/to/obs-studio"

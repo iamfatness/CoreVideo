@@ -637,6 +637,7 @@ enum SDKViewType
 {
     SDK_FIRST_VIEW = 0,
     SDK_SECOND_VIEW,
+    SDK_SEND_SHARE_VIEW,
 };
 
 /**
@@ -652,7 +653,13 @@ enum SDKShareViewZoomRatio
     SDKShareViewZoomRatio_125,
     SDKShareViewZoomRatio_150,
     SDKShareViewZoomRatio_200,
+    SDK_ShareViewZoomRatio_50 = SDKShareViewZoomRatio_50,
+    SDK_ShareViewZoomRatio_100 = SDKShareViewZoomRatio_100,
+    SDK_ShareViewZoomRatio_150 = SDKShareViewZoomRatio_150,
+    SDK_ShareViewZoomRatio_200 = SDKShareViewZoomRatio_200,
+    SDK_ShareViewZoomRatio_300,
 };
+#define ZOOMSDK_HAS_SDK_VIEW_ENUMS 1
 #endif // WIN32
 
 END_ZOOM_SDK_NAMESPACE

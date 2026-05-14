@@ -12,7 +12,7 @@
 #include <string>
 #include <vector>
 
-#define OBS_ZOOM_PLUGIN_VERSION "0.1.0"
+#include "obs-zoom-version.h"
 
 void zoom_source_register();
 

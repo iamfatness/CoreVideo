@@ -3,6 +3,7 @@
 #include "zoom-output-manager.h"
 #include "zoom-output-profile.h"
 #include <QAbstractItemView>
+#include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
@@ -190,20 +191,24 @@ void ZoomOutputDialog::refresh()
         m_table->setCellWidget(row, ColumnPreview, preview_label);
 
         // Register live preview callback for this source.
+        // Capture preview_label via QPointer so the queued lambda is safe if
+        // the table row (and label) is destroyed before the callback fires.
         auto alive = m_alive;
         const std::string src_name = output.source_name;
+        QPointer<QLabel> preview_ptr(preview_label);
         ZoomOutputManager::instance().set_preview_cb(src_name,
-            [preview_label, alive](uint32_t w, uint32_t h,
+            [preview_ptr, alive](uint32_t w, uint32_t h,
                 const uint8_t *y, const uint8_t *u, const uint8_t *v,
                 uint32_t stride_y, uint32_t stride_uv) {
                 if (!alive->load(std::memory_order_acquire)) return;
                 QImage img = i420_to_qimage_scaled(w, h, y, u, v,
                     stride_y, stride_uv, 160, 90);
-                QMetaObject::invokeMethod(preview_label,
-                    [preview_label, img, alive]() {
-                        if (!alive->load(std::memory_order_acquire)) return;
-                        preview_label->setPixmap(QPixmap::fromImage(img));
-                        preview_label->setText({});
+                // Post to main thread; QPointer::operator bool() is safe there.
+                QMetaObject::invokeMethod(qApp,
+                    [preview_ptr, img, alive]() {
+                        if (!alive->load(std::memory_order_acquire) || !preview_ptr) return;
+                        preview_ptr->setPixmap(QPixmap::fromImage(img));
+                        preview_ptr->setText({});
                     }, Qt::QueuedConnection);
             });
 

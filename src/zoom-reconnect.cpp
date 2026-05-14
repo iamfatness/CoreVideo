@@ -52,15 +52,23 @@ void ZoomReconnectManager::store_session(const std::string &jwt,
     m_display_name = display_name;
 }
 
+// Zero-fill a std::string via volatile writes so the compiler cannot elide it.
+static void secure_clear(std::string &s)
+{
+    if (!s.empty()) {
+        volatile char *p = &s[0];
+        for (size_t i = 0; i < s.size(); ++i)
+            p[i] = '\0';
+    }
+    s.clear();
+}
+
 void ZoomReconnectManager::clear_session()
 {
     std::lock_guard<std::mutex> lk(m_mtx);
-    // Wipe credentials we no longer need (defensive hygiene).
-    m_jwt.assign(m_jwt.size(), '\0');
-    m_jwt.clear();
+    secure_clear(m_jwt);
     m_meeting_id.clear();
-    m_passcode.assign(m_passcode.size(), '\0');
-    m_passcode.clear();
+    secure_clear(m_passcode);
     m_display_name.clear();
 }
 

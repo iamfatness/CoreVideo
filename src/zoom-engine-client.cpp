@@ -325,15 +325,15 @@ bool ZoomEngineClient::connect_ipc()
 
 void ZoomEngineClient::disconnect_ipc()
 {
+    // Hold m_mtx so that write_json() cannot use a handle after CloseHandle/close().
+    std::lock_guard<std::mutex> lk(m_mtx);
 #if defined(WIN32)
-    if (m_p2e != kIpcInvalidFd) CloseHandle(m_p2e);
-    if (m_e2p != kIpcInvalidFd) CloseHandle(m_e2p);
+    if (m_p2e != kIpcInvalidFd) { CloseHandle(m_p2e); m_p2e = kIpcInvalidFd; }
+    if (m_e2p != kIpcInvalidFd) { CloseHandle(m_e2p); m_e2p = kIpcInvalidFd; }
 #else
-    if (m_p2e != kIpcInvalidFd) close(m_p2e);
-    if (m_e2p != kIpcInvalidFd) close(m_e2p);
+    if (m_p2e != kIpcInvalidFd) { close(m_p2e); m_p2e = kIpcInvalidFd; }
+    if (m_e2p != kIpcInvalidFd) { close(m_e2p); m_e2p = kIpcInvalidFd; }
 #endif
-    m_p2e = kIpcInvalidFd;
-    m_e2p = kIpcInvalidFd;
 }
 
 void ZoomEngineClient::reader_loop()
@@ -352,6 +352,10 @@ void ZoomEngineClient::handle_event(const std::string &line)
     const QJsonObject obj = doc.object();
     const QString cmd = obj.value("cmd").toString();
 
+    if (cmd == "ready") {
+        blog(LOG_INFO, "[obs-zoom-plugin] Zoom engine ready");
+        return;
+    }
     if (cmd == "auth_ok") {
         blog(LOG_INFO, "[obs-zoom-plugin] Zoom engine authenticated");
         return;

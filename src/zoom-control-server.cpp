@@ -16,6 +16,13 @@
 #include <limits>
 
 // Timing-safe string equality — prevents token leakage via timing side-channel.
+// noinline prevents the compiler from inlining this and then optimising away
+// the constant-time loop when the result is observable from context.
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
 static bool ct_equal(const std::string &a, const std::string &b)
 {
     volatile size_t diff = a.size() ^ b.size();

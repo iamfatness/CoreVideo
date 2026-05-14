@@ -80,20 +80,21 @@ jobs:
           # ── cmake config files: one per package ──────────────────────────────
           $obsSlash = $obs -replace '\\', '/'
           foreach ($pkg in @(
-            @{ name = "LibObs";          target = "OBS::libobs";            dll = "obs"              },
-            @{ name = "obs-frontend-api"; target = "OBS::obs-frontend-api"; dll = "obs-frontend-api" }
+            @{ name = "LibObs";           target = "OBS::libobs";            dll = "obs"              },
+            @{ name = "obs-frontend-api"; target = "OBS::obs-frontend-api";  dll = "obs-frontend-api" }
           )) {
             $dir = "$obs\cmake\$($pkg.name)"
             New-Item -Force -ItemType Directory $dir | Out-Null
-            @"
-add_library($($pkg.target) SHARED IMPORTED GLOBAL)
-set_target_properties($($pkg.target) PROPERTIES
-  IMPORTED_IMPLIB   "$obsSlash/lib/$($pkg.dll).lib"
-  IMPORTED_LOCATION "$obsSlash/bin/64bit/$($pkg.dll).dll"
-  INTERFACE_INCLUDE_DIRECTORIES "$obsSlash/include"
-)
-set($($pkg.name)_FOUND TRUE)
-"@ | Set-Content "$dir\$($pkg.name)Config.cmake"
+            $lines = @(
+              "add_library($($pkg.target) SHARED IMPORTED GLOBAL)",
+              "set_target_properties($($pkg.target) PROPERTIES",
+              "  IMPORTED_IMPLIB   `"$obsSlash/lib/$($pkg.dll).lib`"",
+              "  IMPORTED_LOCATION `"$obsSlash/bin/64bit/$($pkg.dll).dll`"",
+              "  INTERFACE_INCLUDE_DIRECTORIES `"$obsSlash/include`"",
+              ")",
+              "set($($pkg.name)_FOUND TRUE)"
+            )
+            $lines -join "`n" | Set-Content "$dir\$($pkg.name)Config.cmake"
           }
 
       - name: Download Zoom Windows SDK

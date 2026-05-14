@@ -34,9 +34,11 @@ jobs:
         run: |
           $ver = "30.2.2"
           $obs = "C:\obs-runtime"
-          Invoke-WebRequest `
-            "https://github.com/obsproject/obs-studio/releases/download/$ver/OBS-Studio-$ver-Windows.zip" `
-            -OutFile obs.zip
+          $params = @{
+            Uri     = "https://github.com/obsproject/obs-studio/releases/download/$ver/OBS-Studio-$ver-Windows.zip"
+            OutFile = "obs.zip"
+          }
+          Invoke-WebRequest @params
           Expand-Archive obs.zip $obs -Force
 
           # ── Fast path: portable zip already contains cmake config files ──────
@@ -88,9 +90,9 @@ jobs:
             $lines = @(
               "add_library($($pkg.target) SHARED IMPORTED GLOBAL)",
               "set_target_properties($($pkg.target) PROPERTIES",
-              "  IMPORTED_IMPLIB   `"$obsSlash/lib/$($pkg.dll).lib`"",
-              "  IMPORTED_LOCATION `"$obsSlash/bin/64bit/$($pkg.dll).dll`"",
-              "  INTERFACE_INCLUDE_DIRECTORIES `"$obsSlash/include`"",
+              "  IMPORTED_IMPLIB   ""$obsSlash/lib/$($pkg.dll).lib""",
+              "  IMPORTED_LOCATION ""$obsSlash/bin/64bit/$($pkg.dll).dll""",
+              "  INTERFACE_INCLUDE_DIRECTORIES ""$obsSlash/include""",
               ")",
               "set($($pkg.name)_FOUND TRUE)"
             )

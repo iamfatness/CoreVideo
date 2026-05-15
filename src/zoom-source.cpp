@@ -9,9 +9,6 @@
 #include <climits>
 #include <cstring>
 
-#define PROP_MEETING_ID           "meeting_id"
-#define PROP_PASSCODE             "passcode"
-#define PROP_DISPLAY_NAME         "display_name"
 #define PROP_OUTPUT_DISPLAY_NAME  "output_display_name"
 #define PROP_PARTICIPANT_ID       "participant_id"
 #define PROP_ACTIVE_SPEAKER       "active_speaker_mode"
@@ -19,7 +16,6 @@
 #define PROP_SPEAKER_HOLD         "speaker_hold_ms"
 #define PROP_VIDEO_LOSS_MODE      "video_loss_mode"
 #define PROP_ISOLATE_AUDIO        "isolate_audio"
-#define PROP_AUTO_JOIN            "auto_join"
 #define PROP_AUDIO_CHANNELS       "audio_channels"
 #define PROP_RESOLUTION           "resolution"
 #define PROP_STATUS               "status_label"
@@ -93,12 +89,8 @@ void ZoomSource::apply_settings(obs_data_t *settings)
     const uint32_t old_spotlight_slot = spotlight_slot.load(std::memory_order_acquire);
     const uint32_t old_failover = failover_participant_id.load(std::memory_order_acquire);
 
-    meeting_id = obs_data_get_string(settings, PROP_MEETING_ID);
-    passcode = obs_data_get_string(settings, PROP_PASSCODE);
-    display_name = obs_data_get_string(settings, PROP_DISPLAY_NAME);
     output_display_name = obs_data_get_string(settings, PROP_OUTPUT_DISPLAY_NAME);
     participant_id = static_cast<uint32_t>(obs_data_get_int(settings, PROP_PARTICIPANT_ID));
-    auto_join = obs_data_get_bool(settings, PROP_AUTO_JOIN);
     active_speaker_mode = obs_data_get_bool(settings, PROP_ACTIVE_SPEAKER);
     speaker_sensitivity_ms = static_cast<uint32_t>(
         obs_data_get_int(settings, PROP_SPEAKER_SENSITIVITY));
@@ -479,35 +471,7 @@ static void *zoom_source_create(obs_data_t *settings, obs_source_t *source)
             ctx->m_hw_pipeline.init(effective);
     }
 
-    if (ctx->auto_join && !ctx->meeting_id.empty()) {
-        if (ZoomEngineClient::instance().start(s.resolved_jwt_token())) {
-            ZoomEngineClient::instance().join(ctx->meeting_id, ctx->passcode,
-                ctx->display_name.empty() ? "OBS" : ctx->display_name);
-            ctx->subscribe();
-        }
-    }
-
     // ── Register per-source OBS hotkeys ────────────────────────────────────
-    ctx->m_hk_join_id = obs_hotkey_register_source(source,
-        "ZoomSource.Hotkey.Join",
-        obs_module_text("ZoomSource.Hotkey.Join"),
-        [](void *data, obs_hotkey_id, obs_hotkey_t *, bool pressed) {
-            if (!pressed) return;
-            auto *c = static_cast<ZoomSource *>(data);
-            const ZoomPluginSettings s = ZoomPluginSettings::load();
-            if (ZoomEngineClient::instance().start(s.resolved_jwt_token()) &&
-                ZoomEngineClient::instance().join(c->meeting_id, c->passcode,
-                    c->display_name.empty() ? "OBS" : c->display_name)) {
-                c->subscribe();
-            }
-        }, ctx);
-    ctx->m_hk_leave_id = obs_hotkey_register_source(source,
-        "ZoomSource.Hotkey.Leave",
-        obs_module_text("ZoomSource.Hotkey.Leave"),
-        [](void *, obs_hotkey_id, obs_hotkey_t *, bool pressed) {
-            if (!pressed) return;
-            ZoomEngineClient::instance().leave();
-        }, ctx);
     ctx->m_hk_active_on_id = obs_hotkey_register_source(source,
         "ZoomSource.Hotkey.ActiveOn",
         obs_module_text("ZoomSource.Hotkey.ActiveOn"),
@@ -536,8 +500,6 @@ static void *zoom_source_create(obs_data_t *settings, obs_source_t *source)
 static void zoom_source_destroy(void *data)
 {
     auto *ctx = static_cast<ZoomSource *>(data);
-    if (ctx->m_hk_join_id       != OBS_INVALID_HOTKEY_ID) obs_hotkey_unregister(ctx->m_hk_join_id);
-    if (ctx->m_hk_leave_id      != OBS_INVALID_HOTKEY_ID) obs_hotkey_unregister(ctx->m_hk_leave_id);
     if (ctx->m_hk_active_on_id  != OBS_INVALID_HOTKEY_ID) obs_hotkey_unregister(ctx->m_hk_active_on_id);
     if (ctx->m_hk_active_off_id != OBS_INVALID_HOTKEY_ID) obs_hotkey_unregister(ctx->m_hk_active_off_id);
     ZoomOutputManager::instance().unregister_source(ctx);
@@ -580,12 +542,6 @@ static obs_properties_t *zoom_source_get_properties(void *data)
 
     obs_properties_add_text(props, PROP_OUTPUT_DISPLAY_NAME,
         obs_module_text("ZoomSource.OutputDisplayName"), OBS_TEXT_DEFAULT);
-    obs_properties_add_text(props, PROP_MEETING_ID,
-        obs_module_text("ZoomSource.MeetingId"), OBS_TEXT_DEFAULT);
-    obs_properties_add_text(props, PROP_PASSCODE,
-        obs_module_text("ZoomSource.Passcode"), OBS_TEXT_PASSWORD);
-    obs_properties_add_text(props, PROP_DISPLAY_NAME,
-        obs_module_text("ZoomSource.DisplayName"), OBS_TEXT_DEFAULT);
 
     obs_property_t *participant = obs_properties_add_list(props, PROP_PARTICIPANT_ID,
         obs_module_text("ZoomSource.ParticipantId"),
@@ -640,8 +596,6 @@ static obs_properties_t *zoom_source_get_properties(void *data)
     }
     obs_properties_add_bool(props, PROP_ISOLATE_AUDIO,
         obs_module_text("ZoomSource.IsolateAudio"));
-    obs_properties_add_bool(props, PROP_AUTO_JOIN,
-        obs_module_text("ZoomSource.AutoJoin"));
 
     obs_property_t *ch = obs_properties_add_list(props, PROP_AUDIO_CHANNELS,
         obs_module_text("ZoomSource.AudioChannels"),
@@ -681,26 +635,6 @@ static obs_properties_t *zoom_source_get_properties(void *data)
     obs_property_list_add_int(hw, obs_module_text("ZoomSource.HwAccelQsv"),
                               static_cast<int>(HwAccelMode::Qsv));
 
-    obs_properties_add_button(props, "btn_join",
-        obs_module_text("ZoomSource.JoinMeeting"),
-        [](obs_properties_t *, obs_property_t *, void *d) -> bool {
-            auto *c = static_cast<ZoomSource *>(d);
-            const ZoomPluginSettings s = ZoomPluginSettings::load();
-            if (ZoomEngineClient::instance().start(s.resolved_jwt_token()) &&
-                ZoomEngineClient::instance().join(c->meeting_id, c->passcode,
-                    c->display_name.empty() ? "OBS" : c->display_name)) {
-                c->subscribe();
-            }
-            return true;
-        });
-
-    obs_properties_add_button(props, "btn_leave",
-        obs_module_text("ZoomSource.LeaveMeeting"),
-        [](obs_properties_t *, obs_property_t *, void *) -> bool {
-            ZoomEngineClient::instance().leave();
-            return false;
-        });
-
     obs_properties_add_button(props, "btn_refresh",
         obs_module_text("ZoomSource.RefreshParticipants"),
         [](obs_properties_t *, obs_property_t *, void *) -> bool { return true; });
@@ -710,8 +644,6 @@ static obs_properties_t *zoom_source_get_properties(void *data)
 
 static void zoom_source_get_defaults(obs_data_t *settings)
 {
-    obs_data_set_default_string(settings, PROP_DISPLAY_NAME, "OBS");
-    obs_data_set_default_bool(settings, PROP_AUTO_JOIN, false);
     obs_data_set_default_bool(settings, PROP_ACTIVE_SPEAKER, false);
     obs_data_set_default_int(settings, PROP_SPEAKER_SENSITIVITY, 300);
     obs_data_set_default_int(settings, PROP_SPEAKER_HOLD, 2000);

@@ -1051,20 +1051,25 @@ sequenceDiagram
       <tr><th>Field</th><th>Default</th><th>Description</th></tr>
       <tr><td>SDK Key</td><td>—</td><td>Zoom SDK App Key</td></tr>
       <tr><td>SDK Secret</td><td>—</td><td>Zoom SDK App Secret</td></tr>
-      <tr><td>JWT Token</td><td>—</td><td>Signed JWT from your key/secret</td></tr>
+      <tr><td>JWT Token</td><td>—</td><td>Optional override; leave blank to generate from SDK key/secret</td></tr>
       <tr><td>Control Server Port</td><td>19870</td><td>TCP JSON API port</td></tr>
       <tr><td>Control Server Token</td><td>(empty)</td><td>Optional auth token; requires constant-time check</td></tr>
     </table>
     <p>The OSC server port (default 19871) is also read from settings at startup.</p>
 
+    <h3>Meeting Control Dock</h3>
+    <table>
+      <tr><th>Field</th><th>Default</th><th>Description</th></tr>
+      <tr><td>Meeting ID or Zoom URL</td><td>last used</td><td>Numeric meeting ID or full Zoom join URL</td></tr>
+      <tr><td>Passcode</td><td>—</td><td>Optional meeting password; auto-filled from join URLs when present</td></tr>
+      <tr><td>Display Name</td><td>OBS</td><td>Name shown inside the Zoom meeting</td></tr>
+      <tr><td>Join as Webinar / Zoom Events</td><td>off</td><td>Uses the webinar join path when selected</td></tr>
+    </table>
+
     <h3>Zoom Participant Source Properties</h3>
     <table>
       <tr><th>Property</th><th>Default</th><th>Description</th></tr>
-      <tr><td>Meeting ID</td><td>—</td><td>Zoom meeting number</td></tr>
-      <tr><td>Passcode</td><td>—</td><td>Optional meeting password</td></tr>
-      <tr><td>Display Name</td><td>OBS</td><td>Name shown inside the Zoom meeting</td></tr>
       <tr><td>Output Label</td><td>—</td><td>Label shown in the OBS Output Manager</td></tr>
-      <tr><td>Auto-join</td><td>off</td><td>Join meeting when source is activated</td></tr>
       <tr><td>Participant</td><td>—</td><td>Select from live roster</td></tr>
       <tr><td>Follow active speaker</td><td>off</td><td>Automatically follow whoever is speaking</td></tr>
       <tr><td>Switch sensitivity (ms)</td><td>300</td><td>New speaker must hold the floor this long before switching</td></tr>

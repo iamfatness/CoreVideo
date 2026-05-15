@@ -104,7 +104,7 @@ CoreVideo integrates the Zoom Meeting SDK into OBS — no screen capture or virt
 
 4. **Configure credentials** — open OBS → **Tools → Zoom Plugin Settings** and enter your SDK Key and SDK Secret. CoreVideo generates a short-lived Meeting SDK JWT locally when joining. The JWT Token field is optional and overrides generated tokens when set. You may also set a control server token and custom ports.
 
-5. **Add sources** — in OBS, add a **Zoom Participant** source (video + audio), **Zoom Participant Audio** source (audio only), **Zoom Share** source (screen share), or **Zoom Interpretation Audio** source (language channel).
+5. **Join once, then assign outputs** — use the CoreVideo dock or the TCP/OSC control APIs to join the meeting once per OBS session. Then add **Zoom Participant**, **Zoom Participant Audio**, **Zoom Share**, or **Zoom Interpretation Audio** sources and assign them to participants or dynamic roles.
 
 ## Control APIs
 

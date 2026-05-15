@@ -19,16 +19,12 @@ void zoom_source_register();
 struct ZoomSource {
     obs_source_t *source = nullptr;
     std::string source_uuid;
-    std::string meeting_id;
-    std::string passcode;
-    std::string display_name;
     std::string output_display_name;
     // These scalars are written from the OBS UI thread (apply_settings,
     // configure_output) and read from the IPC reader thread
     // (on_engine_audio, on_roster_changed). Make them atomic so the
     // cross-thread reads are race-free without serializing the whole struct.
     std::atomic<uint32_t> participant_id{0};
-    bool auto_join = false;
     std::atomic<bool> active_speaker_mode{false};
     bool isolate_audio = false;
     std::atomic<AudioChannelMode> audio_mode{AudioChannelMode::Mono};
@@ -74,8 +70,6 @@ struct ZoomSource {
 
     HwVideoPipeline m_hw_pipeline;
     // Per-source OBS hotkey IDs.
-    obs_hotkey_id m_hk_join_id       = OBS_INVALID_HOTKEY_ID;
-    obs_hotkey_id m_hk_leave_id      = OBS_INVALID_HOTKEY_ID;
     obs_hotkey_id m_hk_active_on_id  = OBS_INVALID_HOTKEY_ID;
     obs_hotkey_id m_hk_active_off_id = OBS_INVALID_HOTKEY_ID;
 

@@ -677,6 +677,7 @@ public:
             std::to_string(static_cast<int>(start_raw)) + "}");
         if (m_video_engine)
             m_video_engine->resubscribe_all();
+        EngineAudio::instance().retry_subscribe("recording_privilege_granted");
     }
     void onRequestCloudRecordingResponse(
         ZOOMSDK::RequestStartCloudRecordingStatus status) override
@@ -835,7 +836,7 @@ int main()
                 p.userName                  = g_wide_name.c_str();
                 p.psw                       = passcode.empty() ? nullptr : g_wide_psw.c_str();
                 p.isVideoOff                = true;
-                p.isAudioOff                = true;
+                p.isAudioOff                = false;
                 p.isMyVoiceInMix            = false;
                 p.eAudioRawdataSamplingRate = ZOOMSDK::AudioRawdataSamplingRate_48K;
                 p.eVideoRawdataColorspace   = ZOOMSDK::VideoRawdataColorspace_BT709_F;
@@ -858,8 +859,10 @@ int main()
 
         } else if (line.find(IPC_CMD_UNSUBSCRIBE) != std::string::npos) {
             std::string uuid = json_str(line, "source_uuid");
-            if (is_valid_source_uuid(uuid))
+            if (is_valid_source_uuid(uuid)) {
                 video_engine.unsubscribe(uuid);
+                EngineAudio::instance().remove(uuid);
+            }
         }
     }
 

@@ -7,6 +7,7 @@
 #include <util/platform.h>
 #include <algorithm>
 #include <climits>
+#include <cstdlib>
 #include <cstring>
 
 #define PROP_OUTPUT_DISPLAY_NAME  "output_display_name"
@@ -532,8 +533,14 @@ void ZoomSource::on_engine_audio(uint32_t event_byte_len)
     if (event_byte_len == 0) return;
     const size_t audio_bytes = sizeof(ShmAudioHeader) + event_byte_len;
     if ((!m_audio_shm.ptr || m_audio_shm.size < audio_bytes) &&
-        !shm_region_open_read(m_audio_shm, shm_name, audio_bytes))
+        !shm_region_open_read(m_audio_shm, shm_name, audio_bytes)) {
+        if (m_audio_frame_count == 0) {
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] Failed to open audio shared memory: source=%s uuid=%s bytes=%zu",
+                 output_name().c_str(), source_uuid.c_str(), audio_bytes);
+        }
         return;
+    }
 
     auto *hdr = static_cast<const ShmAudioHeader *>(m_audio_shm.ptr);
     const uint32_t byte_len = hdr->byte_len;
@@ -566,6 +573,18 @@ void ZoomSource::on_engine_audio(uint32_t event_byte_len)
         audio.speakers = hdr->channels == 2 ? SPEAKERS_STEREO : SPEAKERS_MONO;
     }
     obs_source_output_audio(source, &audio);
+    ++m_audio_frame_count;
+    if (m_audio_frame_count == 1 || m_audio_frame_count % 250 == 0) {
+        int peak = 0;
+        const uint32_t sample_count = byte_len / kZoomBytesPerSample;
+        for (uint32_t i = 0; i < sample_count; ++i)
+            peak = std::max<int>(peak, std::abs(static_cast<int>(pcm[i])));
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] Output Zoom audio frame: source=%s uuid=%s count=%llu frames=%u sample_rate=%u channels=%u byte_len=%u peak=%d",
+             output_name().c_str(), source_uuid.c_str(),
+             static_cast<unsigned long long>(m_audio_frame_count),
+             audio.frames, hdr->sample_rate, hdr->channels, byte_len, peak);
+    }
 }
 
 uint32_t ZoomSource::width() const

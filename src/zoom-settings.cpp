@@ -86,6 +86,8 @@ ZoomPluginSettings ZoomPluginSettings::load()
     const char *jwt    = config_get_string(cfg, SECTION, "JwtToken");
     const char *oauth_client_id = config_get_string(cfg, SECTION, "OAuthClientId");
     const char *oauth_client_secret = config_get_string(cfg, SECTION, "OAuthClientSecret");
+    const int oauth_use_client_secret =
+        config_get_int(cfg, SECTION, "OAuthUseClientSecret");
     const char *oauth_authorization_url = config_get_string(cfg, SECTION, "OAuthAuthorizationUrl");
     const char *oauth_redirect_uri = config_get_string(cfg, SECTION, "OAuthRedirectUri");
     const char *oauth_scopes = config_get_string(cfg, SECTION, "OAuthScopes");
@@ -95,6 +97,7 @@ ZoomPluginSettings ZoomPluginSettings::load()
     s.jwt_token  = (jwt    && *jwt)    ? jwt    : kEmbeddedJwtToken;
     s.oauth_client_id = oauth_client_id ? oauth_client_id : "";
     s.oauth_client_secret = unprotect_secret(oauth_client_secret);
+    s.oauth_use_client_secret = oauth_use_client_secret != 0;
     s.oauth_authorization_url = oauth_authorization_url ? oauth_authorization_url : "";
     if (oauth_redirect_uri && *oauth_redirect_uri)
         s.oauth_redirect_uri = oauth_redirect_uri;
@@ -184,6 +187,8 @@ void ZoomPluginSettings::save() const
     config_set_string(cfg, SECTION, "OAuthClientId",     oauth_client_id.c_str());
     config_set_string(cfg, SECTION, "OAuthClientSecret",
                       protect_secret(oauth_client_secret).c_str());
+    config_set_int   (cfg, SECTION, "OAuthUseClientSecret",
+                      oauth_use_client_secret ? 1 : 0);
     config_set_string(cfg, SECTION, "OAuthAuthorizationUrl",
                       oauth_authorization_url.c_str());
     config_set_string(cfg, SECTION, "OAuthRedirectUri",  oauth_redirect_uri.c_str());

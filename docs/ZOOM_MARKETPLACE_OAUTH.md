@@ -47,9 +47,10 @@ This is needed for external-account meetings and Marketplace review.
    global config and falls back to `19870`.
 4. The plugin verifies `state`, exchanges the authorization code at
    `https://zoom.us/oauth/token`, and stores access/refresh tokens. For public
-   PKCE, leave OAuth Client Secret blank so CoreVideo sends HTTP Basic auth as
-   `base64(public_client_id:)`. For a confidential General OAuth local-test app,
-   enter the OAuth Client Secret and CoreVideo sends `base64(client_id:secret)`.
+   PKCE, leave **Use Client Secret for confidential OAuth** unchecked so
+   CoreVideo sends HTTP Basic auth as `base64(public_client_id)`. For a
+   confidential General OAuth local-test app, enable that checkbox, enter the
+   OAuth Client Secret, and CoreVideo sends `base64(client_id:secret)`.
 5. Before joining, the plugin refreshes the access token if needed and calls:
    `GET https://api.zoom.us/v2/users/me/zak`
 6. The returned ZAK is passed into the Meeting SDK `JoinParam4WithoutLogin`

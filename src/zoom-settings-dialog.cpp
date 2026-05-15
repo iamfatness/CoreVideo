@@ -35,6 +35,9 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     m_oauth_client_id_edit = new QLineEdit(QString::fromStdString(s.oauth_client_id), this);
     m_oauth_client_secret_edit =
         new QLineEdit(QString::fromStdString(s.oauth_client_secret), this);
+    m_oauth_use_client_secret_cb =
+        new QCheckBox("Use Client Secret for confidential OAuth", this);
+    m_oauth_use_client_secret_cb->setChecked(s.oauth_use_client_secret);
     m_oauth_authorization_url_edit =
         new QLineEdit(QString::fromStdString(s.oauth_authorization_url), this);
     m_oauth_redirect_uri_edit =
@@ -46,6 +49,9 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     m_oauth_client_secret_edit->setEchoMode(QLineEdit::Password);
     m_oauth_client_secret_edit->setPlaceholderText(
         "Optional; leave blank for public PKCE OAuth");
+    m_oauth_client_secret_edit->setEnabled(s.oauth_use_client_secret);
+    connect(m_oauth_use_client_secret_cb, &QCheckBox::toggled,
+            m_oauth_client_secret_edit, &QLineEdit::setEnabled);
     m_jwt_token_edit->setPlaceholderText(
         "Optional override; leave blank to generate from SDK key / secret");
 
@@ -106,6 +112,7 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     oauth_form->setSpacing(8);
     oauth_form->addRow(new QLabel("Status:", this), m_oauth_status_label);
     oauth_form->addRow(new QLabel("Client ID:",          this), m_oauth_client_id_edit);
+    oauth_form->addRow("", m_oauth_use_client_secret_cb);
     oauth_form->addRow(new QLabel("Client Secret:",      this), m_oauth_client_secret_edit);
     oauth_form->addRow(new QLabel("Authorization URL:",  this), m_oauth_authorization_url_edit);
     oauth_form->addRow(new QLabel("Redirect URI:",       this), m_oauth_redirect_uri_edit);
@@ -238,6 +245,7 @@ void ZoomSettingsDialog::onSave()
     s.jwt_token           = m_jwt_token_edit->text().toStdString();
     s.oauth_client_id     = m_oauth_client_id_edit->text().toStdString();
     s.oauth_client_secret = m_oauth_client_secret_edit->text().toStdString();
+    s.oauth_use_client_secret = m_oauth_use_client_secret_cb->isChecked();
     s.oauth_authorization_url =
         m_oauth_authorization_url_edit->text().toStdString();
     s.oauth_redirect_uri  = m_oauth_redirect_uri_edit->text().toStdString();
@@ -284,6 +292,7 @@ void ZoomSettingsDialog::onAuthorizeOAuth()
     ZoomPluginSettings s = ZoomPluginSettings::load();
     s.oauth_client_id = m_oauth_client_id_edit->text().toStdString();
     s.oauth_client_secret = m_oauth_client_secret_edit->text().toStdString();
+    s.oauth_use_client_secret = m_oauth_use_client_secret_cb->isChecked();
     s.oauth_authorization_url =
         m_oauth_authorization_url_edit->text().toStdString();
     s.oauth_redirect_uri = m_oauth_redirect_uri_edit->text().toStdString();
@@ -301,6 +310,7 @@ void ZoomSettingsDialog::onRegisterUrlScheme()
     ZoomPluginSettings s = ZoomPluginSettings::load();
     s.oauth_client_id = m_oauth_client_id_edit->text().toStdString();
     s.oauth_client_secret = m_oauth_client_secret_edit->text().toStdString();
+    s.oauth_use_client_secret = m_oauth_use_client_secret_cb->isChecked();
     s.oauth_authorization_url =
         m_oauth_authorization_url_edit->text().toStdString();
     s.oauth_redirect_uri = m_oauth_redirect_uri_edit->text().toStdString();
@@ -364,6 +374,9 @@ void ZoomSettingsDialog::updateOAuthStatus()
         status += QString(" OAuth callbacks will use the configured control port %1 after the updated helper is installed.")
             .arg(m_control_port_spin->value());
     }
+    status += s.oauth_use_client_secret
+        ? " OAuth mode: confidential client."
+        : " OAuth mode: public PKCE client.";
 
     m_oauth_status_label->setText(status);
     m_oauth_refresh_btn->setEnabled(has_refresh);

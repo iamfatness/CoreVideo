@@ -71,6 +71,8 @@ QString ZoomOAuthManager::form_encode(const QMap<QString, QString> &fields)
 static QByteArray oauth_basic_auth(const QString &client_id,
                                    const QString &client_secret)
 {
+    if (client_secret.isEmpty())
+        return "Basic " + client_id.toUtf8().toBase64();
     return "Basic " + (client_id + ":" + client_secret).toUtf8().toBase64();
 }
 
@@ -205,7 +207,9 @@ bool ZoomOAuthManager::handle_redirect_url(const QString &url, QString *error)
     const QString client_id = m_pending_client_id.isEmpty()
         ? QString::fromStdString(s.oauth_client_id)
         : m_pending_client_id;
-    const QString client_secret = QString::fromStdString(s.oauth_client_secret);
+    const QString client_secret = s.oauth_use_client_secret
+        ? QString::fromStdString(s.oauth_client_secret)
+        : QString();
     QNetworkAccessManager manager;
     QNetworkRequest request(QUrl("https://zoom.us/oauth/token"));
     request.setHeader(QNetworkRequest::ContentTypeHeader,
@@ -213,7 +217,6 @@ bool ZoomOAuthManager::handle_redirect_url(const QString &url, QString *error)
     request.setRawHeader("Authorization", oauth_basic_auth(client_id, client_secret));
     const QString body = form_encode({
         {"grant_type", "authorization_code"},
-        {"client_id", client_id},
         {"code", code},
         {"redirect_uri", QString::fromStdString(s.oauth_redirect_uri)},
         {"code_verifier", m_pending_verifier},
@@ -269,10 +272,11 @@ bool ZoomOAuthManager::refresh_access_token_blocking(QString *error)
                       "application/x-www-form-urlencoded");
     request.setRawHeader("Authorization",
                          oauth_basic_auth(QString::fromStdString(s.oauth_client_id),
-                                          QString::fromStdString(s.oauth_client_secret)));
+                                          s.oauth_use_client_secret
+                                              ? QString::fromStdString(s.oauth_client_secret)
+                                              : QString()));
     const QString body = form_encode({
         {"grant_type", "refresh_token"},
-        {"client_id", QString::fromStdString(s.oauth_client_id)},
         {"refresh_token", QString::fromStdString(s.oauth_refresh_token)},
     });
 

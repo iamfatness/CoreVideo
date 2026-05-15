@@ -28,6 +28,7 @@ private:
     QLineEdit *m_jwt_token_edit         = nullptr;
     QLineEdit *m_oauth_client_id_edit   = nullptr;
     QLineEdit *m_oauth_client_secret_edit = nullptr;
+    QCheckBox *m_oauth_use_client_secret_cb = nullptr;
     QLineEdit *m_oauth_authorization_url_edit = nullptr;
     QLineEdit *m_oauth_redirect_uri_edit = nullptr;
     QLineEdit *m_oauth_scopes_edit      = nullptr;

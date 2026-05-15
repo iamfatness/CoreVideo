@@ -1,0 +1,13 @@
+{
+  "id": "talk-show",
+  "name": "Talk Show",
+  "description": "Large host with guest strip below",
+  "columns": 1,
+  "rows": 2,
+  "slots": [
+    { "index": 0, "x": 0.0,  "y": 0.0,  "width": 1.0,  "height": 0.70, "label": "Host",    "isMain": true  },
+    { "index": 1, "x": 0.0,  "y": 0.70, "width": 0.33, "height": 0.30, "label": "Guest 1",  "isMain": false },
+    { "index": 2, "x": 0.33, "y": 0.70, "width": 0.33, "height": 0.30, "label": "Guest 2",  "isMain": false },
+    { "index": 3, "x": 0.66, "y": 0.70, "width": 0.34, "height": 0.30, "label": "Guest 3",  "isMain": false }
+  ]
+}

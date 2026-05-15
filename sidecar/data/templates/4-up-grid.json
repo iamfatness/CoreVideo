@@ -1,0 +1,13 @@
+{
+  "id": "4-up-grid",
+  "name": "4-up Grid",
+  "description": "Four equal sources in a 2x2 grid",
+  "columns": 2,
+  "rows": 2,
+  "slots": [
+    { "index": 0, "x": 0.0, "y": 0.0,  "width": 0.5, "height": 0.5, "label": "TL", "isMain": false },
+    { "index": 1, "x": 0.5, "y": 0.0,  "width": 0.5, "height": 0.5, "label": "TR", "isMain": false },
+    { "index": 2, "x": 0.0, "y": 0.5,  "width": 0.5, "height": 0.5, "label": "BL", "isMain": false },
+    { "index": 3, "x": 0.5, "y": 0.5,  "width": 0.5, "height": 0.5, "label": "BR", "isMain": false }
+  ]
+}

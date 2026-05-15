@@ -1,0 +1,31 @@
+{
+  "name": "4-up Grid",
+  "scene": "CoreVideo Main",
+  "canvas": { "width": 1920, "height": 1080 },
+  "items": [
+    {
+      "source": "Zoom Participant 1",
+      "x": 0,    "y": 0,
+      "boundsWidth": 960, "boundsHeight": 540,
+      "boundsType": "OBS_BOUNDS_SCALE_INNER"
+    },
+    {
+      "source": "Zoom Participant 2",
+      "x": 960,  "y": 0,
+      "boundsWidth": 960, "boundsHeight": 540,
+      "boundsType": "OBS_BOUNDS_SCALE_INNER"
+    },
+    {
+      "source": "Zoom Participant 3",
+      "x": 0,    "y": 540,
+      "boundsWidth": 960, "boundsHeight": 540,
+      "boundsType": "OBS_BOUNDS_SCALE_INNER"
+    },
+    {
+      "source": "Zoom Participant 4",
+      "x": 960,  "y": 540,
+      "boundsWidth": 960, "boundsHeight": 540,
+      "boundsType": "OBS_BOUNDS_SCALE_INNER"
+    }
+  ]
+}

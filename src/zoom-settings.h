@@ -11,6 +11,12 @@ struct ZoomPluginSettings {
     std::string         control_token;
     HwAccelMode         hw_accel_mode        = HwAccelMode::None;
     ZoomReconnectPolicy reconnect_policy;
+
+    // Last successful join, used to repopulate the dock on next launch.
+    std::string         last_meeting_id;
+    std::string         last_display_name;
+    bool                last_was_webinar     = false;
+
     static ZoomPluginSettings load();
     void save() const;
 };

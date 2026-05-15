@@ -1,4 +1,5 @@
 #include "zoom-control-server.h"
+#include "obs-utils.h"
 #include "zoom-engine-client.h"
 #include "zoom-output-manager.h"
 #include "zoom-reconnect.h"
@@ -251,14 +252,24 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
     }
 
     if (cmd == "join") {
-        const QString meeting_id = req.value("meeting_id").toString();
-        const QString passcode = req.value("passcode").toString();
+        const QString meeting_id   = req.value("meeting_id").toString();
+        const QString passcode_in  = req.value("passcode").toString();
         const QString display_name = req.value("display_name").toString("OBS");
+
+        // Accept either a numeric ID or a full Zoom URL in meeting_id.
+        const auto parsed = zoom_join_utils::parse_join_input(meeting_id.toStdString());
+        if (parsed.meeting_id.empty()) {
+            write_response(socket, {{"ok", false}, {"error", "invalid_meeting_id"}});
+            return;
+        }
+        std::string passcode = passcode_in.toStdString();
+        if (passcode.empty()) passcode = parsed.passcode;
+
         const ZoomPluginSettings settings = ZoomPluginSettings::load();
-        const bool ok = ZoomEngineClient::instance().start(settings.jwt_token) &&
-            ZoomEngineClient::instance().join(
-            meeting_id.toStdString(), passcode.toStdString(),
-            display_name.toStdString());
+        const bool ok =
+            ZoomEngineClient::instance().start(settings.jwt_token) &&
+            ZoomEngineClient::instance().join(parsed.meeting_id, passcode,
+                                              display_name.toStdString());
         write_response(socket, {{"ok", ok}});
         return;
     }

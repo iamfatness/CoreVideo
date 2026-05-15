@@ -1,7 +1,9 @@
 #include "zoom-osc-server.h"
+#include "obs-utils.h"
 #include "zoom-engine-client.h"
 #include "zoom-output-manager.h"
 #include "zoom-reconnect.h"
+#include "zoom-settings.h"
 #include <QHostAddress>
 #include <QUdpSocket>
 #include <obs-module.h>
@@ -203,15 +205,30 @@ void ZoomOscServer::dispatch(const QString &address,
     }
 
     // /zoom/join  ,sss meeting_id passcode display_name
+    // The meeting_id arg may also be a full Zoom join URL.
     if (address == "/zoom/join") {
         if (args.size() < 1 || args[0].type != OscArg::String) {
             blog(LOG_WARNING, "[obs-zoom-plugin] OSC /zoom/join: missing meeting_id arg");
             return;
         }
-        const std::string meeting_id   = args[0].s;
-        const std::string passcode     = args.size() >= 2 ? args[1].s : "";
+        const auto parsed = zoom_join_utils::parse_join_input(args[0].s);
+        if (parsed.meeting_id.empty()) {
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] OSC /zoom/join: could not parse meeting ID from '%s'",
+                 args[0].s.c_str());
+            return;
+        }
+        std::string passcode = args.size() >= 2 ? args[1].s : std::string();
+        if (passcode.empty()) passcode = parsed.passcode;
         const std::string display_name = args.size() >= 3 ? args[2].s : "OBS";
-        ZoomEngineClient::instance().join(meeting_id, passcode, display_name);
+
+        const ZoomPluginSettings settings = ZoomPluginSettings::load();
+        if (!ZoomEngineClient::instance().start(settings.jwt_token)) {
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] OSC /zoom/join: engine failed to start");
+            return;
+        }
+        ZoomEngineClient::instance().join(parsed.meeting_id, passcode, display_name);
         return;
     }
 

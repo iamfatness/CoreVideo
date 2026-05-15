@@ -14,7 +14,7 @@
 
 **OBS Studio plugin for live Zoom meeting video, audio, screen share, and language interpretation.**
 
-CoreVideo integrates the Zoom Meeting SDK into OBS — no screen capture or virtual camera required. The SDK runs in a dedicated `ZoomObsEngine` child process; the OBS plugin communicates with it through a `ZoomEngineClient` singleton over cross-platform IPC (named pipes on Windows, Unix sockets on macOS/Linux) with frame data delivered through named shared memory. A built-in dockable control panel manages joining, and a `ZoomReconnectManager` handles automatic recovery after crashes or disconnects.
+CoreVideo integrates the Zoom Meeting SDK into OBS — no screen capture or virtual camera required. The SDK runs in a dedicated `ZoomObsEngine` child process; the OBS plugin communicates with it through a `ZoomEngineClient` singleton over cross-platform IPC (named pipes on Windows, Unix sockets on macOS/Linux) with frame data delivered through named shared memory. A built-in dockable control panel manages joining, and a `ZoomReconnectManager` handles automatic recovery after crashes or disconnects. A companion **CoreVideo Sidecar** app provides a standalone layout-management UI that connects to OBS via obs-websocket.
 
 📖 **[Full Documentation & Architecture Diagrams →](https://iamfatness.github.io/CoreVideo/)**
 
@@ -35,17 +35,20 @@ CoreVideo integrates the Zoom Meeting SDK into OBS — no screen capture or virt
 - **Per-participant audio sources** — standalone OBS audio source per meeting participant
 - **Webinar support** — join Zoom Webinars using the dedicated SDK entry point (Webinar checkbox in control dock)
 - **Participant roster** — live list with video, mute, talking, host, co-host, raised hand, spotlight slot, and screen-sharing state
-- **Control dock** — dockable Qt panel with state indicator, join/leave, recovery countdown, and inline output table
+- **Control dock** — dockable Qt panel with animated status dot, join/leave, token-type selector, recovery countdown, and inline output table; persists last meeting ID and display name across sessions
 - **Auto-reconnect** — exponential back-off recovery after engine crash, network drop, or unexpected disconnect
 - **OBS hotkeys** — per-source hotkeys to enable/disable active speaker mode
-- **TCP control API** — JSON server on `127.0.0.1:19870` for scripts and dashboards
+- **TCP control API** — JSON server on `127.0.0.1:19870` for scripts and dashboards; includes `oauth_callback` command for custom URL scheme forwarding
 - **OSC control API** — UDP OSC server on `127.0.0.1:19871` for lighting consoles and broadcast hardware
 - **Output profiles** — save and load named participant-to-source mappings as JSON files
 - **Output manager** — Qt dialog and API for viewing and reconfiguring all sources at runtime
 - **JWT generation** — CoreVideo generates Meeting SDK JWTs locally from key+secret; manual override available
+- **Zoom OAuth PKCE** — user-level OAuth 2.0 with PKCE for attributed joins and Marketplace compliance; fetches a short-lived ZAK via `GET /v2/users/me/zak`; `corevideo://` custom URL scheme with platform callback helpers (`CoreVideoOAuthCallback.exe` / `.app`); DPAPI token protection on Windows; confidential client mode supported
 - **SDK 5.17.x and 7.x** — auto-detects flat and subfolder header layouts
 - **Hardened security** — constant-time token comparison, validated IPC input, sanitised participant IDs, SIGPIPE handling
+- **Modern UI** — CoreVideo stylesheet with dark theme, animated `CvStatusDot`, `CvBanner` first-run notices, and button role variants (primary / danger)
 - **Multi-platform** — Windows (x64/arm64), macOS (universal arm64 + x86_64), Linux
+- **CoreVideo Sidecar** — companion standalone Qt6 app with obs-websocket v5 client, visual layout-template picker (1-up, 2-up PiP, 2-up SbS, 4-up Grid, Talk-Show), participant slot assignment, and live/scene preview canvases
 
 ## Requirements
 
@@ -53,10 +56,10 @@ CoreVideo integrates the Zoom Meeting SDK into OBS — no screen capture or virt
 |---|---|---|
 | OBS Studio | 30+ | `libobs` + `obs-frontend-api` |
 | CMake | 3.16+ | Build system |
-| Qt | 6.x | Core + Network + Widgets |
+| Qt | 6.x | Core + Network + Widgets + WebSockets (Sidecar) |
 | Zoom Meeting SDK | **5.17.x / 7.x** | Place in `third_party/zoom-sdk/`. Windows builds support the older flat header layout and the newer 7.x subfolder header layout. |
 | C++ compiler | C++17 | MSVC 2022 / Clang 14+ / GCC 11+ |
-| Zoom Developer Account | — | Meeting SDK key + secret. A manual SDK JWT may be supplied as an override. |
+| Zoom Developer Account | — | Meeting SDK key + secret. OAuth Client ID required for Marketplace / external-account joins. |
 
 ## Quick Start
 
@@ -106,6 +109,9 @@ CoreVideo integrates the Zoom Meeting SDK into OBS — no screen capture or virt
    contains `LibObsConfig.cmake` and `obs-frontend-apiConfig.cmake`, plus a
    matching Qt 6 MSVC package.
 
+   Windows builds must ship Qt's TLS backend plugins (`obs-plugins/64bit/plugins/tls/`)
+   for OAuth HTTPS requests to succeed.
+
 3. **Install into OBS**
    ```sh
    cmake --install build --prefix "/path/to/obs-studio"
@@ -113,7 +119,24 @@ CoreVideo integrates the Zoom Meeting SDK into OBS — no screen capture or virt
 
 4. **Configure credentials** — open OBS → **Tools → Zoom Plugin Settings** and enter your SDK Key and SDK Secret. CoreVideo generates a short-lived Meeting SDK JWT locally when joining. The JWT Token field is optional and overrides generated tokens when set. You may also set a control server token and custom ports.
 
-5. **Join once, then assign outputs** — use the CoreVideo dock or the TCP/OSC control APIs to join the meeting once per OBS session. Then add **Zoom Participant**, **Zoom Participant Audio**, **Zoom Share**, or **Zoom Interpretation Audio** sources and assign them to participants or dynamic roles.
+5. **Set up OAuth (for Marketplace / external-account joins)** — in the Settings dialog, enter your OAuth Client ID, set the Redirect URI to `corevideo://oauth/callback`, click **Register corevideo:// URL Scheme**, then click **Authorize with Zoom**. See [`docs/ZOOM_MARKETPLACE_OAUTH.md`](docs/ZOOM_MARKETPLACE_OAUTH.md) for the full walkthrough.
+
+6. **Join once, then assign outputs** — use the CoreVideo dock or the TCP/OSC control APIs to join the meeting once per OBS session. Then add **Zoom Participant**, **Zoom Participant Audio**, **Zoom Share**, or **Zoom Interpretation Audio** sources and assign them to participants or dynamic roles.
+
+## Zoom OAuth PKCE
+
+CoreVideo supports user-level OAuth 2.0 with PKCE for attributed meeting joins and Zoom App Marketplace compliance. This is required when joining meetings hosted by accounts other than the SDK account.
+
+### Flow
+1. In **Tools → Zoom Plugin Settings**, enter the OAuth Client ID (and optionally Client Secret for confidential/test apps). Set Redirect URI to `corevideo://oauth/callback`.
+2. Click **Register corevideo:// URL Scheme** — registers the scheme in the OS so the callback helper can intercept the redirect.
+3. Click **Authorize with Zoom** — opens the browser with a PKCE authorization request (S256 code challenge, high-entropy verifier, state CSRF token).
+4. Zoom redirects to `corevideo://oauth/callback?code=...&state=...`.
+5. `CoreVideoOAuthCallback.exe` (Windows) or `CoreVideoOAuthCallback.app` (macOS) forwards the URL to the plugin via the TCP control server (`oauth_callback` command).
+6. The plugin verifies state, exchanges the code at `https://zoom.us/oauth/token`, and persists access + refresh tokens. On Windows, tokens are DPAPI-protected before storage.
+7. Before each meeting join, CoreVideo refreshes the token if needed and fetches a ZAK from `GET /v2/users/me/zak`. The ZAK is passed into the SDK `JoinParam4WithoutLogin`.
+
+See [`docs/ZOOM_MARKETPLACE_OAUTH.md`](docs/ZOOM_MARKETPLACE_OAUTH.md) for the full setup guide and security notes.
 
 ## Control APIs
 
@@ -128,9 +151,12 @@ echo '{"cmd":"list_participants"}' | nc 127.0.0.1 19870
 
 # Reassign source to participant at runtime
 echo '{"cmd":"assign_output","source":"Zoom Participant 1","participant_id":123,"isolate_audio":true,"audio_channels":"stereo"}' | nc 127.0.0.1 19870
+
+# Forward OAuth callback URL from custom scheme helper
+echo '{"cmd":"oauth_callback","url":"corevideo://oauth/callback?code=...&state=..."}' | nc 127.0.0.1 19870
 ```
 
-Commands: `help`, `status`, `list_participants`, `list_outputs`, `assign_output`, `join`, `leave`.
+Commands: `help`, `status`, `list_participants`, `list_outputs`, `assign_output`, `join`, `leave`, `oauth_callback`.
 
 ### UDP OSC (port 19871)
 
@@ -144,6 +170,31 @@ Commands: `help`, `status`, `list_participants`, `list_outputs`, `assign_output`
 | `/zoom/assign_output` | `,si[i]` | source, participant_id, [active_speaker] |
 | `/zoom/assign_output/active_speaker` | `,s` | source |
 | `/zoom/isolate_audio` | `,si` | source, 0\|1 |
+
+## CoreVideo Sidecar
+
+The **CoreVideo Sidecar** is a standalone Qt6 application that connects to OBS via obs-websocket v5 and provides a visual layout-management interface for CoreVideo sources.
+
+### Features
+- **obs-websocket v5 client** (`OBSClient`) — auto-reconnect, scene item ID resolution, transform application
+- **Layout templates** — five built-in templates selectable from a visual thumbnail picker:
+  - **1-up** — full-screen single source
+  - **2-up PiP** — large main with picture-in-picture insert
+  - **2-up SbS** — two equal sources side by side
+  - **4-up Grid** — 2×2 equal grid
+  - **Talk-Show** — large presenter with smaller remote guest
+- **`applyLayout()`** — maps template slots to OBS source names and applies `SetSceneItemTransform` calls via websocket
+- **`applyTemplate()`** — applies a pre-computed applied-template JSON directly (supports full transform spec: position, scale, rotation, crop, bounds)
+- **ParticipantPanel** — assign meeting participants to layout slots
+- **PreviewCanvas** — live and scene preview canvases
+- **Log dock** — real-time obs-websocket event log
+
+### Build
+```sh
+cmake -B build-sidecar sidecar/ \
+  -DCMAKE_PREFIX_PATH="/path/to/Qt6"
+cmake --build build-sidecar --config Release
+```
 
 ## Active Speaker Mode
 
@@ -184,10 +235,25 @@ Use **OBS → Tools → Zoom Output Manager** to save, load, and delete profiles
 ## Architecture Overview
 
 ```
+CoreVideo Sidecar  (standalone Qt6 app)
+├── OBSClient          — obs-websocket v5 client: connect/auth/reconnect,
+│                        SetSceneItemTransform, applyLayout, applyTemplate
+├── LayoutTemplate     — slot geometry (x/y/w/h normalised 0..1), JSON serialisation
+├── TemplateManager    — loads built-in + user templates from disk
+├── TemplatePanel      — visual thumbnail picker (painted TemplateThumbnail widgets)
+├── ParticipantPanel   — slot→participant assignment UI
+└── PreviewCanvas      — live + scene preview rendering
+
 OBS Studio
 └── obs-zoom-plugin  (no Zoom SDK dependency)
-    ├── ZoomDock              — dockable Qt panel: join/leave, state indicator,
-    │                           recovery countdown, inline output table
+    ├── ZoomDock              — dockable Qt panel: animated CvStatusDot, join/leave,
+    │                           token-type selector, recovery countdown, output table;
+    │                           CvBanner first-run credentials notice; persists last
+    │                           meeting ID + display name
+    ├── ZoomOAuthManager      — OAuth 2.0 PKCE: begin_authorization, handle_redirect_url,
+    │                           register_url_scheme, refresh_access_token_blocking,
+    │                           fetch_zak_blocking; DPAPI token storage on Windows;
+    │                           confidential + public client modes
     ├── ZoomEngineClient  ★  — IPC singleton: launches engine, owns pipes/sockets,
     │                           tracks roster/speaker, dispatches frame callbacks,
     │                           subscribe_spotlight / subscribe_screenshare
@@ -200,10 +266,12 @@ OBS Studio
     ├── ZoomAudioRouter       — SDK audio fan-out to all registered sinks
     ├── ZoomOutputManager     — central source registry for runtime reconfiguration
     ├── ZoomOutputProfile     — named JSON profile persistence
-    ├── ZoomControlServer     — TCP JSON API on port 19870 (hardened token auth)
+    ├── ZoomControlServer     — TCP JSON API on port 19870 (hardened token auth);
+    │                           oauth_callback command for URL scheme forwarding
     ├── ZoomOscServer         — UDP OSC API on port 19871
+    ├── cv-style.h / cv-widgets — CoreVideo stylesheet, CvStatusDot, CvBanner
     └── zoom-types.h          — MeetingState, AssignmentMode, MeetingKind,
-                                RecoveryReason, ParticipantInfo, VideoResolution…
+                                RecoveryReason, ParticipantInfo, ZoomJoinAuthTokens…
 
 ZoomObsEngine  (separate child process — owns ALL Zoom SDK access)
 ├── Zoom SDK 5.17+/7.x (auth, meeting+webinar join, participant/spotlight tracking,
@@ -215,9 +283,15 @@ ZoomObsEngine  (separate child process — owns ALL Zoom SDK access)
     │   Engine→Plugin: ready · auth_ok · auth_fail · joined · left · frame · audio
     │                  participants(+spotlight_index/is_sharing_screen) · active_speaker · error
     └── Named shared memory (ZoomObsPlugin_<uuid>) for I420 video + PCM audio frames
+
+CoreVideoOAuthCallback  (thin helper binary — ships beside the plugin)
+├── Windows: CoreVideoOAuthCallback.exe — intercepts corevideo:// URI via registry;
+│            reads control-server port from OBS global config; POSTs oauth_callback command
+└── macOS:   CoreVideoOAuthCallback.app — registered with Launch Services for corevideo://;
+             same forwarding behaviour
 ```
 
-See the **[full documentation](https://iamfatness.github.io/CoreVideo/)** for all architecture diagrams including the ZoomEngineClient deep-dive, assignment mode flows, auto-reconnect, hardware video acceleration, TCP + OSC API references, output profile format, and full IPC protocol reference.
+See the **[full documentation](https://iamfatness.github.io/CoreVideo/)** for all architecture diagrams including the ZoomEngineClient deep-dive, OAuth PKCE flow, assignment mode flows, auto-reconnect, hardware video acceleration, TCP + OSC API references, output profile format, and full IPC protocol reference.
 
 ## Project Structure
 
@@ -227,43 +301,70 @@ CoreVideo/
 ├── buildspec/
 │   ├── macos.cmake
 │   └── windows.cmake
+├── cmake/
+│   └── CoreVideoOAuthCallback-Info.plist.in  # macOS OAuth helper bundle plist
 ├── data/locale/en-US.ini
-├── docs/                                   # GitHub Pages documentation
-├── engine/src/                             # ZoomObsEngine (owns ALL SDK access)
-│   ├── main.cpp                            # IPC loop, SDK auth/join/webinar, spotlight tracking
-│   ├── engine-video.cpp/h                  # IZoomSDKRenderer → named shared memory (I420)
-│   └── engine-audio.cpp/h                  # SDK audio → named shared memory (PCM)
-└── src/                                    # OBS plugin (no SDK linkage)
-    ├── plugin-main.cpp                     # Module load/unload, dock, Tools menu, SIGPIPE
-    ├── zoom-source.*                       # Participant source: ShmRegion, AssignmentMode,
-    │                                       #   HwVideoPipeline, failover, hotkeys, placeholder
-    ├── zoom-engine-client.*                # IPC singleton: engine launch, spotlight/screenshare,
-    │                                       #   monitor thread, deferred join, roster callbacks
-    ├── zoom-dock.*                         # Qt dockable join/leave/recovery control panel
-    ├── zoom-reconnect.*                    # Auto-reconnect with exponential back-off
-    ├── zoom-types.h                        # MeetingState, AssignmentMode, MeetingKind,
-    │                                       #   RecoveryReason, ParticipantInfo, enums…
-    ├── hw-video-pipeline.*                 # FFmpeg I420→NV12 (CUDA/VAAPI/VideoToolbox/QSV)
-    ├── zoom-audio-delegate.*               # Mixed/isolated SDK audio → OBS
-    ├── zoom-audio-router.*                 # Central SDK audio fan-out
-    ├── zoom-auth.*                         # JWT auth + observable auth state
-    ├── zoom-meeting.*                      # Meeting state machine
-    ├── zoom-participants.*                 # Roster, active speaker, spotlight callbacks
-    ├── zoom-participant-audio-source.*     # Per-participant audio OBS source
-    ├── zoom-interpretation-audio-source.*  # Language interpretation OBS source
-    ├── zoom-video-delegate.*               # Video frames, resolution, loss mode, preview
-    ├── zoom-share-delegate.*               # Screen share frames → OBS
-    ├── zoom-output-manager.*               # Source registry + runtime reconfiguration
-    ├── zoom-output-profile.*               # Named JSON profile persistence
-    ├── zoom-output-dialog.*                # Qt Output Manager dialog
-    ├── zoom-control-server.*               # TCP JSON API (port 19870)
-    ├── zoom-osc-server.*                   # UDP OSC API (port 19871)
-    ├── zoom-settings.*                     # SDK key/secret/JWT + port persistence
-    ├── zoom-settings-dialog.*              # Qt Settings dialog
-    ├── zoom-credentials.h.in               # Embedded SDK credentials (CMake-generated)
-    ├── obs-zoom-version.h.in               # Plugin version (CMake-generated)
-    ├── engine-ipc.h                        # IPC constants + cross-platform helpers
-    └── obs-utils.*                         # OBS helper functions
+├── docs/                                     # GitHub Pages documentation
+│   ├── index.html
+│   ├── ZOOM_MARKETPLACE_OAUTH.md             # OAuth setup guide
+│   └── policies/                             # Security & privacy policy documents
+├── sidecar/                                  # CoreVideo Sidecar (standalone Qt6 app)
+│   ├── CMakeLists.txt
+│   ├── data/templates/                       # Built-in layout template JSON files
+│   └── src/
+│       ├── main.cpp
+│       ├── mainwindow.*                      # Main window: top bar, canvas, right panel, log dock
+│       ├── obs-client.*                      # obs-websocket v5 client with auto-reconnect
+│       ├── obs-connect-dialog.*              # Host/port/password connection dialog
+│       ├── layout-template.*                 # LayoutTemplate + TemplateSlot data types
+│       ├── template-manager.*                # Loads templates from disk + built-ins
+│       ├── template-panel.*                  # Visual thumbnail picker UI
+│       ├── participant-panel.*               # Slot→participant assignment UI
+│       ├── preview-canvas.*                  # Live/scene preview rendering widget
+│       ├── sidebar.*                         # Page-navigation sidebar
+│       └── sidecar-style.h                   # Sidecar stylesheet
+├── engine/src/                               # ZoomObsEngine (owns ALL SDK access)
+│   ├── main.cpp                              # IPC loop, SDK auth/join/webinar, spotlight tracking
+│   ├── engine-video.cpp/h                    # IZoomSDKRenderer → named shared memory (I420)
+│   └── engine-audio.cpp/h                    # SDK audio → named shared memory (PCM)
+└── src/                                      # OBS plugin (no SDK linkage)
+    ├── plugin-main.cpp                       # Module load/unload, dock, Tools menu, SIGPIPE
+    ├── zoom-source.*                         # Participant source: ShmRegion, AssignmentMode,
+    │                                         #   HwVideoPipeline, failover, hotkeys, placeholder
+    ├── zoom-engine-client.*                  # IPC singleton: engine launch, spotlight/screenshare,
+    │                                         #   monitor thread, deferred join, roster callbacks
+    ├── zoom-oauth.*                          # OAuth 2.0 PKCE: ZoomOAuthManager, ZAK fetch,
+    │                                         #   register_url_scheme, token refresh + DPAPI storage
+    ├── oauth-callback-helper.cpp             # Windows: CoreVideoOAuthCallback.exe entry point
+    ├── oauth-callback-helper-macos.mm        # macOS: CoreVideoOAuthCallback.app entry point
+    ├── zoom-dock.*                           # Qt dockable join/leave/recovery control panel;
+    │                                         #   CvStatusDot, CvBanner, token-type selector
+    ├── zoom-reconnect.*                      # Auto-reconnect with exponential back-off
+    ├── zoom-types.h                          # MeetingState, AssignmentMode, MeetingKind,
+    │                                         #   RecoveryReason, ParticipantInfo, ZoomJoinAuthTokens…
+    ├── cv-style.h                            # CoreVideo QSS stylesheet (dark theme, button roles)
+    ├── cv-widgets.*                          # CvStatusDot (animated dot), CvBanner (notice strip)
+    ├── hw-video-pipeline.*                   # FFmpeg I420→NV12 (CUDA/VAAPI/VideoToolbox/QSV)
+    ├── zoom-audio-delegate.*                 # Mixed/isolated SDK audio → OBS
+    ├── zoom-audio-router.*                   # Central SDK audio fan-out
+    ├── zoom-auth.*                           # JWT auth + observable auth state
+    ├── zoom-meeting.*                        # Meeting state machine
+    ├── zoom-participants.*                   # Roster, active speaker, spotlight callbacks
+    ├── zoom-participant-audio-source.*       # Per-participant audio OBS source
+    ├── zoom-interpretation-audio-source.*    # Language interpretation OBS source
+    ├── zoom-video-delegate.*                 # Video frames, resolution, loss mode, preview
+    ├── zoom-share-delegate.*                 # Screen share frames → OBS
+    ├── zoom-output-manager.*                 # Source registry + runtime reconfiguration
+    ├── zoom-output-profile.*                 # Named JSON profile persistence
+    ├── zoom-output-dialog.*                  # Qt Output Manager dialog
+    ├── zoom-control-server.*                 # TCP JSON API (port 19870) + oauth_callback command
+    ├── zoom-osc-server.*                     # UDP OSC API (port 19871)
+    ├── zoom-settings.*                       # SDK key/secret/JWT + OAuth tokens + port persistence
+    ├── zoom-settings-dialog.*                # Qt Settings dialog with OAuth section
+    ├── zoom-credentials.h.in                 # Embedded SDK credentials (CMake-generated)
+    ├── obs-zoom-version.h.in                 # Plugin version (CMake-generated)
+    ├── engine-ipc.h                          # IPC constants + cross-platform helpers
+    └── obs-utils.*                           # OBS helper functions
 ```
 
 ## Security

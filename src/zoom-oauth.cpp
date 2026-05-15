@@ -177,6 +177,33 @@ bool ZoomOAuthManager::parse_token_response(const QByteArray &body, QString *err
     return true;
 }
 
+static QString oauth_error_message(const QByteArray &body,
+                                   const QString &fallback)
+{
+    QJsonParseError parse_error;
+    const QJsonDocument doc = QJsonDocument::fromJson(body, &parse_error);
+    if (parse_error.error == QJsonParseError::NoError && doc.isObject()) {
+        const QJsonObject obj = doc.object();
+        const QString oauth_error = obj.value("error").toString();
+        const QString reason = obj.value("reason").toString();
+        if (oauth_error == "invalid_client") {
+            return "Zoom rejected the OAuth client. For public PKCE, enable "
+                   "Use Public Client OAuth in the Zoom Marketplace app and "
+                   "use the separate Public Client ID, not the regular Client "
+                   "ID. If you intentionally use a confidential client, enable "
+                   "Use Client Secret in CoreVideo and re-enter the client secret.";
+        }
+        if (!reason.isEmpty())
+            return reason;
+        const QString message = obj.value("message").toString();
+        if (!message.isEmpty())
+            return message;
+        if (!oauth_error.isEmpty())
+            return oauth_error;
+    }
+    return body.isEmpty() ? fallback : QString::fromUtf8(body);
+}
+
 bool ZoomOAuthManager::handle_redirect_url(const QString &url, QString *error)
 {
     blog(LOG_INFO, "[obs-zoom-plugin] Zoom OAuth callback received");
@@ -239,10 +266,8 @@ bool ZoomOAuthManager::handle_redirect_url(const QString &url, QString *error)
 
     if (net_error != QNetworkReply::NoError || status < 200 || status >= 300) {
         if (error) {
-            const QString details = response.isEmpty()
-                ? net_error_string
-                : QString::fromUtf8(response);
-            *error = "Zoom token exchange failed: " + details;
+            *error = "Zoom token exchange failed: " +
+                     oauth_error_message(response, net_error_string);
         }
         blog(LOG_WARNING, "[obs-zoom-plugin] Zoom OAuth token exchange failed: status=%d network=%d error=%s",
              status, static_cast<int>(net_error), net_error_string.toUtf8().constData());
@@ -293,10 +318,8 @@ bool ZoomOAuthManager::refresh_access_token_blocking(QString *error)
 
     if (net_error != QNetworkReply::NoError || status < 200 || status >= 300) {
         if (error) {
-            const QString details = response.isEmpty()
-                ? net_error_string
-                : QString::fromUtf8(response);
-            *error = "Zoom token refresh failed: " + details;
+            *error = "Zoom token refresh failed: " +
+                     oauth_error_message(response, net_error_string);
         }
         if (!response.isEmpty()) {
             blog(LOG_WARNING, "[obs-zoom-plugin] Zoom OAuth token refresh response: %s",

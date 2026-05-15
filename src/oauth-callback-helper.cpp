@@ -36,6 +36,56 @@ static std::string json_escape(const std::string &in)
     return out;
 }
 
+static std::string json_unescape(const std::string &in)
+{
+    std::string out;
+    out.reserve(in.size());
+    bool escaped = false;
+    for (char c : in) {
+        if (escaped) {
+            switch (c) {
+            case 'n': out += '\n'; break;
+            case 'r': out += '\r'; break;
+            case 't': out += '\t'; break;
+            default: out += c; break;
+            }
+            escaped = false;
+        } else if (c == '\\') {
+            escaped = true;
+        } else {
+            out += c;
+        }
+    }
+    return out;
+}
+
+static std::string json_string_value(const std::string &json,
+                                     const std::string &key)
+{
+    const std::string needle = "\"" + key + "\":\"";
+    const size_t start = json.find(needle);
+    if (start == std::string::npos)
+        return {};
+
+    std::string value;
+    bool escaped = false;
+    for (size_t i = start + needle.size(); i < json.size(); ++i) {
+        const char c = json[i];
+        if (escaped) {
+            value += '\\';
+            value += c;
+            escaped = false;
+        } else if (c == '\\') {
+            escaped = true;
+        } else if (c == '"') {
+            return json_unescape(value);
+        } else {
+            value += c;
+        }
+    }
+    return {};
+}
+
 static int read_control_port()
 {
     const char *appdata = std::getenv("APPDATA");
@@ -79,6 +129,10 @@ int main(int argc, char **argv)
 {
     if (argc < 2) {
         log_helper_event("missing callback URL argument");
+        MessageBoxA(nullptr,
+                    "CoreVideo OAuth callback did not receive a callback URL.",
+                    "CoreVideo Zoom OAuth",
+                    MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
         return 1;
     }
 
@@ -87,6 +141,10 @@ int main(int argc, char **argv)
     WSADATA wsa{};
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         log_helper_event("WSAStartup failed");
+        MessageBoxA(nullptr,
+                    "CoreVideo OAuth callback could not initialize networking.",
+                    "CoreVideo Zoom OAuth",
+                    MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
         return 2;
     }
 
@@ -94,6 +152,10 @@ int main(int argc, char **argv)
     if (sock == INVALID_SOCKET) {
         log_helper_event("socket creation failed");
         WSACleanup();
+        MessageBoxA(nullptr,
+                    "CoreVideo OAuth callback could not create a local socket.",
+                    "CoreVideo Zoom OAuth",
+                    MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
         return 3;
     }
 
@@ -107,6 +169,12 @@ int main(int argc, char **argv)
         log_helper_event("connect failed on port " + std::to_string(port));
         closesocket(sock);
         WSACleanup();
+        const std::string message =
+            "Zoom returned to CoreVideo, but OBS was not listening on "
+            "127.0.0.1:" + std::to_string(port) +
+            ". Open OBS with the CoreVideo plugin loaded, then authorize again.";
+        MessageBoxA(nullptr, message.c_str(), "CoreVideo Zoom OAuth",
+                    MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
         return 4;
     }
 
@@ -114,10 +182,31 @@ int main(int argc, char **argv)
         json_escape(argv[1]) + "\"}\n";
     send(sock, payload.c_str(), static_cast<int>(payload.size()), 0);
 
-    char buffer[512];
-    recv(sock, buffer, sizeof(buffer), 0);
+    char buffer[2048];
+    const int received = recv(sock, buffer, sizeof(buffer), 0);
+    std::string response;
+    if (received > 0)
+        response.assign(buffer, buffer + received);
+
     log_helper_event("forwarded callback to OBS on port " + std::to_string(port));
+    if (!response.empty())
+        log_helper_event("OBS callback response: " + response);
+
     closesocket(sock);
     WSACleanup();
+
+    if (response.find("\"ok\":true") != std::string::npos) {
+        MessageBoxA(nullptr,
+                    "Zoom authorization completed. Return to OBS to continue.",
+                    "CoreVideo Zoom OAuth",
+                    MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
+        return 0;
+    }
+
+    std::string error = json_string_value(response, "error");
+    if (error.empty())
+        error = "OBS did not report a successful OAuth callback.";
+    MessageBoxA(nullptr, error.c_str(), "CoreVideo Zoom OAuth",
+                MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
     return 0;
 }

@@ -57,12 +57,14 @@ struct ZoomSource {
                              AudioChannelMode new_audio_mode);
     void subscribe();
     void unsubscribe();
+    void activate();
+    void deactivate();
     void on_roster_changed();
     void on_engine_frame(uint32_t width, uint32_t height);
     void on_engine_audio(uint32_t byte_len);
 
-    uint32_t width() const { return m_width.load(std::memory_order_relaxed); }
-    uint32_t height() const { return m_height.load(std::memory_order_relaxed); }
+    uint32_t width() const;
+    uint32_t height() const;
     bool is_subscribed() const { return m_subscribed; }
     void set_preview_cb(ZoomPreviewCallback cb);
     void clear_preview_cb();
@@ -74,16 +76,18 @@ struct ZoomSource {
     obs_hotkey_id m_hk_active_off_id = OBS_INVALID_HOTKEY_ID;
 
 private:
-    void output_black_frame();
+    void output_placeholder_frame(bool color_bars);
 
     mutable std::mutex m_mtx;
     ShmRegion m_video_shm;
     ShmRegion m_audio_shm;
+    std::vector<uint8_t> m_placeholder_buf;
     std::atomic<uint32_t> m_width{0};
     std::atomic<uint32_t> m_height{0};
     std::vector<int16_t> m_stereo_buf;
     ZoomPreviewCallback m_preview_cb;
     uint64_t m_preview_last_ns = 0;
     std::atomic<bool> m_subscribed{false};
+    std::atomic<bool> m_active{false};
     std::atomic<uint32_t> m_current_subscription_id{0};
 };

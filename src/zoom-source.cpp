@@ -32,6 +32,9 @@
 #define RES_720P  1
 #define RES_1080P 2
 
+static constexpr uint32_t kDefaultWidth = 1280;
+static constexpr uint32_t kDefaultHeight = 720;
+
 static std::atomic<uint64_t> s_source_counter{1};
 static constexpr uint32_t kZoomBytesPerSample = sizeof(int16_t);
 static constexpr uint64_t kPreviewIntervalNs = 200'000'000ULL;
@@ -76,6 +79,39 @@ static uint32_t effective_participant_id(uint32_t configured_participant_id,
     if (!active_speaker_mode) return configured_participant_id;
     const uint32_t active = ZoomEngineClient::instance().active_speaker_id();
     return active != 0 ? active : configured_participant_id;
+}
+
+static uint32_t width_for_resolution(VideoResolution res)
+{
+    switch (res) {
+    case VideoResolution::P360: return 640;
+    case VideoResolution::P720: return 1280;
+    case VideoResolution::P1080:
+    default: return 1920;
+    }
+}
+
+static uint32_t height_for_resolution(VideoResolution res)
+{
+    switch (res) {
+    case VideoResolution::P360: return 360;
+    case VideoResolution::P720: return 720;
+    case VideoResolution::P1080:
+    default: return 1080;
+    }
+}
+
+static uint8_t clamp_u8(int value)
+{
+    return static_cast<uint8_t>(std::max(0, std::min(255, value)));
+}
+
+static void rgb_to_i420_values(uint8_t r, uint8_t g, uint8_t b,
+                               uint8_t &y, uint8_t &u, uint8_t &v)
+{
+    y = clamp_u8(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16);
+    u = clamp_u8(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
+    v = clamp_u8(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
 }
 
 static bool source_wants_subscription(AssignmentMode mode,
@@ -291,6 +327,10 @@ void ZoomSource::subscribe()
         return;
     }
     }
+
+    if (m_active.load(std::memory_order_acquire) &&
+        m_width.load(std::memory_order_relaxed) == 0)
+        output_placeholder_frame(true);
 }
 
 void ZoomSource::unsubscribe()
@@ -299,6 +339,23 @@ void ZoomSource::unsubscribe()
     ZoomEngineClient::instance().unsubscribe(source_uuid);
     m_subscribed = false;
     m_current_subscription_id = 0;
+}
+
+void ZoomSource::activate()
+{
+    m_active.store(true, std::memory_order_release);
+    if (m_width.load(std::memory_order_relaxed) == 0)
+        output_placeholder_frame(true);
+    const AssignmentMode mode = assignment.load(std::memory_order_acquire);
+    if (source_wants_subscription(mode, participant_id.load(std::memory_order_acquire),
+                                  active_speaker_mode.load(std::memory_order_acquire)))
+        subscribe();
+}
+
+void ZoomSource::deactivate()
+{
+    m_active.store(false, std::memory_order_release);
+    unsubscribe();
 }
 
 void ZoomSource::on_roster_changed()
@@ -444,6 +501,94 @@ void ZoomSource::on_engine_audio(uint32_t event_byte_len)
     obs_source_output_audio(source, &audio);
 }
 
+uint32_t ZoomSource::width() const
+{
+    const uint32_t w = m_width.load(std::memory_order_relaxed);
+    if (w != 0) return w;
+    const uint32_t configured = width_for_resolution(resolution);
+    return configured != 0 ? configured : kDefaultWidth;
+}
+
+uint32_t ZoomSource::height() const
+{
+    const uint32_t h = m_height.load(std::memory_order_relaxed);
+    if (h != 0) return h;
+    const uint32_t configured = height_for_resolution(resolution);
+    return configured != 0 ? configured : kDefaultHeight;
+}
+
+void ZoomSource::output_placeholder_frame(bool color_bars)
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    if (!source) return;
+
+    uint32_t w = width_for_resolution(resolution);
+    uint32_t h = height_for_resolution(resolution);
+    if (w == 0 || h == 0) {
+        w = kDefaultWidth;
+        h = kDefaultHeight;
+    }
+
+    const size_t y_size = static_cast<size_t>(w) * h;
+    const size_t uv_size = y_size / 4;
+    const size_t total = y_size + uv_size * 2;
+    if (m_placeholder_buf.size() != total)
+        m_placeholder_buf.resize(total);
+
+    uint8_t *y_plane = m_placeholder_buf.data();
+    uint8_t *u_plane = y_plane + y_size;
+    uint8_t *v_plane = u_plane + uv_size;
+
+    if (!color_bars) {
+        std::fill(y_plane, y_plane + y_size, 16);
+        std::fill(u_plane, u_plane + uv_size, 128);
+        std::fill(v_plane, v_plane + uv_size, 128);
+    } else {
+        struct Bar { uint8_t r, g, b; };
+        static constexpr Bar bars[] = {
+            {191, 191, 191}, {191, 191, 0}, {0, 191, 191}, {0, 191, 0},
+            {191, 0, 191},   {191, 0, 0},   {0, 0, 191},   {0, 0, 0}
+        };
+
+        for (uint32_t yy = 0; yy < h; ++yy) {
+            for (uint32_t xx = 0; xx < w; ++xx) {
+                const Bar &bar = bars[std::min<size_t>(
+                    (static_cast<size_t>(xx) * std::size(bars)) / w,
+                    std::size(bars) - 1)];
+                uint8_t yv, uv, vv;
+                rgb_to_i420_values(bar.r, bar.g, bar.b, yv, uv, vv);
+                y_plane[static_cast<size_t>(yy) * w + xx] = yv;
+            }
+        }
+
+        for (uint32_t yy = 0; yy < h / 2; ++yy) {
+            for (uint32_t xx = 0; xx < w / 2; ++xx) {
+                const Bar &bar = bars[std::min<size_t>(
+                    (static_cast<size_t>(xx * 2) * std::size(bars)) / w,
+                    std::size(bars) - 1)];
+                uint8_t yv, uv, vv;
+                rgb_to_i420_values(bar.r, bar.g, bar.b, yv, uv, vv);
+                const size_t off = static_cast<size_t>(yy) * (w / 2) + xx;
+                u_plane[off] = uv;
+                v_plane[off] = vv;
+            }
+        }
+    }
+
+    obs_source_frame frame = {};
+    frame.format = VIDEO_FORMAT_I420;
+    frame.width = w;
+    frame.height = h;
+    frame.timestamp = os_gettime_ns();
+    frame.data[0] = y_plane;
+    frame.data[1] = u_plane;
+    frame.data[2] = v_plane;
+    frame.linesize[0] = w;
+    frame.linesize[1] = w / 2;
+    frame.linesize[2] = w / 2;
+    obs_source_output_video(source, &frame);
+}
+
 void ZoomSource::set_preview_cb(ZoomPreviewCallback cb)
 {
     std::lock_guard<std::mutex> lk(m_mtx);
@@ -536,6 +681,16 @@ static void zoom_source_destroy(void *data)
 static void zoom_source_update(void *data, obs_data_t *settings)
 {
     static_cast<ZoomSource *>(data)->apply_settings(settings);
+}
+
+static void zoom_source_activate(void *data)
+{
+    static_cast<ZoomSource *>(data)->activate();
+}
+
+static void zoom_source_deactivate(void *data)
+{
+    static_cast<ZoomSource *>(data)->deactivate();
 }
 
 static uint32_t zoom_source_get_width(void *data)
@@ -691,6 +846,8 @@ void zoom_source_register()
     info.create = zoom_source_create;
     info.destroy = zoom_source_destroy;
     info.update = zoom_source_update;
+    info.activate = zoom_source_activate;
+    info.deactivate = zoom_source_deactivate;
     info.get_width = zoom_source_get_width;
     info.get_height = zoom_source_get_height;
     info.get_properties = zoom_source_get_properties;

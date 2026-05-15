@@ -125,6 +125,24 @@ static QJsonObject output_to_json(const ZoomOutputInfo &o)
                             : QString::fromStdString(o.display_name);
     obj["participant_id"] = static_cast<double>(o.participant_id);
     obj["active_speaker"] = o.active_speaker;
+    switch (o.assignment) {
+    case AssignmentMode::ActiveSpeaker:
+        obj["assignment_mode"] = "active_speaker";
+        break;
+    case AssignmentMode::SpotlightIndex:
+        obj["assignment_mode"] = "spotlight";
+        break;
+    case AssignmentMode::ScreenShare:
+        obj["assignment_mode"] = "screen_share";
+        break;
+    case AssignmentMode::Participant:
+    default:
+        obj["assignment_mode"] = "participant";
+        break;
+    }
+    obj["spotlight_slot"] = static_cast<double>(o.spotlight_slot);
+    obj["failover_participant_id"] =
+        static_cast<double>(o.failover_participant_id);
     obj["isolate_audio"]  = o.isolate_audio;
     obj["audio_channels"] = o.audio_mode == AudioChannelMode::Stereo
         ? "stereo" : "mono";

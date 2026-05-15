@@ -81,6 +81,11 @@ static uint32_t effective_participant_id(uint32_t configured_participant_id,
     return active != 0 ? active : configured_participant_id;
 }
 
+static bool is_active_speaker_assignment(AssignmentMode mode)
+{
+    return mode == AssignmentMode::ActiveSpeaker;
+}
+
 static uint32_t width_for_resolution(VideoResolution res)
 {
     switch (res) {
@@ -115,15 +120,14 @@ static void rgb_to_i420_values(uint8_t r, uint8_t g, uint8_t b,
 }
 
 static bool source_wants_subscription(AssignmentMode mode,
-                                      uint32_t participant_id,
-                                      bool active_speaker_mode)
+                                      uint32_t participant_id)
 {
     if (mode == AssignmentMode::ScreenShare ||
         mode == AssignmentMode::SpotlightIndex ||
         mode == AssignmentMode::ActiveSpeaker)
         return true;
 
-    return active_speaker_mode || participant_id != 0;
+    return participant_id != 0;
 }
 
 void ZoomSource::apply_settings(obs_data_t *settings)
@@ -139,7 +143,7 @@ void ZoomSource::apply_settings(obs_data_t *settings)
 
     output_display_name = obs_data_get_string(settings, PROP_OUTPUT_DISPLAY_NAME);
     participant_id = static_cast<uint32_t>(obs_data_get_int(settings, PROP_PARTICIPANT_ID));
-    active_speaker_mode = obs_data_get_bool(settings, PROP_ACTIVE_SPEAKER);
+    const bool legacy_active_speaker = obs_data_get_bool(settings, PROP_ACTIVE_SPEAKER);
     speaker_sensitivity_ms = static_cast<uint32_t>(
         obs_data_get_int(settings, PROP_SPEAKER_SENSITIVITY));
     speaker_hold_ms = static_cast<uint32_t>(obs_data_get_int(settings, PROP_SPEAKER_HOLD));
@@ -156,11 +160,17 @@ void ZoomSource::apply_settings(obs_data_t *settings)
         if (mode_int == 1) mode = AssignmentMode::ActiveSpeaker;
         else if (mode_int == 2) mode = AssignmentMode::SpotlightIndex;
         else if (mode_int == 3) mode = AssignmentMode::ScreenShare;
-        // Back-compat: the older bool PROP_ACTIVE_SPEAKER overrides if the
-        // user has it checked and no explicit assignment mode is set.
-        if (mode == AssignmentMode::Participant && active_speaker_mode)
+        // Back-compat: the older bool PROP_ACTIVE_SPEAKER promotes plain
+        // participant mode to ActiveSpeaker. After this point assignment mode
+        // is the source of truth for overlapping source/output-manager state.
+        if (mode == AssignmentMode::Participant && legacy_active_speaker)
             mode = AssignmentMode::ActiveSpeaker;
         assignment.store(mode, std::memory_order_release);
+        active_speaker_mode.store(is_active_speaker_assignment(mode),
+                                  std::memory_order_release);
+        obs_data_set_bool(settings, PROP_ACTIVE_SPEAKER,
+                          is_active_speaker_assignment(mode));
+        obs_data_set_int(settings, PROP_ASSIGNMENT_MODE, static_cast<int>(mode));
         spotlight_slot.store(static_cast<uint32_t>(std::max<int64_t>(1,
             obs_data_get_int(settings, PROP_SPOTLIGHT_SLOT))),
             std::memory_order_release);
@@ -183,8 +193,7 @@ void ZoomSource::apply_settings(obs_data_t *settings)
     }
 
     if (!m_subscribed &&
-        source_wants_subscription(new_assignment, participant_id,
-                                  active_speaker_mode)) {
+        source_wants_subscription(new_assignment, participant_id)) {
         subscribe();
     }
 
@@ -214,10 +223,11 @@ ZoomOutputInfo ZoomSource::output_info() const
     info.source_name = output_name();
     info.display_name = output_display_name;
     info.participant_id = participant_id;
-    info.active_speaker = active_speaker_mode;
+    const AssignmentMode mode = assignment.load(std::memory_order_acquire);
+    info.active_speaker = is_active_speaker_assignment(mode);
     info.isolate_audio = isolate_audio;
     info.audio_mode = audio_mode;
-    info.assignment = assignment.load(std::memory_order_acquire);
+    info.assignment = mode;
     info.spotlight_slot = spotlight_slot.load(std::memory_order_acquire);
     info.failover_participant_id = failover_participant_id.load(std::memory_order_acquire);
     return info;
@@ -230,6 +240,10 @@ void ZoomSource::configure_output(uint32_t new_participant_id,
 {
     if (source) {
         obs_data_t *settings = obs_source_get_settings(source);
+        const AssignmentMode mode = new_active_speaker_mode
+            ? AssignmentMode::ActiveSpeaker
+            : AssignmentMode::Participant;
+        obs_data_set_int(settings, PROP_ASSIGNMENT_MODE, static_cast<int>(mode));
         obs_data_set_int(settings, PROP_PARTICIPANT_ID, new_participant_id);
         obs_data_set_bool(settings, PROP_ACTIVE_SPEAKER, new_active_speaker_mode);
         obs_data_set_bool(settings, PROP_ISOLATE_AUDIO, new_isolate_audio);
@@ -241,6 +255,10 @@ void ZoomSource::configure_output(uint32_t new_participant_id,
         return;
     }
 
+    assignment.store(new_active_speaker_mode
+                     ? AssignmentMode::ActiveSpeaker
+                     : AssignmentMode::Participant,
+                     std::memory_order_release);
     participant_id = new_participant_id;
     active_speaker_mode = new_active_speaker_mode;
     isolate_audio = new_isolate_audio;
@@ -307,10 +325,11 @@ void ZoomSource::subscribe()
     default: {
         // Resolve target participant. If primary is missing from the current
         // roster and we have a failover ID, use it.
+        const bool use_active_speaker = is_active_speaker_assignment(mode);
         uint32_t target = effective_participant_id(participant_id,
-                                                    active_speaker_mode);
+                                                    use_active_speaker);
         const uint32_t failover = failover_participant_id.load(std::memory_order_acquire);
-        if (target != 0 && failover != 0 && !active_speaker_mode) {
+        if (target != 0 && failover != 0 && !use_active_speaker) {
             const auto roster = ZoomEngineClient::instance().roster();
             const bool primary_present = std::any_of(
                 roster.begin(), roster.end(),
@@ -323,7 +342,7 @@ void ZoomSource::subscribe()
              "[obs-zoom-plugin] Zoom source subscription: source=%s uuid=%s participant_id=%u",
              output_name().c_str(), source_uuid.c_str(), target);
         m_current_subscription_id = target;
-        m_subscribed = target != 0 || active_speaker_mode;
+        m_subscribed = target != 0 || use_active_speaker;
         return;
     }
     }
@@ -347,8 +366,7 @@ void ZoomSource::activate()
     if (m_width.load(std::memory_order_relaxed) == 0)
         output_placeholder_frame(true);
     const AssignmentMode mode = assignment.load(std::memory_order_acquire);
-    if (source_wants_subscription(mode, participant_id.load(std::memory_order_acquire),
-                                  active_speaker_mode.load(std::memory_order_acquire)))
+    if (source_wants_subscription(mode, participant_id.load(std::memory_order_acquire)))
         subscribe();
 }
 
@@ -368,9 +386,9 @@ void ZoomSource::on_roster_changed()
     if (mode == AssignmentMode::SpotlightIndex ||
         mode == AssignmentMode::ScreenShare) return;
 
-    if (active_speaker_mode) {
+    if (is_active_speaker_assignment(mode)) {
         const uint32_t subscribe_id =
-            effective_participant_id(participant_id, active_speaker_mode);
+            effective_participant_id(participant_id, true);
         if (subscribe_id == 0 || subscribe_id == m_current_subscription_id) return;
         subscribe();
         return;

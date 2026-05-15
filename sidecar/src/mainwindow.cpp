@@ -124,6 +124,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
                 onObsLog(QStringLiteral("✓ Applied '%1' (%2 items).").arg(name).arg(n));
             });
 
+    // Canvas slot assignment from drag-and-drop
+    connect(m_liveCanvas,  &PreviewCanvas::slotAssigned, this, &MainWindow::onSlotAssigned);
+    connect(m_sceneCanvas, &PreviewCanvas::slotAssigned, this, &MainWindow::onSlotAssigned);
+
     // Templates
     auto &tm = TemplateManager::instance();
     tm.loadBuiltIn();
@@ -150,10 +154,39 @@ void MainWindow::buildTopBar(QWidget *parent)
 
     auto *row = new QHBoxLayout(m_topBar);
     row->setContentsMargins(16, 0, 12, 0);
-    row->setSpacing(12);
+    row->setSpacing(10);
 
     m_showNameLabel = new QLabel("Morning Show — Episode 142", m_topBar);
     m_showNameLabel->setStyleSheet("color: #e0e0f0; font-size: 15px; font-weight: 700;");
+
+    // Show phase segmented control
+    auto *phaseBar = new QWidget(m_topBar);
+    phaseBar->setObjectName("phaseSegment");
+    auto *phl = new QHBoxLayout(phaseBar);
+    phl->setContentsMargins(2, 2, 2, 2);
+    phl->setSpacing(0);
+
+    m_preShowBtn  = new QPushButton("PRE",     phaseBar);
+    m_liveBtn     = new QPushButton("● LIVE",  phaseBar);
+    m_postShowBtn = new QPushButton("POST",    phaseBar);
+
+    m_preShowBtn->setObjectName("phasePreBtn");
+    m_liveBtn->setObjectName("phaseLiveBtn");
+    m_postShowBtn->setObjectName("phasePostBtn");
+
+    for (auto *b : {m_preShowBtn, m_liveBtn, m_postShowBtn}) {
+        b->setCheckable(true);
+        b->setFixedHeight(28);
+        phl->addWidget(b);
+    }
+    m_preShowBtn->setChecked(true);
+
+    connect(m_preShowBtn,  &QPushButton::clicked, this,
+            [this]{ onPhaseSelected(ShowPhase::PreShow);  });
+    connect(m_liveBtn,     &QPushButton::clicked, this,
+            [this]{ onPhaseSelected(ShowPhase::Live);     });
+    connect(m_postShowBtn, &QPushButton::clicked, this,
+            [this]{ onPhaseSelected(ShowPhase::PostShow); });
 
     m_obsStatusLabel = new QLabel("Disconnected", m_topBar);
     m_obsStatusLabel->setStyleSheet("color: #8080a0; font-size: 11px; background: transparent;");
@@ -166,9 +199,11 @@ void MainWindow::buildTopBar(QWidget *parent)
     m_obsBtn->setObjectName("obsBtn");
     m_obsBtn->setFixedHeight(34);
 
-    row->addWidget(m_showNameLabel, 1);
+    row->addWidget(m_showNameLabel);
+    row->addStretch(1);
+    row->addWidget(phaseBar);
     row->addWidget(m_obsStatusLabel);
-    row->addSpacing(6);
+    row->addSpacing(4);
     row->addWidget(m_obsBtn);
     row->addWidget(m_engineBtn);
 }
@@ -277,16 +312,16 @@ void MainWindow::buildLogDock()
 // ── Mock data ─────────────────────────────────────────────────────────────────
 void MainWindow::loadMockParticipants()
 {
-    QVector<ParticipantInfo> parts = {
+    m_participants = {
         {1, "Alex Rivera",   "AR", QColor(0x1e, 0x6a, 0xe0), false, true,  0},
         {2, "Sam Chen",      "SC", QColor(0x20, 0xa0, 0x60), false, false, 1},
         {3, "Jordan Kim",    "JK", QColor(0x9b, 0x40, 0xd0), false, true,  2},
         {4, "Taylor Brooks", "TB", QColor(0xe0, 0x60, 0x20), false, false, 3},
     };
-    m_participantPanel->setParticipants(parts);
+    m_participantPanel->setParticipants(m_participants);
 
     QVector<PreviewCanvas::Participant> cp;
-    for (const auto &p : parts)
+    for (const auto &p : m_participants)
         cp.append({p.name, p.initials, p.color, p.isTalking, p.hasVideo});
     m_liveCanvas->setParticipants(cp);
     m_sceneCanvas->setParticipants(cp);
@@ -465,4 +500,54 @@ void MainWindow::onSettingsChanged()
     // Re-read the saved OBS config so the next connect picks it up
     m_obsConfig = m_settingsPage->obsConfig();
     onObsLog("Settings saved.");
+}
+
+void MainWindow::onPhaseSelected(ShowPhase phase)
+{
+    m_phase = phase;
+    m_preShowBtn->setChecked(phase == ShowPhase::PreShow);
+    m_liveBtn->setChecked(phase == ShowPhase::Live);
+    m_postShowBtn->setChecked(phase == ShowPhase::PostShow);
+
+    // Highlight top bar border red during LIVE
+    const QString border = (phase == ShowPhase::Live) ? "#cc2020" : "#181828";
+    m_topBar->setStyleSheet(
+        QString("#topBar { background: #0d0d12; border-bottom: 2px solid %1; }").arg(border));
+
+    const QStringList labels = {"PRE-SHOW", "LIVE", "POST-SHOW"};
+    onObsLog(QString("Show phase → %1").arg(labels[int(phase)]));
+}
+
+void MainWindow::onSlotAssigned(int slotIndex, int participantId)
+{
+    // Evict the old occupant of this slot, then assign the new one
+    for (auto &p : m_participants) {
+        if (p.slotAssign == slotIndex)
+            p.slotAssign = -1;
+    }
+    for (auto &p : m_participants) {
+        if (p.id == participantId)
+            p.slotAssign = slotIndex;
+    }
+
+    // Rebuild ordered participant list for canvas (slot index → position)
+    const int nSlots = m_currentTemplate.slots.size();
+    QVector<PreviewCanvas::Participant> cp(nSlots);
+    for (const auto &p : m_participants) {
+        if (p.slotAssign >= 0 && p.slotAssign < nSlots)
+            cp[p.slotAssign] = {p.name, p.initials, p.color, p.isTalking, p.hasVideo};
+    }
+    m_liveCanvas->setParticipants(cp);
+    m_sceneCanvas->setParticipants(cp);
+
+    // Refresh panel to show updated slot labels
+    m_participantPanel->setParticipants(m_participants);
+
+    onObsLog(QString("Slot %1 ← %2")
+             .arg(slotIndex + 1)
+             .arg([&]() -> QString {
+                 for (const auto &p : m_participants)
+                     if (p.id == participantId) return p.name;
+                 return QString::number(participantId);
+             }()));
 }

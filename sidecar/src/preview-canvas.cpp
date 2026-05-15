@@ -2,6 +2,11 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QFontMetrics>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QDragLeaveEvent>
+#include <QDropEvent>
+#include <QMimeData>
 #include <cmath>
 
 static const QColor kSlotBg   {0x22, 0x22, 0x30};
@@ -14,6 +19,7 @@ PreviewCanvas::PreviewCanvas(QWidget *parent)
 {
     setMinimumSize(240, 135);
     setAttribute(Qt::WA_OpaquePaintEvent);
+    setAcceptDrops(true);
 }
 
 void PreviewCanvas::setTemplate(const LayoutTemplate &tmpl)
@@ -26,6 +32,53 @@ void PreviewCanvas::setParticipants(const QVector<Participant> &participants)
 {
     m_parts = participants;
     update();
+}
+
+// ── Drag-and-drop ─────────────────────────────────────────────────────────────
+
+int PreviewCanvas::slotAtPoint(QPoint pt) const
+{
+    for (int i = 0; i < m_tmpl.slots.size(); ++i) {
+        if (slotRect(m_tmpl.slots[i]).contains(pt))
+            return i;
+    }
+    return -1;
+}
+
+void PreviewCanvas::dragEnterEvent(QDragEnterEvent *e)
+{
+    if (e->mimeData()->hasFormat("application/x-cv-participant"))
+        e->acceptProposedAction();
+}
+
+void PreviewCanvas::dragMoveEvent(QDragMoveEvent *e)
+{
+    if (!e->mimeData()->hasFormat("application/x-cv-participant")) return;
+    const int slot = slotAtPoint(e->position().toPoint());
+    if (slot != m_hoveredSlot) {
+        m_hoveredSlot = slot;
+        update();
+    }
+    (slot >= 0) ? e->acceptProposedAction() : e->ignore();
+}
+
+void PreviewCanvas::dragLeaveEvent(QDragLeaveEvent *)
+{
+    m_hoveredSlot = -1;
+    update();
+}
+
+void PreviewCanvas::dropEvent(QDropEvent *e)
+{
+    if (!e->mimeData()->hasFormat("application/x-cv-participant")) return;
+    const int slot = slotAtPoint(e->position().toPoint());
+    m_hoveredSlot = -1;
+    update();
+    if (slot < 0) { e->ignore(); return; }
+    const int pid = QString::fromUtf8(
+        e->mimeData()->data("application/x-cv-participant")).toInt();
+    emit slotAssigned(slot, pid);
+    e->acceptProposedAction();
 }
 
 QRectF PreviewCanvas::slotRect(const TemplateSlot &s) const
@@ -66,8 +119,11 @@ void PreviewCanvas::drawSlot(QPainter &p, const QRectF &rect, int idx) const
     path.addRoundedRect(rect, 10, 10);
     p.fillPath(path, kSlotBg);
 
-    // Talking border
-    if (hasPart && part.isTalking) {
+    // Border: drop-target highlight > talking ring > normal
+    if (idx == m_hoveredSlot) {
+        p.setPen(QPen(QColor(0x29, 0x79, 0xff), 3.0, Qt::SolidLine));
+        p.drawPath(path);
+    } else if (hasPart && part.isTalking) {
         p.setPen(QPen(QColor(0x20, 0x90, 0xff), 2.5));
         p.drawPath(path);
     } else {

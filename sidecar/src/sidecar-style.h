@@ -243,6 +243,37 @@ QPushButton#assignBtn {
 }
 QPushButton#assignBtn:hover { background-color: #2548f0; }
 
+/* ─── Show phase bar ──────────────────────────────────────────────────────── */
+#phaseSegment {
+    background-color: #171724;
+    border: 1px solid #232338;
+    border-radius: 8px;
+}
+QPushButton#phasePreBtn, QPushButton#phaseLiveBtn, QPushButton#phasePostBtn {
+    background-color: transparent;
+    border: none;
+    border-radius: 0;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    padding: 4px 10px;
+    min-height: 24px;
+    color: #40405e;
+}
+QPushButton#phasePreBtn  { border-radius: 6px 0 0 6px; }
+QPushButton#phasePostBtn { border-radius: 0 6px 6px 0; }
+QPushButton#phasePreBtn:hover, QPushButton#phaseLiveBtn:hover, QPushButton#phasePostBtn:hover {
+    background-color: #1c1c2e;
+    color: #7070a0;
+}
+QPushButton#phasePreBtn:checked  { background-color: #252545; color: #9090d0; }
+QPushButton#phaseLiveBtn:checked {
+    background-color: #6a1010;
+    color: #ff5050;
+    border: none;
+}
+QPushButton#phasePostBtn:checked { background-color: #252545; color: #9090d0; }
+
 /* ─── Bottom toolbar ──────────────────────────────────────────────────────── */
 #bottomBar {
     background-color: #0d0d12;

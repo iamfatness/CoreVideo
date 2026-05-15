@@ -4,6 +4,7 @@
 #include "obs-client.h"
 #include "show-theme.h"
 #include "macro.h"
+#include "participant-panel.h"
 #include <QMainWindow>
 
 class PreviewCanvas;
@@ -22,6 +23,8 @@ class QStackedWidget;
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
+    enum class ShowPhase { PreShow, Live, PostShow };
+
     explicit MainWindow(QWidget *parent = nullptr);
 
 private slots:
@@ -39,6 +42,8 @@ private slots:
     void onSettingsChanged();
     void onSceneActivated(const QString &name);
     void onMacroTriggered(const Macro &macro);
+    void onPhaseSelected(ShowPhase phase);
+    void onSlotAssigned(int slotIndex, int participantId);
 
 private:
     void buildTopBar(QWidget *parent);
@@ -55,6 +60,12 @@ private:
     QPushButton *m_engineBtn      = nullptr;
     QPushButton *m_obsBtn         = nullptr;
     bool         m_engineOn       = false;
+
+    // Show phase segment
+    QPushButton *m_preShowBtn  = nullptr;
+    QPushButton *m_liveBtn     = nullptr;
+    QPushButton *m_postShowBtn = nullptr;
+    ShowPhase    m_phase       = ShowPhase::PreShow;
 
     // Toolbar buttons (kept for state updates)
     QPushButton *m_vcamBtn = nullptr;
@@ -84,8 +95,9 @@ private:
     QPlainTextEdit *m_logView = nullptr;
 
     // State
-    LayoutTemplate    m_currentTemplate;
-    OBSClient        *m_obsClient = nullptr;
-    OBSClient::Config m_obsConfig;
-    Sidebar          *m_sidebar = nullptr;
+    LayoutTemplate             m_currentTemplate;
+    OBSClient                 *m_obsClient   = nullptr;
+    OBSClient::Config          m_obsConfig;
+    Sidebar                   *m_sidebar     = nullptr;
+    QVector<ParticipantInfo>   m_participants;
 };

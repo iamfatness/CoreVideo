@@ -66,6 +66,12 @@ public:
     void requestSceneItems(const QString &sceneName);
     void setCurrentScene(const QString &name);
 
+    // ── Virtual camera ───────────────────────────────────────────────────────
+    void requestVirtualCamStatus();
+    void startVirtualCam();
+    void stopVirtualCam();
+    bool isVirtualCamActive() const { return m_virtualCamActive; }
+
     // ── Transform application ────────────────────────────────────────────────
     void setSceneItemTransform(const QString  &sceneName,
                                int             sceneItemId,
@@ -97,6 +103,7 @@ signals:
     void scenesReceived(const QStringList &scenes);
     void sceneItemsReceived(const QString &scene, const QVector<SceneItem> &items);
     void templateApplied(const QString &name, int itemCount);
+    void virtualCamStateChanged(bool active);
     void log(const QString &msg);
 
 private slots:
@@ -125,6 +132,7 @@ private:
     State       m_state = State::Disconnected;
     int         m_idSeq = 1;
     int         m_reconnectAttempt = 0;
-    QHash<QString, QString> m_pending;            // requestId → requestType
+    QHash<QString, QString> m_pending;               // requestId → requestType
     QHash<QString, QHash<QString, int>> m_itemCache; // scene → (source → itemId)
+    bool m_virtualCamActive = false;
 };

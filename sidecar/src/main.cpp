@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "sidecar-style.h"
+#include "show-theme.h"
 #include <QApplication>
 #include <QStyleFactory>
 
@@ -12,7 +13,8 @@ int main(int argc, char *argv[])
 
     // Fusion gives clean cross-platform rendering with full QSS support
     app.setStyle(QStyleFactory::create("Fusion"));
-    app.setStyleSheet(sidecar_stylesheet());
+    const auto builtins = ShowTheme::builtIns();
+    app.setStyleSheet(sidecar_stylesheet(&builtins.first())); // Midnight Blue default
 
     MainWindow w;
     w.show();

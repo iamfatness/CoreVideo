@@ -1,8 +1,20 @@
 #pragma once
+#include "show-theme.h"
 #include <QString>
 
-inline QString sidecar_stylesheet()
+// Returns a stylesheet with theme colours substituted.
+// Defaults (no theme / null) produce the original Midnight Blue palette.
+inline QString sidecar_stylesheet(const ShowTheme *theme = nullptr)
 {
+    const QString accent     = theme ? theme->accent.name()        : "#2979ff";
+    const QString accentNav  = theme ? theme->accent.darker(110).name() : "#1d3de8";
+    const QString accentPri  = theme ? theme->accent.darker(115).name() : "#1e3ae8";
+    const QString accentHov  = theme ? theme->accent.lighter(115).name() : "#2548ff";
+    const QString bg         = theme ? theme->background.name()    : "#0d0d12";
+    const QString panelBg    = theme ? theme->panelBg.name()       : "#101016";
+    const QString textPri    = theme ? theme->textPrimary.name()   : "#dde0f0";
+    const QString textSec    = theme ? theme->textSecondary.name() : "#6868a0";
+
     return QString(R"css(
 /* ─── Global ──────────────────────────────────────────────────────────────── */
 * {
@@ -273,5 +285,13 @@ QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {
 QScrollBar::add-line:vertical,  QScrollBar::sub-line:vertical  { height: 0; }
 QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal { width: 0;  }
 QScrollBar::corner { background: transparent; }
-)css");
+)css")
+    .replace("#2979ff", accent)
+    .replace("#1d3de8", accentNav)
+    .replace("#1e3ae8", accentPri)
+    .replace("#2548ff", accentHov)
+    .replace("#0d0d12", bg)
+    .replace("#101016", panelBg)
+    .replace("#dde0f0", textPri)
+    .replace("#6868a0", textSec);
 }

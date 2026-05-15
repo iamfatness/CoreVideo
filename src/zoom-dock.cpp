@@ -22,6 +22,7 @@
 #include <QVBoxLayout>
 #include <QWidget>
 #include <algorithm>
+#include <unordered_map>
 
 // ── Column layout for the output table ───────────────────────────────────────
 enum DockOutputColumns {
@@ -166,10 +167,13 @@ ZoomDock::ZoomDock(QWidget *parent)
         update_recovery_panel();
     });
 
+    // Periodic tick only updates the lightweight state indicator (state dot,
+    // active speaker label, join-timeout watchdog). The output table is
+    // expensive to rebuild and is refreshed from the roster callback below.
     m_refresh_timer = new QTimer(this);
     m_refresh_timer->setInterval(500);
     connect(m_refresh_timer, &QTimer::timeout, this, [this]() {
-        refresh();
+        update_state_indicator();
     });
     m_refresh_timer->start();
 
@@ -321,6 +325,34 @@ void ZoomDock::refresh()
 
 void ZoomDock::refresh_outputs()
 {
+    // If a dropdown popup is open, the user is mid-selection — rebuilding the
+    // widgets right now would close the popup and lose the pick. Defer; the
+    // next roster update (or any later refresh) will rebuild instead.
+    for (int row = 0; row < m_output_table->rowCount(); ++row) {
+        if (auto *combo = qobject_cast<QComboBox *>(
+                m_output_table->cellWidget(row, DColAssignment))) {
+            if (combo->view() && combo->view()->isVisible()) return;
+        }
+    }
+
+    // Snapshot any in-flight (picked-but-not-yet-applied) selections so that
+    // a roster-driven rebuild does not silently revert the user's choice
+    // before they have a chance to click Apply.
+    struct PendingPick { QString assignment; int audio_idx; bool isolate; };
+    std::unordered_map<std::string, PendingPick> pending;
+    for (int row = 0; row < m_output_table->rowCount(); ++row) {
+        auto *name_item = m_output_table->item(row, DColName);
+        auto *assign = qobject_cast<QComboBox *>(m_output_table->cellWidget(row, DColAssignment));
+        auto *audio  = qobject_cast<QComboBox *>(m_output_table->cellWidget(row, DColAudio));
+        auto *isolate = qobject_cast<QCheckBox *>(m_output_table->cellWidget(row, DColIsolate));
+        if (!name_item || !assign || !audio || !isolate) continue;
+        pending[name_item->data(Qt::UserRole).toString().toStdString()] = {
+            assign->currentData().toString(),
+            audio->currentIndex(),
+            isolate->isChecked()
+        };
+    }
+
     const auto outputs = ZoomOutputManager::instance().outputs();
     const auto roster  = ZoomEngineClient::instance().roster();
 
@@ -396,6 +428,18 @@ void ZoomDock::refresh_outputs()
         isolate->setChecked(output.isolate_audio);
         isolate->setToolTip("Use isolated audio for the assigned participant");
         m_output_table->setCellWidget(row, DColIsolate, isolate);
+
+        // Restore any user pick that was in-flight before the rebuild. We only
+        // restore values that are still selectable in the rebuilt widgets so
+        // a stale snapshot can never resurrect a participant that just left.
+        auto pit = pending.find(output.source_name);
+        if (pit != pending.end()) {
+            const int aidx = assignment->findData(pit->second.assignment);
+            if (aidx >= 0) assignment->setCurrentIndex(aidx);
+            if (pit->second.audio_idx >= 0 && pit->second.audio_idx < audio->count())
+                audio->setCurrentIndex(pit->second.audio_idx);
+            isolate->setChecked(pit->second.isolate);
+        }
     }
 }
 

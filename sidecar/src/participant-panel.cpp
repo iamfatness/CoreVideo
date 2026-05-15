@@ -6,6 +6,10 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QScrollArea>
+#include <QApplication>
+#include <QDrag>
+#include <QMimeData>
+#include <QMouseEvent>
 
 // ── ParticipantCard ───────────────────────────────────────────────────────────
 
@@ -47,6 +51,34 @@ ParticipantCard::ParticipantCard(const ParticipantInfo &info, QWidget *parent)
     connect(assignBtn, &QPushButton::clicked, this, [this]() {
         emit assignClicked(m_info.id);
     });
+}
+
+void ParticipantCard::mousePressEvent(QMouseEvent *e)
+{
+    if (e->button() == Qt::LeftButton)
+        m_dragStart = e->pos();
+    QWidget::mousePressEvent(e);
+}
+
+void ParticipantCard::mouseMoveEvent(QMouseEvent *e)
+{
+    if (!(e->buttons() & Qt::LeftButton)) return;
+    if ((e->pos() - m_dragStart).manhattanLength() < QApplication::startDragDistance()) return;
+
+    auto *drag = new QDrag(this);
+    auto *mime = new QMimeData;
+    mime->setData("application/x-cv-participant",
+                  QByteArray::number(m_info.id));
+    drag->setMimeData(mime);
+
+    // Render card as drag pixmap
+    QPixmap px(size());
+    px.fill(Qt::transparent);
+    render(&px);
+    drag->setPixmap(px.scaled(px.size() * 0.85, Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+    drag->setHotSpot(e->pos() * 85 / 100);
+
+    drag->exec(Qt::CopyAction);
 }
 
 void ParticipantCard::paintEvent(QPaintEvent *)

@@ -1,8 +1,20 @@
 #pragma once
+#include "show-theme.h"
 #include <QString>
 
-inline QString sidecar_stylesheet()
+// Returns a stylesheet with theme colours substituted.
+// Defaults (no theme / null) produce the original Midnight Blue palette.
+inline QString sidecar_stylesheet(const ShowTheme *theme = nullptr)
 {
+    const QString accent     = theme ? theme->accent.name()        : "#2979ff";
+    const QString accentNav  = theme ? theme->accent.darker(110).name() : "#1d3de8";
+    const QString accentPri  = theme ? theme->accent.darker(115).name() : "#1e3ae8";
+    const QString accentHov  = theme ? theme->accent.lighter(115).name() : "#2548ff";
+    const QString bg         = theme ? theme->background.name()    : "#0d0d12";
+    const QString panelBg    = theme ? theme->panelBg.name()       : "#101016";
+    const QString textPri    = theme ? theme->textPrimary.name()   : "#dde0f0";
+    const QString textSec    = theme ? theme->textSecondary.name() : "#6868a0";
+
     return QString(R"css(
 /* ─── Global ──────────────────────────────────────────────────────────────── */
 * {
@@ -231,6 +243,37 @@ QPushButton#assignBtn {
 }
 QPushButton#assignBtn:hover { background-color: #2548f0; }
 
+/* ─── Show phase bar ──────────────────────────────────────────────────────── */
+#phaseSegment {
+    background-color: #171724;
+    border: 1px solid #232338;
+    border-radius: 8px;
+}
+QPushButton#phasePreBtn, QPushButton#phaseLiveBtn, QPushButton#phasePostBtn {
+    background-color: transparent;
+    border: none;
+    border-radius: 0;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    padding: 4px 10px;
+    min-height: 24px;
+    color: #40405e;
+}
+QPushButton#phasePreBtn  { border-radius: 6px 0 0 6px; }
+QPushButton#phasePostBtn { border-radius: 0 6px 6px 0; }
+QPushButton#phasePreBtn:hover, QPushButton#phaseLiveBtn:hover, QPushButton#phasePostBtn:hover {
+    background-color: #1c1c2e;
+    color: #7070a0;
+}
+QPushButton#phasePreBtn:checked  { background-color: #252545; color: #9090d0; }
+QPushButton#phaseLiveBtn:checked {
+    background-color: #6a1010;
+    color: #ff5050;
+    border: none;
+}
+QPushButton#phasePostBtn:checked { background-color: #252545; color: #9090d0; }
+
 /* ─── Bottom toolbar ──────────────────────────────────────────────────────── */
 #bottomBar {
     background-color: #0d0d12;
@@ -273,5 +316,13 @@ QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {
 QScrollBar::add-line:vertical,  QScrollBar::sub-line:vertical  { height: 0; }
 QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal { width: 0;  }
 QScrollBar::corner { background: transparent; }
-)css");
+)css")
+    .replace("#2979ff", accent)
+    .replace("#1d3de8", accentNav)
+    .replace("#1e3ae8", accentPri)
+    .replace("#2548ff", accentHov)
+    .replace("#0d0d12", bg)
+    .replace("#101016", panelBg)
+    .replace("#dde0f0", textPri)
+    .replace("#6868a0", textSec);
 }

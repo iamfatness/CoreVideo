@@ -46,7 +46,10 @@ signals:
 
 protected:
     void paintEvent(QPaintEvent *) override;
+    void mousePressEvent(QMouseEvent *e) override;
+    void mouseMoveEvent(QMouseEvent *e) override;
 
 private:
     ParticipantInfo m_info;
+    QPoint          m_dragStart;
 };

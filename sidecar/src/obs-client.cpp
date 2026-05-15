@@ -118,6 +118,7 @@ void OBSClient::onTextMessageReceived(const QString &msg)
         emit connected();
         emit log("Identified — connection ready.");
         requestSceneList();
+        requestVirtualCamStatus();
         break;
     case 5: handleEvent(d);    break;
     case 7: handleResponse(d); break;
@@ -198,6 +199,24 @@ void OBSClient::handleResponse(const QJsonObject &d)
         emit scenesReceived(names);
         emit log(QStringLiteral("Scenes: %1").arg(names.join(", ")));
     }
+    else if (type == "GetVirtualCamStatus") {
+        const bool active = rd["outputActive"].toBool();
+        if (m_virtualCamActive != active) {
+            m_virtualCamActive = active;
+            emit virtualCamStateChanged(active);
+        }
+        emit log(QStringLiteral("Virtual camera: %1.").arg(active ? "active" : "inactive"));
+    }
+    else if (type == "StartVirtualCam") {
+        m_virtualCamActive = true;
+        emit virtualCamStateChanged(true);
+        emit log("Virtual camera started.");
+    }
+    else if (type == "StopVirtualCam") {
+        m_virtualCamActive = false;
+        emit virtualCamStateChanged(false);
+        emit log("Virtual camera stopped.");
+    }
     else if (type == "GetSceneItemList") {
         const QString scene = rd["sceneName"].toString();
         QVector<SceneItem> items;
@@ -220,10 +239,20 @@ void OBSClient::handleResponse(const QJsonObject &d)
 void OBSClient::handleEvent(const QJsonObject &d)
 {
     const QString type = d["eventType"].toString();
-    if (type == "SceneItemCreated" || type == "SceneItemRemoved") {
-        // Invalidate cache for affected scene
+    if (type == "CurrentProgramSceneChanged") {
+        emit sceneChanged(d["eventData"].toObject()["sceneName"].toString());
+    }
+    else if (type == "SceneItemCreated" || type == "SceneItemRemoved") {
         const QString scene = d["eventData"].toObject()["sceneName"].toString();
         m_itemCache.remove(scene);
+    }
+    else if (type == "VirtualcamStateChanged") {
+        const bool active = d["eventData"].toObject()["outputActive"].toBool();
+        if (m_virtualCamActive != active) {
+            m_virtualCamActive = active;
+            emit virtualCamStateChanged(active);
+            emit log(QStringLiteral("Virtual camera %1.").arg(active ? "started" : "stopped"));
+        }
     }
 }
 
@@ -282,6 +311,45 @@ void OBSClient::setSceneItemTransform(const QString  &sceneName,
         {"sceneItemId",        sceneItemId},
         {"sceneItemTransform", t.toJson()},
     });
+}
+
+// ── Macro execution ───────────────────────────────────────────────────────────
+void OBSClient::executeMacro(const Macro &macro)
+{
+    if (m_state != State::Connected) return;
+    QJsonArray requests;
+    for (const auto &step : macro.steps) {
+        QJsonObject req{
+            {"requestType", step.requestType},
+            {"requestId",   nextId()},
+        };
+        if (!step.data.isEmpty()) req["requestData"] = step.data;
+        requests.append(req);
+    }
+    if (requests.isEmpty()) return;
+    sendOp(8, QJsonObject{
+        {"requestId",     nextId()},
+        {"haltOnFailure", false},
+        {"requests",      requests},
+    });
+    emit log(QStringLiteral("Macro '%1': dispatched %2 steps.")
+                 .arg(macro.label).arg(requests.size()));
+}
+
+// ── Virtual camera ────────────────────────────────────────────────────────────
+void OBSClient::requestVirtualCamStatus()
+{
+    if (m_state == State::Connected) sendRequest("GetVirtualCamStatus");
+}
+
+void OBSClient::startVirtualCam()
+{
+    if (m_state == State::Connected) sendRequest("StartVirtualCam");
+}
+
+void OBSClient::stopVirtualCam()
+{
+    if (m_state == State::Connected) sendRequest("StopVirtualCam");
 }
 
 // ── applyLayout (normalized LayoutTemplate) ───────────────────────────────────

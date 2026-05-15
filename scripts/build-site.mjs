@@ -4,6 +4,7 @@ import path from "node:path";
 const root = process.cwd();
 const wikiDir = path.join(root, "wiki");
 const docsDir = path.join(root, "docs");
+const siteAssetsDir = path.join(root, "site-assets");
 const outDir = path.join(root, "public");
 
 const pages = [
@@ -85,6 +86,27 @@ function normalizeText(value) {
     .replaceAll("behaviour", "behavior")
     .replaceAll("https://iamfatness.github.io/CoreVideo/", "/documentation/")
     .replaceAll("https://iamfatness.github.io/CoreVideo", "/documentation");
+}
+
+function homeContent() {
+  return `<section class="hero">
+  <div class="hero-copy">
+    <img class="hero-logo" src="/assets/corevideo-logo.jpg" alt="CoreVideo">
+    <p class="eyebrow">OBS Studio plugin for Zoom Meeting SDK production workflows</p>
+    <h1>Live Zoom video, audio, screen share, and interpretation inside OBS.</h1>
+    <p class="lede">CoreVideo provides raw participant media routing for broadcast, recording, and ISO-style production workflows while keeping processing local to the operator machine.</p>
+    <div class="hero-actions">
+      <a class="button primary" href="/documentation/">Read documentation</a>
+      <a class="button" href="https://github.com/iamfatness/CoreVideo">View source</a>
+    </div>
+  </div>
+</section>
+<section class="link-grid" aria-label="CoreVideo resources">
+  <a href="/documentation/"><strong>Documentation</strong><span>Architecture, setup, control APIs, and operating notes.</span></a>
+  <a href="/terms/"><strong>Terms of Use</strong><span>Marketplace-ready usage terms and license requirements.</span></a>
+  <a href="/privacy/"><strong>Privacy Policy</strong><span>Data processing, local storage, and third-party service details.</span></a>
+  <a href="/support/"><strong>Support</strong><span>Issue reporting, troubleshooting, and common fixes.</span></a>
+</section>`;
 }
 
 function renderTable(lines) {
@@ -196,7 +218,7 @@ function markdownToHtml(markdown) {
   return html.join("\n");
 }
 
-function layout(page, content) {
+function layout(page, content, options = {}) {
   const nav = [
     ["Home", "/"],
     ["Documentation", "/documentation/"],
@@ -215,9 +237,9 @@ function layout(page, content) {
   <meta name="description" content="${escapeHtml(page.description)}">
   <link rel="stylesheet" href="/assets/site.css">
 </head>
-<body>
+<body class="${options.home ? "home-page" : "document-page"}">
   <header class="site-header">
-    <a class="brand" href="/">CoreVideo</a>
+    <a class="brand" href="/"><span class="brand-mark">C</span><span>CoreVideo</span></a>
     <nav>${nav.map(([label, href]) => `<a href="${href}">${label}</a>`).join("")}</nav>
   </header>
   <main class="content">
@@ -243,11 +265,21 @@ for (const page of pages) {
   const markdown = normalizeText(
     fs.readFileSync(path.join(wikiDir, page.source), "utf8"),
   );
-  const html = layout(page, markdownToHtml(markdown));
+  const isHome = page.output === "index.html";
+  const html = layout(page, isHome ? homeContent() : markdownToHtml(markdown), {
+    home: isHome,
+  });
   writeText(page.output, html);
   for (const alias of page.aliases ?? []) {
     writeText(alias, html);
   }
+}
+
+const logoSource = path.join(siteAssetsDir, "corevideo-logo.jpg");
+if (fs.existsSync(logoSource)) {
+  const logoTarget = path.join(outDir, "assets", "corevideo-logo.jpg");
+  ensureDir(logoTarget);
+  fs.copyFileSync(logoSource, logoTarget);
 }
 
 const docsHtml = fs.readFileSync(path.join(docsDir, "index.html"), "utf8")
@@ -259,23 +291,43 @@ writeText("documentation/index.html", docsHtml);
 writeText("docs/index.html", docsHtml);
 
 writeText("assets/site.css", `:root {
-  color-scheme: light;
-  --bg: #f7f8fb;
-  --panel: #ffffff;
-  --text: #172033;
-  --muted: #5f6f86;
-  --line: #d9e0ea;
-  --accent: #0b5cff;
+  color-scheme: dark;
+  --bg: #070914;
+  --bg-2: #101528;
+  --panel: rgba(14, 18, 35, 0.88);
+  --panel-strong: #11172c;
+  --text: #f7faff;
+  --muted: #9daac2;
+  --line: rgba(125, 239, 255, 0.18);
+  --cyan: #22e7e8;
+  --blue: #2aa8ff;
+  --cyan-soft: rgba(34, 231, 232, 0.14);
 }
 * { box-sizing: border-box; }
+html { min-height: 100%; }
 body {
   margin: 0;
+  min-height: 100%;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: var(--bg);
+  background:
+    radial-gradient(circle at 28% 18%, rgba(34, 231, 232, 0.16), transparent 26rem),
+    radial-gradient(circle at 82% 72%, rgba(42, 168, 255, 0.12), transparent 30rem),
+    linear-gradient(145deg, var(--bg), var(--bg-2));
   color: var(--text);
   line-height: 1.6;
 }
-a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px);
+  background-size: 42px 42px;
+  mask-image: linear-gradient(to bottom, black, transparent 78%);
+}
+a { color: var(--cyan); text-decoration-thickness: 1px; text-underline-offset: 3px; }
 .site-header {
   display: flex;
   align-items: center;
@@ -283,23 +335,39 @@ a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset:
   gap: 24px;
   padding: 18px clamp(20px, 5vw, 56px);
   border-bottom: 1px solid var(--line);
-  background: var(--panel);
+  background: rgba(7, 9, 20, 0.82);
+  backdrop-filter: blur(16px);
   position: sticky;
   top: 0;
   z-index: 10;
 }
 .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
   color: var(--text);
   font-weight: 750;
   font-size: 20px;
   text-decoration: none;
+}
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  color: #07101c;
+  font-size: 17px;
+  font-weight: 850;
+  background: linear-gradient(135deg, var(--cyan), var(--blue));
+  box-shadow: 0 0 24px rgba(34, 231, 232, 0.35);
 }
 nav {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   flex-wrap: wrap;
-  gap: 14px;
+  gap: 16px;
 }
 nav a {
   color: var(--muted);
@@ -308,25 +376,120 @@ nav a {
 }
 nav a:hover { color: var(--text); }
 .content {
-  width: min(920px, calc(100% - 40px));
+  width: min(980px, calc(100% - 40px));
   margin: 42px auto 56px;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
   padding: clamp(24px, 5vw, 52px);
+  position: relative;
 }
-h1, h2, h3, h4 { line-height: 1.2; margin: 1.6em 0 0.55em; }
-h1 { margin-top: 0; font-size: clamp(32px, 5vw, 48px); }
+.home-page .content {
+  width: min(1120px, calc(100% - 40px));
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  padding: 0;
+}
+.hero {
+  min-height: 580px;
+  display: flex;
+  align-items: flex-end;
+  padding: clamp(28px, 6vw, 70px);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, rgba(7, 9, 20, 0.32), rgba(7, 9, 20, 0.88)),
+    url("/assets/corevideo-logo.jpg") center / cover no-repeat;
+  box-shadow: 0 24px 90px rgba(0, 0, 0, 0.5);
+}
+.hero-copy { max-width: 680px; }
+.hero-logo {
+  display: block;
+  width: min(520px, 100%);
+  height: auto;
+  margin: 0 0 28px;
+  border-radius: 6px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.36);
+}
+.eyebrow {
+  color: var(--cyan);
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.hero h1 {
+  margin: 0 0 18px;
+  max-width: 820px;
+  font-size: clamp(36px, 6vw, 70px);
+  letter-spacing: 0;
+}
+.lede {
+  color: #d5def0;
+  max-width: 660px;
+  font-size: 18px;
+}
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 28px;
+}
+.button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 10px 18px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  background: rgba(255,255,255,0.06);
+  text-decoration: none;
+}
+.button.primary {
+  color: #06111a;
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--cyan), var(--blue));
+  font-weight: 750;
+}
+.link-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+}
+.link-grid a {
+  min-height: 160px;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(17, 23, 44, 0.86);
+  text-decoration: none;
+}
+.link-grid strong {
+  display: block;
+  color: var(--text);
+  font-size: 18px;
+  margin-bottom: 8px;
+}
+.link-grid span { color: var(--muted); }
+h1, h2, h3, h4 { line-height: 1.2; margin: 1.6em 0 0.55em; letter-spacing: 0; }
+h1 { margin-top: 0; font-size: clamp(34px, 5vw, 52px); }
 h2 { font-size: 26px; border-top: 1px solid var(--line); padding-top: 28px; }
-h3 { font-size: 21px; }
+h3 { font-size: 21px; color: #dcecff; }
 p, ul, table, blockquote { margin: 0 0 18px; }
+p, li, td { color: #d6deee; }
 ul { padding-left: 24px; }
 code {
-  background: #eef2f8;
-  border: 1px solid #dfe6f1;
+  background: rgba(34, 231, 232, 0.1);
+  border: 1px solid rgba(34, 231, 232, 0.16);
   border-radius: 4px;
   padding: 0.1em 0.35em;
   font-size: 0.92em;
+  color: #bafcff;
 }
 table {
   width: 100%;
@@ -339,12 +502,12 @@ th, td {
   border: 1px solid var(--line);
   padding: 10px 12px;
 }
-th { background: #f1f4f9; }
+th { background: rgba(34, 231, 232, 0.08); color: var(--text); }
 blockquote {
-  border-left: 4px solid var(--accent);
+  border-left: 4px solid var(--cyan);
   padding: 12px 18px;
-  background: #f3f7ff;
-  color: #24324a;
+  background: var(--cyan-soft);
+  color: #e7fbff;
 }
 hr {
   border: 0;
@@ -357,10 +520,16 @@ hr {
   padding: 24px clamp(20px, 5vw, 56px) 40px;
   text-align: center;
 }
+@media (max-width: 900px) {
+  .hero { min-height: 520px; }
+  .link-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 @media (max-width: 700px) {
   .site-header { align-items: flex-start; flex-direction: column; }
   nav { justify-content: flex-start; }
   .content { margin-top: 24px; }
+  .hero { min-height: 0; }
+  .link-grid { grid-template-columns: 1fr; }
 }
 `);
 

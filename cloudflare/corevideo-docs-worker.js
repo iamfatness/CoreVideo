@@ -24,6 +24,8 @@ function normalizePath(pathname) {
     return { redirect: "/documentation/" };
   if (pathname === "/assets/site.css")
     return { asset: "/assets/site.css", type: "text/css; charset=utf-8" };
+  if (pathname === "/assets/corevideo-logo.jpg")
+    return { asset: "/assets/corevideo-logo.jpg", type: "image/jpeg" };
   if (htmlPaths.has(pathname))
     return { asset: pathname + "index.html", type: "text/html; charset=utf-8" };
   return { asset: "/index.html", type: "text/html; charset=utf-8", status: 404 };

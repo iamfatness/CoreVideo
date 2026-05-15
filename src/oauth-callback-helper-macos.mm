@@ -5,6 +5,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cstdlib>
+#include <fstream>
 #include <string>
 
 static std::string json_escape(const std::string &in)
@@ -24,6 +26,46 @@ static std::string json_escape(const std::string &in)
     return out;
 }
 
+static int read_control_port()
+{
+    const char *home = std::getenv("HOME");
+    if (!home || !*home)
+        return 19870;
+
+    const std::string path =
+        std::string(home) + "/Library/Application Support/obs-studio/global.ini";
+    std::ifstream file(path);
+    if (!file)
+        return 19870;
+
+    bool in_zoom_section = false;
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line == "[ZoomPlugin]") {
+            in_zoom_section = true;
+            continue;
+        }
+        if (in_zoom_section && !line.empty() && line[0] == '[')
+            break;
+        if (!in_zoom_section)
+            continue;
+
+        const std::string key = "ControlServerPort=";
+        if (line.rfind(key, 0) != 0)
+            continue;
+
+        try {
+            const int port = std::stoi(line.substr(key.size()));
+            if (port >= 1024 && port <= 65535)
+                return port;
+        } catch (...) {
+            return 19870;
+        }
+    }
+
+    return 19870;
+}
+
 static void forward_url(NSURL *url)
 {
     if (!url) return;
@@ -36,7 +78,7 @@ static void forward_url(NSURL *url)
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(19870);
+    addr.sin_port = htons(static_cast<uint16_t>(read_control_port()));
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
 
     if (connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == 0) {

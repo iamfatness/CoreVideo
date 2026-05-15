@@ -186,11 +186,11 @@ if(BUILD_ZOOM_ENGINE)
                 COMMENT "Copying Zoom SDK runtime files to output directory"
             )
             install(DIRECTORY "${ZOOM_SDK_RUNTIME_DIR}/"
-                DESTINATION "${CMAKE_INSTALL_PREFIX}/obs-plugins/64bit"
+                DESTINATION "${CMAKE_INSTALL_PREFIX}/obs-plugins/64bit/zoom-runtime"
             )
         endif()
         install(TARGETS ZoomObsEngine
-            RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}/obs-plugins/64bit"
+            RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}/obs-plugins/64bit/zoom-runtime"
         )
     elseif(APPLE)
         add_executable(ZoomObsEngine ${ENGINE_SOURCES})

@@ -32,7 +32,12 @@ static std::string engine_executable_path()
         std::string path(module_path);
         const size_t slash = path.find_last_of("\\/");
         if (slash != std::string::npos) {
-            std::string candidate = path.substr(0, slash + 1) + "ZoomObsEngine.exe";
+            const std::string module_dir = path.substr(0, slash + 1);
+            std::string candidate = module_dir + "zoom-runtime\\ZoomObsEngine.exe";
+            if (GetFileAttributesA(candidate.c_str()) != INVALID_FILE_ATTRIBUTES)
+                return candidate;
+
+            candidate = module_dir + "ZoomObsEngine.exe";
             if (GetFileAttributesA(candidate.c_str()) != INVALID_FILE_ATTRIBUTES)
                 return candidate;
         }
@@ -48,6 +53,15 @@ static std::string engine_executable_path()
     return "ZoomObsEngine";
 #endif
 }
+
+#if defined(WIN32)
+static std::string parent_directory(const std::string &path)
+{
+    const size_t slash = path.find_last_of("\\/");
+    if (slash == std::string::npos) return {};
+    return path.substr(0, slash);
+}
+#endif
 
 static std::string json_escape(const std::string &in)
 {
@@ -260,10 +274,14 @@ bool ZoomEngineClient::launch_engine()
     STARTUPINFOA si = {};
     PROCESS_INFORMATION pi = {};
     si.cb = sizeof(si);
-    std::string command = "\"" + engine_executable_path() + "\"";
+    const std::string engine_path = engine_executable_path();
+    const std::string engine_dir = parent_directory(engine_path);
+    std::string command = "\"" + engine_path + "\"";
 
     if (!CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE,
-                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+                        CREATE_NO_WINDOW, nullptr,
+                        engine_dir.empty() ? nullptr : engine_dir.c_str(),
+                        &si, &pi)) {
         blog(LOG_ERROR, "[obs-zoom-plugin] Failed to launch ZoomObsEngine: %lu",
              GetLastError());
         return false;

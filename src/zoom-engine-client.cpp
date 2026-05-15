@@ -8,6 +8,7 @@
 #include <util/platform.h>
 #include <chrono>
 #include <thread>
+#include <unordered_map>
 
 #if defined(WIN32)
 #include <windows.h>
@@ -494,6 +495,19 @@ void ZoomEngineClient::handle_event(const std::string &line)
         callbacks = it->second;
     }
     if (cmd == "frame" && callbacks.on_frame) {
+        static std::mutex frame_log_mtx;
+        static std::unordered_map<std::string, uint64_t> frame_counts;
+        uint64_t frame_count = 0;
+        {
+            std::lock_guard<std::mutex> lk(frame_log_mtx);
+            frame_count = ++frame_counts[uuid];
+        }
+        if (frame_count == 1 || frame_count % 120 == 0) {
+            blog(LOG_INFO,
+                 "[obs-zoom-plugin] Dispatching Zoom video frame: source_uuid=%s count=%llu w=%d h=%d",
+                 uuid.c_str(), static_cast<unsigned long long>(frame_count),
+                 obj.value("w").toInt(), obj.value("h").toInt());
+        }
         callbacks.on_frame(static_cast<uint32_t>(obj.value("w").toInt()),
                            static_cast<uint32_t>(obj.value("h").toInt()));
     }

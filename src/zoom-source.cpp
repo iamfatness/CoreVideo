@@ -399,21 +399,43 @@ void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height)
     const size_t frame_bytes = sizeof(ShmFrameHeader) +
         static_cast<size_t>(event_width) * event_height * 3 / 2;
     if ((!m_video_shm.ptr || m_video_shm.size < frame_bytes) &&
-        !shm_region_open_read(m_video_shm, shm_name, frame_bytes))
+        !shm_region_open_read(m_video_shm, shm_name, frame_bytes)) {
+        if (m_frame_count == 0) {
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] Failed to open video shared memory: source=%s uuid=%s w=%u h=%u bytes=%zu",
+                 output_name().c_str(), source_uuid.c_str(), event_width,
+                 event_height, frame_bytes);
+        }
         return;
+    }
 
     auto *hdr = static_cast<const ShmFrameHeader *>(m_video_shm.ptr);
     const uint32_t w = hdr->width;
     const uint32_t h = hdr->height;
     const uint32_t y_len = hdr->y_len;
-    if (!source || w == 0 || h == 0 || y_len != w * h) return;
+    if (!source || w == 0 || h == 0 || y_len != w * h) {
+        if (m_frame_count == 0) {
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] Invalid video frame header: source=%s uuid=%s w=%u h=%u y_len=%u",
+                 output_name().c_str(), source_uuid.c_str(), w, h, y_len);
+        }
+        return;
+    }
 
     // Bound the read: the header may claim a frame larger than the region
     // we have mapped (engine wrote a bigger frame than the size we used to
     // open the SHM). Reject those rather than walking past the mapping.
     const size_t needed_bytes = sizeof(ShmFrameHeader) +
         static_cast<size_t>(y_len) + static_cast<size_t>(y_len) / 2;
-    if (needed_bytes > m_video_shm.size) return;
+    if (needed_bytes > m_video_shm.size) {
+        if (m_frame_count == 0) {
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] Video shared memory too small: source=%s uuid=%s need=%zu have=%zu",
+                 output_name().c_str(), source_uuid.c_str(), needed_bytes,
+                 m_video_shm.size);
+        }
+        return;
+    }
 
     const auto *pixels = static_cast<const uint8_t *>(m_video_shm.ptr) + sizeof(ShmFrameHeader);
     const auto *y_ptr = pixels;
@@ -448,6 +470,13 @@ void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height)
     }
 
     obs_source_output_video(source, &frame);
+    ++m_frame_count;
+    if (m_frame_count == 1 || m_frame_count % 120 == 0) {
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] Output Zoom video frame: source=%s uuid=%s count=%llu w=%u h=%u",
+             output_name().c_str(), source_uuid.c_str(),
+             static_cast<unsigned long long>(m_frame_count), w, h);
+    }
     m_width.store(w, std::memory_order_relaxed);
     m_height.store(h, std::memory_order_relaxed);
 

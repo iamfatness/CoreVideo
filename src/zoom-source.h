@@ -87,6 +87,7 @@ private:
     std::vector<int16_t> m_stereo_buf;
     ZoomPreviewCallback m_preview_cb;
     uint64_t m_preview_last_ns = 0;
+    uint64_t m_frame_count = 0;
     std::atomic<bool> m_subscribed{false};
     std::atomic<bool> m_active{false};
     std::atomic<uint32_t> m_current_subscription_id{0};

@@ -152,7 +152,8 @@ set($($pkg.name)_FOUND TRUE)
               "-Dobs-frontend-api_DIR=$obsFe" `
               "-DZOOM_EMBED_SDK_KEY=${{ secrets.ZOOM_EMBED_SDK_KEY }}" `
               "-DZOOM_EMBED_SDK_SECRET=${{ secrets.ZOOM_EMBED_SDK_SECRET }}" `
-              "-DZOOM_EMBED_JWT_TOKEN=${{ secrets.ZOOM_EMBED_JWT_TOKEN }}"
+              "-DZOOM_EMBED_JWT_TOKEN=${{ secrets.ZOOM_EMBED_JWT_TOKEN }}" `
+              "-DZOOM_EMBED_OAUTH_CLIENT_ID=${{ secrets.ZOOM_EMBED_OAUTH_CLIENT_ID }}"
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -256,7 +257,8 @@ set($($pkg.name)_FOUND TRUE)
               "-Dobs-frontend-api_DIR=/tmp/obs-sdk/cmake/obs-frontend-api" \
               "-DZOOM_EMBED_SDK_KEY=${{ secrets.ZOOM_EMBED_SDK_KEY }}" \
               "-DZOOM_EMBED_SDK_SECRET=${{ secrets.ZOOM_EMBED_SDK_SECRET }}" \
-              "-DZOOM_EMBED_JWT_TOKEN=${{ secrets.ZOOM_EMBED_JWT_TOKEN }}"
+              "-DZOOM_EMBED_JWT_TOKEN=${{ secrets.ZOOM_EMBED_JWT_TOKEN }}" \
+              "-DZOOM_EMBED_OAUTH_CLIENT_ID=${{ secrets.ZOOM_EMBED_OAUTH_CLIENT_ID }}"
 
       - name: Build
         run: cmake --build build --parallel

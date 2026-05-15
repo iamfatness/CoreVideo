@@ -84,6 +84,58 @@ static void ipc_teardown(IpcFd p2e, IpcFd e2p)
     CloseHandle(e2p);
 }
 
+static void pump_windows_messages()
+{
+    MSG msg;
+    while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+}
+
+static bool ipc_read_line_with_message_pump(IpcFd fd, std::string &out,
+                                            size_t max_len = 65536)
+{
+    out.clear();
+    while (true) {
+        char ch = 0;
+        DWORD n = 0;
+        OVERLAPPED ov = {};
+        ov.hEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+        if (!ov.hEvent) return false;
+
+        BOOL ok = ReadFile(fd, &ch, 1, &n, &ov);
+        if (!ok && GetLastError() == ERROR_IO_PENDING) {
+            HANDLE event = ov.hEvent;
+            while (true) {
+                DWORD wait = MsgWaitForMultipleObjects(
+                    1, &event, FALSE, 50, QS_ALLINPUT);
+                if (wait == WAIT_OBJECT_0) {
+                    ok = GetOverlappedResult(fd, &ov, &n, FALSE);
+                    break;
+                }
+                if (wait == WAIT_OBJECT_0 + 1 || wait == WAIT_TIMEOUT) {
+                    pump_windows_messages();
+                    continue;
+                }
+                CancelIo(fd);
+                CloseHandle(ov.hEvent);
+                return false;
+            }
+        }
+
+        const DWORD err = ok ? ERROR_SUCCESS : GetLastError();
+        CloseHandle(ov.hEvent);
+        pump_windows_messages();
+
+        if (!ok && err != ERROR_SUCCESS) return false;
+        if (n != 1) return false;
+        if (ch == '\n') return true;
+        if (out.size() >= max_len) return false;
+        out += ch;
+    }
+}
+
 #else // POSIX (macOS / Linux)
 #  include <sys/socket.h>
 #  include <sys/un.h>
@@ -462,6 +514,9 @@ public:
           m_participants(participants) {}
 
     void onMeetingStatusChanged(ZOOMSDK::MeetingStatus status, int iResult) override {
+        EngineIpc::write(R"({"cmd":"debug","stage":"meeting_status","status":)" +
+            std::to_string(static_cast<int>(status)) +
+            R"(,"result":)" + std::to_string(iResult) + "}");
         switch (status) {
         case ZOOMSDK::MEETING_STATUS_INMEETING:
             EngineIpc::write( R"({"cmd":"joined"})");
@@ -537,7 +592,11 @@ int main()
     std::string line;
 
     while (running) {
+#if defined(WIN32)
+        if (!ipc_read_line_with_message_pump(p2e, line)) break;
+#else
         if (!ipc_read_line(p2e, line)) break; // EOF or connection closed
+#endif
         if (line.empty()) continue;
 
         if (line.find(IPC_CMD_QUIT) != std::string::npos) {
@@ -545,6 +604,7 @@ int main()
 
         } else if (line.find(IPC_CMD_INIT) != std::string::npos) {
             std::string jwt = json_str(line, "jwt");
+            EngineIpc::write(R"({"cmd":"debug","stage":"init_received"})");
 
             ZOOMSDK::InitParam init_param;
 #if defined(WIN32)
@@ -558,17 +618,38 @@ int main()
 #endif
             init_param.rawdataOpts.videoRawdataMemoryMode = ZOOMSDK::ZoomSDKRawDataMemoryModeHeap;
             init_param.rawdataOpts.audioRawdataMemoryMode = ZOOMSDK::ZoomSDKRawDataMemoryModeHeap;
-            ZOOMSDK::InitSDK(init_param);
+            EngineIpc::write(R"({"cmd":"debug","stage":"before_init_sdk"})");
+            ZOOMSDK::SDKError err = ZOOMSDK::InitSDK(init_param);
+            EngineIpc::write(R"({"cmd":"debug","stage":"after_init_sdk","code":)" +
+                std::to_string(static_cast<int>(err)) + "}");
+            if (err != ZOOMSDK::SDKERR_SUCCESS) {
+                EngineIpc::write(R"({"cmd":"auth_fail","stage":"init","code":)" +
+                    std::to_string(static_cast<int>(err)) + "}");
+                continue;
+            }
 
-            ZOOMSDK::CreateAuthService(&auth_svc);
+            EngineIpc::write(R"({"cmd":"debug","stage":"before_create_auth"})");
+            err = ZOOMSDK::CreateAuthService(&auth_svc);
+            EngineIpc::write(R"({"cmd":"debug","stage":"after_create_auth","code":)" +
+                std::to_string(static_cast<int>(err)) + "}");
+            if (err != ZOOMSDK::SDKERR_SUCCESS || !auth_svc) {
+                EngineIpc::write(R"({"cmd":"auth_fail","stage":"create_auth","code":)" +
+                    std::to_string(static_cast<int>(err)) + "}");
+                continue;
+            }
             if (auth_svc) {
                 auth_svc->SetEvent(&auth_event);
                 g_wide_jwt = to_zstr(jwt); // persists for async SDKAuth call
                 ZOOMSDK::AuthContext ctx;
                 ctx.jwt_token = g_wide_jwt.c_str();
-                auth_svc->SDKAuth(ctx);
-            } else {
-                EngineIpc::write( R"({"cmd":"auth_fail","code":-1})");
+                EngineIpc::write(R"({"cmd":"debug","stage":"before_sdk_auth"})");
+                err = auth_svc->SDKAuth(ctx);
+                EngineIpc::write(R"({"cmd":"debug","stage":"after_sdk_auth","code":)" +
+                    std::to_string(static_cast<int>(err)) + "}");
+                if (err != ZOOMSDK::SDKERR_SUCCESS) {
+                    EngineIpc::write(R"({"cmd":"auth_fail","stage":"sdk_auth","code":)" +
+                        std::to_string(static_cast<int>(err)) + "}");
+                }
             }
 
         } else if (line.find(IPC_CMD_JOIN) != std::string::npos) {
@@ -576,6 +657,8 @@ int main()
             std::string passcode     = json_str(line, "passcode");
             std::string display_name = json_str(line, "display_name");
             if (display_name.empty()) display_name = "OBS";
+            EngineIpc::write(R"({"cmd":"debug","stage":"join_received","meeting_id":")" +
+                json_escape(meeting_id) + "\"}");
 
             if (!meeting_svc) {
                 ZOOMSDK::CreateMeetingService(&meeting_svc);
@@ -606,7 +689,9 @@ int main()
                 p.isMyVoiceInMix            = false;
                 p.eAudioRawdataSamplingRate = ZOOMSDK::AudioRawdataSamplingRate_48K;
                 p.eVideoRawdataColorspace   = ZOOMSDK::VideoRawdataColorspace_BT709_F;
-                meeting_svc->Join(jp);
+                ZOOMSDK::SDKError err = meeting_svc->Join(jp);
+                EngineIpc::write(R"({"cmd":"debug","stage":"after_join","code":)" +
+                    std::to_string(static_cast<int>(err)) + "}");
             }
 
         } else if (line.find(IPC_CMD_LEAVE) != std::string::npos) {

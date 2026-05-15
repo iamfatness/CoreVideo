@@ -100,6 +100,7 @@ bool ZoomEngineClient::start(const std::string &jwt_token)
     }
     m_last_jwt = jwt_token;
     m_user_leaving.store(false, std::memory_order_release);
+    m_authenticated.store(false, std::memory_order_release);
 
     // Join threads from any previous session (e.g. after a crash).
     if (m_reader.joinable())  m_reader.join();
@@ -151,6 +152,7 @@ void ZoomEngineClient::stop_for_reconnect()
     // Always join both threads — safe even if they already exited.
     if (m_reader.joinable())  m_reader.join();
     if (m_monitor.joinable()) m_monitor.join(); // also reaps the child process
+    m_authenticated.store(false, std::memory_order_release);
     m_state.store(MeetingState::Idle, std::memory_order_release);
 }
 
@@ -211,11 +213,19 @@ bool ZoomEngineClient::join(const std::string &meeting_id,
     // Always keep session params up to date for recovery.
     ZoomReconnectManager::instance().store_session(
         m_last_jwt, meeting_id, passcode, display_name);
-    const char *kind_str = (kind == MeetingKind::Webinar) ? "webinar" : "meeting";
-    write_json(R"({"cmd":"join","meeting_id":")" + json_escape(meeting_id) +
-        R"(","passcode":")" + json_escape(passcode) +
-        R"(","display_name":")" + json_escape(display_name) +
-        R"(","kind":")" + kind_str + "\"}");
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        m_join_pending = true;
+        m_pending_meeting_id = meeting_id;
+        m_pending_passcode = passcode;
+        m_pending_display_name = display_name;
+        m_pending_kind = kind;
+        blog(LOG_INFO, "[obs-zoom-plugin] Zoom join queued: meeting_id=%s authenticated=%d",
+             meeting_id.c_str(),
+             m_authenticated.load(std::memory_order_acquire) ? 1 : 0);
+        if (m_authenticated.load(std::memory_order_acquire))
+            send_join_locked();
+    }
     return true;
 }
 
@@ -239,6 +249,10 @@ void ZoomEngineClient::leave()
     m_user_leaving.store(true, std::memory_order_release);
     ZoomReconnectManager::instance().cancel(); // suppress any in-progress recovery
     m_state.store(MeetingState::Leaving, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        m_join_pending = false;
+    }
     write_json(R"({"cmd":"leave"})");
 }
 
@@ -376,6 +390,16 @@ void ZoomEngineClient::handle_event(const std::string &line)
     }
     if (cmd == "auth_ok") {
         blog(LOG_INFO, "[obs-zoom-plugin] Zoom engine authenticated");
+        m_authenticated.store(true, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lk(m_mtx);
+            if (m_join_pending)
+                send_join_locked();
+        }
+        return;
+    }
+    if (cmd == "debug") {
+        blog(LOG_INFO, "[obs-zoom-plugin] Zoom engine debug: %s", line.c_str());
         return;
     }
     if (cmd == "joined") {
@@ -476,6 +500,20 @@ void ZoomEngineClient::handle_event(const std::string &line)
     if (cmd == "audio" && callbacks.on_audio) {
         callbacks.on_audio(static_cast<uint32_t>(obj.value("byte_len").toInt()));
     }
+}
+
+void ZoomEngineClient::send_join_locked()
+{
+    if (!m_join_pending || m_pending_meeting_id.empty()) return;
+
+    const char *kind_str = (m_pending_kind == MeetingKind::Webinar) ? "webinar" : "meeting";
+    blog(LOG_INFO, "[obs-zoom-plugin] Sending Zoom join to engine: meeting_id=%s kind=%s",
+         m_pending_meeting_id.c_str(), kind_str);
+    ipc_write_line(m_p2e, R"({"cmd":"join","meeting_id":")" + json_escape(m_pending_meeting_id) +
+        R"(","passcode":")" + json_escape(m_pending_passcode) +
+        R"(","display_name":")" + json_escape(m_pending_display_name) +
+        R"(","kind":")" + kind_str + "\"}");
+    m_join_pending = false;
 }
 
 uint32_t ZoomEngineClient::active_speaker_id() const

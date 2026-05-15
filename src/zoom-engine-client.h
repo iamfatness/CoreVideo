@@ -61,6 +61,7 @@ private:
     void reader_loop();
     void monitor_loop();
     void handle_event(const std::string &line);
+    void send_join_locked();
     void write_json(const std::string &json);
 
     mutable std::mutex m_mtx;
@@ -69,6 +70,7 @@ private:
     std::thread m_reader;
     std::thread m_monitor;
     std::atomic<bool> m_running{false};
+    std::atomic<bool> m_authenticated{false};
     std::atomic<MeetingState> m_state{MeetingState::Idle};
     uint32_t m_active_speaker_id = 0;
     std::vector<ParticipantInfo> m_roster;
@@ -77,6 +79,11 @@ private:
     // Tracks whether the user deliberately requested a leave/stop (suppresses recovery).
     std::atomic<bool> m_user_leaving{false};
     std::string m_last_jwt; // stored so reconnect manager can access it
+    bool m_join_pending = false;
+    std::string m_pending_meeting_id;
+    std::string m_pending_passcode;
+    std::string m_pending_display_name;
+    MeetingKind m_pending_kind = MeetingKind::Meeting;
 
 #if defined(WIN32)
     void *m_process = nullptr;

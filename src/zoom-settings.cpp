@@ -16,6 +16,19 @@ static QByteArray base64url(const QByteArray &data)
                          QByteArray::OmitTrailingEquals);
 }
 
+static bool looks_like_jwt(const std::string &token)
+{
+    const size_t first_dot = token.find('.');
+    if (first_dot == std::string::npos || first_dot == 0) return false;
+
+    const size_t second_dot = token.find('.', first_dot + 1);
+    if (second_dot == std::string::npos || second_dot == first_dot + 1)
+        return false;
+
+    return second_dot + 1 < token.size() &&
+        token.find('.', second_dot + 1) == std::string::npos;
+}
+
 ZoomPluginSettings ZoomPluginSettings::load()
 {
     config_t *cfg = obs_frontend_get_global_config();
@@ -68,7 +81,7 @@ ZoomPluginSettings ZoomPluginSettings::load()
 
 std::string ZoomPluginSettings::resolved_jwt_token() const
 {
-    if (!jwt_token.empty()) return jwt_token;
+    if (!jwt_token.empty() && looks_like_jwt(jwt_token)) return jwt_token;
     if (sdk_key.empty() || sdk_secret.empty()) return {};
 
     const qint64 now = QDateTime::currentSecsSinceEpoch();

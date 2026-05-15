@@ -43,6 +43,8 @@ This is needed for external-account meetings and Marketplace review.
 2. Zoom redirects to `corevideo://oauth/callback?...`.
 3. `CoreVideoOAuthCallback.exe` forwards that callback to the running OBS
    plugin. On macOS, `CoreVideoOAuthCallback.app` performs the same forwarding.
+   The helper reads the configured CoreVideo control-server port from the OBS
+   global config and falls back to `19870`.
 4. The plugin verifies `state`, exchanges the authorization code at
    `https://zoom.us/oauth/token`, and stores access/refresh tokens.
 5. Before joining, the plugin refreshes the access token if needed and calls:
@@ -57,6 +59,9 @@ This is needed for external-account meetings and Marketplace review.
 - Windows token storage uses DPAPI before writing tokens into OBS global config.
 - Refresh tokens are rotated; always persist the latest refresh token Zoom
   returns.
+- Windows builds must ship Qt's TLS backend plugins, especially the Schannel
+  backend under `obs-plugins/64bit/plugins/tls`, or OAuth HTTPS requests will
+  fail before tokens or ZAKs can be fetched.
 - The URL callback command bypasses the local control-server token, but the
   OAuth `state` and one-time verifier are still required before any token
   exchange occurs.

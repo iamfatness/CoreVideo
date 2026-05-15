@@ -21,6 +21,16 @@ if(COREVIDEO_BUILD_PLUGIN)
     find_package(LibObs REQUIRED)
     find_package(obs-frontend-api REQUIRED)
     find_package(Qt6 COMPONENTS Core Network Widgets REQUIRED)
+
+    get_target_property(_qt_core_location Qt6::Core IMPORTED_LOCATION_RELEASE)
+    if(NOT _qt_core_location)
+        get_target_property(_qt_core_location Qt6::Core IMPORTED_LOCATION)
+    endif()
+    if(_qt_core_location)
+        get_filename_component(_qt_bin_dir "${_qt_core_location}" DIRECTORY)
+        get_filename_component(_qt_root_dir "${_qt_bin_dir}" DIRECTORY)
+        set(COREVIDEO_QT_PLUGIN_DIR "${_qt_root_dir}/plugins")
+    endif()
 endif()
 
 # ── Optional FFmpeg hardware-accelerated video conversion ─────────────────────
@@ -213,11 +223,11 @@ if(BUILD_ZOOM_ENGINE)
                 COMMENT "Copying Zoom SDK runtime files to output directory"
             )
             install(DIRECTORY "${ZOOM_SDK_RUNTIME_DIR}/"
-                DESTINATION "${CMAKE_INSTALL_PREFIX}/obs-plugins/64bit/zoom-runtime"
+                DESTINATION "obs-plugins/64bit/zoom-runtime"
             )
         endif()
         install(TARGETS ZoomObsEngine
-            RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}/obs-plugins/64bit/zoom-runtime"
+            RUNTIME DESTINATION "obs-plugins/64bit/zoom-runtime"
         )
     elseif(APPLE)
         add_executable(ZoomObsEngine ${ENGINE_SOURCES})
@@ -247,6 +257,13 @@ if(COREVIDEO_BUILD_PLUGIN)
     install(TARGETS obs-zoom-plugin
         LIBRARY DESTINATION "obs-plugins/64bit"
     )
+    if(WIN32 AND COREVIDEO_QT_PLUGIN_DIR AND EXISTS "${COREVIDEO_QT_PLUGIN_DIR}/tls")
+        install(FILES
+            "${COREVIDEO_QT_PLUGIN_DIR}/tls/qcertonlybackend.dll"
+            "${COREVIDEO_QT_PLUGIN_DIR}/tls/qschannelbackend.dll"
+            DESTINATION "obs-plugins/64bit/plugins/tls"
+        )
+    endif()
     install(DIRECTORY data/
         DESTINATION "data/obs-plugins/obs-zoom-plugin"
     )

@@ -202,6 +202,7 @@ bool ZoomOAuthManager::handle_redirect_url(const QString &url, QString *error)
     const QByteArray response = reply->readAll();
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     const QNetworkReply::NetworkError net_error = reply->error();
+    const QString net_error_string = reply->errorString();
     reply->deleteLater();
 
     m_pending_state.clear();
@@ -209,7 +210,12 @@ bool ZoomOAuthManager::handle_redirect_url(const QString &url, QString *error)
     m_pending_client_id.clear();
 
     if (net_error != QNetworkReply::NoError || status < 200 || status >= 300) {
-        if (error) *error = "Zoom token exchange failed: " + QString::fromUtf8(response);
+        if (error) {
+            const QString details = response.isEmpty()
+                ? net_error_string
+                : QString::fromUtf8(response);
+            *error = "Zoom token exchange failed: " + details;
+        }
         return false;
     }
     const bool ok = parse_token_response(response, error);
@@ -244,10 +250,16 @@ bool ZoomOAuthManager::refresh_access_token_blocking(QString *error)
     const QByteArray response = reply->readAll();
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     const QNetworkReply::NetworkError net_error = reply->error();
+    const QString net_error_string = reply->errorString();
     reply->deleteLater();
 
     if (net_error != QNetworkReply::NoError || status < 200 || status >= 300) {
-        if (error) *error = "Zoom token refresh failed: " + QString::fromUtf8(response);
+        if (error) {
+            const QString details = response.isEmpty()
+                ? net_error_string
+                : QString::fromUtf8(response);
+            *error = "Zoom token refresh failed: " + details;
+        }
         return false;
     }
     return parse_token_response(response, error);
@@ -279,10 +291,16 @@ bool ZoomOAuthManager::fetch_zak_blocking(std::string &zak, QString *error)
     const QByteArray response = reply->readAll();
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     const QNetworkReply::NetworkError net_error = reply->error();
+    const QString net_error_string = reply->errorString();
     reply->deleteLater();
 
     if (net_error != QNetworkReply::NoError || status < 200 || status >= 300) {
-        if (error) *error = "Could not fetch Zoom ZAK: " + QString::fromUtf8(response);
+        if (error) {
+            const QString details = response.isEmpty()
+                ? net_error_string
+                : QString::fromUtf8(response);
+            *error = "Could not fetch Zoom ZAK: " + details;
+        }
         return false;
     }
 

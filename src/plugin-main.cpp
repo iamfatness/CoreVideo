@@ -10,14 +10,50 @@
 #include "zoom-dock.h"
 #include "zoom-control-server.h"
 #include "zoom-osc-server.h"
+#include <QCoreApplication>
+#include <QDir>
+#include <QFileInfo>
 #include <QDockWidget>
 #include <QMainWindow>
 #include <QPointer>
+#if defined(WIN32)
+#include <windows.h>
+extern "C" IMAGE_DOS_HEADER __ImageBase;
+#endif
 #if !defined(WIN32)
 #include <csignal>
 #endif
 
 static QPointer<ZoomDock> g_dock;
+
+static void configure_qt_plugin_paths()
+{
+#if defined(WIN32)
+    wchar_t module_path[MAX_PATH] = {};
+    if (!GetModuleFileNameW(reinterpret_cast<HMODULE>(&__ImageBase),
+                            module_path, MAX_PATH)) {
+        return;
+    }
+
+    const QFileInfo plugin_info(QString::fromWCharArray(module_path));
+    const QDir plugin_dir = plugin_info.dir();
+    const QStringList candidates = {
+        plugin_dir.absoluteFilePath("plugins"),
+        plugin_dir.absoluteFilePath("qt/plugins"),
+        plugin_dir.absoluteFilePath("../plugins"),
+    };
+
+    for (const QString &path : candidates) {
+        if (QFileInfo::exists(path))
+            QCoreApplication::addLibraryPath(path);
+    }
+
+    blog(LOG_INFO, "[obs-zoom-plugin] Qt library paths: %s",
+         QCoreApplication::libraryPaths().join(";").toUtf8().constData());
+#else
+    (void)QCoreApplication::libraryPaths();
+#endif
+}
 
 static ZoomDock *ensure_zoom_dock()
 {
@@ -67,6 +103,7 @@ MODULE_EXPORT const char *obs_module_description(void)
 bool obs_module_load(void)
 {
     blog(LOG_INFO, "[obs-zoom-plugin] Loading plugin v%s", OBS_ZOOM_PLUGIN_VERSION);
+    configure_qt_plugin_paths();
 
 #if !defined(WIN32)
     // Writing to a closed pipe (engine crashed) raises SIGPIPE on POSIX,

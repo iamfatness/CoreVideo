@@ -152,6 +152,23 @@ if(COREVIDEO_BUILD_PLUGIN)
         install(TARGETS CoreVideoOAuthCallback
             RUNTIME DESTINATION "obs-plugins/64bit"
         )
+    elseif(APPLE)
+        target_link_libraries(obs-zoom-plugin PRIVATE
+            "-framework CoreServices"
+        )
+        add_executable(CoreVideoOAuthCallback MACOSX_BUNDLE
+            src/oauth-callback-helper-macos.mm
+        )
+        target_link_libraries(CoreVideoOAuthCallback PRIVATE
+            "-framework Cocoa"
+        )
+        set_target_properties(CoreVideoOAuthCallback PROPERTIES
+            MACOSX_BUNDLE_INFO_PLIST
+                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CoreVideoOAuthCallback-Info.plist.in"
+        )
+        install(TARGETS CoreVideoOAuthCallback
+            BUNDLE DESTINATION "obs-plugins/64bit"
+        )
     endif()
 
     if(ENABLE_FFMPEG_HW_ACCEL)

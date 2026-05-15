@@ -25,6 +25,9 @@
 #include <QSettings>
 #include <windows.h>
 extern "C" IMAGE_DOS_HEADER __ImageBase;
+#elif defined(__APPLE__)
+#include <CoreServices/CoreServices.h>
+#include <dlfcn.h>
 #endif
 
 ZoomOAuthManager &ZoomOAuthManager::instance()
@@ -323,10 +326,50 @@ bool ZoomOAuthManager::register_url_scheme(QString *error)
         return false;
     }
     return true;
+#elif defined(__APPLE__)
+    Dl_info info{};
+    if (!dladdr(reinterpret_cast<const void *>(&ZoomOAuthManager::register_url_scheme),
+                &info) ||
+        !info.dli_fname) {
+        if (error) *error = "Could not locate the CoreVideo plugin directory.";
+        return false;
+    }
+
+    const QFileInfo plugin_info(QString::fromUtf8(info.dli_fname));
+    const QString helper = plugin_info.dir().absoluteFilePath(
+        "CoreVideoOAuthCallback.app");
+    if (!QFileInfo::exists(helper)) {
+        if (error) *error = "CoreVideoOAuthCallback.app was not found beside the plugin.";
+        return false;
+    }
+
+    const QByteArray helper_path = helper.toUtf8();
+    CFURLRef app_url = CFURLCreateFromFileSystemRepresentation(
+        kCFAllocatorDefault,
+        reinterpret_cast<const UInt8 *>(helper_path.constData()),
+        helper_path.size(),
+        true);
+    if (!app_url) {
+        if (error) *error = "Could not create a URL for CoreVideoOAuthCallback.app.";
+        return false;
+    }
+
+#if defined(__MAC_10_15) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 101500
+    const OSStatus status = LSRegisterURL(app_url, true);
+#else
+    const OSStatus status = LSRegisterURL(app_url, true);
+#endif
+    CFRelease(app_url);
+    if (status != noErr) {
+        if (error) *error = QString("Could not register corevideo:// URL scheme (%1).")
+            .arg(static_cast<int>(status));
+        return false;
+    }
+    return true;
 #else
     if (error) {
         *error = "Automatic custom URL scheme registration is currently implemented "
-                 "for Windows. Register corevideo://oauth/callback with your OS and "
+                 "for Windows and macOS. Register corevideo://oauth/callback with your OS and "
                  "forward the URL to the plugin oauth_callback control command.";
     }
     return false;

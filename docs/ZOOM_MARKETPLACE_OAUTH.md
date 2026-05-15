@@ -29,6 +29,8 @@ This is needed for external-account meetings and Marketplace review.
 5. Click **Register corevideo:// URL Scheme**. On Windows this registers:
    `HKCU\Software\Classes\corevideo\shell\open\command`
    to launch `CoreVideoOAuthCallback.exe`.
+   On macOS this registers the bundled `CoreVideoOAuthCallback.app` with
+   Launch Services.
 6. Click **Authorize with Zoom** and approve the app in the browser.
 7. Return to OBS. The callback helper forwards the URL to the plugin over
    `127.0.0.1:19870` using the `oauth_callback` command.
@@ -40,7 +42,7 @@ This is needed for external-account meetings and Marketplace review.
    present, and injects the PKCE parameters it must control.
 2. Zoom redirects to `corevideo://oauth/callback?...`.
 3. `CoreVideoOAuthCallback.exe` forwards that callback to the running OBS
-   plugin.
+   plugin. On macOS, `CoreVideoOAuthCallback.app` performs the same forwarding.
 4. The plugin verifies `state`, exchanges the authorization code at
    `https://zoom.us/oauth/token`, and stores access/refresh tokens.
 5. Before joining, the plugin refreshes the access token if needed and calls:

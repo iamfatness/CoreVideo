@@ -25,6 +25,7 @@ public:
               uint32_t participant_id,
               bool isolate_audio);
     bool retry_subscribe(const std::string &reason);
+    void reset_subscription(const std::string &reason);
     void remove(const std::string &source_uuid);
     void shutdown();
 

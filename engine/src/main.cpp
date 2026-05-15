@@ -596,6 +596,7 @@ public:
             break;
         case ZOOMSDK::MEETING_STATUS_DISCONNECTING:
         case ZOOMSDK::MEETING_STATUS_ENDED:
+            EngineAudio::instance().reset_subscription("meeting_left");
 #if defined(COREVIDEO_HAS_RECORDING_CTRL)
             if (m_meeting_svc && *m_meeting_svc) {
                 auto *rec = (*m_meeting_svc)->GetMeetingRecordingController();
@@ -623,6 +624,7 @@ public:
             EngineIpc::write( R"({"cmd":"left"})");
             break;
         case ZOOMSDK::MEETING_STATUS_FAILED:
+            EngineAudio::instance().reset_subscription("meeting_failed");
             if (m_participants) m_participants->detach();
             EngineIpc::write( R"({"cmd":"error","msg":"meeting_failed","code":)" +
                            std::to_string(iResult) + "}");

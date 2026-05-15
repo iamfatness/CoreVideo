@@ -76,6 +76,19 @@ bool EngineAudio::retry_subscribe(const std::string &reason)
     return subscribe_if_needed(source_uuid, "audio_resubscribe");
 }
 
+void EngineAudio::reset_subscription(const std::string &reason)
+{
+    std::lock_guard<std::mutex> subscribe_lock(m_subscribe_mtx);
+    if (!m_subscribed) return;
+
+    ZOOMSDK::IZoomSDKAudioRawDataHelper *helper = ZOOMSDK::GetAudioRawdataHelper();
+    if (helper) helper->unSubscribe();
+    m_subscribed = false;
+    EngineIpc::write(
+        R"({"cmd":"debug","stage":"audio_subscription_reset","reason":")" +
+        reason + "\"}");
+}
+
 void EngineAudio::shutdown()
 {
     {

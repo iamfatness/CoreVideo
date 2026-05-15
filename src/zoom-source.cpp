@@ -480,7 +480,7 @@ static void *zoom_source_create(obs_data_t *settings, obs_source_t *source)
     }
 
     if (ctx->auto_join && !ctx->meeting_id.empty()) {
-        if (ZoomEngineClient::instance().start(s.jwt_token)) {
+        if (ZoomEngineClient::instance().start(s.resolved_jwt_token())) {
             ZoomEngineClient::instance().join(ctx->meeting_id, ctx->passcode,
                 ctx->display_name.empty() ? "OBS" : ctx->display_name);
             ctx->subscribe();
@@ -495,7 +495,7 @@ static void *zoom_source_create(obs_data_t *settings, obs_source_t *source)
             if (!pressed) return;
             auto *c = static_cast<ZoomSource *>(data);
             const ZoomPluginSettings s = ZoomPluginSettings::load();
-            if (ZoomEngineClient::instance().start(s.jwt_token) &&
+            if (ZoomEngineClient::instance().start(s.resolved_jwt_token()) &&
                 ZoomEngineClient::instance().join(c->meeting_id, c->passcode,
                     c->display_name.empty() ? "OBS" : c->display_name)) {
                 c->subscribe();
@@ -686,7 +686,7 @@ static obs_properties_t *zoom_source_get_properties(void *data)
         [](obs_properties_t *, obs_property_t *, void *d) -> bool {
             auto *c = static_cast<ZoomSource *>(d);
             const ZoomPluginSettings s = ZoomPluginSettings::load();
-            if (ZoomEngineClient::instance().start(s.jwt_token) &&
+            if (ZoomEngineClient::instance().start(s.resolved_jwt_token()) &&
                 ZoomEngineClient::instance().join(c->meeting_id, c->passcode,
                     c->display_name.empty() ? "OBS" : c->display_name)) {
                 c->subscribe();

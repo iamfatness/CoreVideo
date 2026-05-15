@@ -28,6 +28,8 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
 
     m_sdk_secret_edit->setEchoMode(QLineEdit::Password);
     m_jwt_token_edit->setEchoMode(QLineEdit::Password);
+    m_jwt_token_edit->setPlaceholderText(
+        "Optional override; leave blank to generate from SDK key/secret");
 
     m_control_port_spin = new QSpinBox(this);
     m_control_port_spin->setRange(1024, 65535);

@@ -437,7 +437,7 @@ void ZoomDock::on_join_clicked()
     if (display_name.empty()) display_name = "OBS";
 
     ZoomPluginSettings s = ZoomPluginSettings::load();
-    if (!ZoomEngineClient::instance().start(s.jwt_token)) return;
+    if (!ZoomEngineClient::instance().start(s.resolved_jwt_token())) return;
 
     const bool webinar = m_webinar_cb && m_webinar_cb->isChecked();
     const MeetingKind kind = webinar ? MeetingKind::Webinar : MeetingKind::Meeting;

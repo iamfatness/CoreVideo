@@ -1,9 +1,20 @@
 #include "zoom-settings.h"
 #include "zoom-credentials.h"
+#include <QByteArray>
+#include <QDateTime>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QMessageAuthenticationCode>
 #include <obs-frontend-api.h>
 #include <util/config-file.h>
 
 static constexpr const char *SECTION = "ZoomPlugin";
+
+static QByteArray base64url(const QByteArray &data)
+{
+    return data.toBase64(QByteArray::Base64UrlEncoding |
+                         QByteArray::OmitTrailingEquals);
+}
 
 ZoomPluginSettings ZoomPluginSettings::load()
 {
@@ -53,6 +64,38 @@ ZoomPluginSettings ZoomPluginSettings::load()
     s.last_was_webinar  = config_get_int(cfg, SECTION, "LastWasWebinar") != 0;
 
     return s;
+}
+
+std::string ZoomPluginSettings::resolved_jwt_token() const
+{
+    if (!jwt_token.empty()) return jwt_token;
+    if (sdk_key.empty() || sdk_secret.empty()) return {};
+
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    const qint64 iat = now - 30;
+    const qint64 exp = now + 60 * 60 * 2;
+
+    QJsonObject header;
+    header["alg"] = "HS256";
+    header["typ"] = "JWT";
+
+    QJsonObject payload;
+    payload["appKey"] = QString::fromStdString(sdk_key);
+    payload["iat"] = iat;
+    payload["exp"] = exp;
+    payload["tokenExp"] = exp;
+
+    const QByteArray encoded_header = base64url(
+        QJsonDocument(header).toJson(QJsonDocument::Compact));
+    const QByteArray encoded_payload = base64url(
+        QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    const QByteArray signing_input = encoded_header + "." + encoded_payload;
+    const QByteArray signature = QMessageAuthenticationCode::hash(
+        signing_input,
+        QByteArray::fromStdString(sdk_secret),
+        QCryptographicHash::Sha256);
+
+    return (signing_input + "." + base64url(signature)).toStdString();
 }
 
 void ZoomPluginSettings::save() const

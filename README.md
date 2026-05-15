@@ -45,9 +45,9 @@ CoreVideo integrates the Zoom Meeting SDK into OBS — no screen capture or virt
 | OBS Studio | 30+ | `libobs` + `obs-frontend-api` |
 | CMake | 3.16+ | Build system |
 | Qt | 6.x | Core + Network + Widgets |
-| Zoom Meeting SDK | **5.17.x** (tested) | Place in `third_party/zoom-sdk/`. Raw data API surface changes between minor versions; pin to 5.17.x unless you have tested a newer release. |
+| Zoom Meeting SDK | **5.17.x / 7.x** | Place in `third_party/zoom-sdk/`. Windows builds support the older flat header layout and the newer 7.x subfolder header layout. |
 | C++ compiler | C++17 | MSVC 2022 / Clang 14+ / GCC 11+ |
-| Zoom Developer Account | — | SDK key, secret & JWT token |
+| Zoom Developer Account | — | Meeting SDK key + secret. A manual SDK JWT may be supplied as an override. |
 
 ## Quick Start
 
@@ -102,7 +102,7 @@ CoreVideo integrates the Zoom Meeting SDK into OBS — no screen capture or virt
    cmake --install build --prefix "/path/to/obs-studio"
    ```
 
-4. **Configure credentials** — open OBS → **Tools → Zoom Plugin Settings** and enter your SDK Key, SDK Secret, JWT token, and optionally a control server token and custom ports.
+4. **Configure credentials** — open OBS → **Tools → Zoom Plugin Settings** and enter your SDK Key and SDK Secret. CoreVideo generates a short-lived Meeting SDK JWT locally when joining. The JWT Token field is optional and overrides generated tokens when set. You may also set a control server token and custom ports.
 
 5. **Add sources** — in OBS, add a **Zoom Participant** source (video + audio), **Zoom Participant Audio** source (audio only), **Zoom Share** source (screen share), or **Zoom Interpretation Audio** source (language channel).
 

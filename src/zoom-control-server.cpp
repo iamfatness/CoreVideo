@@ -267,7 +267,7 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
 
         const ZoomPluginSettings settings = ZoomPluginSettings::load();
         const bool ok =
-            ZoomEngineClient::instance().start(settings.jwt_token) &&
+            ZoomEngineClient::instance().start(settings.resolved_jwt_token()) &&
             ZoomEngineClient::instance().join(parsed.meeting_id, passcode,
                                               display_name.toStdString());
         write_response(socket, {{"ok", ok}});

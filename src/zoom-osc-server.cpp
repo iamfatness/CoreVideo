@@ -223,7 +223,7 @@ void ZoomOscServer::dispatch(const QString &address,
         const std::string display_name = args.size() >= 3 ? args[2].s : "OBS";
 
         const ZoomPluginSettings settings = ZoomPluginSettings::load();
-        if (!ZoomEngineClient::instance().start(settings.jwt_token)) {
+        if (!ZoomEngineClient::instance().start(settings.resolved_jwt_token())) {
             blog(LOG_WARNING,
                  "[obs-zoom-plugin] OSC /zoom/join: engine failed to start");
             return;

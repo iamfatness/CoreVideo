@@ -18,5 +18,6 @@ struct ZoomPluginSettings {
     bool                last_was_webinar     = false;
 
     static ZoomPluginSettings load();
+    std::string resolved_jwt_token() const;
     void save() const;
 };

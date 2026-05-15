@@ -42,6 +42,7 @@ public:
     void unsubscribe(const std::string &source_uuid);
 
     MeetingState state() const { return m_state.load(std::memory_order_acquire); }
+    bool is_authenticated() const { return m_authenticated.load(std::memory_order_acquire); }
     uint32_t active_speaker_id() const;
     std::vector<ParticipantInfo> roster() const;
 

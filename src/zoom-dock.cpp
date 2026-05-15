@@ -4,6 +4,7 @@
 #include "zoom-output-manager.h"
 #include "zoom-reconnect.h"
 #include "zoom-settings.h"
+#include "zoom-settings-dialog.h"
 #include <QAbstractItemView>
 #include <QCheckBox>
 #include <QComboBox>
@@ -13,6 +14,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMetaObject>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QTableWidget>
 #include <QTimer>
@@ -437,7 +439,28 @@ void ZoomDock::on_join_clicked()
     if (display_name.empty()) display_name = "OBS";
 
     ZoomPluginSettings s = ZoomPluginSettings::load();
-    if (!ZoomEngineClient::instance().start(s.resolved_jwt_token())) return;
+    std::string jwt = s.resolved_jwt_token();
+    if (!ZoomEngineClient::instance().is_authenticated() && jwt.empty()) {
+        QMessageBox::information(this, "Zoom Authentication",
+            "Enter your Zoom Meeting SDK credentials before joining.");
+        ZoomSettingsDialog dlg(this);
+        if (dlg.exec() != QDialog::Accepted) return;
+        s = ZoomPluginSettings::load();
+        jwt = s.resolved_jwt_token();
+    }
+
+    if (!ZoomEngineClient::instance().is_authenticated() && jwt.empty()) {
+        QMessageBox::warning(this, "Zoom Authentication",
+            "Zoom Meeting SDK authentication is still missing. Enter an SDK key "
+            "and secret, or a valid SDK JWT override, then try Join again.");
+        return;
+    }
+
+    if (!ZoomEngineClient::instance().start(jwt)) {
+        QMessageBox::warning(this, "Zoom Authentication",
+            "Could not start Zoom authentication. Check the OBS log for details.");
+        return;
+    }
 
     const bool webinar = m_webinar_cb && m_webinar_cb->isChecked();
     const MeetingKind kind = webinar ? MeetingKind::Webinar : MeetingKind::Meeting;

@@ -130,6 +130,22 @@ static bool source_wants_subscription(AssignmentMode mode,
     return participant_id != 0;
 }
 
+static void set_yuv_frame_color_info(obs_source_frame &frame)
+{
+    frame.full_range = false;
+    video_format_get_parameters_for_format(VIDEO_CS_709, VIDEO_RANGE_PARTIAL,
+                                           frame.format, frame.color_matrix,
+                                           frame.color_range_min,
+                                           frame.color_range_max);
+}
+
+static uint8_t sample_center_luma(const uint8_t *y_ptr, uint32_t w, uint32_t h,
+                                  uint32_t stride_y)
+{
+    if (!y_ptr || w == 0 || h == 0 || stride_y == 0) return 0;
+    return y_ptr[static_cast<size_t>(h / 2) * stride_y + (w / 2)];
+}
+
 void ZoomSource::apply_settings(obs_data_t *settings)
 {
     const uint32_t old_participant_id = participant_id;
@@ -486,14 +502,18 @@ void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height)
         frame.linesize[1] = w / 2;
         frame.linesize[2] = w / 2;
     }
+    set_yuv_frame_color_info(frame);
 
     obs_source_output_video(source, &frame);
     ++m_frame_count;
     if (m_frame_count == 1 || m_frame_count % 120 == 0) {
         blog(LOG_INFO,
-             "[obs-zoom-plugin] Output Zoom video frame: source=%s uuid=%s count=%llu w=%u h=%u",
+             "[obs-zoom-plugin] Output Zoom video frame: source=%s uuid=%s count=%llu w=%u h=%u fmt=%d y_center=%u y_tl=%u",
              output_name().c_str(), source_uuid.c_str(),
-             static_cast<unsigned long long>(m_frame_count), w, h);
+             static_cast<unsigned long long>(m_frame_count), w, h,
+             static_cast<int>(frame.format),
+             static_cast<unsigned>(sample_center_luma(y_ptr, w, h, w)),
+             static_cast<unsigned>(y_ptr ? y_ptr[0] : 0));
     }
     m_width.store(w, std::memory_order_relaxed);
     m_height.store(h, std::memory_order_relaxed);
@@ -633,6 +653,7 @@ void ZoomSource::output_placeholder_frame(bool color_bars)
     frame.linesize[0] = w;
     frame.linesize[1] = w / 2;
     frame.linesize[2] = w / 2;
+    set_yuv_frame_color_info(frame);
     obs_source_output_video(source, &frame);
 }
 

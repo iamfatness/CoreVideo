@@ -8,6 +8,15 @@
 
 ZoomVideoDelegate::ZoomVideoDelegate(obs_source_t *source) : m_source(source) {}
 
+static void set_yuv_frame_color_info(obs_source_frame &frame)
+{
+    frame.full_range = false;
+    video_format_get_parameters_for_format(VIDEO_CS_709, VIDEO_RANGE_PARTIAL,
+                                           frame.format, frame.color_matrix,
+                                           frame.color_range_min,
+                                           frame.color_range_max);
+}
+
 ZoomVideoDelegate::~ZoomVideoDelegate()
 {
     unsubscribe();
@@ -98,6 +107,7 @@ void ZoomVideoDelegate::onRawDataFrameReceived(YUVRawDataI420 *data)
     frame.linesize[0] = w;
     frame.linesize[1] = w / 2;
     frame.linesize[2] = w / 2;
+    set_yuv_frame_color_info(frame);
 
     obs_source_output_video(m_source, &frame);
 
@@ -150,6 +160,7 @@ void ZoomVideoDelegate::onRawDataStatusChanged(RawDataStatus status)
         frame.linesize[0] = w;
         frame.linesize[1] = w / 2;
         frame.linesize[2] = w / 2;
+        set_yuv_frame_color_info(frame);
         obs_source_output_video(m_source, &frame);
     }
 }

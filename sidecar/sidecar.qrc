@@ -6,4 +6,7 @@
         <file>data/templates/4-up-grid.json</file>
         <file>data/templates/talk-show.json</file>
     </qresource>
+    <qresource prefix="/applied">
+        <file>data/applied/4-up-grid.applied.json</file>
+    </qresource>
 </RCC>

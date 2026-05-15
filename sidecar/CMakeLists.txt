@@ -18,6 +18,7 @@ set(SOURCES
     src/layout-template.cpp
     src/template-manager.cpp
     src/obs-client.cpp
+    src/obs-connect-dialog.cpp
 )
 
 set(RESOURCES sidecar.qrc)

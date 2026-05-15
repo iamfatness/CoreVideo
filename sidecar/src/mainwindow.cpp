@@ -3,12 +3,19 @@
 #include "template-panel.h"
 #include "participant-panel.h"
 #include "template-manager.h"
+#include "obs-connect-dialog.h"
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QLabel>
 #include <QPushButton>
 #include <QFrame>
-#include <QSplitter>
+#include <QPlainTextEdit>
+#include <QDockWidget>
+#include <QFile>
+#include <QJsonDocument>
+#include <QSettings>
+#include <QDateTime>
+#include <QStyle>
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 {
@@ -16,7 +23,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     setMinimumSize(1200, 720);
     resize(1440, 860);
 
-    // Central widget holds 3 columns
     auto *central = new QWidget(this);
     setCentralWidget(central);
 
@@ -24,7 +30,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     rootH->setContentsMargins(0, 0, 0, 0);
     rootH->setSpacing(0);
 
-    // ── Left: Sidebar ─────────────────────────────────────────────────────────
+    // ── Sidebar ───────────────────────────────────────────────────────────────
     auto *sidebar = new Sidebar(this);
     sidebar->setFixedWidth(200);
     rootH->addWidget(sidebar);
@@ -60,10 +66,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         return btn;
     };
 
-    auto *applyBtn = makeToolBtn("⊞  Apply Layout", true);
-    auto *spotBtn  = makeToolBtn("◉  Spotlight Speaker");
-    auto *lowerBtn = makeToolBtn("▼  Lower Thirds");
-    auto *recBtn   = makeToolBtn("⏺  Record");
+    auto *applyBtn  = makeToolBtn("⊞  Apply Template", true);
+    auto *spotBtn   = makeToolBtn("◉  Spotlight Speaker");
+    auto *lowerBtn  = makeToolBtn("▼  Lower Thirds");
+    auto *recBtn    = makeToolBtn("⏺  Record");
     auto *streamBtn = makeToolBtn("⏩  Stream");
 
     tbRow->addWidget(applyBtn);
@@ -83,34 +89,45 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     buildRightPanel(rightPanel);
     rootH->addWidget(rightPanel);
 
+    // ── Log dock ──────────────────────────────────────────────────────────────
+    buildLogDock();
+
+    // ── Restore saved OBS config ──────────────────────────────────────────────
+    QSettings s;
+    m_obsConfig.host          = s.value("obs/host", "localhost").toString();
+    m_obsConfig.port          = s.value("obs/port", 4455).toInt();
+    m_obsConfig.password      = s.value("obs/password", "").toString();
+    m_obsConfig.autoReconnect = s.value("obs/autoReconnect", true).toBool();
+
     // ── Connections ───────────────────────────────────────────────────────────
-    connect(sidebar, &Sidebar::pageSelected, this, &MainWindow::onPageSelected);
-    connect(applyBtn, &QPushButton::clicked, this, &MainWindow::onApplyLayout);
-    connect(m_engineBtn, &QPushButton::clicked, this, &MainWindow::onEngineToggle);
-    connect(m_obsBtn, &QPushButton::clicked, this, &MainWindow::onObsConnect);
+    connect(sidebar,     &Sidebar::pageSelected, this, &MainWindow::onPageSelected);
+    connect(applyBtn,    &QPushButton::clicked,  this, &MainWindow::onApplyLayout);
+    connect(m_engineBtn, &QPushButton::clicked,  this, &MainWindow::onEngineToggle);
+    connect(m_obsBtn,    &QPushButton::clicked,  this, &MainWindow::onObsConnect);
 
     // OBS client
     m_obsClient = new OBSClient(this);
-    connect(m_obsClient, &OBSClient::connected,    this, [this]() {
-        m_obsConnected = true; updateObsButton();
-    });
-    connect(m_obsClient, &OBSClient::disconnected, this, [this]() {
-        m_obsConnected = false; updateObsButton();
-    });
+    connect(m_obsClient, &OBSClient::stateChanged,    this, &MainWindow::onObsState);
+    connect(m_obsClient, &OBSClient::log,             this, &MainWindow::onObsLog);
+    connect(m_obsClient, &OBSClient::scenesReceived,  this, &MainWindow::onScenesReceived);
+    connect(m_obsClient, &OBSClient::templateApplied, this,
+            [this](const QString &name, int n) {
+                onObsLog(QStringLiteral("✓ Applied '%1' (%2 items).").arg(name).arg(n));
+            });
 
-    // Load templates
+    // Templates
     auto &tm = TemplateManager::instance();
     tm.loadBuiltIn();
     m_templatePanel->loadTemplates(tm.templates());
 
-    // Pre-select 4-up grid as example
-    const LayoutTemplate *grid4 = tm.findById("4-up-grid");
-    if (grid4) onTemplateSelected(*grid4);
+    if (const auto *grid4 = tm.findById("4-up-grid")) onTemplateSelected(*grid4);
 
-    // Mock participants
     loadMockParticipants();
+    onObsState(OBSClient::State::Disconnected);
+    onObsLog("Sidecar ready. Click 'OBS' in the top bar to connect.");
 }
 
+// ── Top bar ───────────────────────────────────────────────────────────────────
 void MainWindow::buildTopBar(QWidget *parent)
 {
     m_topBar = new QWidget(parent);
@@ -124,20 +141,25 @@ void MainWindow::buildTopBar(QWidget *parent)
     m_showNameLabel = new QLabel("Morning Show — Episode 142", m_topBar);
     m_showNameLabel->setStyleSheet("color: #e0e0f0; font-size: 15px; font-weight: 700;");
 
+    m_obsStatusLabel = new QLabel("Disconnected", m_topBar);
+    m_obsStatusLabel->setStyleSheet("color: #8080a0; font-size: 11px; background: transparent;");
+
     m_engineBtn = new QPushButton("⏻  Engine OFF", m_topBar);
     m_engineBtn->setObjectName("engineOffBtn");
     m_engineBtn->setFixedHeight(34);
 
-    m_obsBtn = new QPushButton("OBS  ●", m_topBar);
+    m_obsBtn = new QPushButton("OBS  ○", m_topBar);
     m_obsBtn->setObjectName("obsBtn");
     m_obsBtn->setFixedHeight(34);
-    updateObsButton();
 
     row->addWidget(m_showNameLabel, 1);
+    row->addWidget(m_obsStatusLabel);
+    row->addSpacing(6);
     row->addWidget(m_obsBtn);
     row->addWidget(m_engineBtn);
 }
 
+// ── Center canvas area ────────────────────────────────────────────────────────
 void MainWindow::buildCenterArea(QWidget *parent)
 {
     m_canvasArea = new QWidget(parent);
@@ -145,33 +167,27 @@ void MainWindow::buildCenterArea(QWidget *parent)
     row->setContentsMargins(12, 12, 12, 8);
     row->setSpacing(12);
 
-    // Live preview
-    auto *liveWrap = new QWidget(m_canvasArea);
-    auto *liveV    = new QVBoxLayout(liveWrap);
-    liveV->setContentsMargins(0, 0, 0, 0);
-    liveV->setSpacing(4);
-    auto *liveLbl  = new QLabel("LIVE", liveWrap);
-    liveLbl->setStyleSheet("color: #ff4040; font-size: 10px; font-weight: 800; "
-                           "letter-spacing: 0.1em; background: transparent;");
-    m_liveCanvas = new PreviewCanvas(liveWrap);
-    liveV->addWidget(liveLbl);
-    liveV->addWidget(m_liveCanvas, 1);
-    row->addWidget(liveWrap, 1);
+    auto buildPane = [&](const QString &label, const QString &color,
+                         PreviewCanvas *&out) {
+        auto *wrap = new QWidget(m_canvasArea);
+        auto *v = new QVBoxLayout(wrap);
+        v->setContentsMargins(0, 0, 0, 0);
+        v->setSpacing(4);
+        auto *lbl = new QLabel(label, wrap);
+        lbl->setStyleSheet(QString("color: %1; font-size: 10px; font-weight: 800; "
+                                   "letter-spacing: 0.1em; background: transparent;")
+                               .arg(color));
+        out = new PreviewCanvas(wrap);
+        v->addWidget(lbl);
+        v->addWidget(out, 1);
+        return wrap;
+    };
 
-    // Scene preview
-    auto *sceneWrap = new QWidget(m_canvasArea);
-    auto *sceneV    = new QVBoxLayout(sceneWrap);
-    sceneV->setContentsMargins(0, 0, 0, 0);
-    sceneV->setSpacing(4);
-    auto *sceneLbl  = new QLabel("SCENE PREVIEW", sceneWrap);
-    sceneLbl->setStyleSheet("color: #5080ff; font-size: 10px; font-weight: 800; "
-                            "letter-spacing: 0.1em; background: transparent;");
-    m_sceneCanvas = new PreviewCanvas(sceneWrap);
-    sceneV->addWidget(sceneLbl);
-    sceneV->addWidget(m_sceneCanvas, 1);
-    row->addWidget(sceneWrap, 1);
+    row->addWidget(buildPane("LIVE",          "#ff4040", m_liveCanvas),  1);
+    row->addWidget(buildPane("SCENE PREVIEW", "#5080ff", m_sceneCanvas), 1);
 }
 
+// ── Right panel ───────────────────────────────────────────────────────────────
 void MainWindow::buildRightPanel(QWidget *parent)
 {
     auto *vl = new QVBoxLayout(parent);
@@ -183,7 +199,6 @@ void MainWindow::buildRightPanel(QWidget *parent)
             this, &MainWindow::onTemplateSelected);
     vl->addWidget(m_templatePanel);
 
-    // Divider
     auto *div = new QFrame(parent);
     div->setFrameShape(QFrame::HLine);
     div->setStyleSheet("color: #1e1e2e;");
@@ -193,6 +208,25 @@ void MainWindow::buildRightPanel(QWidget *parent)
     vl->addWidget(m_participantPanel, 1);
 }
 
+// ── Log dock ──────────────────────────────────────────────────────────────────
+void MainWindow::buildLogDock()
+{
+    m_logDock = new QDockWidget("OBS Log", this);
+    m_logDock->setFeatures(QDockWidget::DockWidgetClosable |
+                           QDockWidget::DockWidgetMovable);
+    m_logView = new QPlainTextEdit(m_logDock);
+    m_logView->setReadOnly(true);
+    m_logView->setMaximumBlockCount(500);
+    m_logView->setStyleSheet(
+        "QPlainTextEdit { background-color: #0a0a10; color: #b0b0d0; "
+        "font-family: 'Menlo', 'Consolas', monospace; font-size: 11px; "
+        "border: none; padding: 6px; }");
+    m_logDock->setWidget(m_logView);
+    addDockWidget(Qt::BottomDockWidgetArea, m_logDock);
+    m_logDock->hide();
+}
+
+// ── Mock data ─────────────────────────────────────────────────────────────────
 void MainWindow::loadMockParticipants()
 {
     QVector<ParticipantInfo> parts = {
@@ -203,19 +237,15 @@ void MainWindow::loadMockParticipants()
     };
     m_participantPanel->setParticipants(parts);
 
-    // Set on scene canvas
     QVector<PreviewCanvas::Participant> canvasParts;
-    for (const auto &p : parts) {
+    for (const auto &p : parts)
         canvasParts.append({p.name, p.initials, p.color, p.isTalking, p.hasVideo});
-    }
     m_liveCanvas->setParticipants(canvasParts);
     m_sceneCanvas->setParticipants(canvasParts);
 }
 
-void MainWindow::onPageSelected(Sidebar::Page /*p*/)
-{
-    // Future: switch stacked widget pages
-}
+// ── Slots ─────────────────────────────────────────────────────────────────────
+void MainWindow::onPageSelected(Sidebar::Page) { /* future */ }
 
 void MainWindow::onTemplateSelected(const LayoutTemplate &tmpl)
 {
@@ -226,14 +256,34 @@ void MainWindow::onTemplateSelected(const LayoutTemplate &tmpl)
 
 void MainWindow::onApplyLayout()
 {
-    if (!m_currentTemplate.isValid()) return;
-    if (m_obsConnected) {
-        QStringList sources;
-        for (int i = 0; i < m_currentTemplate.slots.size(); ++i)
-            sources << QString("CoreVideo Participant %1").arg(i + 1);
-        m_obsClient->applyLayout("Scene", m_currentTemplate, sources, 1920, 1080);
+    if (!m_currentTemplate.isValid()) {
+        onObsLog("No template selected.");
+        return;
     }
-    // Mock: previews already up to date via onTemplateSelected
+    if (!m_obsClient->isConnected()) {
+        onObsLog("Not connected to OBS — preview-only apply.");
+        return;
+    }
+
+    // Try the flat applied-template JSON first if one ships with the template
+    const QString applied = QString(":/applied/data/applied/%1.applied.json")
+                                .arg(m_currentTemplate.id);
+    QFile f(applied);
+    if (f.open(QIODevice::ReadOnly)) {
+        const QJsonObject obj = QJsonDocument::fromJson(f.readAll()).object();
+        // Override scene with our active target so the user can retarget without
+        // editing JSON.
+        QJsonObject withScene = obj;
+        if (!m_targetScene.isEmpty()) withScene["scene"] = m_targetScene;
+        m_obsClient->applyTemplate(withScene);
+        return;
+    }
+
+    // Fall back to normalized layout
+    QStringList sources;
+    for (int i = 0; i < m_currentTemplate.slots.size(); ++i)
+        sources << QString("Zoom Participant %1").arg(i + 1);
+    m_obsClient->applyLayout(m_targetScene, m_currentTemplate, sources, 1920, 1080);
 }
 
 void MainWindow::onEngineToggle()
@@ -247,17 +297,63 @@ void MainWindow::onEngineToggle()
 
 void MainWindow::onObsConnect()
 {
-    if (m_obsConnected) {
+    if (m_obsClient->isConnected()
+        || m_obsClient->state() == OBSClient::State::Connecting
+        || m_obsClient->state() == OBSClient::State::Reconnecting) {
         m_obsClient->disconnectFromOBS();
-    } else {
-        m_obsClient->connectToOBS({"localhost", 4455, ""});
+        return;
     }
+
+    OBSConnectDialog dlg(m_obsConfig, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+    m_obsConfig = dlg.config();
+
+    QSettings s;
+    s.setValue("obs/host",          m_obsConfig.host);
+    s.setValue("obs/port",          m_obsConfig.port);
+    s.setValue("obs/password",      m_obsConfig.password);
+    s.setValue("obs/autoReconnect", m_obsConfig.autoReconnect);
+
+    m_obsClient->connectToOBS(m_obsConfig);
 }
 
-void MainWindow::updateObsButton()
+void MainWindow::onObsState(OBSClient::State s)
 {
-    m_obsBtn->setProperty("connected", m_obsConnected ? "true" : "false");
-    m_obsBtn->setText(m_obsConnected ? "OBS  ●" : "OBS  ○");
+    m_obsStatusLabel->setText(m_obsClient->stateLabel());
+    const bool ok = (s == OBSClient::State::Connected);
+    m_obsBtn->setProperty("connected", ok ? "true" : "false");
+    m_obsBtn->setText(ok ? "OBS  ●" : "OBS  ○");
     m_obsBtn->style()->unpolish(m_obsBtn);
     m_obsBtn->style()->polish(m_obsBtn);
+
+    QString color = "#8080a0";
+    switch (s) {
+    case OBSClient::State::Connected:    color = "#20c460"; break;
+    case OBSClient::State::Connecting:
+    case OBSClient::State::Authenticating:
+    case OBSClient::State::Reconnecting: color = "#e0a020"; break;
+    case OBSClient::State::Failed:       color = "#e04040"; break;
+    case OBSClient::State::Disconnected: color = "#8080a0"; break;
+    }
+    m_obsStatusLabel->setStyleSheet(
+        QString("color: %1; font-size: 11px; background: transparent;").arg(color));
+}
+
+void MainWindow::onObsLog(const QString &msg)
+{
+    if (!m_logView) return;
+    const QString line = QString("[%1] %2")
+        .arg(QDateTime::currentDateTime().toString("HH:mm:ss"), msg);
+    m_logView->appendPlainText(line);
+    if (!m_logDock->isVisible()) m_logDock->show();
+}
+
+void MainWindow::onScenesReceived(const QStringList &scenes)
+{
+    if (scenes.contains(m_targetScene)) {
+        m_obsClient->requestSceneItems(m_targetScene);
+    } else if (!scenes.isEmpty()) {
+        onObsLog(QStringLiteral("Target scene '%1' not found. Available: %2")
+                     .arg(m_targetScene, scenes.join(", ")));
+    }
 }

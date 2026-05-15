@@ -22,6 +22,9 @@ public:
                             IpcFd e2p_fd);
     ~ParticipantSubscription();
 
+    uint32_t participant_id() const { return m_participant_id; }
+    IpcFd ipc_fd() const { return m_e2p_fd; }
+
     void onRawDataFrameReceived(YUVRawDataI420 *data) override;
     void onRawDataStatusChanged(ZOOMSDK::IZoomSDKRendererDelegate::RawDataStatus status) override;
     void onRendererBeDestroyed() override;
@@ -42,6 +45,7 @@ public:
                    const std::string &source_uuid,
                    IpcFd e2p_fd);
     void unsubscribe(const std::string &source_uuid);
+    void resubscribe_all();
 
 private:
     std::unordered_map<std::string,

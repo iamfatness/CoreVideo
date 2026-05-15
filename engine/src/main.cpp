@@ -15,6 +15,20 @@
 #else
 #include <meeting_participants_ctrl_interface.h>
 #endif
+#if __has_include(<meeting_service_components/meeting_raw_archiving_interface.h>)
+#include <meeting_service_components/meeting_raw_archiving_interface.h>
+#define COREVIDEO_HAS_RAW_ARCHIVING 1
+#elif __has_include(<meeting_raw_archiving_interface.h>)
+#include <meeting_raw_archiving_interface.h>
+#define COREVIDEO_HAS_RAW_ARCHIVING 1
+#endif
+#if __has_include(<meeting_service_components/meeting_recording_interface.h>)
+#include <meeting_service_components/meeting_recording_interface.h>
+#define COREVIDEO_HAS_RECORDING_CTRL 1
+#elif __has_include(<meeting_recording_interface.h>)
+#include <meeting_recording_interface.h>
+#define COREVIDEO_HAS_RECORDING_CTRL 1
+#endif
 #if __has_include(<meeting_service_components/meeting_video_interface.h>)
 #include <meeting_service_components/meeting_video_interface.h>
 #else
@@ -506,12 +520,17 @@ private:
 
 // ── Meeting event handler ─────────────────────────────────────────────────────
 
-class EngineMeetingEvent : public ZOOMSDK::IMeetingServiceEvent {
+class EngineMeetingEvent : public ZOOMSDK::IMeetingServiceEvent
+#if defined(COREVIDEO_HAS_RECORDING_CTRL)
+                         , public ZOOMSDK::IMeetingRecordingCtrlEvent
+#endif
+{
 public:
     EngineMeetingEvent(IpcFd e2p, ZOOMSDK::IMeetingService **meeting_svc,
-                       EngineParticipants *participants)
+                       EngineParticipants *participants,
+                       EngineVideo *video_engine)
         : m_e2p(e2p), m_meeting_svc(meeting_svc),
-          m_participants(participants) {}
+          m_participants(participants), m_video_engine(video_engine) {}
 
     void onMeetingStatusChanged(ZOOMSDK::MeetingStatus status, int iResult) override {
         EngineIpc::write(R"({"cmd":"debug","stage":"meeting_status","status":)" +
@@ -519,6 +538,54 @@ public:
             R"(,"result":)" + std::to_string(iResult) + "}");
         switch (status) {
         case ZOOMSDK::MEETING_STATUS_INMEETING:
+#if defined(COREVIDEO_HAS_RAW_ARCHIVING) || defined(COREVIDEO_HAS_RECORDING_CTRL)
+            if (m_meeting_svc && *m_meeting_svc) {
+#if defined(COREVIDEO_HAS_RECORDING_CTRL)
+                auto *rec = (*m_meeting_svc)->GetMeetingRecordingController();
+                if (rec) {
+                    const ZOOMSDK::SDKError set_event = rec->SetEvent(this);
+                    EngineIpc::write(
+                        R"({"cmd":"debug","stage":"recording_set_event","code":)" +
+                        std::to_string(static_cast<int>(set_event)) + "}");
+                    const ZOOMSDK::SDKError can_raw = rec->CanStartRawRecording();
+                    EngineIpc::write(
+                        R"({"cmd":"debug","stage":"can_start_raw_recording","code":)" +
+                        std::to_string(static_cast<int>(can_raw)) + "}");
+                    if (can_raw != ZOOMSDK::SDKERR_SUCCESS) {
+                        const ZOOMSDK::SDKError support_req =
+                            rec->IsSupportRequestLocalRecordingPrivilege();
+                        EngineIpc::write(
+                            R"({"cmd":"debug","stage":"support_recording_privilege_request","code":)" +
+                            std::to_string(static_cast<int>(support_req)) + "}");
+                        const ZOOMSDK::SDKError req =
+                            rec->RequestLocalRecordingPrivilege();
+                        EngineIpc::write(
+                            R"({"cmd":"debug","stage":"request_recording_privilege","code":)" +
+                            std::to_string(static_cast<int>(req)) + "}");
+                    }
+                    const ZOOMSDK::SDKError start_raw = rec->StartRawRecording();
+                    EngineIpc::write(
+                        R"({"cmd":"debug","stage":"start_raw_recording","code":)" +
+                        std::to_string(static_cast<int>(start_raw)) + "}");
+                } else {
+                    EngineIpc::write(
+                        R"({"cmd":"debug","stage":"recording_controller","code":-1})");
+                }
+#endif
+#if defined(COREVIDEO_HAS_RAW_ARCHIVING)
+                auto *raw = (*m_meeting_svc)->GetMeetingRawArchivingController();
+                if (raw) {
+                    const ZOOMSDK::SDKError err = raw->StartRawArchiving();
+                    EngineIpc::write(
+                        R"({"cmd":"debug","stage":"start_raw_archiving","code":)" +
+                        std::to_string(static_cast<int>(err)) + "}");
+                } else {
+                    EngineIpc::write(
+                        R"({"cmd":"debug","stage":"start_raw_archiving","code":-1})");
+                }
+#endif
+            }
+#endif
             EngineIpc::write( R"({"cmd":"joined"})");
             if (m_participants && m_meeting_svc && *m_meeting_svc) {
                 m_participants->attach(
@@ -529,6 +596,29 @@ public:
             break;
         case ZOOMSDK::MEETING_STATUS_DISCONNECTING:
         case ZOOMSDK::MEETING_STATUS_ENDED:
+#if defined(COREVIDEO_HAS_RECORDING_CTRL)
+            if (m_meeting_svc && *m_meeting_svc) {
+                auto *rec = (*m_meeting_svc)->GetMeetingRecordingController();
+                if (rec) {
+                    rec->SetEvent(nullptr);
+                    const ZOOMSDK::SDKError err = rec->StopRawRecording();
+                    EngineIpc::write(
+                        R"({"cmd":"debug","stage":"stop_raw_recording","code":)" +
+                        std::to_string(static_cast<int>(err)) + "}");
+                }
+            }
+#endif
+#if defined(COREVIDEO_HAS_RAW_ARCHIVING)
+            if (m_meeting_svc && *m_meeting_svc) {
+                auto *raw = (*m_meeting_svc)->GetMeetingRawArchivingController();
+                if (raw) {
+                    const ZOOMSDK::SDKError err = raw->StopRawArchiving();
+                    EngineIpc::write(
+                        R"({"cmd":"debug","stage":"stop_raw_archiving","code":)" +
+                        std::to_string(static_cast<int>(err)) + "}");
+                }
+            }
+#endif
             if (m_participants) m_participants->detach();
             EngineIpc::write( R"({"cmd":"left"})");
             break;
@@ -552,10 +642,73 @@ public:
 #if defined(WIN32)
     void onAppSignalPanelUpdated(ZOOMSDK::IMeetingAppSignalHandler *) override {}
 #endif
+
+#if defined(COREVIDEO_HAS_RECORDING_CTRL)
+    void onRecordingStatus(ZOOMSDK::RecordingStatus status) override
+    {
+        EngineIpc::write(R"({"cmd":"debug","stage":"recording_status","status":)" +
+            std::to_string(static_cast<int>(status)) + "}");
+    }
+    void onCloudRecordingStatus(ZOOMSDK::RecordingStatus status) override
+    {
+        EngineIpc::write(R"({"cmd":"debug","stage":"cloud_recording_status","status":)" +
+            std::to_string(static_cast<int>(status)) + "}");
+    }
+    void onRecordPrivilegeChanged(bool can_rec) override
+    {
+        EngineIpc::write(R"({"cmd":"debug","stage":"record_privilege_changed","can_record":)" +
+            std::string(can_rec ? "true" : "false") + "}");
+    }
+    void onLocalRecordingPrivilegeRequestStatus(
+        ZOOMSDK::RequestLocalRecordingStatus status) override
+    {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"recording_privilege_request_status","status":)" +
+            std::to_string(static_cast<int>(status)) + "}");
+        if (status != ZOOMSDK::RequestLocalRecording_Granted ||
+            !m_meeting_svc || !*m_meeting_svc)
+            return;
+
+        auto *rec = (*m_meeting_svc)->GetMeetingRecordingController();
+        if (!rec) return;
+        const ZOOMSDK::SDKError start_raw = rec->StartRawRecording();
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"start_raw_recording_after_grant","code":)" +
+            std::to_string(static_cast<int>(start_raw)) + "}");
+        if (m_video_engine)
+            m_video_engine->resubscribe_all();
+    }
+    void onRequestCloudRecordingResponse(
+        ZOOMSDK::RequestStartCloudRecordingStatus status) override
+    {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"cloud_recording_request_status","status":)" +
+            std::to_string(static_cast<int>(status)) + "}");
+    }
+    void onLocalRecordingPrivilegeRequested(
+        ZOOMSDK::IRequestLocalRecordingPrivilegeHandler *) override {}
+    void onStartCloudRecordingRequested(
+        ZOOMSDK::IRequestStartCloudRecordingHandler *) override {}
+#if defined(WIN32)
+    void onRecording2MP4Done(bool, int, const zchar_t *) override {}
+    void onRecording2MP4Processing(int) override {}
+    void onCustomizedLocalRecordingSourceNotification(
+        ZOOMSDK::ICustomizedLocalRecordingLayoutHelper *) override {}
+#endif
+    void onCloudRecordingStorageFull(time_t) override {}
+    void onEnableAndStartSmartRecordingRequested(
+        ZOOMSDK::IRequestEnableAndStartSmartRecordingHandler *) override {}
+    void onSmartRecordingEnableActionCallback(
+        ZOOMSDK::ISmartRecordingEnableActionHandler *) override {}
+#if defined(__linux__)
+    void onTranscodingStatusChanged(ZOOMSDK::TranscodingStatus, const zchar_t *) override {}
+#endif
+#endif
 private:
     IpcFd m_e2p;
     ZOOMSDK::IMeetingService **m_meeting_svc = nullptr;
     EngineParticipants *m_participants = nullptr;
+    EngineVideo *m_video_engine = nullptr;
 };
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -573,8 +726,8 @@ int main()
     ZOOMSDK::IMeetingService *meeting_svc = nullptr;
     EngineAuthEvent    auth_event(e2p);
     EngineParticipants participants(e2p);
-    EngineMeetingEvent meeting_event(e2p, &meeting_svc, &participants);
     EngineVideo        video_engine;
+    EngineMeetingEvent meeting_event(e2p, &meeting_svc, &participants, &video_engine);
 
     // Persistent wide-string storage for async SDK calls (JoinParam / AuthContext
     // hold raw pointers — these must outlive the Join/SDKAuth call).

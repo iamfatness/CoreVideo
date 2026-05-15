@@ -6,6 +6,8 @@
 #include <zoom_rawdata_api.h>
 #endif
 #include <cstring>
+#include <tuple>
+#include <vector>
 
 ParticipantSubscription::ParticipantSubscription(uint32_t participant_id,
                                                  const std::string &source_uuid,
@@ -102,4 +104,23 @@ void EngineVideo::subscribe(uint32_t participant_id,
 void EngineVideo::unsubscribe(const std::string &source_uuid)
 {
     m_subs.erase(source_uuid);
+}
+
+void EngineVideo::resubscribe_all()
+{
+    std::vector<std::tuple<std::string, uint32_t, IpcFd>> current;
+    current.reserve(m_subs.size());
+    for (const auto &entry : m_subs) {
+        if (entry.second) {
+            current.emplace_back(entry.first,
+                                 entry.second->participant_id(),
+                                 entry.second->ipc_fd());
+        }
+    }
+
+    for (const auto &entry : current) {
+        const auto &[source_uuid, participant_id, e2p_fd] = entry;
+        m_subs[source_uuid] = std::make_unique<ParticipantSubscription>(
+            participant_id, source_uuid, e2p_fd);
+    }
 }

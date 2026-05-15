@@ -90,8 +90,10 @@ function normalizeText(value) {
 
 function homeContent() {
   return `<section class="hero">
-  <div class="hero-copy">
+  <figure class="hero-media">
     <img class="hero-logo" src="/assets/corevideo-logo.jpg" alt="CoreVideo">
+  </figure>
+  <div class="hero-copy">
     <p class="eyebrow">OBS Studio plugin for Zoom Meeting SDK production workflows</p>
     <h1>Live Zoom video, audio, screen share, and interpretation inside OBS.</h1>
     <p class="lede">CoreVideo provides raw participant media routing for broadcast, recording, and ISO-style production workflows while keeping processing local to the operator machine.</p>
@@ -239,7 +241,7 @@ function layout(page, content, options = {}) {
 </head>
 <body class="${options.home ? "home-page" : "document-page"}">
   <header class="site-header">
-    <a class="brand" href="/"><span class="brand-mark">C</span><span>CoreVideo</span></a>
+    <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span><span>CoreVideo</span></a>
     <nav>${nav.map(([label, href]) => `<a href="${href}">${label}</a>`).join("")}</nav>
   </header>
   <main class="content">
@@ -351,16 +353,32 @@ a { color: var(--cyan); text-decoration-thickness: 1px; text-underline-offset: 3
   text-decoration: none;
 }
 .brand-mark {
-  display: grid;
-  place-items: center;
+  position: relative;
+  display: inline-block;
   width: 32px;
   height: 32px;
   border-radius: 50%;
-  color: #07101c;
-  font-size: 17px;
-  font-weight: 850;
   background: linear-gradient(135deg, var(--cyan), var(--blue));
   box-shadow: 0 0 24px rgba(34, 231, 232, 0.35);
+}
+.brand-mark::before {
+  content: "";
+  position: absolute;
+  inset: 7px 8px;
+  background: #07101c;
+  border-radius: 50%;
+}
+.brand-mark::after {
+  content: "";
+  position: absolute;
+  left: 13px;
+  top: 9px;
+  width: 0;
+  height: 0;
+  border-top: 7px solid transparent;
+  border-bottom: 7px solid transparent;
+  border-left: 11px solid var(--cyan);
+  filter: drop-shadow(0 0 6px rgba(34, 231, 232, 0.75));
 }
 nav {
   display: flex;
@@ -393,25 +411,42 @@ nav a:hover { color: var(--text); }
   padding: 0;
 }
 .hero {
-  min-height: 580px;
-  display: flex;
-  align-items: flex-end;
+  display: grid;
+  grid-template-columns: minmax(0, 1.02fr) minmax(360px, 0.98fr);
+  align-items: center;
+  gap: clamp(30px, 5vw, 68px);
   padding: clamp(28px, 6vw, 70px);
   border: 1px solid var(--line);
   border-radius: 8px;
   background:
-    linear-gradient(90deg, rgba(7, 9, 20, 0.32), rgba(7, 9, 20, 0.88)),
-    url("/assets/corevideo-logo.jpg") center / cover no-repeat;
+    linear-gradient(135deg, rgba(9, 13, 27, 0.96), rgba(12, 17, 34, 0.82)),
+    radial-gradient(circle at 12% 20%, rgba(34, 231, 232, 0.16), transparent 22rem);
   box-shadow: 0 24px 90px rgba(0, 0, 0, 0.5);
 }
-.hero-copy { max-width: 680px; }
+.hero-copy { max-width: 620px; }
+.hero-media {
+  margin: 0;
+  position: relative;
+}
+.hero-media::before {
+  content: "";
+  position: absolute;
+  inset: 14% 18% auto auto;
+  width: 42%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: rgba(34, 231, 232, 0.18);
+  filter: blur(42px);
+}
 .hero-logo {
   display: block;
-  width: min(520px, 100%);
+  position: relative;
+  width: 100%;
   height: auto;
-  margin: 0 0 28px;
-  border-radius: 6px;
-  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.36);
+  border-radius: 8px;
+  box-shadow:
+    0 22px 80px rgba(0, 0, 0, 0.42),
+    0 0 0 1px rgba(125, 239, 255, 0.12);
 }
 .eyebrow {
   color: var(--cyan);
@@ -521,7 +556,10 @@ hr {
   text-align: center;
 }
 @media (max-width: 900px) {
-  .hero { min-height: 520px; }
+  .hero {
+    grid-template-columns: 1fr;
+  }
+  .hero-media { order: -1; }
   .link-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 700px) {

@@ -8,6 +8,7 @@
 #include <QAbstractItemView>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDateTime>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -165,6 +166,13 @@ ZoomDock::ZoomDock(QWidget *parent)
         update_recovery_panel();
     });
 
+    m_refresh_timer = new QTimer(this);
+    m_refresh_timer->setInterval(500);
+    connect(m_refresh_timer, &QTimer::timeout, this, [this]() {
+        refresh();
+    });
+    m_refresh_timer->start();
+
     // Hidden until recovery begins.
     m_recovery_label->setVisible(false);
     m_cancel_rec_btn->setVisible(false);
@@ -216,6 +224,8 @@ ZoomDock::ZoomDock(QWidget *parent)
 ZoomDock::~ZoomDock()
 {
     m_alive->store(false, std::memory_order_release);
+    if (m_join_thread.joinable())
+        m_join_thread.join();
     ZoomEngineClient::instance().remove_roster_callback(this);
     ZoomOutputManager::instance().clear_all_preview_cbs();
 }
@@ -256,14 +266,34 @@ void ZoomDock::update_recovery_panel()
 void ZoomDock::update_state_indicator()
 {
     const MeetingState s = ZoomEngineClient::instance().state();
+
+    if (s == MeetingState::Joining && m_join_started_ms > 0 &&
+        !m_join_timeout_reported &&
+        QDateTime::currentMSecsSinceEpoch() - m_join_started_ms > 120000) {
+        m_join_timeout_reported = true;
+        ZoomEngineClient::instance().leave();
+        ZoomEngineClient::instance().set_state(MeetingState::Failed);
+        QMessageBox::warning(this, "Zoom Join",
+            "Zoom did not finish joining within two minutes. The join attempt "
+            "was cancelled so you can try again.");
+    }
+
+    if (s != MeetingState::Joining) {
+        m_join_started_ms = 0;
+        m_join_timeout_reported = false;
+    }
+
     m_state_dot->setStyleSheet(state_dot_style(s));
     m_state_label->setText(state_label_text(s));
 
     const bool in_meeting    = (s == MeetingState::InMeeting);
     const bool recovering    = (s == MeetingState::Recovering);
-    const bool transitioning = (s == MeetingState::Joining || s == MeetingState::Leaving);
+    const bool join_task     = m_join_in_progress.load(std::memory_order_acquire);
+    const bool transitioning = join_task || s == MeetingState::Joining ||
+                               s == MeetingState::Leaving;
     m_join_btn->setEnabled(!in_meeting && !transitioning && !recovering);
-    m_leave_btn->setEnabled(in_meeting);
+    m_leave_btn->setEnabled(in_meeting || transitioning || recovering);
+    m_leave_btn->setText(in_meeting ? "Leave" : "Cancel");
 
     update_recovery_panel();
 
@@ -417,6 +447,9 @@ void ZoomDock::on_join_clicked()
 {
     const QString raw_input = m_meeting_id->text().trimmed();
     if (raw_input.isEmpty()) return;
+    if (m_join_in_progress.load(std::memory_order_acquire)) return;
+    if (m_join_thread.joinable())
+        m_join_thread.join();
 
     // Accept either a raw meeting ID or a Zoom URL; the parser strips out a
     // numeric meeting ID and an optional pwd= passcode from the URL.
@@ -456,28 +489,65 @@ void ZoomDock::on_join_clicked()
         return;
     }
 
-    if (!ZoomEngineClient::instance().start(jwt)) {
-        QMessageBox::warning(this, "Zoom Authentication",
-            "Could not start Zoom authentication. Check the OBS log for details.");
-        return;
-    }
+    m_join_started_ms = QDateTime::currentMSecsSinceEpoch();
+    m_join_timeout_reported = false;
 
     const bool webinar = m_webinar_cb && m_webinar_cb->isChecked();
     const MeetingKind kind = webinar ? MeetingKind::Webinar : MeetingKind::Meeting;
 
-    if (ZoomEngineClient::instance().join(parsed.meeting_id, passcode,
-                                          display_name, kind)) {
-        s.last_meeting_id   = parsed.meeting_id;
-        s.last_display_name = display_name;
-        s.last_was_webinar  = webinar;
-        s.save();
-    }
-
+    m_join_in_progress.store(true, std::memory_order_release);
+    const uint64_t join_generation =
+        m_join_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+    ZoomEngineClient::instance().set_state(MeetingState::Joining);
     update_state_indicator();
+
+    auto self = this;
+    auto alive = m_alive;
+    const std::string meeting_id = parsed.meeting_id;
+    m_join_thread = std::thread([self, alive, jwt, meeting_id, passcode,
+                                 display_name, kind, webinar, join_generation]() {
+        const bool started = ZoomEngineClient::instance().start(jwt);
+        const bool still_current =
+            self->m_join_generation.load(std::memory_order_acquire) == join_generation;
+        const bool joined = started && still_current &&
+            ZoomEngineClient::instance().join(meeting_id, passcode,
+                                              display_name, kind);
+
+        QMetaObject::invokeMethod(self, [self, alive, started, joined, meeting_id,
+                                         display_name, webinar, join_generation]() {
+            if (!alive->load(std::memory_order_acquire)) return;
+            if (self->m_join_generation.load(std::memory_order_acquire) != join_generation) {
+                self->m_join_in_progress.store(false, std::memory_order_release);
+                self->update_state_indicator();
+                return;
+            }
+
+            self->m_join_in_progress.store(false, std::memory_order_release);
+            if (!started) {
+                ZoomEngineClient::instance().set_state(MeetingState::Failed);
+                QMessageBox::warning(self, "Zoom Authentication",
+                    "Could not start Zoom authentication. Check the OBS log for details.");
+            } else if (!joined) {
+                ZoomEngineClient::instance().set_state(MeetingState::Failed);
+                QMessageBox::warning(self, "Zoom Join",
+                    "Could not send the join request to Zoom. Check the OBS log for details.");
+            } else {
+                ZoomPluginSettings saved = ZoomPluginSettings::load();
+                saved.last_meeting_id = meeting_id;
+                saved.last_display_name = display_name;
+                saved.last_was_webinar = webinar;
+                saved.save();
+            }
+            self->update_state_indicator();
+        }, Qt::QueuedConnection);
+    });
 }
 
 void ZoomDock::on_leave_clicked()
 {
+    m_join_started_ms = 0;
+    m_join_timeout_reported = false;
+    m_join_generation.fetch_add(1, std::memory_order_acq_rel);
     ZoomEngineClient::instance().leave();
     update_state_indicator();
 }

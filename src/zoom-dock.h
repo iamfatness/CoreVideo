@@ -2,7 +2,9 @@
 
 #include <QWidget>
 #include <atomic>
+#include <cstdint>
 #include <memory>
+#include <thread>
 
 class QLabel;
 class QLineEdit;
@@ -47,6 +49,12 @@ private:
     QLabel      *m_recovery_label    = nullptr;
     QPushButton *m_cancel_rec_btn    = nullptr;
     QTimer      *m_countdown_timer   = nullptr;
+    QTimer      *m_refresh_timer     = nullptr;
+    qint64       m_join_started_ms   = 0;
+    bool         m_join_timeout_reported = false;
+    std::thread  m_join_thread;
+    std::atomic<bool> m_join_in_progress{false};
+    std::atomic<uint64_t> m_join_generation{0};
 
     // Output table (replaces the modal Output Manager)
     QTableWidget *m_output_table = nullptr;

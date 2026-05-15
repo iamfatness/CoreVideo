@@ -9,6 +9,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QList>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <obs-module.h>
@@ -91,6 +92,20 @@ bool ZoomControlServer::start(quint16 port)
 
     blog(LOG_INFO, "[obs-zoom-plugin] Control server listening on 127.0.0.1:%u",
          static_cast<unsigned>(port));
+
+    // Roster changes: marshal to Qt main thread, then push event to subscribers.
+    ZoomEngineClient::instance().add_roster_callback(this, [this]() {
+        QMetaObject::invokeMethod(this, [this]() {
+            push_event({{"event", "roster_changed"}});
+        }, Qt::QueuedConnection);
+    });
+
+    if (!m_poll_timer) {
+        m_poll_timer = new QTimer(this);
+        connect(m_poll_timer, &QTimer::timeout, this, [this]() { poll_and_push(); });
+    }
+    m_poll_timer->start(250);
+
     return true;
 }
 
@@ -98,11 +113,54 @@ void ZoomControlServer::stop()
 {
     if (!m_server) return;
     m_server->close();
+    if (m_poll_timer) m_poll_timer->stop();
+    ZoomEngineClient::instance().remove_roster_callback(this);
+    m_event_subs.clear();
 }
 
 void ZoomControlServer::set_token(const std::string &token)
 {
     m_token = token;
+}
+
+void ZoomControlServer::push_event(const QJsonObject &event)
+{
+    const QByteArray line =
+        QJsonDocument(event).toJson(QJsonDocument::Compact) + '\n';
+    for (auto *sock : QList<QTcpSocket *>(m_event_subs.begin(), m_event_subs.end())) {
+        if (sock->state() == QAbstractSocket::ConnectedState) {
+            sock->write(line);
+            sock->flush();
+        }
+    }
+}
+
+void ZoomControlServer::remove_subscriber(QTcpSocket *socket)
+{
+    m_event_subs.remove(socket);
+}
+
+void ZoomControlServer::poll_and_push()
+{
+    const auto newState = ZoomEngineClient::instance().state();
+    if (newState != m_last_state) {
+        m_last_state = newState;
+        push_event({{"event", "meeting_state"}, {"state", meeting_state_to_string(newState)}});
+    }
+
+    const uint32_t spk = ZoomEngineClient::instance().active_speaker_id();
+    if (spk != m_last_speaker) {
+        m_last_speaker = spk;
+        QString name;
+        for (const auto &p : ZoomEngineClient::instance().roster()) {
+            if (p.user_id == spk) { name = QString::fromStdString(p.display_name); break; }
+        }
+        push_event({
+            {"event",   "active_speaker"},
+            {"user_id", static_cast<double>(spk)},
+            {"name",    name},
+        });
+    }
 }
 
 void ZoomControlServer::on_new_connection()
@@ -200,18 +258,12 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
 
     if (cmd == "help") {
         QJsonArray commands;
-        commands.append("help");
-        commands.append("status");
-        commands.append("list_participants");
-        commands.append("list_outputs");
-        commands.append("assign_output");
-        commands.append("join");
-        commands.append("leave");
-        commands.append("oauth_callback");
-        write_response(socket, {
-            {"ok", true},
-            {"commands", commands}
-        });
+        for (const char *c : {"help", "status", "list_participants", "list_outputs",
+                              "assign_output", "assign_output_ex",
+                              "join", "leave", "oauth_callback",
+                              "subscribe_events", "recovery_cancel"})
+            commands.append(c);
+        write_response(socket, {{"ok", true}, {"commands", commands}});
         return;
     }
 
@@ -347,6 +399,66 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
     if (cmd == "leave") {
         ZoomEngineClient::instance().leave();
         write_response(socket, {{"ok", true}});
+        return;
+    }
+
+    // Extended output assignment — supports spotlight, screen_share, failover.
+    // Fields: source (str), mode (str: participant|active_speaker|spotlight|screen_share),
+    //         participant_id (uint), spotlight_slot (uint), failover_participant_id (uint),
+    //         isolate_audio (bool), audio_channels (str: mono|stereo)
+    if (cmd == "assign_output_ex") {
+        const QString source = req.value("source").toString();
+        const QString modeStr = req.value("mode").toString("participant");
+
+        AssignmentMode mode = AssignmentMode::Participant;
+        if      (modeStr == "active_speaker") mode = AssignmentMode::ActiveSpeaker;
+        else if (modeStr == "spotlight")      mode = AssignmentMode::SpotlightIndex;
+        else if (modeStr == "screen_share")   mode = AssignmentMode::ScreenShare;
+
+        uint32_t participant_id = 0, spotlight_slot = 1, failover_id = 0;
+        json_to_uint32(req, "participant_id",          participant_id);
+        json_to_uint32(req, "spotlight_slot",          spotlight_slot);
+        json_to_uint32(req, "failover_participant_id", failover_id);
+        if (spotlight_slot < 1) spotlight_slot = 1;
+
+        const bool isolate = req.value("isolate_audio").toBool(false);
+        const AudioChannelMode amode =
+            req.value("audio_channels").toString() == "stereo"
+            ? AudioChannelMode::Stereo : AudioChannelMode::Mono;
+
+        const bool ok = ZoomOutputManager::instance().configure_output_ex(
+            source.toStdString(), mode, participant_id, spotlight_slot, failover_id,
+            isolate, amode);
+        write_response(socket, ok
+            ? QJsonObject{{"ok", true}}
+            : QJsonObject{{"ok", false}, {"error", "unknown_output"}});
+        return;
+    }
+
+    if (cmd == "recovery_cancel") {
+        ZoomReconnectManager::instance().cancel();
+        write_response(socket, {{"ok", true}});
+        return;
+    }
+
+    // Keep the socket open and stream JSON events until it disconnects.
+    if (cmd == "subscribe_events") {
+        m_event_subs.insert(socket);
+        // Remove from the set if the client disconnects.
+        connect(socket, &QTcpSocket::disconnected, this,
+                [this, socket]() { remove_subscriber(socket); },
+                Qt::UniqueConnection);
+        write_response(socket, {{"ok", true}, {"subscribed", true}});
+        // Send current state immediately so the subscriber starts with fresh data.
+        push_event({{"event", "meeting_state"},
+                    {"state", meeting_state_to_string(ZoomEngineClient::instance().state())}});
+        const uint32_t spk = ZoomEngineClient::instance().active_speaker_id();
+        QString spkName;
+        for (const auto &p : ZoomEngineClient::instance().roster())
+            if (p.user_id == spk) { spkName = QString::fromStdString(p.display_name); break; }
+        push_event({{"event", "active_speaker"},
+                    {"user_id", static_cast<double>(spk)},
+                    {"name",    spkName}});
         return;
     }
 

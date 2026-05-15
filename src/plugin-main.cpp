@@ -10,6 +10,7 @@
 #include "zoom-dock.h"
 #include "zoom-control-server.h"
 #include "zoom-osc-server.h"
+#include <QDockWidget>
 #include <QMainWindow>
 #include <QPointer>
 #if !defined(WIN32)
@@ -17,6 +18,43 @@
 #endif
 
 static QPointer<ZoomDock> g_dock;
+
+static ZoomDock *ensure_zoom_dock()
+{
+    auto *main_win = static_cast<QMainWindow *>(obs_frontend_get_main_window());
+    if (!main_win) {
+        blog(LOG_WARNING, "[obs-zoom-plugin] obs_frontend_get_main_window() returned null — dock not created");
+        return nullptr;
+    }
+
+    if (!g_dock) {
+        g_dock = new ZoomDock(main_win);
+        obs_frontend_add_dock_by_id("ZoomControlDock", "Zoom Control", g_dock);
+    }
+    return g_dock;
+}
+
+static void show_zoom_dock()
+{
+    ZoomDock *dock_widget = ensure_zoom_dock();
+    if (!dock_widget) return;
+
+    QWidget *parent = dock_widget;
+    while (parent && !qobject_cast<QDockWidget *>(parent))
+        parent = parent->parentWidget();
+
+    if (auto *dock = qobject_cast<QDockWidget *>(parent)) {
+        dock->show();
+        dock->raise();
+        dock->activateWindow();
+        dock_widget->setFocus();
+        return;
+    }
+
+    dock_widget->show();
+    dock_widget->raise();
+    dock_widget->activateWindow();
+}
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("obs-zoom-plugin", "en-US")
@@ -59,16 +97,14 @@ bool obs_module_load(void)
         dlg.exec();
     }, nullptr);
 
+    obs_frontend_add_tools_menu_item("Zoom Control", [](void *) {
+        show_zoom_dock();
+    }, nullptr);
+
     obs_frontend_add_event_callback(
         [](enum obs_frontend_event event, void *) {
             if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
-                auto *main_win = static_cast<QMainWindow *>(obs_frontend_get_main_window());
-                if (!main_win) {
-                    blog(LOG_WARNING, "[obs-zoom-plugin] obs_frontend_get_main_window() returned null — dock not created");
-                } else {
-                    g_dock = new ZoomDock(main_win);
-                    obs_frontend_add_dock_by_id("ZoomControlDock", "Zoom Control", g_dock);
-                }
+                ensure_zoom_dock();
             }
             if (event == OBS_FRONTEND_EVENT_EXIT)
                 ZoomEngineClient::instance().stop();

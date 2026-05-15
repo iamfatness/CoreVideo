@@ -220,7 +220,7 @@ void zoom_share_source_register()
     obs_source_info info = {};
     info.id           = "zoom_share_source";
     info.type         = OBS_SOURCE_TYPE_INPUT;
-    info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO |
+    info.output_flags = OBS_SOURCE_ASYNC_VIDEO | OBS_SOURCE_AUDIO |
                         OBS_SOURCE_DO_NOT_DUPLICATE;
     info.get_name     = share_source_name;
     info.create       = share_source_create;

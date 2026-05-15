@@ -16,25 +16,14 @@ public:
 private slots:
     void onSave();
     void onAuthorizeOAuth();
-    void onRegisterUrlScheme();
     void onRefreshOAuth();
     void onDisconnectOAuth();
 
 private:
     void updateOAuthStatus();
 
-    QLineEdit *m_sdk_key_edit           = nullptr;
-    QLineEdit *m_sdk_secret_edit        = nullptr;
-    QLineEdit *m_jwt_token_edit         = nullptr;
-    QLineEdit *m_oauth_client_id_edit   = nullptr;
-    QLineEdit *m_oauth_client_secret_edit = nullptr;
-    QCheckBox *m_oauth_use_client_secret_cb = nullptr;
-    QLineEdit *m_oauth_authorization_url_edit = nullptr;
-    QLineEdit *m_oauth_redirect_uri_edit = nullptr;
-    QLineEdit *m_oauth_scopes_edit      = nullptr;
     QLabel *m_oauth_status_label        = nullptr;
     QPushButton *m_oauth_authorize_btn  = nullptr;
-    QPushButton *m_oauth_register_scheme_btn = nullptr;
     QPushButton *m_oauth_refresh_btn    = nullptr;
     QPushButton *m_oauth_disconnect_btn = nullptr;
     QSpinBox  *m_control_port_spin      = nullptr;

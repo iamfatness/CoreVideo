@@ -1,0 +1,9 @@
+<RCC>
+    <qresource prefix="/templates">
+        <file>data/templates/1-up.json</file>
+        <file>data/templates/2-up-sbs.json</file>
+        <file>data/templates/2-up-pip.json</file>
+        <file>data/templates/4-up-grid.json</file>
+        <file>data/templates/talk-show.json</file>
+    </qresource>
+</RCC>

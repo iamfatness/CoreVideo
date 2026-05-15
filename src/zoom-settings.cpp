@@ -95,7 +95,9 @@ ZoomPluginSettings ZoomPluginSettings::load()
     s.sdk_key    = (key    && *key)    ? key    : kEmbeddedSdkKey;
     s.sdk_secret = (secret && *secret) ? secret : kEmbeddedSdkSecret;
     s.jwt_token  = (jwt    && *jwt)    ? jwt    : kEmbeddedJwtToken;
-    s.oauth_client_id = oauth_client_id ? oauth_client_id : "";
+    s.oauth_client_id = (oauth_client_id && *oauth_client_id)
+        ? oauth_client_id
+        : kEmbeddedOAuthClientId;
     s.oauth_client_secret = unprotect_secret(oauth_client_secret);
     s.oauth_use_client_secret = oauth_use_client_secret != 0;
     s.oauth_authorization_url = oauth_authorization_url ? oauth_authorization_url : "";

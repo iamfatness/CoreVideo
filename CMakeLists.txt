@@ -8,9 +8,10 @@ option(COREVIDEO_BUILD_PLUGIN "Build the OBS plugin module" ON)
 option(COREVIDEO_BUILD_ENGINE "Build the ZoomObsEngine helper process" ON)
 
 # ── Embedded credentials (set via -D or CI secrets; empty = user must enter) ──
-set(ZOOM_EMBED_SDK_KEY    "" CACHE STRING "Pre-embedded Zoom SDK key")
-set(ZOOM_EMBED_SDK_SECRET "" CACHE STRING "Pre-embedded Zoom SDK secret")
-set(ZOOM_EMBED_JWT_TOKEN  "" CACHE STRING "Pre-embedded Zoom JWT token")
+set(ZOOM_EMBED_SDK_KEY          "" CACHE STRING "Pre-embedded Zoom SDK key")
+set(ZOOM_EMBED_SDK_SECRET       "" CACHE STRING "Pre-embedded Zoom SDK secret")
+set(ZOOM_EMBED_JWT_TOKEN        "" CACHE STRING "Pre-embedded Zoom JWT token")
+set(ZOOM_EMBED_OAUTH_CLIENT_ID  "" CACHE STRING "Pre-embedded Zoom OAuth (marketplace) client ID")
 configure_file(src/zoom-credentials.h.in
                "${CMAKE_CURRENT_BINARY_DIR}/zoom-credentials.h" @ONLY)
 configure_file(src/obs-zoom-version.h.in

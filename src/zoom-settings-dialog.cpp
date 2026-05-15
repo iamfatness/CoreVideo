@@ -28,51 +28,6 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
 
     ZoomPluginSettings s = ZoomPluginSettings::load();
 
-    // ── Zoom SDK ──────────────────────────────────────────────────────────────
-    m_sdk_key_edit    = new QLineEdit(QString::fromStdString(s.sdk_key),    this);
-    m_sdk_secret_edit = new QLineEdit(QString::fromStdString(s.sdk_secret), this);
-    m_jwt_token_edit  = new QLineEdit(QString::fromStdString(s.jwt_token),  this);
-    m_oauth_client_id_edit = new QLineEdit(QString::fromStdString(s.oauth_client_id), this);
-    m_oauth_client_secret_edit =
-        new QLineEdit(QString::fromStdString(s.oauth_client_secret), this);
-    m_oauth_use_client_secret_cb =
-        new QCheckBox("Use Client Secret for confidential OAuth", this);
-    m_oauth_use_client_secret_cb->setChecked(s.oauth_use_client_secret);
-    m_oauth_authorization_url_edit =
-        new QLineEdit(QString::fromStdString(s.oauth_authorization_url), this);
-    m_oauth_redirect_uri_edit =
-        new QLineEdit(QString::fromStdString(s.oauth_redirect_uri), this);
-    m_oauth_scopes_edit = new QLineEdit(QString::fromStdString(s.oauth_scopes), this);
-
-    m_sdk_secret_edit->setEchoMode(QLineEdit::Password);
-    m_jwt_token_edit->setEchoMode(QLineEdit::Password);
-    m_oauth_client_secret_edit->setEchoMode(QLineEdit::Password);
-    m_oauth_client_secret_edit->setPlaceholderText(
-        "Optional; leave blank for public PKCE OAuth");
-    m_oauth_client_secret_edit->setEnabled(s.oauth_use_client_secret);
-    connect(m_oauth_use_client_secret_cb, &QCheckBox::toggled,
-            m_oauth_client_secret_edit, &QLineEdit::setEnabled);
-    m_jwt_token_edit->setPlaceholderText(
-        "Optional override; leave blank to generate from SDK key / secret");
-
-    auto *sdk_help = new QLabel(
-        "Obtain your SDK key and secret from the "
-        "<a href=\"https://marketplace.zoom.us\">Zoom Marketplace</a> "
-        "(Develop → Build App → Meeting SDK).", this);
-    sdk_help->setOpenExternalLinks(true);
-    sdk_help->setWordWrap(true);
-    sdk_help->setStyleSheet("QLabel { color: #7a8faa; font-size: 11px; }");
-
-    auto *sdk_form = new QFormLayout;
-    sdk_form->setSpacing(8);
-    sdk_form->addRow(new QLabel("SDK Key:",    this), m_sdk_key_edit);
-    sdk_form->addRow(new QLabel("SDK Secret:", this), m_sdk_secret_edit);
-    sdk_form->addRow(new QLabel("JWT Token:",  this), m_jwt_token_edit);
-    sdk_form->addRow(sdk_help);
-
-    auto *sdk_group = new QGroupBox("Zoom SDK", this);
-    sdk_group->setLayout(sdk_form);
-
     // ── Control Server ────────────────────────────────────────────────────────
     m_control_port_spin = new QSpinBox(this);
     m_control_port_spin->setRange(1024, 65535);
@@ -84,19 +39,16 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     m_control_token_edit->setEchoMode(QLineEdit::Password);
     m_control_token_edit->setPlaceholderText("Leave blank to allow unauthenticated access");
 
-    // ── OAuth / PKCE ──────────────────────────────────────────────────────────
-    m_oauth_authorize_btn = new QPushButton("Authorize with Zoom", this);
-    m_oauth_register_scheme_btn = new QPushButton("Register corevideo:// URL Scheme", this);
-    m_oauth_refresh_btn = new QPushButton("Refresh Token", this);
-    m_oauth_disconnect_btn = new QPushButton("Disconnect", this);
+    // ── Zoom Account (OAuth) ──────────────────────────────────────────────────
+    m_oauth_authorize_btn = new QPushButton("Sign in with Zoom", this);
+    m_oauth_refresh_btn = new QPushButton("Refresh", this);
+    m_oauth_disconnect_btn = new QPushButton("Sign out", this);
     m_oauth_status_label = new QLabel(this);
     m_oauth_status_label->setWordWrap(true);
     m_oauth_status_label->setStyleSheet("QLabel { color: #7a8faa; font-size: 11px; }");
     m_oauth_authorize_btn->setProperty("role", "primary");
     connect(m_oauth_authorize_btn, &QPushButton::clicked,
             this, &ZoomSettingsDialog::onAuthorizeOAuth);
-    connect(m_oauth_register_scheme_btn, &QPushButton::clicked,
-            this, &ZoomSettingsDialog::onRegisterUrlScheme);
     connect(m_oauth_refresh_btn, &QPushButton::clicked,
             this, &ZoomSettingsDialog::onRefreshOAuth);
     connect(m_oauth_disconnect_btn, &QPushButton::clicked,
@@ -108,21 +60,13 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     oauth_button_row->addWidget(m_oauth_refresh_btn);
     oauth_button_row->addWidget(m_oauth_disconnect_btn);
 
-    auto *oauth_form = new QFormLayout;
-    oauth_form->setSpacing(8);
-    oauth_form->addRow(new QLabel("Status:", this), m_oauth_status_label);
-    oauth_form->addRow(new QLabel("Client ID:",          this), m_oauth_client_id_edit);
-    oauth_form->addRow("", m_oauth_use_client_secret_cb);
-    oauth_form->addRow(new QLabel("Client Secret:",      this), m_oauth_client_secret_edit);
-    oauth_form->addRow(new QLabel("Authorization URL:",  this), m_oauth_authorization_url_edit);
-    oauth_form->addRow(new QLabel("Redirect URI:",       this), m_oauth_redirect_uri_edit);
-    oauth_form->addRow(new QLabel("Scopes:",             this), m_oauth_scopes_edit);
-    oauth_form->addRow("", m_oauth_register_scheme_btn);
-    oauth_form->addRow("", oauth_button_row);
+    auto *oauth_layout = new QVBoxLayout;
+    oauth_layout->setSpacing(8);
+    oauth_layout->addWidget(m_oauth_status_label);
+    oauth_layout->addLayout(oauth_button_row);
 
-    auto *oauth_group = new QGroupBox("Zoom OAuth (PKCE)", this);
-    oauth_group->setLayout(oauth_form);
-
+    auto *oauth_group = new QGroupBox("Zoom Account", this);
+    oauth_group->setLayout(oauth_layout);
 
     auto *ctrl_form = new QFormLayout;
     ctrl_form->setSpacing(8);
@@ -224,7 +168,6 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
 
     auto *layout = new QVBoxLayout(this);
     layout->setSpacing(8);
-    layout->addWidget(sdk_group);
     layout->addWidget(oauth_group);
     layout->addWidget(ctrl_group);
     layout->addWidget(osc_group);
@@ -240,16 +183,6 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
 void ZoomSettingsDialog::onSave()
 {
     ZoomPluginSettings s = ZoomPluginSettings::load();
-    s.sdk_key             = m_sdk_key_edit->text().toStdString();
-    s.sdk_secret          = m_sdk_secret_edit->text().toStdString();
-    s.jwt_token           = m_jwt_token_edit->text().toStdString();
-    s.oauth_client_id     = m_oauth_client_id_edit->text().toStdString();
-    s.oauth_client_secret = m_oauth_client_secret_edit->text().toStdString();
-    s.oauth_use_client_secret = m_oauth_use_client_secret_cb->isChecked();
-    s.oauth_authorization_url =
-        m_oauth_authorization_url_edit->text().toStdString();
-    s.oauth_redirect_uri  = m_oauth_redirect_uri_edit->text().toStdString();
-    s.oauth_scopes        = m_oauth_scopes_edit->text().toStdString();
     s.control_server_port = static_cast<uint16_t>(m_control_port_spin->value());
     s.osc_server_port     = static_cast<uint16_t>(m_osc_port_spin->value());
     s.control_token       = m_control_token_edit->text().toStdString();
@@ -289,40 +222,11 @@ void ZoomSettingsDialog::onSave()
 
 void ZoomSettingsDialog::onAuthorizeOAuth()
 {
-    ZoomPluginSettings s = ZoomPluginSettings::load();
-    s.oauth_client_id = m_oauth_client_id_edit->text().toStdString();
-    s.oauth_client_secret = m_oauth_client_secret_edit->text().toStdString();
-    s.oauth_use_client_secret = m_oauth_use_client_secret_cb->isChecked();
-    s.oauth_authorization_url =
-        m_oauth_authorization_url_edit->text().toStdString();
-    s.oauth_redirect_uri = m_oauth_redirect_uri_edit->text().toStdString();
-    s.oauth_scopes = m_oauth_scopes_edit->text().toStdString();
-    s.save();
     QString error;
     if (!ZoomOAuthManager::instance().begin_authorization(this, &error)) {
         QMessageBox::warning(this, "Zoom OAuth", error);
     }
     updateOAuthStatus();
-}
-
-void ZoomSettingsDialog::onRegisterUrlScheme()
-{
-    ZoomPluginSettings s = ZoomPluginSettings::load();
-    s.oauth_client_id = m_oauth_client_id_edit->text().toStdString();
-    s.oauth_client_secret = m_oauth_client_secret_edit->text().toStdString();
-    s.oauth_use_client_secret = m_oauth_use_client_secret_cb->isChecked();
-    s.oauth_authorization_url =
-        m_oauth_authorization_url_edit->text().toStdString();
-    s.oauth_redirect_uri = m_oauth_redirect_uri_edit->text().toStdString();
-    s.oauth_scopes = m_oauth_scopes_edit->text().toStdString();
-    s.save();
-    QString error;
-    if (!ZoomOAuthManager::instance().register_url_scheme(&error)) {
-        QMessageBox::warning(this, "Zoom OAuth", error);
-        return;
-    }
-    QMessageBox::information(this, "Zoom OAuth",
-        "Registered corevideo://oauth/callback for this user.");
 }
 
 void ZoomSettingsDialog::onRefreshOAuth()
@@ -346,7 +250,7 @@ void ZoomSettingsDialog::onDisconnectOAuth()
     s.save();
     updateOAuthStatus();
     QMessageBox::information(this, "Zoom OAuth",
-        "Stored Zoom OAuth tokens were cleared. Authorize again before joining as a signed-in user.");
+        "Signed out of Zoom. Sign in again before joining meetings that require signed-in user context.");
 }
 
 void ZoomSettingsDialog::updateOAuthStatus()
@@ -358,25 +262,17 @@ void ZoomSettingsDialog::updateOAuthStatus()
 
     QString status;
     if (!has_access && !has_refresh) {
-        status = "Not authorized. Use Authorize with Zoom before joining meetings that require signed-in user context.";
+        status = "Not signed in. Use Sign in with Zoom before joining meetings that require signed-in user context.";
     } else if (s.oauth_expires_at > now) {
-        status = QString("Authorized. Access token expires %1.")
+        status = QString("Signed in. Access token expires %1.")
             .arg(QLocale().toString(
                 QDateTime::fromSecsSinceEpoch(s.oauth_expires_at).toLocalTime(),
                 QLocale::ShortFormat));
     } else if (has_refresh) {
-        status = "Authorized, but the access token is expired. Refresh Token should renew it without reopening the browser.";
+        status = "Signed in, but the access token is expired. Refresh should renew it without reopening the browser.";
     } else {
-        status = "Authorization is incomplete or expired. Authorize with Zoom again.";
+        status = "Sign-in is incomplete or expired. Sign in with Zoom again.";
     }
-
-    if (m_control_port_spin && m_control_port_spin->value() != 19870) {
-        status += QString(" OAuth callbacks will use the configured control port %1 after the updated helper is installed.")
-            .arg(m_control_port_spin->value());
-    }
-    status += s.oauth_use_client_secret
-        ? " OAuth mode: confidential client."
-        : " OAuth mode: public PKCE client.";
 
     m_oauth_status_label->setText(status);
     m_oauth_refresh_btn->setEnabled(has_refresh);

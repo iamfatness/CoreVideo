@@ -71,6 +71,15 @@ QString ZoomOAuthManager::form_encode(const QMap<QString, QString> &fields)
 bool ZoomOAuthManager::begin_authorization(QWidget *parent, QString *error)
 {
     ZoomPluginSettings s = ZoomPluginSettings::load();
+    QString registration_error;
+    if (!register_url_scheme(&registration_error)) {
+        if (error) {
+            *error = "Could not register the corevideo:// OAuth callback URL. " +
+                     registration_error;
+        }
+        return false;
+    }
+
     QUrl url = s.oauth_authorization_url.empty()
         ? QUrl("https://zoom.us/oauth/authorize")
         : QUrl(QString::fromStdString(s.oauth_authorization_url));

@@ -1,5 +1,5 @@
 const ORIGIN = "https://raw.githubusercontent.com/iamfatness/CoreVideo/main/public";
-const VERSION = "08a114d";
+const VERSION = "68fda1b";
 
 const aliases = new Map([
   ["/terms-of-use", "/terms/"],

@@ -1,4 +1,5 @@
 const ORIGIN = "https://raw.githubusercontent.com/iamfatness/CoreVideo/main/public";
+const VERSION = "212585c";
 
 const aliases = new Map([
   ["/terms-of-use", "/terms/"],
@@ -32,7 +33,7 @@ function normalizePath(pathname) {
 }
 
 async function fetchAsset(asset) {
-  const response = await fetch(ORIGIN + asset, {
+  const response = await fetch(`${ORIGIN}${asset}?v=${VERSION}`, {
     cf: { cacheTtl: 300, cacheEverything: true },
   });
   if (!response.ok)

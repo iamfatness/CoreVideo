@@ -23,6 +23,7 @@ set(SOURCES
     src/template-manager.cpp
     src/obs-client.cpp
     src/obs-connect-dialog.cpp
+    src/sidecar-control-server.cpp
 )
 
 set(RESOURCES sidecar.qrc)

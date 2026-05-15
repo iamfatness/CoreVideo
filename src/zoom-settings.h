@@ -7,6 +7,7 @@
 struct ZoomPluginSettings {
     std::string         sdk_key, sdk_secret, jwt_token;
     std::string         oauth_client_id;
+    std::string         oauth_client_secret;
     std::string         oauth_authorization_url;
     std::string         oauth_redirect_uri = "corevideo://oauth/callback";
     std::string         oauth_scopes = "user:read:zak user:read:user";

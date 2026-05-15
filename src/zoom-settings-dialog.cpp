@@ -33,6 +33,8 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     m_sdk_secret_edit = new QLineEdit(QString::fromStdString(s.sdk_secret), this);
     m_jwt_token_edit  = new QLineEdit(QString::fromStdString(s.jwt_token),  this);
     m_oauth_client_id_edit = new QLineEdit(QString::fromStdString(s.oauth_client_id), this);
+    m_oauth_client_secret_edit =
+        new QLineEdit(QString::fromStdString(s.oauth_client_secret), this);
     m_oauth_authorization_url_edit =
         new QLineEdit(QString::fromStdString(s.oauth_authorization_url), this);
     m_oauth_redirect_uri_edit =
@@ -41,6 +43,9 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
 
     m_sdk_secret_edit->setEchoMode(QLineEdit::Password);
     m_jwt_token_edit->setEchoMode(QLineEdit::Password);
+    m_oauth_client_secret_edit->setEchoMode(QLineEdit::Password);
+    m_oauth_client_secret_edit->setPlaceholderText(
+        "Optional; leave blank for public PKCE OAuth");
     m_jwt_token_edit->setPlaceholderText(
         "Optional override; leave blank to generate from SDK key / secret");
 
@@ -101,6 +106,7 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     oauth_form->setSpacing(8);
     oauth_form->addRow(new QLabel("Status:", this), m_oauth_status_label);
     oauth_form->addRow(new QLabel("Client ID:",          this), m_oauth_client_id_edit);
+    oauth_form->addRow(new QLabel("Client Secret:",      this), m_oauth_client_secret_edit);
     oauth_form->addRow(new QLabel("Authorization URL:",  this), m_oauth_authorization_url_edit);
     oauth_form->addRow(new QLabel("Redirect URI:",       this), m_oauth_redirect_uri_edit);
     oauth_form->addRow(new QLabel("Scopes:",             this), m_oauth_scopes_edit);
@@ -231,6 +237,7 @@ void ZoomSettingsDialog::onSave()
     s.sdk_secret          = m_sdk_secret_edit->text().toStdString();
     s.jwt_token           = m_jwt_token_edit->text().toStdString();
     s.oauth_client_id     = m_oauth_client_id_edit->text().toStdString();
+    s.oauth_client_secret = m_oauth_client_secret_edit->text().toStdString();
     s.oauth_authorization_url =
         m_oauth_authorization_url_edit->text().toStdString();
     s.oauth_redirect_uri  = m_oauth_redirect_uri_edit->text().toStdString();
@@ -276,6 +283,7 @@ void ZoomSettingsDialog::onAuthorizeOAuth()
 {
     ZoomPluginSettings s = ZoomPluginSettings::load();
     s.oauth_client_id = m_oauth_client_id_edit->text().toStdString();
+    s.oauth_client_secret = m_oauth_client_secret_edit->text().toStdString();
     s.oauth_authorization_url =
         m_oauth_authorization_url_edit->text().toStdString();
     s.oauth_redirect_uri = m_oauth_redirect_uri_edit->text().toStdString();
@@ -292,6 +300,7 @@ void ZoomSettingsDialog::onRegisterUrlScheme()
 {
     ZoomPluginSettings s = ZoomPluginSettings::load();
     s.oauth_client_id = m_oauth_client_id_edit->text().toStdString();
+    s.oauth_client_secret = m_oauth_client_secret_edit->text().toStdString();
     s.oauth_authorization_url =
         m_oauth_authorization_url_edit->text().toStdString();
     s.oauth_redirect_uri = m_oauth_redirect_uri_edit->text().toStdString();

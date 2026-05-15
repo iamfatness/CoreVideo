@@ -47,8 +47,9 @@ This is needed for external-account meetings and Marketplace review.
    global config and falls back to `19870`.
 4. The plugin verifies `state`, exchanges the authorization code at
    `https://zoom.us/oauth/token`, and stores access/refresh tokens. For public
-   PKCE, CoreVideo sends HTTP Basic auth as `base64(public_client_id:)` without
-   a client secret.
+   PKCE, leave OAuth Client Secret blank so CoreVideo sends HTTP Basic auth as
+   `base64(public_client_id:)`. For a confidential General OAuth local-test app,
+   enter the OAuth Client Secret and CoreVideo sends `base64(client_id:secret)`.
 5. Before joining, the plugin refreshes the access token if needed and calls:
    `GET https://api.zoom.us/v2/users/me/zak`
 6. The returned ZAK is passed into the Meeting SDK `JoinParam4WithoutLogin`
@@ -59,6 +60,9 @@ This is needed for external-account meetings and Marketplace review.
 - PKCE is used because CoreVideo is a desktop plugin and cannot safely store an
   OAuth client secret.
 - Windows token storage uses DPAPI before writing tokens into OBS global config.
+- If the optional OAuth Client Secret is configured on Windows, it is also
+  DPAPI-protected before writing to OBS global config. Avoid using this mode for
+  broad distribution; public PKCE remains preferred for desktop plugins.
 - Refresh tokens are rotated; always persist the latest refresh token Zoom
   returns.
 - Windows builds must ship Qt's TLS backend plugins, especially the Schannel

@@ -68,9 +68,10 @@ QString ZoomOAuthManager::form_encode(const QMap<QString, QString> &fields)
     return query.toString(QUrl::FullyEncoded);
 }
 
-static QByteArray public_client_basic_auth(const QString &client_id)
+static QByteArray oauth_basic_auth(const QString &client_id,
+                                   const QString &client_secret)
 {
-    return "Basic " + (client_id + ":").toUtf8().toBase64();
+    return "Basic " + (client_id + ":" + client_secret).toUtf8().toBase64();
 }
 
 bool ZoomOAuthManager::begin_authorization(QWidget *parent, QString *error)
@@ -204,11 +205,12 @@ bool ZoomOAuthManager::handle_redirect_url(const QString &url, QString *error)
     const QString client_id = m_pending_client_id.isEmpty()
         ? QString::fromStdString(s.oauth_client_id)
         : m_pending_client_id;
+    const QString client_secret = QString::fromStdString(s.oauth_client_secret);
     QNetworkAccessManager manager;
     QNetworkRequest request(QUrl("https://zoom.us/oauth/token"));
     request.setHeader(QNetworkRequest::ContentTypeHeader,
                       "application/x-www-form-urlencoded");
-    request.setRawHeader("Authorization", public_client_basic_auth(client_id));
+    request.setRawHeader("Authorization", oauth_basic_auth(client_id, client_secret));
     const QString body = form_encode({
         {"grant_type", "authorization_code"},
         {"client_id", client_id},
@@ -266,7 +268,8 @@ bool ZoomOAuthManager::refresh_access_token_blocking(QString *error)
     request.setHeader(QNetworkRequest::ContentTypeHeader,
                       "application/x-www-form-urlencoded");
     request.setRawHeader("Authorization",
-                         public_client_basic_auth(QString::fromStdString(s.oauth_client_id)));
+                         oauth_basic_auth(QString::fromStdString(s.oauth_client_id),
+                                          QString::fromStdString(s.oauth_client_secret)));
     const QString body = form_encode({
         {"grant_type", "refresh_token"},
         {"client_id", QString::fromStdString(s.oauth_client_id)},

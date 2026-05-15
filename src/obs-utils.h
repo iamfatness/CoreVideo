@@ -6,6 +6,9 @@ namespace zoom_join_utils {
 struct ParsedJoin {
     std::string meeting_id; // numeric only; empty if input could not be parsed
     std::string passcode;   // empty if not present in input
+    std::string on_behalf_token;
+    std::string user_zak;
+    std::string app_privilege_token;
 };
 
 // Accepts either a raw meeting ID (digits, optionally with spaces/dashes) or

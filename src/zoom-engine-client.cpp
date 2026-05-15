@@ -10,6 +10,80 @@
 #include <thread>
 #include <unordered_map>
 
+static bool is_permanent_meeting_failure(int code)
+{
+    switch (code) {
+    case 4:   // MEETING_FAIL_PASSWORD_ERR
+    case 6:   // MEETING_FAIL_MEETING_OVER
+    case 8:   // MEETING_FAIL_MEETING_NOT_EXIST
+    case 9:   // MEETING_FAIL_MEETING_USER_FULL
+    case 12:  // MEETING_FAIL_CONFLOCKED
+    case 13:  // MEETING_FAIL_MEETING_RESTRICTED
+    case 23:  // MEETING_FAIL_ENFORCE_LOGIN
+    case 60:  // MEETING_FAIL_FORBID_TO_JOIN_INTERNAL_MEETING
+    case 62:  // MEETING_FAIL_HOST_DISALLOW_OUTSIDE_USER_JOIN
+    case 63:  // MEETING_FAIL_UNABLE_TO_JOIN_EXTERNAL_MEETING
+    case 64:  // MEETING_FAIL_BLOCKED_BY_ACCOUNT_ADMIN
+    case 82:  // MEETING_FAIL_NEED_SIGN_IN_FOR_PRIVATE_MEETING
+    case 500: // MEETING_FAIL_APP_PRIVILEGE_TOKEN_ERROR
+    case 501: // MEETING_FAIL_AUTHORIZED_USER_NOT_INMEETING
+    case 502: // MEETING_FAIL_ON_BEHALF_TOKEN_CONFLICT_LOGIN_ERROR
+    case 503: // MEETING_FAIL_USER_LEVEL_TOKEN_NOT_HAVE_HOST_ZAK_OBF
+    case 504: // MEETING_FAIL_APP_CAN_NOT_ANONYMOUS_JOIN_MEETING
+    case 505: // MEETING_FAIL_ON_BEHALF_TOKEN_INVALID
+    case 506: // MEETING_FAIL_ON_BEHALF_TOKEN_NOT_MATCH_MEETING
+    case 1143: // MEETING_FAIL_JMAK_USER_EMAIL_NOT_MATCH
+        return true;
+    default:
+        return false;
+    }
+}
+
+static std::string zoom_error_message(const QJsonObject &obj)
+{
+    const QString msg = obj.value("msg").toString();
+    const QString reason = obj.value("reason").toString();
+    const int code = obj.value("code").toInt(0);
+
+    if (msg == "meeting_failed") {
+        if (code == 63) {
+            return "Zoom rejected the join: external meetings require a published "
+                   "Meeting SDK app or Zoom approval. (63 "
+                   "MEETING_FAIL_UNABLE_TO_JOIN_EXTERNAL_MEETING)";
+        }
+        if (code == 505) {
+            return "Zoom rejected the join: the on-behalf token is invalid. "
+                   "(505 MEETING_FAIL_ON_BEHALF_TOKEN_INVALID)";
+        }
+        if (code == 506) {
+            return "Zoom rejected the join: the on-behalf token does not match "
+                   "this meeting. (506 MEETING_FAIL_ON_BEHALF_TOKEN_NOT_MATCH_MEETING)";
+        }
+        if (code == 504) {
+            return "Zoom rejected the join: this app cannot join anonymously. "
+                   "(504 MEETING_FAIL_APP_CAN_NOT_ANONYMOUS_JOIN_MEETING)";
+        }
+        if (code == 500) {
+            return "Zoom rejected the join: app privilege token error. "
+                   "(500 MEETING_FAIL_APP_PRIVILEGE_TOKEN_ERROR)";
+        }
+        std::string out = "Zoom meeting join failed";
+        if (code != 0) out += " (" + std::to_string(code);
+        if (!reason.isEmpty()) {
+            out += code != 0 ? " " : " (";
+            out += reason.toStdString();
+        }
+        if (code != 0 || !reason.isEmpty()) out += ")";
+        return out;
+    }
+
+    if (!reason.isEmpty())
+        return "Zoom engine error: " + reason.toStdString();
+    if (!msg.isEmpty())
+        return "Zoom engine error: " + msg.toStdString();
+    return "Zoom engine error";
+}
+
 #if defined(WIN32)
 #include <windows.h>
 #else
@@ -206,20 +280,23 @@ void ZoomEngineClient::monitor_loop()
 bool ZoomEngineClient::join(const std::string &meeting_id,
                             const std::string &passcode,
                             const std::string &display_name,
-                            MeetingKind kind)
+                            MeetingKind kind,
+                            const ZoomJoinAuthTokens &tokens)
 {
     if (!m_running.load(std::memory_order_acquire)) return false;
     if (meeting_id.empty()) return false;
     m_state.store(MeetingState::Joining, std::memory_order_release);
+    clear_last_error();
     // Always keep session params up to date for recovery.
     ZoomReconnectManager::instance().store_session(
-        m_last_jwt, meeting_id, passcode, display_name);
+        m_last_jwt, meeting_id, passcode, display_name, kind, tokens);
     {
         std::lock_guard<std::mutex> lk(m_mtx);
         m_join_pending = true;
         m_pending_meeting_id = meeting_id;
         m_pending_passcode = passcode;
         m_pending_display_name = display_name;
+        m_pending_tokens = tokens;
         m_pending_kind = kind;
         blog(LOG_INFO, "[obs-zoom-plugin] Zoom join queued: meeting_id=%s authenticated=%d",
              meeting_id.c_str(),
@@ -413,20 +490,41 @@ void ZoomEngineClient::handle_event(const std::string &line)
         return;
     }
     if (cmd == "left") {
-        m_state.store(MeetingState::Idle, std::memory_order_release);
+        bool keep_failed = false;
         {
             std::lock_guard<std::mutex> lk(m_mtx);
             m_roster.clear();
             m_active_speaker_id = 0;
+            keep_failed = !m_last_error.empty() &&
+                !m_user_leaving.load(std::memory_order_acquire);
         }
+        m_state.store(keep_failed ? MeetingState::Failed : MeetingState::Idle,
+                      std::memory_order_release);
         return;
     }
     if (cmd == "error" || cmd == "auth_fail") {
         blog(LOG_ERROR, "[obs-zoom-plugin] Zoom engine event: %s", line.c_str());
         const QString reason = obj.value("reason").toString();
+        const int code = obj.value("code").toInt(0);
+        std::vector<ErrorCallback> error_callbacks;
+        const std::string error_message = zoom_error_message(obj);
+        {
+            std::lock_guard<std::mutex> lk(m_mtx);
+            m_last_error = error_message;
+            for (const auto &entry : m_error_callbacks)
+                if (entry.second) error_callbacks.push_back(entry.second);
+        }
+        for (auto &cb : error_callbacks) cb(error_message);
         // Permanent failures: auth, license, host-ended.
         if (cmd == "auth_fail" || reason == "auth_fail") {
             m_state.store(MeetingState::Failed, std::memory_order_release);
+            ZoomReconnectManager::instance().on_join_failed(true);
+        } else if (obj.value("msg").toString() == "meeting_failed" &&
+                   is_permanent_meeting_failure(code)) {
+            m_state.store(MeetingState::Failed, std::memory_order_release);
+            blog(LOG_ERROR,
+                 "[obs-zoom-plugin] Permanent Zoom meeting failure %d (%s) - not retrying",
+                 code, reason.toUtf8().constData());
             ZoomReconnectManager::instance().on_join_failed(true);
         } else if (reason == "license") {
             m_state.store(MeetingState::Failed, std::memory_order_release);
@@ -527,10 +625,23 @@ void ZoomEngineClient::send_join_locked()
     const char *kind_str = (m_pending_kind == MeetingKind::Webinar) ? "webinar" : "meeting";
     blog(LOG_INFO, "[obs-zoom-plugin] Sending Zoom join to engine: meeting_id=%s kind=%s",
          m_pending_meeting_id.c_str(), kind_str);
-    ipc_write_line(m_p2e, R"({"cmd":"join","meeting_id":")" + json_escape(m_pending_meeting_id) +
+    std::string json = R"({"cmd":"join","meeting_id":")" + json_escape(m_pending_meeting_id) +
         R"(","passcode":")" + json_escape(m_pending_passcode) +
         R"(","display_name":")" + json_escape(m_pending_display_name) +
-        R"(","kind":")" + kind_str + "\"}");
+        R"(","kind":")" + kind_str + "\"";
+    if (!m_pending_tokens.on_behalf_token.empty()) {
+        json += R"(,"on_behalf_token":")" +
+            json_escape(m_pending_tokens.on_behalf_token) + "\"";
+    }
+    if (!m_pending_tokens.user_zak.empty()) {
+        json += R"(,"user_zak":")" + json_escape(m_pending_tokens.user_zak) + "\"";
+    }
+    if (!m_pending_tokens.app_privilege_token.empty()) {
+        json += R"(,"app_privilege_token":")" +
+            json_escape(m_pending_tokens.app_privilege_token) + "\"";
+    }
+    json += "}";
+    ipc_write_line(m_p2e, json);
     m_join_pending = false;
 }
 
@@ -538,6 +649,24 @@ uint32_t ZoomEngineClient::active_speaker_id() const
 {
     std::lock_guard<std::mutex> lk(m_mtx);
     return m_active_speaker_id;
+}
+
+std::string ZoomEngineClient::last_error() const
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    return m_last_error;
+}
+
+void ZoomEngineClient::clear_last_error()
+{
+    std::vector<ErrorCallback> callbacks;
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        m_last_error.clear();
+        for (const auto &entry : m_error_callbacks)
+            if (entry.second) callbacks.push_back(entry.second);
+    }
+    for (auto &cb : callbacks) cb(std::string());
 }
 
 std::vector<ParticipantInfo> ZoomEngineClient::roster() const
@@ -559,6 +688,21 @@ void ZoomEngineClient::remove_roster_callback(void *key)
 {
     std::lock_guard<std::mutex> lk(m_mtx);
     m_roster_callbacks.erase(key);
+}
+
+void ZoomEngineClient::add_error_callback(void *key, ErrorCallback cb)
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    if (cb)
+        m_error_callbacks[key] = std::move(cb);
+    else
+        m_error_callbacks.erase(key);
+}
+
+void ZoomEngineClient::remove_error_callback(void *key)
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    m_error_callbacks.erase(key);
 }
 
 void ZoomEngineClient::write_json(const std::string &json)

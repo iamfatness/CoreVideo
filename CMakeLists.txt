@@ -120,6 +120,7 @@ if(COREVIDEO_BUILD_PLUGIN)
         src/zoom-reconnect.cpp
         src/zoom-settings.cpp
         src/zoom-settings-dialog.cpp
+        src/zoom-oauth.cpp
         src/zoom-output-manager.cpp
         src/zoom-output-dialog.cpp
         src/zoom-output-profile.cpp
@@ -144,6 +145,14 @@ if(COREVIDEO_BUILD_PLUGIN)
         Qt6::Network
         Qt6::Widgets
     )
+    if(WIN32)
+        target_link_libraries(obs-zoom-plugin PRIVATE crypt32)
+        add_executable(CoreVideoOAuthCallback src/oauth-callback-helper.cpp)
+        target_link_libraries(CoreVideoOAuthCallback PRIVATE ws2_32)
+        install(TARGETS CoreVideoOAuthCallback
+            RUNTIME DESTINATION "obs-plugins/64bit"
+        )
+    endif()
 
     if(ENABLE_FFMPEG_HW_ACCEL)
         target_link_libraries(obs-zoom-plugin PRIVATE PkgConfig::FFMPEG)

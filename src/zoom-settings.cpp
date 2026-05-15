@@ -7,6 +7,10 @@
 #include <QMessageAuthenticationCode>
 #include <obs-frontend-api.h>
 #include <util/config-file.h>
+#if defined(_WIN32)
+#include <windows.h>
+#include <dpapi.h>
+#endif
 
 static constexpr const char *SECTION = "ZoomPlugin";
 
@@ -29,6 +33,48 @@ static bool looks_like_jwt(const std::string &token)
         token.find('.', second_dot + 1) == std::string::npos;
 }
 
+static std::string protect_secret(const std::string &secret)
+{
+    if (secret.empty()) return {};
+#if defined(_WIN32)
+    DATA_BLOB in;
+    in.pbData = reinterpret_cast<BYTE *>(const_cast<char *>(secret.data()));
+    in.cbData = static_cast<DWORD>(secret.size());
+    DATA_BLOB out{};
+    if (!CryptProtectData(&in, L"CoreVideo Zoom OAuth token", nullptr, nullptr,
+                          nullptr, 0, &out)) {
+        return {};
+    }
+    QByteArray bytes(reinterpret_cast<const char *>(out.pbData),
+                     static_cast<int>(out.cbData));
+    LocalFree(out.pbData);
+    return bytes.toBase64().toStdString();
+#else
+    return secret;
+#endif
+}
+
+static std::string unprotect_secret(const char *stored)
+{
+    if (!stored || !*stored) return {};
+#if defined(_WIN32)
+    const QByteArray encrypted = QByteArray::fromBase64(QByteArray(stored));
+    if (encrypted.isEmpty()) return {};
+    DATA_BLOB in;
+    in.pbData = reinterpret_cast<BYTE *>(const_cast<char *>(encrypted.constData()));
+    in.cbData = static_cast<DWORD>(encrypted.size());
+    DATA_BLOB out{};
+    if (!CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr, 0, &out)) {
+        return {};
+    }
+    std::string secret(reinterpret_cast<const char *>(out.pbData), out.cbData);
+    LocalFree(out.pbData);
+    return secret;
+#else
+    return stored;
+#endif
+}
+
 ZoomPluginSettings ZoomPluginSettings::load()
 {
     config_t *cfg = obs_frontend_get_global_config();
@@ -38,10 +84,24 @@ ZoomPluginSettings ZoomPluginSettings::load()
     const char *key    = config_get_string(cfg, SECTION, "SdkKey");
     const char *secret = config_get_string(cfg, SECTION, "SdkSecret");
     const char *jwt    = config_get_string(cfg, SECTION, "JwtToken");
+    const char *oauth_client_id = config_get_string(cfg, SECTION, "OAuthClientId");
+    const char *oauth_redirect_uri = config_get_string(cfg, SECTION, "OAuthRedirectUri");
+    const char *oauth_scopes = config_get_string(cfg, SECTION, "OAuthScopes");
 
     s.sdk_key    = (key    && *key)    ? key    : kEmbeddedSdkKey;
     s.sdk_secret = (secret && *secret) ? secret : kEmbeddedSdkSecret;
     s.jwt_token  = (jwt    && *jwt)    ? jwt    : kEmbeddedJwtToken;
+    s.oauth_client_id = oauth_client_id ? oauth_client_id : "";
+    if (oauth_redirect_uri && *oauth_redirect_uri)
+        s.oauth_redirect_uri = oauth_redirect_uri;
+    if (oauth_scopes && *oauth_scopes)
+        s.oauth_scopes = oauth_scopes;
+    s.oauth_access_token = unprotect_secret(
+        config_get_string(cfg, SECTION, "OAuthAccessToken"));
+    s.oauth_refresh_token = unprotect_secret(
+        config_get_string(cfg, SECTION, "OAuthRefreshToken"));
+    s.oauth_expires_at = static_cast<int64_t>(
+        config_get_int(cfg, SECTION, "OAuthExpiresAt"));
 
     s.control_server_port = static_cast<uint16_t>(
         config_get_uint(cfg, SECTION, "ControlServerPort"));
@@ -117,6 +177,15 @@ void ZoomPluginSettings::save() const
     config_set_string(cfg, SECTION, "SdkKey",            sdk_key.c_str());
     config_set_string(cfg, SECTION, "SdkSecret",         sdk_secret.c_str());
     config_set_string(cfg, SECTION, "JwtToken",          jwt_token.c_str());
+    config_set_string(cfg, SECTION, "OAuthClientId",     oauth_client_id.c_str());
+    config_set_string(cfg, SECTION, "OAuthRedirectUri",  oauth_redirect_uri.c_str());
+    config_set_string(cfg, SECTION, "OAuthScopes",       oauth_scopes.c_str());
+    config_set_string(cfg, SECTION, "OAuthAccessToken",
+                      protect_secret(oauth_access_token).c_str());
+    config_set_string(cfg, SECTION, "OAuthRefreshToken",
+                      protect_secret(oauth_refresh_token).c_str());
+    config_set_int   (cfg, SECTION, "OAuthExpiresAt",
+                      static_cast<int>(oauth_expires_at));
     config_set_uint  (cfg, SECTION, "ControlServerPort", control_server_port);
     config_set_uint  (cfg, SECTION, "OscServerPort",     osc_server_port);
     config_set_string(cfg, SECTION, "ControlToken",      control_token.c_str());

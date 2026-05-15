@@ -1,5 +1,6 @@
 #include "obs-utils.h"
 
+#include <cctype>
 #include <cstring>
 
 namespace zoom_join_utils {
@@ -20,6 +21,40 @@ bool all_digits(const std::string &s)
     for (char c : s)
         if (c < '0' || c > '9') return false;
     return true;
+}
+
+std::string lower_ascii(std::string s)
+{
+    for (char &c : s)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+int hex_value(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+std::string url_decode(const std::string &s)
+{
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '%' && i + 2 < s.size()) {
+            const int hi = hex_value(s[i + 1]);
+            const int lo = hex_value(s[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back(static_cast<char>((hi << 4) | lo));
+                i += 2;
+                continue;
+            }
+        }
+        out.push_back(s[i] == '+' ? ' ' : s[i]);
+    }
+    return out;
 }
 
 std::string read_digit_run(const std::string &s, size_t &pos)
@@ -87,13 +122,22 @@ ParsedJoin parse_join_input(const std::string &input)
             const size_t end = (amp == std::string::npos) ? s.size() : amp;
             const size_t eq  = s.find('=', pos);
             if (eq != std::string::npos && eq < end) {
-                const std::string key = s.substr(pos, eq - pos);
-                const std::string val = s.substr(eq + 1, end - eq - 1);
+                const std::string key = lower_ascii(url_decode(s.substr(pos, eq - pos)));
+                const std::string val = url_decode(s.substr(eq + 1, end - eq - 1));
                 if (key == "pwd" || key == "password" || key == "passcode") {
                     out.passcode = val;
                 } else if (out.meeting_id.empty() &&
                            (key == "confno" || key == "meeting_id" || key == "mn")) {
                     if (all_digits(val)) out.meeting_id = val;
+                } else if (key == "obf" || key == "on_behalf_token" ||
+                           key == "onbehalftoken") {
+                    out.on_behalf_token = val;
+                } else if (key == "zak" || key == "user_zak" || key == "userzak") {
+                    out.user_zak = val;
+                } else if (key == "app_privilege_token" ||
+                           key == "appprivilegetoken" ||
+                           key == "apptoken" || key == "app_token") {
+                    out.app_privilege_token = val;
                 }
             }
             if (amp == std::string::npos) break;

@@ -22,6 +22,12 @@ enum class VideoLossMode { LastFrame = 0, Black = 1 };
 // correct Zoom SDK join API (Webinar uses a different SDK entry point).
 enum class MeetingKind { Meeting = 0, Webinar = 1 };
 
+struct ZoomJoinAuthTokens {
+    std::string on_behalf_token;
+    std::string user_zak;
+    std::string app_privilege_token;
+};
+
 // How a ZoomSource selects which participant's feed to render.
 //   Participant   - fixed participant ID
 //   ActiveSpeaker - whoever is currently speaking (legacy "active speaker" mode)

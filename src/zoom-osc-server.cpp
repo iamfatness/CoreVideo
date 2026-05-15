@@ -4,6 +4,7 @@
 #include "zoom-output-manager.h"
 #include "zoom-reconnect.h"
 #include "zoom-settings.h"
+#include "zoom-oauth.h"
 #include <QHostAddress>
 #include <QUdpSocket>
 #include <obs-module.h>
@@ -221,6 +222,19 @@ void ZoomOscServer::dispatch(const QString &address,
         std::string passcode = args.size() >= 2 ? args[1].s : std::string();
         if (passcode.empty()) passcode = parsed.passcode;
         const std::string display_name = args.size() >= 3 ? args[2].s : "OBS";
+        ZoomJoinAuthTokens tokens;
+        tokens.on_behalf_token = parsed.on_behalf_token;
+        tokens.user_zak = parsed.user_zak;
+        tokens.app_privilege_token = parsed.app_privilege_token;
+        if (tokens.user_zak.empty()) {
+            std::string zak;
+            QString zak_error;
+            if (ZoomOAuthManager::instance().fetch_zak_blocking(zak, &zak_error))
+                tokens.user_zak = zak;
+            else if (!zak_error.isEmpty())
+                blog(LOG_WARNING, "[obs-zoom-plugin] OAuth ZAK unavailable: %s",
+                     zak_error.toUtf8().constData());
+        }
 
         const ZoomPluginSettings settings = ZoomPluginSettings::load();
         if (!ZoomEngineClient::instance().start(settings.resolved_jwt_token())) {
@@ -228,7 +242,8 @@ void ZoomOscServer::dispatch(const QString &address,
                  "[obs-zoom-plugin] OSC /zoom/join: engine failed to start");
             return;
         }
-        ZoomEngineClient::instance().join(parsed.meeting_id, passcode, display_name);
+        ZoomEngineClient::instance().join(parsed.meeting_id, passcode, display_name,
+                                          MeetingKind::Meeting, tokens);
         return;
     }
 

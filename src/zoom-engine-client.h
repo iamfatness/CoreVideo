@@ -27,7 +27,8 @@ public:
 
     bool join(const std::string &meeting_id, const std::string &passcode,
               const std::string &display_name,
-              MeetingKind kind = MeetingKind::Meeting);
+              MeetingKind kind = MeetingKind::Meeting,
+              const ZoomJoinAuthTokens &tokens = {});
     void leave();
 
     // Subscribe a source to a "spotlight slot" (1-based) instead of a fixed
@@ -45,6 +46,8 @@ public:
 
     MeetingState state() const { return m_state.load(std::memory_order_acquire); }
     bool is_authenticated() const { return m_authenticated.load(std::memory_order_acquire); }
+    std::string last_error() const;
+    void clear_last_error();
     uint32_t active_speaker_id() const;
     std::vector<ParticipantInfo> roster() const;
 
@@ -53,6 +56,9 @@ public:
     using RosterCallback = std::function<void()>;
     void add_roster_callback(void *key, RosterCallback cb);
     void remove_roster_callback(void *key);
+    using ErrorCallback = std::function<void(const std::string &message)>;
+    void add_error_callback(void *key, ErrorCallback cb);
+    void remove_error_callback(void *key);
 
 private:
     ZoomEngineClient() = default;
@@ -79,6 +85,8 @@ private:
     std::vector<ParticipantInfo> m_roster;
     std::unordered_map<std::string, SourceCallbacks> m_sources;
     std::unordered_map<void *, RosterCallback> m_roster_callbacks;
+    std::unordered_map<void *, ErrorCallback> m_error_callbacks;
+    std::string m_last_error;
     // Tracks whether the user deliberately requested a leave/stop (suppresses recovery).
     std::atomic<bool> m_user_leaving{false};
     std::string m_last_jwt; // stored so reconnect manager can access it
@@ -86,6 +94,7 @@ private:
     std::string m_pending_meeting_id;
     std::string m_pending_passcode;
     std::string m_pending_display_name;
+    ZoomJoinAuthTokens m_pending_tokens;
     MeetingKind m_pending_kind = MeetingKind::Meeting;
 
 #if defined(WIN32)

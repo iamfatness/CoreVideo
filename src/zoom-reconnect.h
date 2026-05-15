@@ -39,7 +39,9 @@ public:
     void store_session(const std::string &jwt,
                        const std::string &meeting_id,
                        const std::string &passcode,
-                       const std::string &display_name);
+                       const std::string &display_name,
+                       MeetingKind kind,
+                       const ZoomJoinAuthTokens &tokens);
     // Clear stored credentials (called on explicit stop/leave).
     void clear_session();
 
@@ -75,6 +77,8 @@ private:
     std::string                 m_meeting_id;
     std::string                 m_passcode;
     std::string                 m_display_name;
+    MeetingKind                 m_kind = MeetingKind::Meeting;
+    ZoomJoinAuthTokens          m_tokens;
 
     std::atomic<bool>           m_recovering{false};
     std::atomic<int>            m_attempt{0};

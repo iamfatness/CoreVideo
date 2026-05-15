@@ -34,9 +34,12 @@ private:
     // Meeting control bar
     QLabel      *m_state_dot    = nullptr;
     QLabel      *m_state_label  = nullptr;
+    QLabel      *m_error_label  = nullptr;
     QLineEdit   *m_meeting_id   = nullptr;
     QLineEdit   *m_passcode     = nullptr;
     QLineEdit   *m_display_name = nullptr;
+    QComboBox   *m_join_token_type = nullptr;
+    QLineEdit   *m_join_token   = nullptr;
     QPushButton *m_join_btn     = nullptr;
     QPushButton *m_leave_btn    = nullptr;
     QCheckBox   *m_webinar_cb   = nullptr;

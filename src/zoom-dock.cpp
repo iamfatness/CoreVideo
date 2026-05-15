@@ -1,6 +1,7 @@
 #include "zoom-dock.h"
 #include "obs-utils.h"
 #include "zoom-engine-client.h"
+#include "zoom-oauth.h"
 #include "zoom-output-manager.h"
 #include "zoom-reconnect.h"
 #include "zoom-settings.h"
@@ -21,6 +22,7 @@
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <obs-module.h>
 #include <algorithm>
 #include <unordered_map>
 
@@ -88,6 +90,12 @@ ZoomDock::ZoomDock(QWidget *parent)
     status_row->addWidget(m_state_label, 1);
     vLayout->addLayout(status_row);
 
+    m_error_label = new QLabel(this);
+    m_error_label->setStyleSheet("color: #ee5555;");
+    m_error_label->setWordWrap(true);
+    m_error_label->setVisible(false);
+    vLayout->addWidget(m_error_label);
+
     // ── Active speaker ────────────────────────────────────────────────────────
     m_speaker_label = new QLabel("—", this);
     m_speaker_label->setStyleSheet("color: #aaaaaa; font-style: italic;");
@@ -115,6 +123,20 @@ ZoomDock::ZoomDock(QWidget *parent)
     m_display_name = new QLineEdit(join_group);
     m_display_name->setPlaceholderText("Display name");
 
+    m_join_token_type = new QComboBox(join_group);
+    m_join_token_type->addItem("OBF / on-behalf token", "on_behalf_token");
+    m_join_token_type->addItem("User ZAK", "user_zak");
+    m_join_token_type->addItem("App privilege token", "app_privilege_token");
+    m_join_token_type->setToolTip(
+        "External-account meetings can require a Zoom user attribution token.");
+
+    m_join_token = new QLineEdit(join_group);
+    m_join_token->setPlaceholderText("External meeting token (optional)");
+    m_join_token->setEchoMode(QLineEdit::Password);
+    m_join_token->setToolTip(
+        "Paste the OBF/on-behalf token, ZAK, or app privilege token for "
+        "meetings that reject anonymous external SDK joins.");
+
     m_join_btn  = new QPushButton("Join",  join_group);
     m_leave_btn = new QPushButton("Leave", join_group);
     m_leave_btn->setEnabled(false);
@@ -128,6 +150,8 @@ ZoomDock::ZoomDock(QWidget *parent)
     join_layout->addWidget(m_meeting_id);
     join_layout->addWidget(m_passcode);
     join_layout->addWidget(m_display_name);
+    join_layout->addWidget(m_join_token_type);
+    join_layout->addWidget(m_join_token);
     join_layout->addWidget(m_webinar_cb);
     join_layout->addLayout(join_btn_row);
     vLayout->addWidget(join_group);
@@ -221,6 +245,17 @@ ZoomDock::ZoomDock(QWidget *parent)
             if (alive->load(std::memory_order_acquire)) self->refresh();
         }, Qt::QueuedConnection);
     });
+    ZoomEngineClient::instance().add_error_callback(this, [self, alive](const std::string &message) {
+        QMetaObject::invokeMethod(self, [self, alive, message]() {
+            if (!alive->load(std::memory_order_acquire)) return;
+            const QString text = QString::fromStdString(message);
+            self->m_error_label->setText(text);
+            self->m_error_label->setVisible(!text.isEmpty());
+            self->update_state_indicator();
+            if (!text.isEmpty())
+                QMessageBox::warning(self, "Zoom Join", text);
+        }, Qt::QueuedConnection);
+    });
 
     refresh();
 }
@@ -231,6 +266,7 @@ ZoomDock::~ZoomDock()
     if (m_join_thread.joinable())
         m_join_thread.join();
     ZoomEngineClient::instance().remove_roster_callback(this);
+    ZoomEngineClient::instance().remove_error_callback(this);
     ZoomOutputManager::instance().clear_all_preview_cbs();
 }
 
@@ -288,7 +324,14 @@ void ZoomDock::update_state_indicator()
     }
 
     m_state_dot->setStyleSheet(state_dot_style(s));
-    m_state_label->setText(state_label_text(s));
+    const std::string last_error = ZoomEngineClient::instance().last_error();
+    if (s == MeetingState::Failed && !last_error.empty()) {
+        m_state_label->setText("Connection failed");
+        m_error_label->setText(QString::fromStdString(last_error));
+        m_error_label->setVisible(true);
+    } else {
+        m_state_label->setText(state_label_text(s));
+    }
 
     const bool in_meeting    = (s == MeetingState::InMeeting);
     const bool recovering    = (s == MeetingState::Recovering);
@@ -515,6 +558,22 @@ void ZoomDock::on_join_clicked()
     std::string display_name = m_display_name->text().trimmed().toStdString();
     if (display_name.empty()) display_name = "OBS";
 
+    ZoomJoinAuthTokens tokens;
+    tokens.on_behalf_token = parsed.on_behalf_token;
+    tokens.user_zak = parsed.user_zak;
+    tokens.app_privilege_token = parsed.app_privilege_token;
+    const std::string typed_token = m_join_token->text().trimmed().toStdString();
+    if (!typed_token.empty() && m_join_token_type) {
+        const QString token_type = m_join_token_type->currentData().toString();
+        if (token_type == "user_zak") {
+            tokens.user_zak = typed_token;
+        } else if (token_type == "app_privilege_token") {
+            tokens.app_privilege_token = typed_token;
+        } else {
+            tokens.on_behalf_token = typed_token;
+        }
+    }
+
     ZoomPluginSettings s = ZoomPluginSettings::load();
     std::string jwt = s.resolved_jwt_token();
     if (!ZoomEngineClient::instance().is_authenticated() && jwt.empty()) {
@@ -549,13 +608,23 @@ void ZoomDock::on_join_clicked()
     auto alive = m_alive;
     const std::string meeting_id = parsed.meeting_id;
     m_join_thread = std::thread([self, alive, jwt, meeting_id, passcode,
-                                 display_name, kind, webinar, join_generation]() {
+                                 display_name, kind, webinar, join_generation,
+                                 tokens]() mutable {
+        if (tokens.user_zak.empty()) {
+            std::string zak;
+            QString zak_error;
+            if (ZoomOAuthManager::instance().fetch_zak_blocking(zak, &zak_error))
+                tokens.user_zak = zak;
+            else if (!zak_error.isEmpty())
+                blog(LOG_WARNING, "[obs-zoom-plugin] OAuth ZAK unavailable: %s",
+                     zak_error.toUtf8().constData());
+        }
         const bool started = ZoomEngineClient::instance().start(jwt);
         const bool still_current =
             self->m_join_generation.load(std::memory_order_acquire) == join_generation;
         const bool joined = started && still_current &&
             ZoomEngineClient::instance().join(meeting_id, passcode,
-                                              display_name, kind);
+                                              display_name, kind, tokens);
 
         QMetaObject::invokeMethod(self, [self, alive, started, joined, meeting_id,
                                          display_name, webinar, join_generation]() {

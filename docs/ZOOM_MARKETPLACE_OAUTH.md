@@ -46,7 +46,9 @@ This is needed for external-account meetings and Marketplace review.
    The helper reads the configured CoreVideo control-server port from the OBS
    global config and falls back to `19870`.
 4. The plugin verifies `state`, exchanges the authorization code at
-   `https://zoom.us/oauth/token`, and stores access/refresh tokens.
+   `https://zoom.us/oauth/token`, and stores access/refresh tokens. For public
+   PKCE, CoreVideo sends HTTP Basic auth as `base64(public_client_id:)` without
+   a client secret.
 5. Before joining, the plugin refreshes the access token if needed and calls:
    `GET https://api.zoom.us/v2/users/me/zak`
 6. The returned ZAK is passed into the Meeting SDK `JoinParam4WithoutLogin`

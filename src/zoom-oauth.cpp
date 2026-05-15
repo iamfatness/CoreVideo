@@ -68,6 +68,11 @@ QString ZoomOAuthManager::form_encode(const QMap<QString, QString> &fields)
     return query.toString(QUrl::FullyEncoded);
 }
 
+static QByteArray public_client_basic_auth(const QString &client_id)
+{
+    return "Basic " + (client_id + ":").toUtf8().toBase64();
+}
+
 bool ZoomOAuthManager::begin_authorization(QWidget *parent, QString *error)
 {
     ZoomPluginSettings s = ZoomPluginSettings::load();
@@ -89,9 +94,10 @@ bool ZoomOAuthManager::begin_authorization(QWidget *parent, QString *error)
     }
 
     QUrlQuery query(url);
-    QString client_id = QString::fromStdString(s.oauth_client_id);
-    if (client_id.isEmpty())
-        client_id = query.queryItemValue("client_id");
+    const QString url_client_id = query.queryItemValue("client_id");
+    QString client_id = url_client_id.isEmpty()
+        ? QString::fromStdString(s.oauth_client_id)
+        : url_client_id;
     if (client_id.isEmpty()) {
         if (error) *error = "Enter the Zoom OAuth Client ID first.";
         return false;
@@ -101,7 +107,7 @@ bool ZoomOAuthManager::begin_authorization(QWidget *parent, QString *error)
     m_pending_state = random_base64url(32);
     m_pending_client_id = client_id;
 
-    if (s.oauth_client_id.empty()) {
+    if (s.oauth_client_id != client_id.toStdString()) {
         s.oauth_client_id = client_id.toStdString();
         s.save();
     }
@@ -127,6 +133,8 @@ bool ZoomOAuthManager::begin_authorization(QWidget *parent, QString *error)
         if (error) *error = "Could not open the system browser.";
         return false;
     }
+
+    blog(LOG_INFO, "[obs-zoom-plugin] Zoom OAuth authorization started");
 
     if (parent) {
         QMessageBox::information(parent, "Zoom OAuth",
@@ -168,6 +176,7 @@ bool ZoomOAuthManager::parse_token_response(const QByteArray &body, QString *err
 
 bool ZoomOAuthManager::handle_redirect_url(const QString &url, QString *error)
 {
+    blog(LOG_INFO, "[obs-zoom-plugin] Zoom OAuth callback received");
     const QUrl callback(url);
     const QUrlQuery query(callback);
     const QString state = query.queryItemValue("state");
@@ -176,14 +185,18 @@ bool ZoomOAuthManager::handle_redirect_url(const QString &url, QString *error)
 
     if (!oauth_error.isEmpty()) {
         if (error) *error = "Zoom OAuth failed: " + oauth_error;
+        blog(LOG_WARNING, "[obs-zoom-plugin] Zoom OAuth callback error: %s",
+             oauth_error.toUtf8().constData());
         return false;
     }
     if (code.isEmpty()) {
         if (error) *error = "OAuth callback did not include an authorization code.";
+        blog(LOG_WARNING, "[obs-zoom-plugin] Zoom OAuth callback missing authorization code");
         return false;
     }
     if (state.isEmpty() || state != m_pending_state || m_pending_verifier.isEmpty()) {
         if (error) *error = "OAuth callback state did not match the active login.";
+        blog(LOG_WARNING, "[obs-zoom-plugin] Zoom OAuth callback state mismatch");
         return false;
     }
 
@@ -195,6 +208,7 @@ bool ZoomOAuthManager::handle_redirect_url(const QString &url, QString *error)
     QNetworkRequest request(QUrl("https://zoom.us/oauth/token"));
     request.setHeader(QNetworkRequest::ContentTypeHeader,
                       "application/x-www-form-urlencoded");
+    request.setRawHeader("Authorization", public_client_basic_auth(client_id));
     const QString body = form_encode({
         {"grant_type", "authorization_code"},
         {"client_id", client_id},
@@ -225,6 +239,12 @@ bool ZoomOAuthManager::handle_redirect_url(const QString &url, QString *error)
                 : QString::fromUtf8(response);
             *error = "Zoom token exchange failed: " + details;
         }
+        blog(LOG_WARNING, "[obs-zoom-plugin] Zoom OAuth token exchange failed: status=%d network=%d error=%s",
+             status, static_cast<int>(net_error), net_error_string.toUtf8().constData());
+        if (!response.isEmpty()) {
+            blog(LOG_WARNING, "[obs-zoom-plugin] Zoom OAuth token exchange response: %s",
+                 QString::fromUtf8(response.left(512)).toUtf8().constData());
+        }
         return false;
     }
     const bool ok = parse_token_response(response, error);
@@ -245,6 +265,8 @@ bool ZoomOAuthManager::refresh_access_token_blocking(QString *error)
     QNetworkRequest request(QUrl("https://zoom.us/oauth/token"));
     request.setHeader(QNetworkRequest::ContentTypeHeader,
                       "application/x-www-form-urlencoded");
+    request.setRawHeader("Authorization",
+                         public_client_basic_auth(QString::fromStdString(s.oauth_client_id)));
     const QString body = form_encode({
         {"grant_type", "refresh_token"},
         {"client_id", QString::fromStdString(s.oauth_client_id)},
@@ -268,6 +290,10 @@ bool ZoomOAuthManager::refresh_access_token_blocking(QString *error)
                 ? net_error_string
                 : QString::fromUtf8(response);
             *error = "Zoom token refresh failed: " + details;
+        }
+        if (!response.isEmpty()) {
+            blog(LOG_WARNING, "[obs-zoom-plugin] Zoom OAuth token refresh response: %s",
+                 QString::fromUtf8(response.left(512)).toUtf8().constData());
         }
         return false;
     }

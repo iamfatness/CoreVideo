@@ -5,6 +5,19 @@
 #include <cstdio>
 #include <fstream>
 #include <string>
+#include <windows.h>
+
+static void log_helper_event(const std::string &message)
+{
+    const char *temp = std::getenv("TEMP");
+    if (!temp || !*temp)
+        return;
+
+    std::ofstream log(std::string(temp) + "\\CoreVideoOAuthCallback.log",
+                      std::ios::app);
+    if (log)
+        log << message << "\n";
+}
 
 static std::string json_escape(const std::string &in)
 {
@@ -64,24 +77,34 @@ static int read_control_port()
 
 int main(int argc, char **argv)
 {
-    if (argc < 2) return 1;
+    if (argc < 2) {
+        log_helper_event("missing callback URL argument");
+        return 1;
+    }
+
+    log_helper_event("received callback URL argument");
 
     WSADATA wsa{};
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        log_helper_event("WSAStartup failed");
         return 2;
+    }
 
     SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock == INVALID_SOCKET) {
+        log_helper_event("socket creation failed");
         WSACleanup();
         return 3;
     }
 
+    const int port = read_control_port();
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(static_cast<u_short>(read_control_port()));
+    addr.sin_port = htons(static_cast<u_short>(port));
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
 
     if (connect(sock, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == SOCKET_ERROR) {
+        log_helper_event("connect failed on port " + std::to_string(port));
         closesocket(sock);
         WSACleanup();
         return 4;
@@ -93,6 +116,7 @@ int main(int argc, char **argv)
 
     char buffer[512];
     recv(sock, buffer, sizeof(buffer), 0);
+    log_helper_event("forwarded callback to OBS on port " + std::to_string(port));
     closesocket(sock);
     WSACleanup();
     return 0;

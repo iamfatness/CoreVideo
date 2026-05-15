@@ -22,7 +22,9 @@ This is needed for external-account meetings and Marketplace review.
 
 1. Build and install CoreVideo.
 2. Open OBS, then open **Tools > Zoom Plugin Settings**.
-3. Enter the OAuth Client ID from the Zoom Marketplace app.
+3. Enter the OAuth Client ID from the Zoom Marketplace app, or paste Zoom's
+   test authorization URL into **Authorization URL**. If the URL contains
+   `client_id`, CoreVideo can infer and store it.
 4. Keep Redirect URI set to `corevideo://oauth/callback`.
 5. Click **Register corevideo:// URL Scheme**. On Windows this registers:
    `HKCU\Software\Classes\corevideo\shell\open\command`
@@ -34,8 +36,8 @@ This is needed for external-account meetings and Marketplace review.
 ## Runtime flow
 
 1. CoreVideo generates a high-entropy `code_verifier`, derives an S256
-   `code_challenge`, and opens:
-   `https://zoom.us/oauth/authorize`
+   `code_challenge`, starts from Zoom's configured authorization URL if one is
+   present, and injects the PKCE parameters it must control.
 2. Zoom redirects to `corevideo://oauth/callback?...`.
 3. `CoreVideoOAuthCallback.exe` forwards that callback to the running OBS
    plugin.

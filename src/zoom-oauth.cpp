@@ -67,21 +67,45 @@ QString ZoomOAuthManager::form_encode(const QMap<QString, QString> &fields)
 
 bool ZoomOAuthManager::begin_authorization(QWidget *parent, QString *error)
 {
-    const ZoomPluginSettings s = ZoomPluginSettings::load();
-    if (s.oauth_client_id.empty()) {
+    ZoomPluginSettings s = ZoomPluginSettings::load();
+    QUrl url = s.oauth_authorization_url.empty()
+        ? QUrl("https://zoom.us/oauth/authorize")
+        : QUrl(QString::fromStdString(s.oauth_authorization_url));
+    if (!url.isValid() || url.scheme().isEmpty() || url.host().isEmpty()) {
+        if (error) *error = "The Zoom authorization URL is not valid.";
+        return false;
+    }
+
+    QUrlQuery query(url);
+    QString client_id = QString::fromStdString(s.oauth_client_id);
+    if (client_id.isEmpty())
+        client_id = query.queryItemValue("client_id");
+    if (client_id.isEmpty()) {
         if (error) *error = "Enter the Zoom OAuth Client ID first.";
         return false;
     }
 
     m_pending_verifier = random_base64url(64);
     m_pending_state = random_base64url(32);
+    m_pending_client_id = client_id;
 
-    QUrl url("https://zoom.us/oauth/authorize");
-    QUrlQuery query;
+    if (s.oauth_client_id.empty()) {
+        s.oauth_client_id = client_id.toStdString();
+        s.save();
+    }
+
+    query.removeAllQueryItems("response_type");
+    query.removeAllQueryItems("client_id");
+    query.removeAllQueryItems("redirect_uri");
+    query.removeAllQueryItems("scope");
+    query.removeAllQueryItems("state");
+    query.removeAllQueryItems("code_challenge");
+    query.removeAllQueryItems("code_challenge_method");
     query.addQueryItem("response_type", "code");
-    query.addQueryItem("client_id", QString::fromStdString(s.oauth_client_id));
+    query.addQueryItem("client_id", client_id);
     query.addQueryItem("redirect_uri", QString::fromStdString(s.oauth_redirect_uri));
-    query.addQueryItem("scope", QString::fromStdString(s.oauth_scopes));
+    if (!s.oauth_scopes.empty())
+        query.addQueryItem("scope", QString::fromStdString(s.oauth_scopes));
     query.addQueryItem("state", m_pending_state);
     query.addQueryItem("code_challenge", pkce_challenge(m_pending_verifier));
     query.addQueryItem("code_challenge_method", "S256");
@@ -152,13 +176,16 @@ bool ZoomOAuthManager::handle_redirect_url(const QString &url, QString *error)
     }
 
     const ZoomPluginSettings s = ZoomPluginSettings::load();
+    const QString client_id = m_pending_client_id.isEmpty()
+        ? QString::fromStdString(s.oauth_client_id)
+        : m_pending_client_id;
     QNetworkAccessManager manager;
     QNetworkRequest request(QUrl("https://zoom.us/oauth/token"));
     request.setHeader(QNetworkRequest::ContentTypeHeader,
                       "application/x-www-form-urlencoded");
     const QString body = form_encode({
         {"grant_type", "authorization_code"},
-        {"client_id", QString::fromStdString(s.oauth_client_id)},
+        {"client_id", client_id},
         {"code", code},
         {"redirect_uri", QString::fromStdString(s.oauth_redirect_uri)},
         {"code_verifier", m_pending_verifier},
@@ -176,6 +203,7 @@ bool ZoomOAuthManager::handle_redirect_url(const QString &url, QString *error)
 
     m_pending_state.clear();
     m_pending_verifier.clear();
+    m_pending_client_id.clear();
 
     if (net_error != QNetworkReply::NoError || status < 200 || status >= 300) {
         if (error) *error = "Zoom token exchange failed: " + QString::fromUtf8(response);

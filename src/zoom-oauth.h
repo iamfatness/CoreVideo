@@ -28,4 +28,5 @@ private:
 
     QString m_pending_state;
     QString m_pending_verifier;
+    QString m_pending_client_id;
 };

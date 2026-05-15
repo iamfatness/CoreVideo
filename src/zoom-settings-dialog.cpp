@@ -28,6 +28,8 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     m_sdk_secret_edit = new QLineEdit(QString::fromStdString(s.sdk_secret), this);
     m_jwt_token_edit  = new QLineEdit(QString::fromStdString(s.jwt_token),  this);
     m_oauth_client_id_edit = new QLineEdit(QString::fromStdString(s.oauth_client_id), this);
+    m_oauth_authorization_url_edit =
+        new QLineEdit(QString::fromStdString(s.oauth_authorization_url), this);
     m_oauth_redirect_uri_edit =
         new QLineEdit(QString::fromStdString(s.oauth_redirect_uri), this);
     m_oauth_scopes_edit = new QLineEdit(QString::fromStdString(s.oauth_scopes), this);
@@ -66,6 +68,8 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
 
     auto *oauth_form = new QFormLayout;
     oauth_form->addRow(new QLabel("Client ID:", this), m_oauth_client_id_edit);
+    oauth_form->addRow(new QLabel("Authorization URL:", this),
+                       m_oauth_authorization_url_edit);
     oauth_form->addRow(new QLabel("Redirect URI:", this), m_oauth_redirect_uri_edit);
     oauth_form->addRow(new QLabel("Scopes:", this), m_oauth_scopes_edit);
     oauth_form->addRow("", m_oauth_register_scheme_btn);
@@ -175,6 +179,8 @@ void ZoomSettingsDialog::onSave()
     s.sdk_secret          = m_sdk_secret_edit->text().toStdString();
     s.jwt_token           = m_jwt_token_edit->text().toStdString();
     s.oauth_client_id     = m_oauth_client_id_edit->text().toStdString();
+    s.oauth_authorization_url =
+        m_oauth_authorization_url_edit->text().toStdString();
     s.oauth_redirect_uri  = m_oauth_redirect_uri_edit->text().toStdString();
     s.oauth_scopes        = m_oauth_scopes_edit->text().toStdString();
     s.control_server_port = static_cast<uint16_t>(m_control_port_spin->value());
@@ -210,6 +216,8 @@ void ZoomSettingsDialog::onAuthorizeOAuth()
 {
     ZoomPluginSettings s = ZoomPluginSettings::load();
     s.oauth_client_id = m_oauth_client_id_edit->text().toStdString();
+    s.oauth_authorization_url =
+        m_oauth_authorization_url_edit->text().toStdString();
     s.oauth_redirect_uri = m_oauth_redirect_uri_edit->text().toStdString();
     s.oauth_scopes = m_oauth_scopes_edit->text().toStdString();
     s.save();
@@ -223,6 +231,8 @@ void ZoomSettingsDialog::onRegisterUrlScheme()
 {
     ZoomPluginSettings s = ZoomPluginSettings::load();
     s.oauth_client_id = m_oauth_client_id_edit->text().toStdString();
+    s.oauth_authorization_url =
+        m_oauth_authorization_url_edit->text().toStdString();
     s.oauth_redirect_uri = m_oauth_redirect_uri_edit->text().toStdString();
     s.oauth_scopes = m_oauth_scopes_edit->text().toStdString();
     s.save();

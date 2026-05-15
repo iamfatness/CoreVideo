@@ -78,6 +78,18 @@ static uint32_t effective_participant_id(uint32_t configured_participant_id,
     return active != 0 ? active : configured_participant_id;
 }
 
+static bool source_wants_subscription(AssignmentMode mode,
+                                      uint32_t participant_id,
+                                      bool active_speaker_mode)
+{
+    if (mode == AssignmentMode::ScreenShare ||
+        mode == AssignmentMode::SpotlightIndex ||
+        mode == AssignmentMode::ActiveSpeaker)
+        return true;
+
+    return active_speaker_mode || participant_id != 0;
+}
+
 void ZoomSource::apply_settings(obs_data_t *settings)
 {
     const uint32_t old_participant_id = participant_id;
@@ -131,6 +143,12 @@ void ZoomSource::apply_settings(obs_data_t *settings)
         old_assignment != new_assignment ||
         old_spotlight_slot != new_spot ||
         old_failover != new_failover)) {
+        subscribe();
+    }
+
+    if (!m_subscribed &&
+        source_wants_subscription(new_assignment, participant_id,
+                                  active_speaker_mode)) {
         subscribe();
     }
 
@@ -263,9 +281,13 @@ void ZoomSource::subscribe()
                 [&](const ParticipantInfo &p) { return p.user_id == target; });
             if (!primary_present) target = failover;
         }
-        ZoomEngineClient::instance().subscribe(source_uuid, target);
+        if (target != 0)
+            ZoomEngineClient::instance().subscribe(source_uuid, target);
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] Zoom source subscription: source=%s uuid=%s participant_id=%u",
+             output_name().c_str(), source_uuid.c_str(), target);
         m_current_subscription_id = target;
-        m_subscribed = true;
+        m_subscribed = target != 0 || active_speaker_mode;
         return;
     }
     }

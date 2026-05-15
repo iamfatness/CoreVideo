@@ -15,10 +15,22 @@ ParticipantSubscription::ParticipantSubscription(uint32_t participant_id,
       m_e2p_fd(e2p_fd)
 {
     ZOOMSDK::SDKError err = ZOOMSDK::createRenderer(&m_renderer, this);
-    if (err != ZOOMSDK::SDKERR_SUCCESS || !m_renderer) return;
+    if (err != ZOOMSDK::SDKERR_SUCCESS || !m_renderer) {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"create_renderer_failed","source_uuid":")" +
+            m_source_uuid + R"(","participant_id":)" +
+            std::to_string(m_participant_id) + R"(,"code":)" +
+            std::to_string(static_cast<int>(err)) + "}");
+        return;
+    }
 
     m_renderer->setRawDataResolution(ZOOMSDK::ZoomSDKResolution_1080P);
-    m_renderer->subscribe(participant_id, ZOOMSDK::RAW_DATA_TYPE_VIDEO);
+    err = m_renderer->subscribe(participant_id, ZOOMSDK::RAW_DATA_TYPE_VIDEO);
+    EngineIpc::write(
+        R"({"cmd":"debug","stage":"video_subscribe","source_uuid":")" +
+        m_source_uuid + R"(","participant_id":)" +
+        std::to_string(m_participant_id) + R"(,"code":)" +
+        std::to_string(static_cast<int>(err)) + "}");
 }
 
 ParticipantSubscription::~ParticipantSubscription()
@@ -64,7 +76,15 @@ void ParticipantSubscription::onRawDataFrameReceived(YUVRawDataI420 *data)
         R"(","w":)" + std::to_string(w) + R"(,"h":)" + std::to_string(h) + "}");
 }
 
-void ParticipantSubscription::onRawDataStatusChanged(ZOOMSDK::IZoomSDKRendererDelegate::RawDataStatus) {}
+void ParticipantSubscription::onRawDataStatusChanged(
+    ZOOMSDK::IZoomSDKRendererDelegate::RawDataStatus status)
+{
+    EngineIpc::write(
+        R"({"cmd":"debug","stage":"video_raw_status","source_uuid":")" +
+        m_source_uuid + R"(","participant_id":)" +
+        std::to_string(m_participant_id) + R"(,"status":)" +
+        std::to_string(static_cast<int>(status)) + "}");
+}
 
 void ParticipantSubscription::onRendererBeDestroyed()
 {

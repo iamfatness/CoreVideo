@@ -613,6 +613,9 @@ int main()
             init_param.strWebDomain = "https://zoom.us";
 #endif
             init_param.enableGenerateDump = true;
+#if defined(WIN32)
+            init_param.obConfigOpts.optionalFeatures = ENABLE_CUSTOMIZED_UI_FLAG;
+#endif
             init_param.rawdataOpts.videoRawdataMemoryMode = ZOOMSDK::ZoomSDKRawDataMemoryModeHeap;
             init_param.rawdataOpts.audioRawdataMemoryMode = ZOOMSDK::ZoomSDKRawDataMemoryModeHeap;
             EngineIpc::write(R"({"cmd":"debug","stage":"before_init_sdk"})");

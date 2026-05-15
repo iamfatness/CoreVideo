@@ -150,7 +150,11 @@
   <div class="nav-section">Flows</div>
   <a href="#flow-auth">Authentication Flow</a>
   <a href="#flow-meeting">Meeting Join Flow</a>
+  <a href="#assignment-modes">Assignment Modes</a>
   <a href="#active-speaker">Active Speaker Mode</a>
+  <a href="#auto-reconnect">Auto-Reconnect</a>
+  <a href="#zoom-dock">Zoom Control Dock</a>
+  <a href="#hw-accel">Hardware Video Acceleration</a>
   <div class="nav-section">Reference</div>
   <a href="#control-api">TCP Control API</a>
   <a href="#osc-api">OSC Control API</a>
@@ -165,17 +169,24 @@
 
   <div class="hero">
     <h1>CoreVideo</h1>
-    <p style="font-size:1.1rem;color:#8b949e;max-width:620px;">
+    <p style="font-size:1.1rem;color:#8b949e;max-width:640px;">
       An OBS Studio plugin that captures live Zoom meeting video, audio,
-      screen share, and language interpretation — with TCP and OSC control APIs
-      for broadcast automation.
+      screen share, and language interpretation — with a dockable control panel,
+      auto-reconnect, ZoomISO-style assignment modes, hardware video acceleration,
+      and TCP/OSC control APIs for full broadcast automation.
     </p>
-    <div class="hero-badges">
+    <div class="callout warning" style="margin-top:18px;">
+      <div class="callout-title">⚠️ Zoom Enhanced Media License Required</div>
+      Capturing raw video and audio from Zoom meetings requires a <strong>Zoom Enhanced Media license</strong>
+      on the account hosting or joining the meeting. Operating without it will cause raw-data permission
+      errors at runtime. Contact your Zoom account representative before deploying in production.
+    </div>
+    <div class="hero-badges" style="margin-top:16px;">
       <span class="badge blue">C++17</span>
       <span class="badge blue">CMake 3.16+</span>
-      <span class="badge green">OBS Studio</span>
+      <span class="badge green">OBS Studio 30+</span>
       <span class="badge green">Qt 6</span>
-      <span class="badge purple">Zoom Meeting SDK</span>
+      <span class="badge purple">Zoom SDK 5.17+ / 7.x</span>
       <span class="badge orange">Windows</span>
       <span class="badge orange">macOS</span>
       <span class="badge orange">Linux</span>
@@ -187,21 +198,28 @@
     <h2>Introduction</h2>
     <p>
       <strong>CoreVideo</strong> integrates the <strong>Zoom Meeting SDK</strong>
-      directly into OBS Studio. It receives raw I420 video and 48 kHz PCM audio
-      from meeting participants, converts the frames, and pushes them into OBS as
-      native sources — no screen capture or virtual camera involved.
+      into OBS Studio with no screen capture or virtual camera required.
+      It receives raw I420 video and 48 kHz PCM audio from any meeting participant,
+      performs optional hardware-accelerated color conversion, and pushes frames
+      into OBS as native sources.
     </p>
     <p>
-      The companion process <code>ZoomObsEngine</code> hosts the Zoom SDK in
-      isolation, communicating back over JSON IPC (named pipes on Windows, Unix
-      domain sockets on macOS/Linux) with frame data flowing through shared memory.
+      The <code>ZoomObsEngine</code> child process hosts all SDK access in isolation,
+      communicating with the plugin over JSON IPC (named pipes on Windows,
+      Unix domain sockets on macOS/Linux) with frame data flowing through named
+      shared memory. The plugin contains no Zoom SDK linkage.
     </p>
     <p>
-      Two external control interfaces let automation tools drive the plugin at
-      runtime: a <strong>TCP JSON server</strong> on port 19870 and a
-      <strong>UDP OSC server</strong> on port 19871. Named <strong>output
-      profiles</strong> let operators save and recall complete source-to-participant
-      mappings in one command.
+      Joining a meeting is driven by the built-in <strong>Zoom Control dock</strong>
+      (or the TCP/OSC APIs). Once in a meeting, sources can follow a fixed
+      participant, the active speaker, a ZoomISO-style <strong>spotlight slot</strong>,
+      or the active <strong>screen share</strong> — and switch automatically with a
+      configurable failover participant if the primary leaves.
+    </p>
+    <p>
+      A <strong>ZoomReconnectManager</strong> automatically re-joins after engine
+      crashes, network drops, or unexpected disconnects, with exponential back-off
+      and a cancel-at-any-time UI in the dock.
     </p>
   </section>
 
@@ -210,33 +228,43 @@
     <h2>Features</h2>
     <div class="card-grid">
       <div class="card"><div class="card-icon">🎥</div><h4>Raw Video Capture</h4>
-        <p>I420 YUV → BGRA per participant. Selectable 360p / 720p / 1080p resolution.</p></div>
-      <div class="card"><div class="card-icon">⬛</div><h4>Video Loss Mode</h4>
-        <p>Hold the last frame or go black immediately when a participant's feed drops.</p></div>
+        <p>I420 YUV per participant. Selectable 360p / 720p / 1080p resolution. Hardware-accelerated color conversion (CUDA, VAAPI, VideoToolbox, QSV).</p></div>
+      <div class="card"><div class="card-icon">⬛</div><h4>Video Loss &amp; Placeholder</h4>
+        <p>Hold last frame or show black on feed drop. Shows a color-bar placeholder when not yet subscribed.</p></div>
       <div class="card"><div class="card-icon">🎙️</div><h4>Raw Audio Capture</h4>
-        <p>48 kHz PCM, mono or stereo, with per-participant audio isolation.</p></div>
+        <p>48 kHz PCM, mono or stereo, with per-participant audio isolation and mixer routing.</p></div>
       <div class="card"><div class="card-icon">🌐</div><h4>Language Interpretation</h4>
         <p>Dedicated OBS source for any language interpretation channel in the meeting.</p></div>
       <div class="card"><div class="card-icon">🖥️</div><h4>Screen Share Capture</h4>
-        <p>Dedicated OBS source type that follows active screen share content.</p></div>
-      <div class="card"><div class="card-icon">👥</div><h4>Participant Roster</h4>
-        <p>Live list with video, mute, and talking state updated in real time.</p></div>
+        <p>Source type that follows active screen-share feed via <code>ScreenShare</code> assignment mode.</p></div>
+      <div class="card"><div class="card-icon">🎯</div><h4>Spotlight / ZoomISO Modes</h4>
+        <p>Assign a source to Spotlight slot 1…N — exactly like ZoomISO. Engine resolves which participant owns each slot.</p></div>
       <div class="card"><div class="card-icon">🔄</div><h4>Active Speaker Mode</h4>
-        <p>Configurable sensitivity (ms) and hold time (ms) debounce speaker switching.</p></div>
+        <p>Sensitivity (ms) + hold-time (ms) debounce with liveness guard, supersede logic, and failover participant.</p></div>
+      <div class="card"><div class="card-icon">🔁</div><h4>Failover Participant</h4>
+        <p>Configure a secondary participant ID that activates automatically when the primary leaves the meeting.</p></div>
+      <div class="card"><div class="card-icon">🔌</div><h4>Auto-Reconnect</h4>
+        <p>Automatic re-join after engine crash, network drop, or disconnection — exponential back-off with cancel UI.</p></div>
+      <div class="card"><div class="card-icon">🎬</div><h4>Webinar Support</h4>
+        <p>Join Zoom Webinars using the dedicated SDK entry point — set the Webinar checkbox in the control dock.</p></div>
+      <div class="card"><div class="card-icon">👥</div><h4>Rich Participant Roster</h4>
+        <p>Live list with video, mute, talking, host, co-host, raised hand, spotlight slot, and screen-sharing state.</p></div>
       <div class="card"><div class="card-icon">🔊</div><h4>Per-Participant Audio</h4>
-        <p>Standalone OBS audio source type per meeting participant.</p></div>
+        <p>Standalone OBS audio source per meeting participant; audio mixed into OBS audio mixer.</p></div>
+      <div class="card"><div class="card-icon">🎛️</div><h4>Control Dock</h4>
+        <p>Dockable Qt panel with join/leave, state indicator, active speaker label, recovery countdown, and output table.</p></div>
       <div class="card"><div class="card-icon">🌐</div><h4>TCP Control API</h4>
-        <p>JSON server on port 19870 — query, join, leave, assign outputs.</p></div>
+        <p>JSON server on port 19870 — query, join, leave, assign outputs from scripts or dashboards.</p></div>
       <div class="card"><div class="card-icon">🎛️</div><h4>OSC Control API</h4>
         <p>UDP OSC server on port 19871 for lighting consoles and broadcast hardware.</p></div>
       <div class="card"><div class="card-icon">💾</div><h4>Output Profiles</h4>
         <p>Save and load named participant-to-source mappings as JSON files.</p></div>
-      <div class="card"><div class="card-icon">📡</div><h4>Output Manager</h4>
-        <p>Qt dialog and API for viewing and reconfiguring all sources at runtime.</p></div>
+      <div class="card"><div class="card-icon">⌨️</div><h4>OBS Hotkeys</h4>
+        <p>Per-source hotkeys to enable/disable active speaker mode from OBS keyboard shortcuts.</p></div>
       <div class="card"><div class="card-icon">🔒</div><h4>Hardened Security</h4>
-        <p>Constant-time token comparison, validated IPC input, sanitised participant IDs.</p></div>
+        <p>Constant-time token comparison, validated IPC input, sanitised participant IDs, SIGPIPE handling.</p></div>
       <div class="card"><div class="card-icon">💻</div><h4>Multi-Platform</h4>
-        <p>Windows (x64/arm64), macOS (universal), Linux — engine on all platforms.</p></div>
+        <p>Windows (x64/arm64), macOS (universal arm64+x86_64), Linux. SDK 5.17.x and 7.x header layouts supported.</p></div>
     </div>
   </section>
 
@@ -248,9 +276,11 @@
       <tr><td>OBS Studio</td><td>30+</td><td><code>libobs</code> + <code>obs-frontend-api</code></td></tr>
       <tr><td>CMake</td><td>3.16+</td><td>Build system</td></tr>
       <tr><td>Qt</td><td>6.x</td><td>Core + Network + Widgets</td></tr>
-      <tr><td>Zoom Meeting SDK</td><td>5.x</td><td>Place in <code>third_party/zoom-sdk/</code></td></tr>
+      <tr><td>Zoom Meeting SDK</td><td><strong>5.17.x or 7.x</strong></td><td>Place at <code>third_party/zoom-sdk/</code>. CMake detects flat (5.x) and subfolder (7.x) header layouts automatically.</td></tr>
       <tr><td>C++ Compiler</td><td>C++17</td><td>MSVC 2022 / Clang 14+ / GCC 11+</td></tr>
-      <tr><td>Zoom Developer Account</td><td>—</td><td>SDK key, secret &amp; JWT token</td></tr>
+      <tr><td>Zoom Developer Account</td><td>—</td><td>SDK key + secret required. CoreVideo generates the Meeting SDK JWT locally. A manual JWT override field is available.</td></tr>
+      <tr><td>Zoom Enhanced Media License</td><td>—</td><td><strong>Required</strong> on the Zoom account joining the meeting. Without it the SDK returns raw-data permission errors.</td></tr>
+      <tr><td>FFmpeg (optional)</td><td>—</td><td>Required only when building with <code>-DCOREVIDEO_HW_ACCEL=ON</code> for hardware-accelerated I420→NV12 conversion.</td></tr>
     </table>
   </section>
 
@@ -259,12 +289,19 @@
   <section id="arch-system">
     <h2>Architecture: System Overview</h2>
     <p>
-      All Zoom SDK access now lives exclusively in <code>ZoomObsEngine</code>.
-      The plugin communicates with it entirely through
-      <code>ZoomEngineClient</code> — a singleton that launches the engine
-      process, owns the IPC channels, and distributes roster events and
-      frame notifications to registered sources. The plugin itself contains
-      no Zoom SDK headers or linkage.
+      All Zoom SDK access lives exclusively in <code>ZoomObsEngine</code>.
+      The plugin communicates with it through <code>ZoomEngineClient</code> — a
+      singleton that launches the engine process, owns the IPC channels, and
+      distributes roster events and frame notifications to registered sources.
+      The plugin contains no Zoom SDK headers or linkage.
+    </p>
+    <p>
+      Meeting joining is handled by the <strong>Zoom Control dock</strong>
+      (<code>ZoomDock</code>) or the TCP/OSC APIs. On unexpected disconnects the
+      <strong>ZoomReconnectManager</strong> automatically re-joins with exponential
+      back-off. Sources each hold an <strong>AssignmentMode</strong> that controls
+      which feed they subscribe to: a fixed participant, the active speaker, a
+      spotlight slot, or the active screen share.
     </p>
     <div class="diagram-wrap">
       <div class="mermaid">
@@ -277,44 +314,45 @@ graph TB
       end
 
       subgraph Plugin["obs-zoom-plugin  (no SDK dependency)"]
-        PM["plugin-main"]
+        ZDock["ZoomDock\n(Control UI)"]
         ZEC["ZoomEngineClient\n★ central singleton"]
-        ZS["ZoomSource\n(reads ShmRegion directly)"]
+        ZRM["ZoomReconnectManager\n(auto-reconnect)"]
+        ZS["ZoomSource\n(ShmRegion · AssignmentMode)"]
         ZOM["ZoomOutputManager"]
-        ZOP["ZoomOutputProfile"]
-        ZCS["ZoomControlServer\nTCP 127.0.0.1:19870"]
+        ZCS["ZoomControlServer :19870"]
+        ZOSC["ZoomOscServer :19871"]
 
-        PM --> ZEC & ZCS
+        ZDock --> ZEC
+        ZRM --> ZEC
         ZEC --> ZS
-        ZS --> ZOM
-        ZOM --> ZOP
-        ZCS --> ZOM & ZEC
+        ZCS & ZOSC --> ZOM & ZEC
+        ZEC --> ZRM
       end
 
-      subgraph Engine["ZoomObsEngine  (owns ALL SDK access)"]
+      subgraph Engine["ZoomObsEngine  (ALL SDK access)"]
         ELoop["IPC Loop"]
-        EVid["EngineVideo\n(shared memory write)"]
-        EAud["EngineAudio\n(shared memory write)"]
-        EPart["Participant &amp;\nSpeaker tracking"]
-        SDK["Zoom Meeting SDK\nAuth · Meeting · Raw data"]
+        EVid["EngineVideo\n(SHM write)"]
+        EAud["EngineAudio\n(SHM write)"]
+        EPart["Participant &amp; Spotlight\ntracking"]
+        SDK["Zoom SDK\nAuth · Meeting · Webinar · Raw data"]
         ELoop --> EVid & EAud & EPart --> SDK
       end
 
       subgraph ZoomCloud["Zoom Cloud"]
-        Mtg["Live Meeting"]
+        Mtg["Live Meeting / Webinar"]
       end
 
       subgraph External["External Control"]
-        Ctrl["Script / Dashboard\nTCP JSON :19870"]
+        Ctrl["Script / Dashboard"]
       end
     end
 
     OBS -->|loads| Plugin
     VSrc <--> ZS
-    Plugin <-->|"JSON IPC\n(pipe / socket)"| ELoop
-    EVid & EAud -->|"Named Shared Memory\nBGRA frames · PCM audio"| ZS
+    Plugin <-->|"JSON IPC\n(named pipe / Unix socket)"| ELoop
+    EVid & EAud -->|"Named Shared Memory\nI420 frames · PCM audio"| ZS
     SDK <-->|HTTPS/WSS| Mtg
-    Ctrl <-->|TCP| ZCS
+    Ctrl <-->|"TCP :19870\nUDP OSC :19871"| ZCS & ZOSC
 
     style OBS fill:#0d2137,stroke:#2f81f7,color:#e6edf3
     style Plugin fill:#1a2332,stroke:#388bfd,color:#e6edf3
@@ -322,89 +360,105 @@ graph TB
     style ZoomCloud fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
     style External fill:#2d2000,stroke:#d29922,color:#e6edf3
       </div>
-      <div class="diagram-caption">Fig 1 — All SDK access is in ZoomObsEngine. The plugin communicates entirely through ZoomEngineClient over IPC.</div>
+      <div class="diagram-caption">Fig 1 — All SDK access is in ZoomObsEngine. The plugin communicates entirely through ZoomEngineClient over IPC. ZoomDock and ZoomReconnectManager manage the join lifecycle.</div>
     </div>
   </section>
 
   <section id="arch-components">
     <h2>Architecture: Plugin Components</h2>
     <p>
-      After the architectural refactor, all Zoom SDK access lives in
-      <code>ZoomObsEngine</code> (a separate process). The plugin-side class
-      hierarchy is significantly simpler: <code>ZoomEngineClient</code> is the
-      single singleton that owns IPC and roster state, while each
-      <code>ZoomSource</code> reads video and audio frames directly from named
-      shared memory (<code>ShmRegion</code>).
+      All Zoom SDK access lives in <code>ZoomObsEngine</code>. The plugin-side
+      hierarchy centers on <code>ZoomEngineClient</code> (IPC singleton) and
+      <code>ZoomSource</code> (reads frames from <code>ShmRegion</code>).
+      New additions: <code>ZoomDock</code> (join UI), <code>ZoomReconnectManager</code>
+      (auto-reconnect), and <code>HwVideoPipeline</code> (hardware I420→NV12).
     </p>
     <div class="diagram-wrap">
       <div class="mermaid">
 classDiagram
     class ZoomEngineClient {
         &lt;&lt;Singleton&gt;&gt;
-        +start(jwt_token) bool
-        +stop()
-        +join(meeting_id, passcode, display_name) bool
+        +start(jwt) / stop() / stop_for_reconnect()
+        +join(id, pass, name, kind: MeetingKind)
         +leave()
-        +subscribe(source_uuid, participant_id)
-        +unsubscribe(source_uuid)
+        +subscribe(uuid, pid, isolate_audio)
+        +subscribe_spotlight(uuid, slot)
+        +subscribe_screenshare(uuid)
+        +unsubscribe(uuid)
         +state() MeetingState
+        +is_authenticated() bool
         +active_speaker_id() uint32_t
         +roster() vector~ParticipantInfo~
         +register_source(uuid, callbacks)
-        +unregister_source(uuid)
         +add_roster_callback(key, cb)
-        +remove_roster_callback(key)
     }
     class ZoomSource {
-        +source_uuid : string
-        +meeting_id, passcode, display_name
-        +participant_id, active_speaker_mode
-        +isolate_audio, audio_mode
+        +assignment : AssignmentMode
+        +participant_id : atomic~uint32_t~
+        +spotlight_slot : atomic~uint32_t~
+        +failover_participant_id : atomic~uint32_t~
         +resolution : VideoResolution
         +video_loss_mode : VideoLossMode
-        +speaker_sensitivity_ms : uint32_t
-        +speaker_hold_ms : uint32_t
-        +apply_settings(settings)
-        +configure_output(...)
-        +subscribe() / unsubscribe()
+        +hw_accel_override : int
+        +speaker_sensitivity_ms, speaker_hold_ms
+        +configure_output_ex(mode, pid, slot, failover, …)
         +on_engine_frame(w, h)
         +on_engine_audio(byte_len)
-        +set_preview_cb(cb)
+        +m_hk_active_on_id, m_hk_active_off_id
+        +m_hw_pipeline : HwVideoPipeline
     }
-    class ShmRegion {
-        +open(name) bool
-        +close()
-        +data() uint8_t*
-        +size() size_t
+    class ZoomDock {
+        +on_join_clicked()
+        +on_leave_clicked()
+        +on_cancel_recovery_clicked()
+        +update_state_indicator()
+        +update_recovery_panel()
+        -m_join_thread / m_join_generation
+        -m_output_table : QTableWidget
+    }
+    class ZoomReconnectManager {
+        &lt;&lt;Singleton&gt;&gt;
+        +set_policy(policy)
+        +store_session(jwt, id, pass, name)
+        +trigger(reason: RecoveryReason)
+        +cancel()
+        +on_join_success() / on_join_failed(permanent)
+        +is_recovering() bool
+        +next_retry_ms() int
+    }
+    class HwVideoPipeline {
+        +init(mode: HwAccelMode) bool
+        +process(y,u,v, w,h, strides, frame) bool
+        +active_mode() HwAccelMode
+        +shutdown()
     }
     class ZoomOutputManager {
         &lt;&lt;Singleton&gt;&gt;
-        +register_source(source)
-        +unregister_source(source)
+        +register_source / unregister_source
+        +configure_output_ex(mode, …)
         +outputs() vector
-        +configure_output(...)
-    }
-    class ZoomOutputProfile {
-        &lt;&lt;namespace&gt;&gt;
-        +list() vector~string~
-        +save(name, outputs)
-        +load(name) vector
-        +remove(name)
     }
     class ZoomControlServer {
         &lt;&lt;Singleton&gt;&gt;
         +start(port=19870)
         +set_token(token)
     }
+    class ZoomOscServer {
+        &lt;&lt;Singleton&gt;&gt;
+        +start(port=19871)
+    }
 
+    ZoomDock --> ZoomEngineClient : join / leave
+    ZoomReconnectManager --> ZoomEngineClient : stop_for_reconnect / start / join
+    ZoomEngineClient ..> ZoomReconnectManager : trigger / on_join_success
     ZoomSource --> ZoomEngineClient : subscribe / unsubscribe
-    ZoomSource --> ShmRegion : reads video + audio frames
+    ZoomSource ..> HwVideoPipeline : I420→NV12 conversion
     ZoomSource --> ZoomOutputManager
-    ZoomOutputManager --> ZoomOutputProfile
-    ZoomOutputManager &lt;-- ZoomControlServer
-    ZoomEngineClient ..> ZoomSource : on_frame / on_audio callbacks
+    ZoomControlServer --> ZoomOutputManager
+    ZoomControlServer --> ZoomEngineClient
+    ZoomOscServer --> ZoomOutputManager
       </div>
-      <div class="diagram-caption">Fig 2 — Plugin class diagram after refactor. ZoomEngineClient owns IPC; ZoomSource reads frames from shared memory.</div>
+      <div class="diagram-caption">Fig 2 — Plugin class diagram. ZoomEngineClient is the IPC singleton; ZoomDock owns join flow; ZoomReconnectManager handles recovery.</div>
     </div>
   </section>
 
@@ -465,14 +519,32 @@ graph TB
       <tr><td><code>leave()</code> / <code>stop()</code></td><td>Sends <code>leave</code> / <code>quit</code>; reader thread joins</td></tr>
     </table>
 
-    <h3>Roster and Active Speaker</h3>
+    <h3>Roster, Active Speaker, and Spotlight</h3>
     <p>
       The engine sends a <code>participants</code> event whenever the roster changes
       and an <code>active_speaker</code> event when the speaking participant changes.
       <code>ZoomEngineClient</code> updates its internal roster and active-speaker ID
       from these events, then fires all registered <code>RosterCallback</code>
-      functions. <code>ZoomSource</code> instances in active-speaker mode listen via
-      <code>add_roster_callback()</code> and run the debounce algorithm on every change.
+      functions. <code>ZoomSource</code> instances react based on their
+      <code>AssignmentMode</code>: active-speaker sources run the debounce algorithm;
+      spotlight sources send a <code>subscribe_spotlight</code> command when spotlight
+      slots change.
+    </p>
+
+    <h3>Deferred Join (Pending Until Authenticated)</h3>
+    <p>
+      Calls to <code>join()</code> before the engine has authenticated store the
+      meeting credentials in <code>m_join_pending / m_pending_*</code> fields.
+      When the <code>auth_ok</code> event arrives, <code>send_join_locked()</code>
+      is called automatically so operators can trigger join at any time.
+    </p>
+
+    <h3>Monitor Thread</h3>
+    <p>
+      A dedicated <code>monitor_loop()</code> thread watches for engine health
+      issues (stalled reader, unexpected process exit) and sets the state to
+      <code>Failed</code>, which triggers <code>ZoomReconnectManager</code>
+      if recovery is configured.
     </p>
   </section>
 
@@ -632,86 +704,164 @@ flowchart LR
 
   <section id="flow-auth">
     <h2>Flow: Authentication</h2>
+    <p>
+      CoreVideo generates the Zoom Meeting SDK JWT locally from the saved SDK key
+      and secret — no external JWT service needed. A manual JWT override can be
+      supplied in settings. The engine is not started on module load; it is launched
+      the first time a join is requested.
+    </p>
     <div class="diagram-wrap">
       <div class="mermaid">
 sequenceDiagram
     participant OBS as OBS Studio
     participant PM as plugin-main
+    participant ZDock as ZoomDock
     participant ZEC5 as ZoomEngineClient
     participant ZS2 as ZoomSettings
     participant Engine as ZoomObsEngine
     participant SDK as Zoom SDK
 
     OBS->>PM: obs_module_load()
-    PM->>ZS2: load() → {jwt, ports, token}
+    PM->>ZS2: load() → {sdk_key, sdk_secret, jwt_override, ports, token}
     PM->>ZoomControlServer: start(control_server_port)
-    alt Credentials present
-        PM->>ZEC5: instance().start(jwt_token)
-        ZEC5->>Engine: launch_engine() [fork/CreateProcess]
-        ZEC5->>ZEC5: connect_ipc() [up to 300 × 100ms retries]
-        Engine-->>ZEC5: {"cmd":"ready"}
-        ZEC5->>Engine: {"cmd":"init","jwt":"…"}
-        Engine->>SDK: InitSDK() + SDKAuth({jwt})
-        SDK-->>Engine: onAuthenticationReturn(SUCCESS)
-        Engine-->>ZEC5: {"cmd":"auth_ok"}
-        Note over ZEC5: state → InMeeting-capable
-    end
+    PM->>ZoomOscServer: start(osc_server_port)
+    PM->>ZDock: ensure_zoom_dock() [after OBS_FRONTEND_EVENT_FINISHED_LOADING]
+
+    Note over ZDock: User clicks Join or API sends join cmd
+
+    ZDock->>ZDock: generate JWT from key+secret (or use override)
+    ZDock->>ZEC5: start(jwt_token)
+    ZEC5->>Engine: launch_engine() [fork / CreateProcess]
+    ZEC5->>ZEC5: connect_ipc() [300 × 100ms retries]
+    Engine-->>ZEC5: {"cmd":"ready"}
+    ZEC5->>Engine: {"cmd":"init","jwt":"…"}
+    Engine->>SDK: InitSDK() + SDKAuth({jwt})
+    SDK-->>Engine: onAuthenticationReturn(SUCCESS)
+    Engine-->>ZEC5: {"cmd":"auth_ok"}
+    Note over ZEC5: m_authenticated = true; send pending join if queued
+
     opt Identity expires later
         SDK-->>Engine: onZoomIdentityExpired()
         Engine->>SDK: SDKAuth(last_jwt)
         Engine-->>ZEC5: {"cmd":"auth_ok"}
     end
       </div>
-      <div class="diagram-caption">Fig 8 — Auth at load time via ZoomEngineClient launching the engine process, with automatic re-authentication on identity expiry.</div>
+      <div class="diagram-caption">Fig 8 — JWT is generated locally from key+secret. Engine is launched on first join. Auth expiry is handled automatically inside the engine.</div>
     </div>
   </section>
 
   <section id="flow-meeting">
     <h2>Flow: Meeting Join &amp; Capture</h2>
+    <p>
+      Joining is centralized in <code>ZoomDock</code> (or the TCP/OSC control APIs) —
+      not in individual sources. Sources subscribe to the already-joined meeting.
+    </p>
     <div class="diagram-wrap">
       <div class="mermaid">
 sequenceDiagram
     participant U as User / Control API
-    participant ZS3 as ZoomSource
-    participant ZOM2 as ZoomOutputManager
+    participant ZDock2 as ZoomDock
+    participant ZRM2 as ZoomReconnectManager
     participant ZEC6 as ZoomEngineClient
+    participant ZS3 as ZoomSource
     participant Engine as ZoomObsEngine
 
-    U->>ZS3: activate source
-    ZS3->>ZOM2: register_source(this)
-    ZS3->>ZEC6: join(meeting_id, passcode, display_name)
-    ZEC6->>Engine: {"cmd":"join","meeting_id":"…"}
+    U->>ZDock2: click Join (meeting_id, passcode, display_name, [webinar])
+    ZDock2->>ZRM2: store_session(jwt, id, pass, name)
+    ZDock2->>ZEC6: start(jwt) [launches engine if not running]
+    ZDock2->>ZEC6: join(id, pass, name, kind=Meeting|Webinar)
+    ZEC6->>Engine: {"cmd":"join","meeting_id":"…","kind":"meeting|webinar"}
     Engine-->>ZEC6: {"cmd":"joined"}
-    ZS3->>ZEC6: subscribe(source_uuid, participant_id)
+    ZEC6-->>ZRM2: on_join_success()
+
+    Note over ZS3: ZoomSource.activate() when OBS activates source
+
+    ZS3->>ZEC6: subscribe(uuid, pid, isolate) OR subscribe_spotlight(uuid, slot)
     ZEC6->>Engine: {"cmd":"subscribe","source_uuid":"…","participant_id":N}
 
     loop Live capture
         Engine-->>ZEC6: {"cmd":"frame","uuid":"…","w":W,"h":H}
         ZEC6-->>ZS3: on_engine_frame(w, h)
-        ZS3->>ZS3: read I420 from m_video_shm
+        ZS3->>ZS3: read I420 from m_video_shm; HwVideoPipeline.process() if enabled
         ZS3->>OBS: obs_source_output_video()
         Engine-->>ZEC6: {"cmd":"audio","uuid":"…","byte_len":B}
         ZEC6-->>ZS3: on_engine_audio(byte_len)
-        ZS3->>ZS3: read PCM from m_audio_shm
         ZS3->>OBS: obs_source_output_audio()
     end
 
-    opt Active speaker changes
-        Engine-->>ZEC6: {"cmd":"active_speaker","participant_id":X}
-        ZEC6-->>ZS3: roster_callback (active_speaker_id updated)
-        Note over ZS3: on_active_speaker_changed()\ndebounce: sensitivity_ms + hold_ms
-        ZS3->>ZEC6: unsubscribe(uuid) + subscribe(uuid, new_pid)
-        ZEC6->>Engine: unsubscribe + subscribe cmds
+    opt Engine crash / unexpected disconnect
+        ZEC6-->>ZRM2: trigger(EngineCrash | MeetingDisconnect)
+        ZRM2->>ZRM2: schedule retry with exponential back-off
+        ZRM2->>ZEC6: stop_for_reconnect() [on retry]
+        ZRM2->>ZEC6: start(jwt) + join(…)
     end
 
-    U->>ZS3: deactivate
-    ZS3->>ZOM2: unregister_source(this)
-    ZS3->>ZEC6: unsubscribe(source_uuid)
-    ZEC6->>Engine: {"cmd":"unsubscribe","source_uuid":"…"}
-    ZS3->>ZEC6: leave()
+    U->>ZDock2: click Leave
+    ZDock2->>ZEC6: leave()
     ZEC6->>Engine: {"cmd":"leave"}
+    ZRM2->>ZRM2: clear_session() [no recovery after explicit leave]
       </div>
-      <div class="diagram-caption">Fig 9 — Meeting join, live capture via shared memory, debounced active-speaker switching, and teardown.</div>
+      <div class="diagram-caption">Fig 9 — Join is driven by ZoomDock. Sources subscribe once in meeting. ZoomReconnectManager handles unexpected disconnects.</div>
+    </div>
+  </section>
+
+  <!-- ══ ASSIGNMENT MODES ══════════════════════════════════════ -->
+
+  <section id="assignment-modes">
+    <h2>Assignment Modes</h2>
+    <p>
+      Each <code>ZoomSource</code> has an <code>AssignmentMode</code> property
+      that controls which feed it subscribes to. This is the ZoomISO 3.0 model:
+      sources are reusable roles rather than fixed participant bindings.
+    </p>
+    <table>
+      <tr><th>Mode</th><th>Enum value</th><th>Behaviour</th></tr>
+      <tr><td><strong>Participant</strong></td><td><code>AssignmentMode::Participant</code></td><td>Subscribe to a fixed <code>participant_id</code>. If a <code>failover_participant_id</code> is set and the primary participant leaves, the source automatically re-subscribes to the failover.</td></tr>
+      <tr><td><strong>Active Speaker</strong></td><td><code>AssignmentMode::ActiveSpeaker</code></td><td>Follow whoever is currently speaking. Uses the two-timer debounce (sensitivity + hold). See Active Speaker Mode section for details.</td></tr>
+      <tr><td><strong>Spotlight Slot</strong></td><td><code>AssignmentMode::SpotlightIndex</code></td><td>Subscribe to Spotlight slot N (1-based). The engine tracks which participant is in each spotlight position and sends <code>subscribe_spotlight</code> subscriptions automatically when the slot changes.</td></tr>
+      <tr><td><strong>Screen Share</strong></td><td><code>AssignmentMode::ScreenShare</code></td><td>Subscribe to the active screen-share feed. Uses <code>subscribe_screenshare(uuid)</code> on the engine. The source shows a placeholder when no share is active.</td></tr>
+    </table>
+
+    <h3>Failover Participant</h3>
+    <p>
+      In <strong>Participant</strong> mode, a <code>failover_participant_id</code>
+      (0 = disabled) can be configured alongside the primary participant. When the
+      engine sends a <code>participants</code> event showing the primary ID has left,
+      <code>ZoomSource</code> automatically re-subscribes to the failover ID. When
+      the primary rejoins, it switches back.
+    </p>
+
+    <h3>Spotlight Tracking</h3>
+    <p>
+      In <strong>Spotlight Slot</strong> mode, the roster callback checks
+      <code>ParticipantInfo::spotlight_index</code> on every roster update.
+      The source sends a <code>subscribe_spotlight(uuid, slot)</code> to the engine,
+      which resolves the participant in that slot and sets up the SDK renderer.
+      This mirrors the ZoomISO "Spotlight 1/2/3" output model.
+    </p>
+
+    <div class="diagram-wrap">
+      <div class="mermaid">
+flowchart LR
+    subgraph Source["ZoomSource (AssignmentMode)"]
+        P["Participant\nfixed pid + failover"]
+        AS["ActiveSpeaker\ndebounce + liveness"]
+        SP["SpotlightIndex\nslot 1…N"]
+        SS["ScreenShare\nactive share feed"]
+    end
+
+    P -->|subscribe(uuid, pid, isolate)| ZEC7["ZoomEngineClient"]
+    AS -->|subscribe(uuid, active_spk_pid, isolate)| ZEC7
+    SP -->|subscribe_spotlight(uuid, slot)| ZEC7
+    SS -->|subscribe_screenshare(uuid)| ZEC7
+
+    ZEC7 -->|JSON IPC| Engine2["ZoomObsEngine\n(resolves → SDK renderer)"]
+
+    style Source fill:#0d2137,stroke:#2f81f7,color:#e6edf3
+    style ZEC7 fill:#1a2332,stroke:#388bfd,color:#e6edf3
+    style Engine2 fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
+      </div>
+      <div class="diagram-caption">Assignment modes map to different ZoomEngineClient subscribe calls; the engine resolves each to the correct SDK renderer.</div>
     </div>
   </section>
 
@@ -862,6 +1012,131 @@ sequenceDiagram
     </p>
   </section>
 
+  <!-- ══ AUTO-RECONNECT ═══════════════════════════════════════ -->
+
+  <section id="auto-reconnect">
+    <h2>Auto-Reconnect</h2>
+    <p>
+      <code>ZoomReconnectManager</code> automatically re-joins the meeting after
+      engine crashes, network drops, SDK errors, or host-ended meetings.
+      It is configurable per-session and shows a live countdown in the Zoom Control dock.
+    </p>
+
+    <h3>Reconnect Policy</h3>
+    <table>
+      <tr><th>Field</th><th>Default</th><th>Description</th></tr>
+      <tr><td><code>enabled</code></td><td>true</td><td>Master switch for auto-reconnect</td></tr>
+      <tr><td><code>max_attempts</code></td><td>5</td><td>Maximum retry attempts before giving up</td></tr>
+      <tr><td><code>base_delay_ms</code></td><td>2 000 ms</td><td>Initial delay before first retry</td></tr>
+      <tr><td><code>max_delay_ms</code></td><td>30 000 ms</td><td>Maximum delay between retries (caps the back-off)</td></tr>
+      <tr><td><code>backoff_multiplier</code></td><td>2.0</td><td>Exponential multiplier: delay × 2^attempt</td></tr>
+      <tr><td><code>on_engine_crash</code></td><td>true</td><td>Trigger recovery on engine process exit</td></tr>
+      <tr><td><code>on_disconnect</code></td><td>true</td><td>Trigger recovery on unexpected meeting disconnect</td></tr>
+      <tr><td><code>on_auth_fail</code></td><td>false</td><td>Trigger recovery on auth failure (disabled by default)</td></tr>
+    </table>
+
+    <h3>Recovery Triggers</h3>
+    <table>
+      <tr><th>RecoveryReason</th><th>Cause</th></tr>
+      <tr><td><code>EngineCrash</code></td><td>Engine process exited unexpectedly</td></tr>
+      <tr><td><code>MeetingDisconnect</code></td><td>SDK reported unexpected meeting end</td></tr>
+      <tr><td><code>NetworkDrop</code></td><td>Network connectivity lost mid-meeting</td></tr>
+      <tr><td><code>AuthFailure</code></td><td>SDK authentication failed or expired without self-healing</td></tr>
+      <tr><td><code>SdkError</code></td><td>Fatal SDK error returned to engine</td></tr>
+      <tr><td><code>HostEndedMeeting</code></td><td>Host ended the meeting (re-join if meeting resumes)</td></tr>
+      <tr><td><code>LicenseError</code></td><td>Raw-data permission denied (Enhanced Media license missing)</td></tr>
+    </table>
+
+    <h3>Cancellation Safety</h3>
+    <p>
+      A monotonically increasing generation counter ensures stale timer wakeups
+      never fire a retry that was already cancelled or superseded. Calling
+      <code>cancel()</code> (via the dock or API) bumps the generation; the timer
+      thread sees the mismatch and discards the pending retry.
+    </p>
+    <p>
+      Explicit <code>leave()</code> calls set the <code>m_user_leaving</code> flag
+      and call <code>clear_session()</code>, preventing any recovery attempt after
+      a deliberate disconnect.
+    </p>
+  </section>
+
+  <!-- ══ ZOOM CONTROL DOCK ═════════════════════════════════════ -->
+
+  <section id="zoom-dock">
+    <h2>Zoom Control Dock</h2>
+    <p>
+      <code>ZoomDock</code> is a dockable Qt widget added to OBS on plugin load.
+      Access it via <strong>Tools → Zoom Control</strong> or drag it to any dock
+      position in OBS. It is the primary UI for meeting management.
+    </p>
+
+    <h3>Meeting Control Bar</h3>
+    <table>
+      <tr><th>Control</th><th>Description</th></tr>
+      <tr><td>State indicator (dot + label)</td><td>Shows Idle / Joining / InMeeting / Leaving / Recovering / Failed with a coloured dot</td></tr>
+      <tr><td>Meeting ID field</td><td>Zoom meeting number</td></tr>
+      <tr><td>Passcode field</td><td>Optional meeting passcode</td></tr>
+      <tr><td>Display Name field</td><td>Name shown inside the Zoom meeting</td></tr>
+      <tr><td>Webinar checkbox</td><td>Use Zoom Webinar SDK join API instead of regular meeting API</td></tr>
+      <tr><td>Join button</td><td>Generates JWT from saved key+secret and calls <code>ZoomEngineClient::join()</code></td></tr>
+      <tr><td>Leave button</td><td>Calls <code>ZoomEngineClient::leave()</code> and clears reconnect session</td></tr>
+      <tr><td>Participant filter</td><td>Filter participant list by display name</td></tr>
+      <tr><td>Active speaker label</td><td>Shows current active speaker's display name</td></tr>
+    </table>
+
+    <h3>Recovery Panel</h3>
+    <p>
+      Shown automatically when <code>MeetingState::Recovering</code>. Displays:
+    </p>
+    <ul>
+      <li>Recovery status message with attempt count</li>
+      <li>Live countdown timer to next retry (refreshes every second)</li>
+      <li><strong>Cancel Recovery</strong> button — calls <code>ZoomReconnectManager::cancel()</code></li>
+    </ul>
+
+    <h3>Output Table</h3>
+    <p>
+      The dock embeds an inline output table (replacing the separate Output Manager
+      modal for quick edits). Full output management is still available via
+      <strong>Tools → Zoom Output Manager</strong>.
+    </p>
+  </section>
+
+  <!-- ══ HARDWARE VIDEO ACCELERATION ══════════════════════════ -->
+
+  <section id="hw-accel">
+    <h2>Hardware Video Acceleration</h2>
+    <p>
+      When built with <code>-DCOREVIDEO_HW_ACCEL=ON</code>, each <code>ZoomSource</code>
+      owns a <code>HwVideoPipeline</code> that converts incoming I420 frames to NV12
+      using FFmpeg hardware acceleration. This offloads color-space conversion from
+      the CPU to the GPU/media engine.
+    </p>
+    <table>
+      <tr><th>HwAccelMode</th><th>Backend</th><th>Platform</th></tr>
+      <tr><td><code>None</code></td><td>CPU path (default)</td><td>All</td></tr>
+      <tr><td><code>Auto</code></td><td>First available hardware backend</td><td>All</td></tr>
+      <tr><td><code>Cuda</code></td><td>NVIDIA CUDA</td><td>Windows / Linux</td></tr>
+      <tr><td><code>Vaapi</code></td><td>VAAPI (Intel / AMD)</td><td>Linux</td></tr>
+      <tr><td><code>VideoToolbox</code></td><td>Apple VideoToolbox</td><td>macOS</td></tr>
+      <tr><td><code>Qsv</code></td><td>Intel Quick Sync</td><td>Windows / Linux</td></tr>
+    </table>
+    <p>
+      A per-source <code>hw_accel_override</code> property (−1 = use global setting)
+      allows different acceleration modes per source. <code>HwVideoPipeline</code>
+      builds a dynamic FFmpeg filter graph on the first frame and rebuilds it
+      automatically on resolution change. On any error it falls back to the CPU path
+      and sets a <code>m_broken</code> flag to avoid repeated failures.
+    </p>
+    <div class="callout info">
+      <div class="callout-title">Build requirement</div>
+      Hardware acceleration requires FFmpeg (libavfilter, libavhwaccel).
+      Without <code>-DCOREVIDEO_HW_ACCEL=ON</code>, <code>HwVideoPipeline</code>
+      is compiled to an empty stub and <code>init()</code> always returns false.
+    </div>
+  </section>
+
   <!-- ══ REFERENCE ══════════════════════════════════════════════ -->
 
   <section id="control-api">
@@ -983,25 +1258,27 @@ sequenceDiagram
     <table>
       <tr><th>Command</th><th>Payload</th><th>Description</th></tr>
       <tr><td><code>init</code></td><td><code>{"cmd":"init","jwt":"…"}</code></td><td>Initialize SDK and authenticate</td></tr>
-      <tr><td><code>join</code></td><td><code>{"cmd":"join","meeting_id":"…","passcode":"…","display_name":"OBS"}</code></td><td>Join meeting</td></tr>
+      <tr><td><code>join</code></td><td><code>{"cmd":"join","meeting_id":"…","passcode":"…","display_name":"OBS","kind":"meeting|webinar"}</code></td><td>Join meeting or webinar</td></tr>
       <tr><td><code>leave</code></td><td><code>{"cmd":"leave"}</code></td><td>Leave meeting</td></tr>
-      <tr><td><code>subscribe</code></td><td><code>{"cmd":"subscribe","source_uuid":"…","participant_id":N}</code></td><td>Subscribe to participant frames</td></tr>
-      <tr><td><code>unsubscribe</code></td><td><code>{"cmd":"unsubscribe","source_uuid":"…"}</code></td><td>Stop frame delivery</td></tr>
-      <tr><td><code>quit</code></td><td><code>{"cmd":"quit"}</code></td><td>Shut down engine</td></tr>
+      <tr><td><code>subscribe</code></td><td><code>{"cmd":"subscribe","source_uuid":"…","participant_id":N,"isolate_audio":bool}</code></td><td>Subscribe to fixed participant frames</td></tr>
+      <tr><td><code>subscribe_spotlight</code></td><td><code>{"cmd":"subscribe_spotlight","source_uuid":"…","slot":N}</code></td><td>Subscribe to spotlight slot N (1-based)</td></tr>
+      <tr><td><code>subscribe_screenshare</code></td><td><code>{"cmd":"subscribe_screenshare","source_uuid":"…"}</code></td><td>Subscribe to active screen-share feed</td></tr>
+      <tr><td><code>unsubscribe</code></td><td><code>{"cmd":"unsubscribe","source_uuid":"…"}</code></td><td>Stop frame delivery for this source</td></tr>
+      <tr><td><code>quit</code></td><td><code>{"cmd":"quit"}</code></td><td>Shut down engine process</td></tr>
     </table>
     <h3>Engine → Plugin</h3>
     <table>
       <tr><th>Event</th><th>Payload</th><th>Description</th></tr>
-      <tr><td><code>ready</code></td><td><code>{"cmd":"ready"}</code></td><td>Engine started</td></tr>
-      <tr><td><code>auth_ok</code></td><td><code>{"cmd":"auth_ok"}</code></td><td>SDK authenticated</td></tr>
+      <tr><td><code>ready</code></td><td><code>{"cmd":"ready"}</code></td><td>Engine started and IPC connected</td></tr>
+      <tr><td><code>auth_ok</code></td><td><code>{"cmd":"auth_ok"}</code></td><td>SDK authenticated; pending join fires now</td></tr>
       <tr><td><code>auth_fail</code></td><td><code>{"cmd":"auth_fail","code":N}</code></td><td>Authentication failed</td></tr>
-      <tr><td><code>joined</code></td><td><code>{"cmd":"joined"}</code></td><td>In meeting</td></tr>
-      <tr><td><code>left</code></td><td><code>{"cmd":"left"}</code></td><td>Meeting ended</td></tr>
-      <tr><td><code>frame</code></td><td><code>{"cmd":"frame","uuid":"…","shm":"…","w":W,"h":H}</code></td><td>Video frame in shared memory</td></tr>
-      <tr><td><code>audio</code></td><td><code>{"cmd":"audio","uuid":"…","shm":"…","byte_len":B}</code></td><td>Audio chunk in shared memory</td></tr>
-      <tr><td><code>participants</code></td><td><code>{"cmd":"participants","active_speaker_id":N,"participants":[{"user_id":N,"display_name":"…","has_video":bool,"is_talking":bool,"is_muted":bool},…]}</code></td><td>Full roster snapshot whenever roster changes</td></tr>
+      <tr><td><code>joined</code></td><td><code>{"cmd":"joined"}</code></td><td>Now in meeting</td></tr>
+      <tr><td><code>left</code></td><td><code>{"cmd":"left"}</code></td><td>Left meeting (normal or host-ended)</td></tr>
+      <tr><td><code>frame</code></td><td><code>{"cmd":"frame","uuid":"…","shm":"…","w":W,"h":H}</code></td><td>Video frame written to named shared memory</td></tr>
+      <tr><td><code>audio</code></td><td><code>{"cmd":"audio","uuid":"…","shm":"…","byte_len":B}</code></td><td>PCM audio chunk written to named shared memory</td></tr>
+      <tr><td><code>participants</code></td><td><code>{"cmd":"participants","active_speaker_id":N,"participants":[{"user_id":N,"display_name":"…","has_video":bool,"is_talking":bool,"is_muted":bool,"is_host":bool,"is_co_host":bool,"raised_hand":bool,"spotlight_index":N,"is_sharing_screen":bool},…]}</code></td><td>Full roster snapshot on any roster change</td></tr>
       <tr><td><code>active_speaker</code></td><td><code>{"cmd":"active_speaker","participant_id":N}</code></td><td>Active speaking participant changed</td></tr>
-      <tr><td><code>error</code></td><td><code>{"cmd":"error","msg":"…","code":N}</code></td><td>SDK / meeting error</td></tr>
+      <tr><td><code>error</code></td><td><code>{"cmd":"error","msg":"…","code":N}</code></td><td>SDK or meeting error</td></tr>
     </table>
   </section>
 
@@ -1112,20 +1389,39 @@ sequenceDiagram
 ├── data/locale/en-US.ini
 ├── docs/                                   # GitHub Pages documentation
 ├── engine/src/                             # ZoomObsEngine process (owns ALL SDK access)
-│   ├── main.cpp                            # IPC event loop + SDK init + roster tracking
-│   ├── engine-video.cpp/h                  # IZoomSDKRenderer → shared memory
-│   └── engine-audio.cpp/h                  # SDK audio → shared memory
-└── src/                                    # OBS plugin (no SDK dependency)
-    ├── plugin-main.cpp                     # Module load/unload, engine lifecycle
-    ├── zoom-source.*                       # Main video+audio OBS source (reads ShmRegion)
-    ├── zoom-engine-client.*                # Singleton: IPC to engine, roster, callbacks
-    ├── zoom-types.h                        # Shared enums + structs (MeetingState, ParticipantInfo…)
-    ├── zoom-output-manager.*               # Central source registry
+│   ├── main.cpp                            # IPC loop, SDK auth/join, roster/spotlight tracking
+│   ├── engine-video.cpp/h                  # IZoomSDKRenderer → named shared memory (I420)
+│   └── engine-audio.cpp/h                  # SDK audio → named shared memory (PCM)
+└── src/                                    # OBS plugin (no SDK linkage)
+    ├── plugin-main.cpp                     # Module load/unload, dock, Tools menu, SIGPIPE
+    ├── zoom-source.*                       # Participant source (ShmRegion, AssignmentMode,
+    │                                       #   HwVideoPipeline, failover, hotkeys, placeholder)
+    ├── zoom-engine-client.*                # Singleton: IPC, engine launch, roster, callbacks,
+    │                                       #   spotlight/screenshare subscribe, monitor thread
+    ├── zoom-dock.*                         # Qt dockable join/leave/recovery control panel
+    ├── zoom-reconnect.*                    # Auto-reconnect manager (exponential back-off)
+    ├── zoom-types.h                        # Shared enums: MeetingState, AssignmentMode,
+    │                                       #   MeetingKind, RecoveryReason, ParticipantInfo…
+    ├── hw-video-pipeline.*                 # FFmpeg I420→NV12 hardware acceleration
+    │                                       #   (CUDA / VAAPI / VideoToolbox / QSV)
+    ├── zoom-audio-delegate.*               # Mixed / isolated SDK audio → OBS audio output
+    ├── zoom-audio-router.*                 # Central SDK audio fan-out dispatcher
+    ├── zoom-auth.*                         # JWT auth + observable auth state
+    ├── zoom-meeting.*                      # Meeting state machine
+    ├── zoom-participants.*                 # Roster, active speaker, spotlight callbacks
+    ├── zoom-participant-audio-source.*     # Standalone per-participant audio OBS source
+    ├── zoom-interpretation-audio-source.*  # Language interpretation channel OBS source
+    ├── zoom-video-delegate.*               # Video frames, resolution, loss mode, preview cb
+    ├── zoom-share-delegate.*               # Screen share frames → OBS source
+    ├── zoom-output-manager.*               # Central source registry + runtime reconfiguration
     ├── zoom-output-profile.*               # Named JSON profile persistence
-    ├── zoom-output-dialog.*                # Qt Output Manager dialog
+    ├── zoom-output-dialog.*                # Qt Output Manager modal dialog
     ├── zoom-control-server.*               # TCP JSON control API (port 19870)
-    ├── zoom-settings.*                     # Credential + port persistence
+    ├── zoom-osc-server.*                   # UDP OSC control API (port 19871)
+    ├── zoom-settings.*                     # SDK key/secret/JWT + port persistence
     ├── zoom-settings-dialog.*              # Qt Settings dialog
+    ├── zoom-credentials.h.in               # Embedded SDK credentials (CMake-generated)
+    ├── obs-zoom-version.h.in               # Plugin version string (CMake-generated)
     ├── engine-ipc.h                        # IPC constants + cross-platform pipe/socket helpers
     └── obs-utils.*                         # OBS helper functions</code></pre>
 

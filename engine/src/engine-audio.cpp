@@ -9,13 +9,23 @@
 
 EngineAudio &EngineAudio::instance() { static EngineAudio inst; return inst; }
 
-bool EngineAudio::init(IpcFd e2p_fd, const std::string &source_uuid)
+bool EngineAudio::init(IpcFd e2p_fd,
+                       const std::string &source_uuid,
+                       uint32_t participant_id,
+                       bool isolate_audio)
 {
     m_e2p_fd = e2p_fd;
     {
         std::lock_guard<std::mutex> lock(m_targets_mtx);
-        if (m_targets.find(source_uuid) == m_targets.end())
-            m_targets.emplace(source_uuid, std::make_unique<AudioTarget>(e2p_fd));
+        auto it = m_targets.find(source_uuid);
+        if (it == m_targets.end()) {
+            m_targets.emplace(source_uuid,
+                std::make_unique<AudioTarget>(e2p_fd, participant_id, isolate_audio));
+        } else if (it->second) {
+            it->second->e2p_fd = e2p_fd;
+            it->second->participant_id = participant_id;
+            it->second->isolate_audio = isolate_audio;
+        }
     }
 
     return subscribe_if_needed(source_uuid, "audio_subscribe");
@@ -107,51 +117,72 @@ bool EngineAudio::ensure_shm(AudioTarget &target,
     return shm_region_create(target.shm, region_name, total);
 }
 
-void EngineAudio::onMixedAudioRawDataReceived(AudioRawData *data)
+void EngineAudio::output_audio_frame(AudioTarget &target,
+                                     const std::string &source_uuid,
+                                     AudioRawData *data,
+                                     const char *stage)
 {
-    if (!data || m_e2p_fd == kIpcInvalidFd) return;
     const uint32_t byte_len = data->GetBufferLen();
     if (byte_len == 0) return;
 
-    std::lock_guard<std::mutex> lock(m_targets_mtx);
-    for (auto &entry : m_targets) {
-        const std::string &source_uuid = entry.first;
-        AudioTarget &target = *entry.second;
-        if (!ensure_shm(target, source_uuid, byte_len) || !target.shm.ptr) {
-            if (target.frame_count == 0) {
-                EngineIpc::write(
-                    R"({"cmd":"debug","stage":"audio_shm_create_failed","source_uuid":")" +
-                    source_uuid + R"(","byte_len":)" +
-                    std::to_string(byte_len) + "}");
-            }
-            continue;
-        }
-
-        auto *hdr        = static_cast<ShmAudioHeader *>(target.shm.ptr);
-        hdr->sample_rate = data->GetSampleRate();
-        hdr->channels    = static_cast<uint16_t>(data->GetChannelNum());
-        hdr->byte_len    = byte_len;
-        std::memcpy(static_cast<char *>(target.shm.ptr) + sizeof(ShmAudioHeader),
-                    data->GetBuffer(), byte_len);
-
-        ++target.frame_count;
-        if (target.frame_count == 1 || target.frame_count % 250 == 0) {
+    if (!ensure_shm(target, source_uuid, byte_len) || !target.shm.ptr) {
+        if (target.frame_count == 0) {
             EngineIpc::write(
-                R"({"cmd":"debug","stage":"audio_frame_received","source_uuid":")" +
-                source_uuid + R"(","count":)" +
-                std::to_string(target.frame_count) + R"(,"sample_rate":)" +
-                std::to_string(data->GetSampleRate()) + R"(,"channels":)" +
-                std::to_string(data->GetChannelNum()) + R"(,"byte_len":)" +
+                R"({"cmd":"debug","stage":"audio_shm_create_failed","source_uuid":")" +
+                source_uuid + R"(","byte_len":)" +
                 std::to_string(byte_len) + "}");
         }
+        return;
+    }
 
+    auto *hdr        = static_cast<ShmAudioHeader *>(target.shm.ptr);
+    hdr->sample_rate = data->GetSampleRate();
+    hdr->channels    = static_cast<uint16_t>(data->GetChannelNum());
+    hdr->byte_len    = byte_len;
+    std::memcpy(static_cast<char *>(target.shm.ptr) + sizeof(ShmAudioHeader),
+                data->GetBuffer(), byte_len);
+
+    ++target.frame_count;
+    if (target.frame_count == 1 || target.frame_count % 250 == 0) {
         EngineIpc::write(
-            R"({"cmd":"audio","source_uuid":")" + source_uuid +
-            R"(","byte_len":)" + std::to_string(byte_len) + "}");
+            R"({"cmd":"debug","stage":")" + std::string(stage) +
+            R"(","source_uuid":")" + source_uuid + R"(","count":)" +
+            std::to_string(target.frame_count) + R"(,"sample_rate":)" +
+            std::to_string(data->GetSampleRate()) + R"(,"channels":)" +
+            std::to_string(data->GetChannelNum()) + R"(,"byte_len":)" +
+            std::to_string(byte_len) + R"(,"participant_id":)" +
+            std::to_string(target.participant_id) + "}");
+    }
+
+    EngineIpc::write(
+        R"({"cmd":"audio","source_uuid":")" + source_uuid +
+        R"(","byte_len":)" + std::to_string(byte_len) + "}");
+}
+
+void EngineAudio::onMixedAudioRawDataReceived(AudioRawData *data)
+{
+    if (!data || m_e2p_fd == kIpcInvalidFd || data->GetBufferLen() == 0) return;
+
+    std::lock_guard<std::mutex> lock(m_targets_mtx);
+    for (auto &entry : m_targets) {
+        if (!entry.second || entry.second->isolate_audio) continue;
+        output_audio_frame(*entry.second, entry.first, data,
+                           "audio_frame_received");
     }
 }
 
-void EngineAudio::onOneWayAudioRawDataReceived(AudioRawData *, uint32_t) {}
+void EngineAudio::onOneWayAudioRawDataReceived(AudioRawData *data, uint32_t user_id)
+{
+    if (!data || m_e2p_fd == kIpcInvalidFd || data->GetBufferLen() == 0) return;
+
+    std::lock_guard<std::mutex> lock(m_targets_mtx);
+    for (auto &entry : m_targets) {
+        if (!entry.second || !entry.second->isolate_audio) continue;
+        if (entry.second->participant_id != user_id) continue;
+        output_audio_frame(*entry.second, entry.first, data,
+                           "audio_one_way_frame_received");
+    }
+}
 void EngineAudio::onShareAudioRawDataReceived(AudioRawData *, uint32_t) {}
 void EngineAudio::onOneWayInterpreterAudioRawDataReceived(AudioRawData *,
                                                            const zchar_t *) {}

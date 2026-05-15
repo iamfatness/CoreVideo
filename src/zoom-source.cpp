@@ -354,7 +354,8 @@ void ZoomSource::subscribe()
             if (!primary_present) target = failover;
         }
         if (target != 0)
-            ZoomEngineClient::instance().subscribe(source_uuid, target);
+            ZoomEngineClient::instance().subscribe(source_uuid, target,
+                                                   isolate_audio);
         blog(LOG_INFO,
              "[obs-zoom-plugin] Zoom source subscription: source=%s uuid=%s participant_id=%u",
              output_name().c_str(), source_uuid.c_str(), target);

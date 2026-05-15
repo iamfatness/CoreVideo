@@ -109,7 +109,7 @@ bool ZoomMeeting::join_impl(const std::string &meeting_id, const std::string &pa
     p.psw                       = passcode.empty() ? nullptr : m_wide_passcode.c_str();
     p.isVideoOff                = true;
     p.isAudioOff                = false;
-    p.isMyVoiceInMix            = false;
+    p.isMyVoiceInMix            = true;
     p.eAudioRawdataSamplingRate = ZOOMSDK::AudioRawdataSamplingRate_48K;
     p.eVideoRawdataColorspace   = ZOOMSDK::VideoRawdataColorspace_BT709_F;
 

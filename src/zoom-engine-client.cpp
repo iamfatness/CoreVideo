@@ -257,11 +257,15 @@ void ZoomEngineClient::leave()
     write_json(R"({"cmd":"leave"})");
 }
 
-void ZoomEngineClient::subscribe(const std::string &source_uuid, uint32_t participant_id)
+void ZoomEngineClient::subscribe(const std::string &source_uuid,
+                                 uint32_t participant_id,
+                                 bool isolate_audio)
 {
     if (!m_running.load(std::memory_order_acquire) || source_uuid.empty()) return;
     write_json(R"({"cmd":"subscribe","source_uuid":")" + json_escape(source_uuid) +
-        R"(","participant_id":)" + std::to_string(participant_id) + "}");
+        R"(","participant_id":)" + std::to_string(participant_id) +
+        R"(,"isolate_audio":)" + std::string(isolate_audio ? "true" : "false") +
+        "}");
 }
 
 void ZoomEngineClient::unsubscribe(const std::string &source_uuid)

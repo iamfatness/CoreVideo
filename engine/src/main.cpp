@@ -837,7 +837,7 @@ int main()
                 p.psw                       = passcode.empty() ? nullptr : g_wide_psw.c_str();
                 p.isVideoOff                = true;
                 p.isAudioOff                = false;
-                p.isMyVoiceInMix            = false;
+                p.isMyVoiceInMix            = true;
                 p.eAudioRawdataSamplingRate = ZOOMSDK::AudioRawdataSamplingRate_48K;
                 p.eVideoRawdataColorspace   = ZOOMSDK::VideoRawdataColorspace_BT709_F;
                 ZOOMSDK::SDKError err = meeting_svc->Join(jp);
@@ -852,9 +852,11 @@ int main()
         } else if (line.find(IPC_CMD_SUBSCRIBE) != std::string::npos) {
             std::string uuid = json_str(line, "source_uuid");
             uint32_t    pid  = json_uint(line, "participant_id");
+            const bool isolate_audio =
+                line.find(R"("isolate_audio":true)") != std::string::npos;
             if (is_valid_source_uuid(uuid)) {
                 video_engine.subscribe(pid, uuid, e2p);
-                EngineAudio::instance().init(e2p, uuid);
+                EngineAudio::instance().init(e2p, uuid, pid, isolate_audio);
             }
 
         } else if (line.find(IPC_CMD_UNSUBSCRIBE) != std::string::npos) {

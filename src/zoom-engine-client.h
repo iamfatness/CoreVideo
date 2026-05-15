@@ -38,7 +38,9 @@ public:
 
     // Used by ZoomReconnectManager to drive state transitions.
     void set_state(MeetingState s) { m_state.store(s, std::memory_order_release); }
-    void subscribe(const std::string &source_uuid, uint32_t participant_id);
+    void subscribe(const std::string &source_uuid,
+                   uint32_t participant_id,
+                   bool isolate_audio);
     void unsubscribe(const std::string &source_uuid);
 
     MeetingState state() const { return m_state.load(std::memory_order_acquire); }

@@ -20,7 +20,10 @@ class EngineAudio : public ZOOMSDK::IZoomSDKAudioRawDataDelegate {
 public:
     static EngineAudio &instance();
 
-    bool init(IpcFd e2p_fd, const std::string &source_uuid);
+    bool init(IpcFd e2p_fd,
+              const std::string &source_uuid,
+              uint32_t participant_id,
+              bool isolate_audio);
     bool retry_subscribe(const std::string &reason);
     void remove(const std::string &source_uuid);
     void shutdown();
@@ -37,8 +40,11 @@ private:
     bool subscribe_if_needed(const std::string &source_uuid,
                              const std::string &stage);
     struct AudioTarget {
-        explicit AudioTarget(IpcFd e2p) : e2p_fd(e2p) {}
+        AudioTarget(IpcFd e2p, uint32_t pid, bool isolate)
+            : e2p_fd(e2p), participant_id(pid), isolate_audio(isolate) {}
         IpcFd e2p_fd;
+        uint32_t participant_id = 0;
+        bool isolate_audio = false;
         ShmRegion shm;
         uint64_t frame_count = 0;
     };
@@ -46,6 +52,10 @@ private:
     bool ensure_shm(AudioTarget &target,
                     const std::string &source_uuid,
                     uint32_t byte_len);
+    void output_audio_frame(AudioTarget &target,
+                            const std::string &source_uuid,
+                            AudioRawData *data,
+                            const char *stage);
 
     IpcFd       m_e2p_fd     = kIpcInvalidFd;
     std::mutex  m_subscribe_mtx;

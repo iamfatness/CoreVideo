@@ -124,6 +124,38 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
                 onObsLog(QStringLiteral("✓ Applied '%1' (%2 items).").arg(name).arg(n));
             });
 
+    m_controlServer = new SidecarControlServer(this);
+    m_controlServer->start();
+
+    connect(m_obsClient, &OBSClient::stateChanged, this, [this](OBSClient::State) {
+        m_controlServer->notifyOBSState(m_obsClient->stateLabel());
+    });
+    connect(m_obsClient, &OBSClient::scenesReceived, this, [this](const QStringList &scenes) {
+        m_controlServer->notifyScenesUpdated(scenes);
+    });
+    connect(m_obsClient, &OBSClient::sceneChanged, this, [this](const QString &scene) {
+        m_controlServer->notifySceneChanged(scene);
+    });
+
+    connect(m_controlServer, &SidecarControlServer::phaseChangeRequested,
+            this, [this](const QString &phase) {
+        if (phase == "live")           onPhaseSelected(ShowPhase::Live);
+        else if (phase == "post_show") onPhaseSelected(ShowPhase::PostShow);
+        else                           onPhaseSelected(ShowPhase::PreShow);
+    });
+    connect(m_controlServer, &SidecarControlServer::templateApplyRequested,
+            this, [this](const QString &id) {
+        auto &tm = TemplateManager::instance();
+        if (const auto *t = tm.findById(id)) {
+            onTemplateSelected(*t);
+            onApplyLayout();
+        }
+    });
+    connect(m_controlServer, &SidecarControlServer::sceneChangeRequested,
+            this, [this](const QString &scene) {
+        onSceneActivated(scene);
+    });
+
     // Canvas slot assignment from drag-and-drop
     connect(m_liveCanvas,  &PreviewCanvas::slotAssigned, this, &MainWindow::onSlotAssigned);
     connect(m_sceneCanvas, &PreviewCanvas::slotAssigned, this, &MainWindow::onSlotAssigned);
@@ -351,6 +383,7 @@ void MainWindow::onPageSelected(Sidebar::Page p)
 void MainWindow::onTemplateSelected(const LayoutTemplate &tmpl)
 {
     m_currentTemplate = tmpl;
+    m_controlServer->notifyTemplateChanged(tmpl.id, tmpl.name);
     m_liveCanvas->setTemplate(tmpl);
     m_sceneCanvas->setTemplate(tmpl);
 }
@@ -504,6 +537,8 @@ void MainWindow::onSettingsChanged()
 
 void MainWindow::onPhaseSelected(ShowPhase phase)
 {
+    const QStringList labels = {"pre_show", "live", "post_show"};
+    m_controlServer->notifyPhaseChanged(labels[int(phase)]);
     m_phase = phase;
     m_preShowBtn->setChecked(phase == ShowPhase::PreShow);
     m_liveBtn->setChecked(phase == ShowPhase::Live);

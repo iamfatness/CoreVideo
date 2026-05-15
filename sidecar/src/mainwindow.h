@@ -5,6 +5,7 @@
 #include "show-theme.h"
 #include "macro.h"
 #include "participant-panel.h"
+#include "sidecar-control-server.h"
 #include <QMainWindow>
 
 class PreviewCanvas;
@@ -96,8 +97,9 @@ private:
 
     // State
     LayoutTemplate             m_currentTemplate;
-    OBSClient                 *m_obsClient   = nullptr;
+    OBSClient                 *m_obsClient      = nullptr;
     OBSClient::Config          m_obsConfig;
-    Sidebar                   *m_sidebar     = nullptr;
+    Sidebar                   *m_sidebar        = nullptr;
     QVector<ParticipantInfo>   m_participants;
+    SidecarControlServer      *m_controlServer  = nullptr;
 };

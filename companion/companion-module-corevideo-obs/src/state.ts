@@ -1,3 +1,5 @@
+// ── Zoom / CoreVideo plugin ──────────────────────────────────────────────────
+
 export type MeetingState = 'idle' | 'joining' | 'in_meeting' | 'leaving' | 'recovering' | 'failed'
 
 export interface Participant {
@@ -19,20 +21,66 @@ export interface Output {
 	audio_channels: 'mono' | 'stereo'
 }
 
-export interface CoreVideoState {
-	meetingState: MeetingState
-	activeSpeakerId: number
-	activeSpeakerName: string
-	participants: Participant[]
-	outputs: Output[]
+export type ShowPhase = 'pre_show' | 'live' | 'post_show'
+
+// ── Combined module state ────────────────────────────────────────────────────
+
+export interface ModuleState {
+	zoom: {
+		meetingState: MeetingState
+		activeSpeakerId: number
+		activeSpeakerName: string
+		participants: Participant[]
+		outputs: Output[]
+	}
+	obs: {
+		connected: boolean
+		currentScene: string
+		scenes: string[]
+		recording: boolean
+		recordingPaused: boolean
+		streaming: boolean
+		virtualCam: boolean
+	}
+	sidecar: {
+		connected: boolean
+		phase: ShowPhase
+		templateId: string
+		templateName: string
+		templates: Array<{ id: string; name: string }>
+		obsState: string
+		currentScene: string
+		scenes: string[]
+	}
 }
 
-export function defaultState(): CoreVideoState {
+export function defaultState(): ModuleState {
 	return {
-		meetingState: 'idle',
-		activeSpeakerId: 0,
-		activeSpeakerName: '',
-		participants: [],
-		outputs: [],
+		zoom: {
+			meetingState: 'idle',
+			activeSpeakerId: 0,
+			activeSpeakerName: '',
+			participants: [],
+			outputs: [],
+		},
+		obs: {
+			connected: false,
+			currentScene: '',
+			scenes: [],
+			recording: false,
+			recordingPaused: false,
+			streaming: false,
+			virtualCam: false,
+		},
+		sidecar: {
+			connected: false,
+			phase: 'pre_show',
+			templateId: '',
+			templateName: '',
+			templates: [],
+			obsState: 'disconnected',
+			currentScene: '',
+			scenes: [],
+		},
 	}
 }

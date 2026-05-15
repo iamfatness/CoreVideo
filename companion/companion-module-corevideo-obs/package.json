@@ -15,16 +15,18 @@
     "id": "corevideo-obs",
     "version": "1.0.0",
     "api_version": "0.6",
-    "description": "Control CoreVideo OBS plugin — join/leave Zoom meetings, assign participants to OBS sources, and monitor meeting state.",
+    "description": "Unified control for CoreVideo: Zoom participant routing, OBS Studio, and Sidecar show phase management — all in one module.",
     "author": "CoreVideo",
-    "help": "Connect to the CoreVideo control server (default port 19870) running on the same machine as OBS Studio.",
+    "help": "Connects to three services: CoreVideo plugin (port 19870, required), OBS WebSocket v5 (port 4455, optional), and CoreVideo Sidecar (port 19880, optional).",
     "category": "softwarecontrol"
   },
   "dependencies": {
-    "@companion-module/base": "^1.8.0"
+    "@companion-module/base": "^1.8.0",
+    "ws": "^8.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "@types/ws": "^8.0.0",
     "typescript": "^5.0.0"
   },
   "engines": {

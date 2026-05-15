@@ -1,4 +1,5 @@
 #include "zoom-output-dialog.h"
+#include "cv-style.h"
 #include "zoom-engine-client.h"
 #include "zoom-output-manager.h"
 #include "zoom-output-profile.h"
@@ -131,6 +132,9 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
                                          QDialogButtonBox::Close, this);
     auto *refresh_button = buttons->addButton("Refresh", QDialogButtonBox::ActionRole);
 
+    if (auto *apply_btn = buttons->button(QDialogButtonBox::Apply))
+        apply_btn->setProperty("role", "primary");
+
     connect(refresh_button, &QPushButton::clicked, this, [this]() { refresh(); });
     connect(buttons->button(QDialogButtonBox::Apply), &QPushButton::clicked,
             this, [this]() { apply(); });
@@ -144,6 +148,8 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     layout->addWidget(new QLabel("Outputs", this));
     layout->addWidget(m_table);
     layout->addWidget(buttons);
+
+    setStyleSheet(cv_stylesheet());
 
     QPointer<ZoomOutputDialog> self(this);
     auto alive = m_alive;
@@ -266,12 +272,19 @@ void ZoomOutputDialog::refresh_participants()
         m_participant_table->insertRow(row);
         m_participant_table->setItem(row, 0, new QTableWidgetItem(name));
         m_participant_table->setItem(row, 1, new QTableWidgetItem(id));
-        m_participant_table->setItem(row, 2,
-            new QTableWidgetItem(p.has_video ? "On" : "Off"));
-        m_participant_table->setItem(row, 3,
-            new QTableWidgetItem(p.is_muted ? "Muted" : "Open"));
-        m_participant_table->setItem(row, 4,
-            new QTableWidgetItem(p.is_talking ? "Yes" : ""));
+
+        auto *video_item = new QTableWidgetItem(p.has_video ? "● On" : "Off");
+        video_item->setForeground(p.has_video ? QColor("#22cc44") : QColor("#666666"));
+        m_participant_table->setItem(row, 2, video_item);
+
+        auto *audio_item = new QTableWidgetItem(p.is_muted ? "Muted" : "● Open");
+        audio_item->setForeground(p.is_muted ? QColor("#f0a000") : QColor("#22cc44"));
+        m_participant_table->setItem(row, 3, audio_item);
+
+        auto *talking_item = new QTableWidgetItem(p.is_talking ? "●" : "");
+        talking_item->setForeground(QColor("#22cc44"));
+        talking_item->setTextAlignment(Qt::AlignCenter);
+        m_participant_table->setItem(row, 4, talking_item);
         ++row;
     }
 }

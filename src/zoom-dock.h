@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QFrame>
 #include <QWidget>
 #include <atomic>
 #include <cstdint>
@@ -13,6 +14,8 @@ class QTableWidget;
 class QComboBox;
 class QCheckBox;
 class QTimer;
+class CvStatusDot;
+class CvBanner;
 
 class ZoomDock : public QWidget {
     Q_OBJECT
@@ -30,11 +33,20 @@ private:
     void on_cancel_recovery_clicked();
     void update_state_indicator();
     void update_recovery_panel();
+    void update_credentials_banner();
 
-    // Meeting control bar
-    QLabel      *m_state_dot    = nullptr;
-    QLabel      *m_state_label  = nullptr;
-    QLabel      *m_error_label  = nullptr;
+    // Status bar
+    CvStatusDot *m_state_dot   = nullptr;
+    QLabel      *m_state_label = nullptr;
+    QLabel      *m_error_label = nullptr;
+
+    // Active speaker
+    QLabel      *m_speaker_label = nullptr;
+
+    // First-run credentials notice
+    CvBanner    *m_credentials_banner = nullptr;
+
+    // Join controls
     QLineEdit   *m_meeting_id   = nullptr;
     QLineEdit   *m_passcode     = nullptr;
     QLineEdit   *m_display_name = nullptr;
@@ -45,23 +57,22 @@ private:
     QCheckBox   *m_webinar_cb   = nullptr;
     QLineEdit   *m_participant_filter = nullptr;
 
-    // Active speaker
-    QLabel      *m_speaker_label = nullptr;
+    // Recovery status panel (shown only while Recovering)
+    QFrame      *m_recovery_frame  = nullptr;
+    QLabel      *m_recovery_label  = nullptr;
+    QPushButton *m_cancel_rec_btn  = nullptr;
+    QTimer      *m_countdown_timer = nullptr;
+    QTimer      *m_refresh_timer   = nullptr;
 
-    // Recovery status panel (shown only when Recovering)
-    QLabel      *m_recovery_label    = nullptr;
-    QPushButton *m_cancel_rec_btn    = nullptr;
-    QTimer      *m_countdown_timer   = nullptr;
-    QTimer      *m_refresh_timer     = nullptr;
-    qint64       m_join_started_ms   = 0;
+    qint64       m_join_started_ms      = 0;
     bool         m_join_timeout_reported = false;
     std::thread  m_join_thread;
-    std::atomic<bool> m_join_in_progress{false};
+    std::atomic<bool>     m_join_in_progress{false};
     std::atomic<uint64_t> m_join_generation{0};
 
-    // Output table (replaces the modal Output Manager)
+    // Output assignment table
     QTableWidget *m_output_table = nullptr;
-    QPushButton  *m_apply_btn    = nullptr;
+    QPushButton  *m_apply_btn   = nullptr;
 
     std::shared_ptr<std::atomic<bool>> m_alive =
         std::make_shared<std::atomic<bool>>(true);

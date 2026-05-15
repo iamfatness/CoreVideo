@@ -1,4 +1,5 @@
 #include "zoom-settings-dialog.h"
+#include "cv-style.h"
 #include "zoom-settings.h"
 #include "zoom-control-server.h"
 #include "zoom-oauth.h"
@@ -20,10 +21,11 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     : QDialog(parent)
 {
     setWindowTitle("Zoom Plugin Settings");
-    setMinimumWidth(460);
+    setMinimumWidth(480);
 
     ZoomPluginSettings s = ZoomPluginSettings::load();
 
+    // ── Zoom SDK ──────────────────────────────────────────────────────────────
     m_sdk_key_edit    = new QLineEdit(QString::fromStdString(s.sdk_key),    this);
     m_sdk_secret_edit = new QLineEdit(QString::fromStdString(s.sdk_secret), this);
     m_jwt_token_edit  = new QLineEdit(QString::fromStdString(s.jwt_token),  this);
@@ -37,60 +39,78 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     m_sdk_secret_edit->setEchoMode(QLineEdit::Password);
     m_jwt_token_edit->setEchoMode(QLineEdit::Password);
     m_jwt_token_edit->setPlaceholderText(
-        "Optional override; leave blank to generate from SDK key/secret");
+        "Optional override; leave blank to generate from SDK key / secret");
 
+    auto *sdk_help = new QLabel(
+        "Obtain your SDK key and secret from the "
+        "<a href=\"https://marketplace.zoom.us\">Zoom Marketplace</a> "
+        "(Develop → Build App → Meeting SDK).", this);
+    sdk_help->setOpenExternalLinks(true);
+    sdk_help->setWordWrap(true);
+    sdk_help->setStyleSheet("QLabel { color: #7a8faa; font-size: 11px; }");
+
+    auto *sdk_form = new QFormLayout;
+    sdk_form->setSpacing(8);
+    sdk_form->addRow(new QLabel("SDK Key:",    this), m_sdk_key_edit);
+    sdk_form->addRow(new QLabel("SDK Secret:", this), m_sdk_secret_edit);
+    sdk_form->addRow(new QLabel("JWT Token:",  this), m_jwt_token_edit);
+    sdk_form->addRow(sdk_help);
+
+    auto *sdk_group = new QGroupBox("Zoom SDK", this);
+    sdk_group->setLayout(sdk_form);
+
+    // ── Control Server ────────────────────────────────────────────────────────
     m_control_port_spin = new QSpinBox(this);
     m_control_port_spin->setRange(1024, 65535);
     m_control_port_spin->setValue(s.control_server_port);
-
-    m_osc_port_spin = new QSpinBox(this);
-    m_osc_port_spin->setRange(1024, 65535);
-    m_osc_port_spin->setValue(s.osc_server_port);
 
     m_control_token_edit = new QLineEdit(QString::fromStdString(s.control_token), this);
     m_control_token_edit->setEchoMode(QLineEdit::Password);
     m_control_token_edit->setPlaceholderText("Leave blank to allow unauthenticated access");
 
-    auto *sdk_form = new QFormLayout;
-    sdk_form->addRow(new QLabel("SDK Key:",    this), m_sdk_key_edit);
-    sdk_form->addRow(new QLabel("SDK Secret:", this), m_sdk_secret_edit);
-    sdk_form->addRow(new QLabel("JWT Token:",  this), m_jwt_token_edit);
-
-    auto *sdk_group = new QGroupBox("Zoom SDK", this);
-    sdk_group->setLayout(sdk_form);
-
+    // ── OAuth / PKCE ──────────────────────────────────────────────────────────
     m_oauth_authorize_btn = new QPushButton("Authorize with Zoom", this);
     m_oauth_register_scheme_btn = new QPushButton("Register corevideo:// URL Scheme", this);
+    m_oauth_authorize_btn->setProperty("role", "primary");
     connect(m_oauth_authorize_btn, &QPushButton::clicked,
             this, &ZoomSettingsDialog::onAuthorizeOAuth);
     connect(m_oauth_register_scheme_btn, &QPushButton::clicked,
             this, &ZoomSettingsDialog::onRegisterUrlScheme);
 
     auto *oauth_form = new QFormLayout;
-    oauth_form->addRow(new QLabel("Client ID:", this), m_oauth_client_id_edit);
-    oauth_form->addRow(new QLabel("Authorization URL:", this),
-                       m_oauth_authorization_url_edit);
-    oauth_form->addRow(new QLabel("Redirect URI:", this), m_oauth_redirect_uri_edit);
-    oauth_form->addRow(new QLabel("Scopes:", this), m_oauth_scopes_edit);
+    oauth_form->setSpacing(8);
+    oauth_form->addRow(new QLabel("Client ID:",          this), m_oauth_client_id_edit);
+    oauth_form->addRow(new QLabel("Authorization URL:",  this), m_oauth_authorization_url_edit);
+    oauth_form->addRow(new QLabel("Redirect URI:",       this), m_oauth_redirect_uri_edit);
+    oauth_form->addRow(new QLabel("Scopes:",             this), m_oauth_scopes_edit);
     oauth_form->addRow("", m_oauth_register_scheme_btn);
     oauth_form->addRow("", m_oauth_authorize_btn);
 
     auto *oauth_group = new QGroupBox("Zoom OAuth (PKCE)", this);
     oauth_group->setLayout(oauth_form);
 
+
     auto *ctrl_form = new QFormLayout;
-    ctrl_form->addRow(new QLabel("TCP Port:",  this), m_control_port_spin);
-    ctrl_form->addRow(new QLabel("Token:", this), m_control_token_edit);
+    ctrl_form->setSpacing(8);
+    ctrl_form->addRow(new QLabel("TCP Port:", this), m_control_port_spin);
+    ctrl_form->addRow(new QLabel("Token:",    this), m_control_token_edit);
 
     auto *ctrl_group = new QGroupBox("Control Server (127.0.0.1 TCP/JSON)", this);
     ctrl_group->setLayout(ctrl_form);
 
+    // ── OSC Server ────────────────────────────────────────────────────────────
+    m_osc_port_spin = new QSpinBox(this);
+    m_osc_port_spin->setRange(1024, 65535);
+    m_osc_port_spin->setValue(s.osc_server_port);
+
     auto *osc_form = new QFormLayout;
+    osc_form->setSpacing(8);
     osc_form->addRow(new QLabel("UDP Port:", this), m_osc_port_spin);
 
     auto *osc_group = new QGroupBox("OSC Server (127.0.0.1 UDP)", this);
     osc_group->setLayout(osc_form);
 
+    // ── Hardware Video Acceleration ───────────────────────────────────────────
     m_hw_accel_combo = new QComboBox(this);
     m_hw_accel_combo->addItem("Disabled (CPU only)",          static_cast<int>(HwAccelMode::None));
     m_hw_accel_combo->addItem("Auto (detect best available)", static_cast<int>(HwAccelMode::Auto));
@@ -98,7 +118,6 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     m_hw_accel_combo->addItem("VAAPI (Intel / AMD on Linux)", static_cast<int>(HwAccelMode::Vaapi));
     m_hw_accel_combo->addItem("VideoToolbox (Apple)",         static_cast<int>(HwAccelMode::VideoToolbox));
     m_hw_accel_combo->addItem("QSV (Intel Quick Sync)",       static_cast<int>(HwAccelMode::Qsv));
-    // Pre-select the current setting.
     for (int i = 0; i < m_hw_accel_combo->count(); ++i) {
         if (m_hw_accel_combo->itemData(i).toInt() == static_cast<int>(s.hw_accel_mode)) {
             m_hw_accel_combo->setCurrentIndex(i);
@@ -111,6 +130,7 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
 #endif
 
     auto *hw_form = new QFormLayout;
+    hw_form->setSpacing(8);
     hw_form->addRow(new QLabel("Mode:", this), m_hw_accel_combo);
 
     auto *hw_group = new QGroupBox("Hardware Video Acceleration", this);
@@ -146,23 +166,30 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     m_rc_on_auth_cb->setChecked(rp.on_auth_fail);
 
     auto *rc_form = new QFormLayout;
-    rc_form->addRow("",                           m_rc_enabled_cb);
-    rc_form->addRow("Max attempts:",              m_rc_max_attempts_spin);
-    rc_form->addRow("Initial retry delay:",       m_rc_base_delay_spin);
-    rc_form->addRow("Max retry delay:",           m_rc_max_delay_spin);
-    rc_form->addRow("Reconnect triggers:",        m_rc_on_crash_cb);
-    rc_form->addRow("",                           m_rc_on_disc_cb);
-    rc_form->addRow("",                           m_rc_on_auth_cb);
+    rc_form->setSpacing(8);
+    rc_form->addRow("",                     m_rc_enabled_cb);
+    rc_form->addRow("Max attempts:",        m_rc_max_attempts_spin);
+    rc_form->addRow("Initial retry delay:", m_rc_base_delay_spin);
+    rc_form->addRow("Max retry delay:",     m_rc_max_delay_spin);
+    rc_form->addRow("Reconnect triggers:",  m_rc_on_crash_cb);
+    rc_form->addRow("",                     m_rc_on_disc_cb);
+    rc_form->addRow("",                     m_rc_on_auth_cb);
 
     auto *rc_group = new QGroupBox("Auto-Reconnect", this);
     rc_group->setLayout(rc_form);
 
+    // ── Buttons ───────────────────────────────────────────────────────────────
     auto *buttons = new QDialogButtonBox(
         QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
     connect(buttons, &QDialogButtonBox::accepted, this, &ZoomSettingsDialog::onSave);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
+    // Style the Save button as a primary action
+    if (auto *save_btn = buttons->button(QDialogButtonBox::Save))
+        save_btn->setProperty("role", "primary");
+
     auto *layout = new QVBoxLayout(this);
+    layout->setSpacing(8);
     layout->addWidget(sdk_group);
     layout->addWidget(oauth_group);
     layout->addWidget(ctrl_group);
@@ -170,6 +197,9 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     layout->addWidget(hw_group);
     layout->addWidget(rc_group);
     layout->addWidget(buttons);
+
+    // Apply stylesheet last so all widget properties are already set
+    setStyleSheet(cv_stylesheet());
 }
 
 void ZoomSettingsDialog::onSave()
@@ -188,10 +218,10 @@ void ZoomSettingsDialog::onSave()
     s.control_token       = m_control_token_edit->text().toStdString();
     s.hw_accel_mode       = static_cast<HwAccelMode>(
         m_hw_accel_combo->currentData().toInt());
-    s.reconnect_policy.enabled        = m_rc_enabled_cb->isChecked();
-    s.reconnect_policy.max_attempts   = m_rc_max_attempts_spin->value();
-    s.reconnect_policy.base_delay_ms  = m_rc_base_delay_spin->value();
-    s.reconnect_policy.max_delay_ms   = m_rc_max_delay_spin->value();
+    s.reconnect_policy.enabled         = m_rc_enabled_cb->isChecked();
+    s.reconnect_policy.max_attempts    = m_rc_max_attempts_spin->value();
+    s.reconnect_policy.base_delay_ms   = m_rc_base_delay_spin->value();
+    s.reconnect_policy.max_delay_ms    = m_rc_max_delay_spin->value();
     s.reconnect_policy.on_engine_crash = m_rc_on_crash_cb->isChecked();
     s.reconnect_policy.on_disconnect   = m_rc_on_disc_cb->isChecked();
     s.reconnect_policy.on_auth_fail    = m_rc_on_auth_cb->isChecked();

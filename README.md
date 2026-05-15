@@ -12,7 +12,7 @@
 > [Zoom Plans](https://zoom.us/pricing) to verify your entitlements before
 > deploying this plugin in a production environment.
 
-**OBS Studio plugin for live Zoom meeting video, audio, screen share, and language interpretation.**
+**OBS Studio plugin for live Zoom meeting video, audio, screen share, and Zoom interpretation audio channel capture.**
 
 CoreVideo integrates the Zoom Meeting SDK into OBS — no screen capture or virtual camera required. The SDK runs in a dedicated `ZoomObsEngine` child process; the OBS plugin communicates with it through a `ZoomEngineClient` singleton over cross-platform IPC (named pipes on Windows, Unix sockets on macOS/Linux) with frame data delivered through named shared memory. A built-in dockable control panel manages joining, and a `ZoomReconnectManager` handles automatic recovery after crashes or disconnects. A companion **CoreVideo Sidecar** app provides a standalone layout-management UI that connects to OBS via obs-websocket.
 
@@ -31,7 +31,7 @@ CoreVideo integrates the Zoom Meeting SDK into OBS — no screen capture or virt
 - **Active speaker mode** — configurable sensitivity + hold-time debounce, liveness guard, supersede logic
 - **Spotlight / ZoomISO** — subscribe a source to spotlight slot N; engine resolves which participant is spotlighted
 - **Screen share capture** — source subscribes to the active meeting screen-share feed
-- **Language interpretation audio** — dedicated OBS source for any Zoom interpretation channel
+- **Zoom interpretation audio channel capture** — dedicated OBS source for existing Zoom interpretation audio channels
 - **Per-participant audio sources** — standalone OBS audio source per meeting participant
 - **Webinar support** — join Zoom Webinars using the dedicated SDK entry point (Webinar checkbox in control dock)
 - **Participant roster** — live list with video, mute, talking, host, co-host, raised hand, spotlight slot, and screen-sharing state

@@ -1,6 +1,6 @@
 # CoreVideo Wiki
 
-Welcome to the CoreVideo wiki — an OBS Studio plugin for live Zoom meeting video, audio, screen share, and language interpretation.
+Welcome to the CoreVideo wiki — an OBS Studio plugin for live Zoom meeting video, audio, screen share, and Zoom interpretation audio channel capture.
 
 📖 **[Full Documentation & Architecture Diagrams](https://iamfatness.github.io/CoreVideo/)**
 

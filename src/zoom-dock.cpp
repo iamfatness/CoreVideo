@@ -1,4 +1,6 @@
 #include "zoom-dock.h"
+#include "cv-style.h"
+#include "cv-widgets.h"
 #include "obs-utils.h"
 #include "zoom-engine-client.h"
 #include "zoom-output-manager.h"
@@ -9,6 +11,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDateTime>
+#include <QFrame>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -33,27 +36,14 @@ enum DockOutputColumns {
     DColCount      = 4
 };
 
-// ── State dot colour ─────────────────────────────────────────────────────────
-static const char *state_dot_style(MeetingState s)
-{
-    switch (s) {
-    case MeetingState::InMeeting:  return "color: #22cc44; font-size: 18px;";
-    case MeetingState::Joining:
-    case MeetingState::Leaving:    return "color: #f0a000; font-size: 18px;";
-    case MeetingState::Recovering: return "color: #f0a000; font-size: 18px;";
-    case MeetingState::Failed:     return "color: #ee3333; font-size: 18px;";
-    default:                       return "color: #666666; font-size: 18px;";
-    }
-}
-
 static const char *state_label_text(MeetingState s)
 {
     switch (s) {
     case MeetingState::Idle:       return "Not connected";
-    case MeetingState::Joining:    return "Joining...";
+    case MeetingState::Joining:    return "Joining…";
     case MeetingState::InMeeting:  return "In meeting";
-    case MeetingState::Leaving:    return "Leaving...";
-    case MeetingState::Recovering: return "Recovering...";
+    case MeetingState::Leaving:    return "Leaving…";
+    case MeetingState::Recovering: return "Recovering…";
     case MeetingState::Failed:     return "Connection failed";
     }
     return "";
@@ -75,31 +65,46 @@ ZoomDock::ZoomDock(QWidget *parent)
     setMinimumWidth(340);
 
     auto *vLayout = new QVBoxLayout(this);
-    vLayout->setContentsMargins(6, 6, 6, 6);
+    vLayout->setContentsMargins(8, 8, 8, 8);
     vLayout->setSpacing(6);
 
     // ── Status row ────────────────────────────────────────────────────────────
-    m_state_dot   = new QLabel("●", this);
+    m_state_dot   = new CvStatusDot(this);
     m_state_label = new QLabel("Not connected", this);
-    m_state_dot->setStyleSheet("color: #666666; font-size: 18px;");
 
     auto *status_row = new QHBoxLayout;
+    status_row->setSpacing(8);
     status_row->addWidget(m_state_dot);
     status_row->addWidget(m_state_label, 1);
     vLayout->addLayout(status_row);
 
     // ── Active speaker ────────────────────────────────────────────────────────
-    m_speaker_label = new QLabel("—", this);
-    m_speaker_label->setStyleSheet("color: #aaaaaa; font-style: italic;");
+    m_speaker_label = new QLabel(QStringLiteral("—"), this);
+    m_speaker_label->setObjectName("speakerValue");
 
     auto *speaker_row = new QHBoxLayout;
+    speaker_row->setSpacing(6);
     speaker_row->addWidget(new QLabel("Active speaker:", this));
     speaker_row->addWidget(m_speaker_label, 1);
     vLayout->addLayout(speaker_row);
 
+    // ── Credentials notice (hidden once credentials are set) ──────────────────
+    m_credentials_banner = new CvBanner(
+        CvBannerKind::Info,
+        "SDK credentials required to join meetings.",
+        this);
+    m_credentials_banner->setActionText("Open Settings");
+    connect(m_credentials_banner, &CvBanner::actionClicked, this, [this]() {
+        ZoomSettingsDialog dlg(this);
+        dlg.exec();
+        update_credentials_banner();
+    });
+    vLayout->addWidget(m_credentials_banner);
+
     // ── Join controls ─────────────────────────────────────────────────────────
     auto *join_group  = new QGroupBox("Join Meeting", this);
     auto *join_layout = new QVBoxLayout(join_group);
+    join_layout->setSpacing(6);
 
     m_meeting_id = new QLineEdit(join_group);
     m_meeting_id->setPlaceholderText("Meeting ID or Zoom URL");
@@ -119,7 +124,12 @@ ZoomDock::ZoomDock(QWidget *parent)
     m_leave_btn = new QPushButton("Leave", join_group);
     m_leave_btn->setEnabled(false);
 
+    // Role-based styling — evaluated when stylesheet is applied below
+    m_join_btn->setProperty("role", "primary");
+    m_leave_btn->setProperty("role", "danger");
+
     auto *join_btn_row = new QHBoxLayout;
+    join_btn_row->setSpacing(6);
     join_btn_row->addWidget(m_join_btn);
     join_btn_row->addWidget(m_leave_btn);
 
@@ -148,18 +158,22 @@ ZoomDock::ZoomDock(QWidget *parent)
     connect(m_leave_btn, &QPushButton::clicked, this, [this]() { on_leave_clicked(); });
 
     // ── Recovery panel ────────────────────────────────────────────────────────
-    m_recovery_label = new QLabel("", this);
-    m_recovery_label->setStyleSheet("color: #f0a000;");
+    m_recovery_frame = new QFrame(this);
+    m_recovery_frame->setObjectName("recoveryPanel");
+
+    m_recovery_label  = new QLabel("", m_recovery_frame);
     m_recovery_label->setWordWrap(true);
 
-    m_cancel_rec_btn = new QPushButton("Cancel Recovery", this);
+    m_cancel_rec_btn = new QPushButton("Cancel Recovery", m_recovery_frame);
     connect(m_cancel_rec_btn, &QPushButton::clicked,
             this, [this]() { on_cancel_recovery_clicked(); });
 
-    auto *rec_row = new QHBoxLayout;
-    rec_row->addWidget(m_recovery_label, 1);
-    rec_row->addWidget(m_cancel_rec_btn);
-    vLayout->addLayout(rec_row);
+    auto *rec_inner = new QHBoxLayout(m_recovery_frame);
+    rec_inner->setContentsMargins(10, 7, 10, 7);
+    rec_inner->setSpacing(8);
+    rec_inner->addWidget(m_recovery_label, 1);
+    rec_inner->addWidget(m_cancel_rec_btn);
+    vLayout->addWidget(m_recovery_frame);
 
     m_countdown_timer = new QTimer(this);
     m_countdown_timer->setInterval(500);
@@ -167,9 +181,9 @@ ZoomDock::ZoomDock(QWidget *parent)
         update_recovery_panel();
     });
 
-    // Periodic tick only updates the lightweight state indicator (state dot,
-    // active speaker label, join-timeout watchdog). The output table is
-    // expensive to rebuild and is refreshed from the roster callback below.
+    // Periodic tick updates the lightweight state indicator (state dot, active
+    // speaker label, join-timeout watchdog). The output table is rebuilt only
+    // on roster callback to avoid thrashing while a user is mid-selection.
     m_refresh_timer = new QTimer(this);
     m_refresh_timer->setInterval(500);
     connect(m_refresh_timer, &QTimer::timeout, this, [this]() {
@@ -177,16 +191,15 @@ ZoomDock::ZoomDock(QWidget *parent)
     });
     m_refresh_timer->start();
 
-    // Hidden until recovery begins.
-    m_recovery_label->setVisible(false);
-    m_cancel_rec_btn->setVisible(false);
+    m_recovery_frame->setVisible(false);
 
     // ── Output table ──────────────────────────────────────────────────────────
     auto *output_group  = new QGroupBox("Outputs", this);
     auto *output_layout = new QVBoxLayout(output_group);
+    output_layout->setSpacing(6);
 
     m_participant_filter = new QLineEdit(output_group);
-    m_participant_filter->setPlaceholderText("Filter participants...");
+    m_participant_filter->setPlaceholderText("Filter participants…");
     m_participant_filter->setClearButtonEnabled(true);
     connect(m_participant_filter, &QLineEdit::textChanged,
             this, [this](const QString &) { refresh_outputs(); });
@@ -202,17 +215,17 @@ ZoomDock::ZoomDock(QWidget *parent)
     m_output_table->verticalHeader()->setVisible(false);
     m_output_table->setSelectionMode(QAbstractItemView::NoSelection);
     m_output_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_output_table->setAlternatingRowColors(true);
 
     m_apply_btn = new QPushButton("Apply", output_group);
+    m_apply_btn->setProperty("role", "primary");
     connect(m_apply_btn, &QPushButton::clicked, this, [this]() { apply_outputs(); });
 
     output_layout->addWidget(m_output_table);
     output_layout->addWidget(m_apply_btn);
     vLayout->addWidget(output_group, 1);
 
-    
-
-    // ── Subscribe to roster / state changes ──────────────────────────────────
+    // ── Subscribe to roster / state changes ───────────────────────────────────
     auto self  = this;
     auto alive = m_alive;
 
@@ -222,6 +235,10 @@ ZoomDock::ZoomDock(QWidget *parent)
         }, Qt::QueuedConnection);
     });
 
+    // ── Apply stylesheet last so all properties are set before evaluation ─────
+    setStyleSheet(cv_stylesheet());
+
+    update_credentials_banner();
     refresh();
 }
 
@@ -235,11 +252,17 @@ ZoomDock::~ZoomDock()
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
+void ZoomDock::update_credentials_banner()
+{
+    const ZoomPluginSettings s = ZoomPluginSettings::load();
+    const bool missing = s.sdk_key.empty() && s.sdk_secret.empty() && s.jwt_token.empty();
+    m_credentials_banner->setVisible(missing);
+}
+
 void ZoomDock::update_recovery_panel()
 {
     const bool recovering = ZoomReconnectManager::instance().is_recovering();
-    m_recovery_label->setVisible(recovering);
-    m_cancel_rec_btn->setVisible(recovering);
+    m_recovery_frame->setVisible(recovering);
 
     if (!recovering) {
         m_countdown_timer->stop();
@@ -252,13 +275,13 @@ void ZoomDock::update_recovery_panel()
 
     if (ms_left > 0) {
         m_recovery_label->setText(
-            QString("Reconnecting in %1s... (attempt %2/%3)")
+            QString("Reconnecting in %1s… (attempt %2/%3)")
                 .arg((ms_left + 999) / 1000)
                 .arg(attempt + 1)
                 .arg(max_att));
     } else {
         m_recovery_label->setText(
-            QString("Reconnecting... (attempt %1/%2)")
+            QString("Reconnecting… (attempt %1/%2)")
                 .arg(attempt)
                 .arg(max_att));
     }
@@ -287,7 +310,7 @@ void ZoomDock::update_state_indicator()
         m_join_timeout_reported = false;
     }
 
-    m_state_dot->setStyleSheet(state_dot_style(s));
+    m_state_dot->setState(s);
     m_state_label->setText(state_label_text(s));
 
     const bool in_meeting    = (s == MeetingState::InMeeting);
@@ -304,7 +327,7 @@ void ZoomDock::update_state_indicator()
     // Active speaker name
     const uint32_t spk_id = ZoomEngineClient::instance().active_speaker_id();
     if (spk_id == 0) {
-        m_speaker_label->setText("—");
+        m_speaker_label->setText(QStringLiteral("—"));
     } else {
         QString spk_name = QString("ID %1").arg(spk_id);
         for (const auto &p : ZoomEngineClient::instance().roster()) {
@@ -499,13 +522,19 @@ void ZoomDock::on_join_clicked()
     // numeric meeting ID and an optional pwd= passcode from the URL.
     const auto parsed = zoom_join_utils::parse_join_input(raw_input.toStdString());
     if (parsed.meeting_id.empty()) {
-        m_meeting_id->setStyleSheet("border: 1px solid #ee3333;");
+        // Use dynamic property to trigger the [error="true"] QSS rule
+        m_meeting_id->setProperty("error", true);
+        m_meeting_id->style()->unpolish(m_meeting_id);
+        m_meeting_id->style()->polish(m_meeting_id);
         m_meeting_id->setToolTip(
             "Could not parse a numeric meeting ID from this input. "
             "Enter the ID directly or paste a Zoom join URL.");
         return;
     }
-    m_meeting_id->setStyleSheet(QString());
+    // Clear error state
+    m_meeting_id->setProperty("error", false);
+    m_meeting_id->style()->unpolish(m_meeting_id);
+    m_meeting_id->style()->polish(m_meeting_id);
 
     // If the URL carried a passcode, prefer it over an empty UI field;
     // otherwise the user-entered passcode wins.
@@ -522,6 +551,7 @@ void ZoomDock::on_join_clicked()
             "Enter your Zoom Meeting SDK credentials before joining.");
         ZoomSettingsDialog dlg(this);
         if (dlg.exec() != QDialog::Accepted) return;
+        update_credentials_banner();
         s = ZoomPluginSettings::load();
         jwt = s.resolved_jwt_token();
     }

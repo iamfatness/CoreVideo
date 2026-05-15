@@ -1,4 +1,5 @@
 #include "zoom-dock.h"
+#include "cv-onboarding.h"
 #include "cv-style.h"
 #include "cv-widgets.h"
 #include "obs-utils.h"
@@ -12,6 +13,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDrag>
 #include <QFrame>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -20,6 +22,7 @@
 #include <QLineEdit>
 #include <QMetaObject>
 #include <QMessageBox>
+#include <QMimeData>
 #include <QPushButton>
 #include <QTableWidget>
 #include <QTimer>
@@ -31,11 +34,109 @@
 
 // ── Column layout for the output table ───────────────────────────────────────
 enum DockOutputColumns {
-    DColName       = 0,
-    DColAssignment = 1,
-    DColAudio      = 2,
-    DColIsolate    = 3,
-    DColCount      = 4
+    DColPreview    = 0,
+    DColName       = 1,
+    DColAssignment = 2,
+    DColAudio      = 3,
+    DColIsolate    = 4,
+    DColCount      = 5
+};
+
+static constexpr int kThumbW = 80;
+static constexpr int kThumbH = 45;
+static constexpr int kRowH   = 50;
+
+// Fast I420 → RGB888 for dock thumbnails (shared with output dialog logic)
+static QImage i420_to_qimage_dock(uint32_t w, uint32_t h,
+    const uint8_t *y, const uint8_t *u, const uint8_t *v,
+    uint32_t sy, uint32_t suv)
+{
+    QImage img(kThumbW, kThumbH, QImage::Format_RGB888);
+    const float xs = float(w) / kThumbW, ys = float(h) / kThumbH;
+    for (int dy = 0; dy < kThumbH; ++dy) {
+        const auto iy = uint32_t(dy * ys), icy = iy / 2;
+        auto *row = img.scanLine(dy);
+        for (int dx = 0; dx < kThumbW; ++dx) {
+            const auto ix = uint32_t(dx * xs), icx = ix / 2;
+            const int Y = y[iy * sy + ix];
+            const int U = u[icy * suv + icx] - 128;
+            const int V = v[icy * suv + icx] - 128;
+            row[dx*3]   = uint8_t(std::clamp(Y + int(1.402f*V),                          0, 255));
+            row[dx*3+1] = uint8_t(std::clamp(Y - int(0.344f*U) - int(0.714f*V),          0, 255));
+            row[dx*3+2] = uint8_t(std::clamp(Y + int(1.772f*U),                          0, 255));
+        }
+    }
+    return img;
+}
+
+// ── Draggable participant list ────────────────────────────────────────────────
+// Each item carries participant user_id as Qt::UserRole.
+// Dragging emits MIME type "application/x-cv-participant" with the user_id.
+class CvParticipantList : public QListWidget {
+public:
+    explicit CvParticipantList(QWidget *p = nullptr) : QListWidget(p) {
+        setDragEnabled(true);
+        setDragDropMode(QAbstractItemView::DragOnly);
+        setDefaultDropAction(Qt::CopyAction);
+        setStyleSheet(
+            "QListWidget { border: none; background: transparent; outline: none; }"
+            "QListWidget::item { color: #c0c0d8; padding: 5px 8px; border-radius: 4px; }"
+            "QListWidget::item:hover { background: #1a1a30; }"
+            "QListWidget::item:selected { background: #1d3de8; color: #fff; }");
+    }
+protected:
+    void startDrag(Qt::DropActions) override {
+        auto *item = currentItem();
+        if (!item) return;
+        auto *drag = new QDrag(this);
+        auto *data = new QMimeData;
+        data->setData("application/x-cv-participant",
+                      item->data(Qt::UserRole).toString().toUtf8());
+        drag->setMimeData(data);
+        drag->exec(Qt::CopyAction);
+    }
+};
+
+// ── Drop-enabled output table ─────────────────────────────────────────────────
+// Accepts drops from CvParticipantList; sets the assignment combo on the
+// row that was hovered when the participant was dropped.
+class CvDropOutputTable : public QTableWidget {
+public:
+    explicit CvDropOutputTable(QWidget *p = nullptr) : QTableWidget(p) {
+        setAcceptDrops(true);
+        setDropIndicatorShown(true);
+    }
+protected:
+    void dragEnterEvent(QDragEnterEvent *e) override {
+        if (e->mimeData()->hasFormat("application/x-cv-participant"))
+            e->acceptProposedAction();
+        else
+            QTableWidget::dragEnterEvent(e);
+    }
+    void dragMoveEvent(QDragMoveEvent *e) override {
+        if (e->mimeData()->hasFormat("application/x-cv-participant"))
+            e->acceptProposedAction();
+        else
+            QTableWidget::dragMoveEvent(e);
+    }
+    void dropEvent(QDropEvent *e) override {
+        if (!e->mimeData()->hasFormat("application/x-cv-participant")) {
+            QTableWidget::dropEvent(e);
+            return;
+        }
+        const QString uid =
+            QString::fromUtf8(e->mimeData()->data("application/x-cv-participant"));
+        const int row = rowAt(e->position().toPoint().y());
+        if (row >= 0) {
+            auto *combo = qobject_cast<QComboBox *>(cellWidget(row, DColAssignment));
+            if (combo) {
+                const QString key = QString("user:%1").arg(uid);
+                const int idx = combo->findData(key);
+                if (idx >= 0) combo->setCurrentIndex(idx);
+            }
+        }
+        e->acceptProposedAction();
+    }
 };
 
 static const char *state_label_text(MeetingState s)
@@ -229,13 +330,21 @@ ZoomDock::ZoomDock(QWidget *parent)
             this, [this](const QString &) { refresh_outputs(); });
     output_layout->addWidget(m_participant_filter);
 
-    m_output_table = new QTableWidget(output_group);
+    // Draggable participant list (drop on output rows to assign)
+    m_participant_list = new CvParticipantList(output_group);
+    m_participant_list->setMaximumHeight(90);
+    m_participant_list->setToolTip("Drag a participant onto an output row to assign them.");
+    output_layout->addWidget(m_participant_list);
+
+    m_output_table = new CvDropOutputTable(output_group);
     m_output_table->setColumnCount(DColCount);
-    m_output_table->setHorizontalHeaderLabels({"Output", "Assignment", "Audio", "Isolated"});
+    m_output_table->setHorizontalHeaderLabels({"", "Output", "Assignment", "Audio", "Isolated"});
+    m_output_table->horizontalHeader()->setSectionResizeMode(DColPreview,    QHeaderView::Fixed);
     m_output_table->horizontalHeader()->setSectionResizeMode(DColName,       QHeaderView::Stretch);
     m_output_table->horizontalHeader()->setSectionResizeMode(DColAssignment, QHeaderView::Stretch);
     m_output_table->horizontalHeader()->setSectionResizeMode(DColAudio,      QHeaderView::ResizeToContents);
     m_output_table->horizontalHeader()->setSectionResizeMode(DColIsolate,    QHeaderView::ResizeToContents);
+    m_output_table->setColumnWidth(DColPreview, kThumbW + 2);
     m_output_table->verticalHeader()->setVisible(false);
     m_output_table->setSelectionMode(QAbstractItemView::NoSelection);
     m_output_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -275,6 +384,21 @@ ZoomDock::ZoomDock(QWidget *parent)
 
     update_credentials_banner();
     refresh();
+
+    // ── First-run onboarding wizard ───────────────────────────────────────────
+    if (!CvOnboardingWizard::isCompleted()) {
+        const ZoomPluginSettings &cfg = ZoomPluginSettings::load();
+        const bool noCredentials = cfg.sdk_key.empty()
+            && cfg.sdk_secret.empty()
+            && cfg.jwt_token.empty();
+        if (noCredentials) {
+            QTimer::singleShot(0, this, [this]() {
+                CvOnboardingWizard wiz(this);
+                wiz.exec();
+                update_credentials_banner();
+            });
+        }
+    }
 }
 
 ZoomDock::~ZoomDock()
@@ -423,9 +547,53 @@ void ZoomDock::refresh_outputs()
     const auto outputs = ZoomOutputManager::instance().outputs();
     const auto roster  = ZoomEngineClient::instance().roster();
 
+    // Rebuild participant list for drag-and-drop
+    if (m_participant_list) {
+        const QString filter = m_participant_filter
+            ? m_participant_filter->text().trimmed().toLower() : QString();
+        m_participant_list->clear();
+        for (const auto &p : roster) {
+            const QString name = p.display_name.empty()
+                ? QString("ID %1").arg(p.user_id)
+                : QString::fromStdString(p.display_name);
+            if (!filter.isEmpty() && !name.toLower().contains(filter) &&
+                !QString::number(p.user_id).contains(filter)) continue;
+            auto *item = new QListWidgetItem(name);
+            item->setData(Qt::UserRole, QString::number(p.user_id));
+            m_participant_list->addItem(item);
+        }
+    }
+
+    // Clear stale preview callbacks before rebuilding rows
+    ZoomOutputManager::instance().clear_all_preview_cbs();
+
     m_output_table->setRowCount(static_cast<int>(outputs.size()));
     for (int row = 0; row < static_cast<int>(outputs.size()); ++row) {
         const auto &output = outputs[row];
+        m_output_table->setRowHeight(row, kRowH);
+
+        // Preview thumbnail
+        auto *thumb = new QLabel(m_output_table);
+        thumb->setFixedSize(kThumbW, kThumbH);
+        thumb->setAlignment(Qt::AlignCenter);
+        thumb->setStyleSheet("background: #111118; color: #505068; font-size: 9px;");
+        thumb->setText("no video");
+        m_output_table->setCellWidget(row, DColPreview, thumb);
+
+        auto alive_ref = m_alive;
+        QPointer<QLabel> thumbPtr(thumb);
+        ZoomOutputManager::instance().set_preview_cb(output.source_name,
+            [thumbPtr, alive_ref](uint32_t w, uint32_t h,
+                const uint8_t *y, const uint8_t *u, const uint8_t *v,
+                uint32_t sy, uint32_t suv) {
+                if (!alive_ref->load(std::memory_order_acquire)) return;
+                QImage img = i420_to_qimage_dock(w, h, y, u, v, sy, suv);
+                QMetaObject::invokeMethod(qApp, [thumbPtr, alive_ref, img]() {
+                    if (!alive_ref->load(std::memory_order_acquire) || !thumbPtr) return;
+                    thumbPtr->setPixmap(QPixmap::fromImage(img));
+                    thumbPtr->setText({});
+                }, Qt::QueuedConnection);
+            });
 
         auto *name_item = new QTableWidgetItem(
             output.display_name.empty()

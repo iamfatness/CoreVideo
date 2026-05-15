@@ -239,7 +239,10 @@ void OBSClient::handleResponse(const QJsonObject &d)
 void OBSClient::handleEvent(const QJsonObject &d)
 {
     const QString type = d["eventType"].toString();
-    if (type == "SceneItemCreated" || type == "SceneItemRemoved") {
+    if (type == "CurrentProgramSceneChanged") {
+        emit sceneChanged(d["eventData"].toObject()["sceneName"].toString());
+    }
+    else if (type == "SceneItemCreated" || type == "SceneItemRemoved") {
         const QString scene = d["eventData"].toObject()["sceneName"].toString();
         m_itemCache.remove(scene);
     }
@@ -308,6 +311,29 @@ void OBSClient::setSceneItemTransform(const QString  &sceneName,
         {"sceneItemId",        sceneItemId},
         {"sceneItemTransform", t.toJson()},
     });
+}
+
+// ── Macro execution ───────────────────────────────────────────────────────────
+void OBSClient::executeMacro(const Macro &macro)
+{
+    if (m_state != State::Connected) return;
+    QJsonArray requests;
+    for (const auto &step : macro.steps) {
+        QJsonObject req{
+            {"requestType", step.requestType},
+            {"requestId",   nextId()},
+        };
+        if (!step.data.isEmpty()) req["requestData"] = step.data;
+        requests.append(req);
+    }
+    if (requests.isEmpty()) return;
+    sendOp(8, QJsonObject{
+        {"requestId",     nextId()},
+        {"haltOnFailure", false},
+        {"requests",      requests},
+    });
+    emit log(QStringLiteral("Macro '%1': dispatched %2 steps.")
+                 .arg(macro.label).arg(requests.size()));
 }
 
 // ── Virtual camera ────────────────────────────────────────────────────────────

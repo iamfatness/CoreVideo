@@ -3,12 +3,15 @@
 #include "layout-template.h"
 #include "obs-client.h"
 #include "show-theme.h"
+#include "macro.h"
 #include <QMainWindow>
 
 class PreviewCanvas;
 class TemplatePanel;
 class ParticipantPanel;
 class ThemePanel;
+class ScenesPanel;
+class MacrosPanel;
 class SettingsPage;
 class QLabel;
 class QPushButton;
@@ -34,6 +37,8 @@ private slots:
     void onVirtualCamToggle();
     void onVirtualCamState(bool active);
     void onSettingsChanged();
+    void onSceneActivated(const QString &name);
+    void onMacroTriggered(const Macro &macro);
 
 private:
     void buildTopBar(QWidget *parent);
@@ -63,13 +68,16 @@ private:
     TemplatePanel    *m_templatePanel    = nullptr;
     ParticipantPanel *m_participantPanel = nullptr;
     ThemePanel       *m_themePanel       = nullptr;
+    ScenesPanel      *m_scenesPanel      = nullptr;
+    MacrosPanel      *m_macrosPanel      = nullptr;
     SettingsPage     *m_settingsPage     = nullptr;
 
     // Right panel page indices
-    int m_pageTemplates    = 0;
-    int m_pageThemes       = 0;
-    int m_pageParticipants = 0;
-    int m_pageSettings     = 0;
+    int m_pageTemplates = 0;
+    int m_pageThemes    = 0;
+    int m_pageScenes    = 0;
+    int m_pageMacros    = 0;
+    int m_pageSettings  = 0;
 
     // Log
     QDockWidget    *m_logDock = nullptr;

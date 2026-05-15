@@ -130,6 +130,7 @@ if(COREVIDEO_BUILD_PLUGIN)
         src/obs-utils.cpp
         src/hw-video-pipeline.cpp
         src/cv-widgets.cpp
+        src/cv-onboarding.cpp
     )
 
     target_include_directories(obs-zoom-plugin PRIVATE

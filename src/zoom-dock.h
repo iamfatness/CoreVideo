@@ -9,6 +9,7 @@
 
 class QLabel;
 class QLineEdit;
+class QListWidget;
 class QPushButton;
 class QTableWidget;
 class QComboBox;
@@ -56,6 +57,7 @@ private:
     QPushButton *m_leave_btn    = nullptr;
     QCheckBox   *m_webinar_cb   = nullptr;
     QLineEdit   *m_participant_filter = nullptr;
+    QListWidget *m_participant_list   = nullptr;
 
     // Recovery status panel (shown only while Recovering)
     QFrame      *m_recovery_frame  = nullptr;

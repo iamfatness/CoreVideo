@@ -16,6 +16,8 @@ set(SOURCES
     src/template-panel.cpp
     src/theme-panel.cpp
     src/participant-panel.cpp
+    src/scenes-panel.cpp
+    src/macros-panel.cpp
     src/settings-page.cpp
     src/layout-template.cpp
     src/template-manager.cpp

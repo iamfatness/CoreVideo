@@ -3,6 +3,8 @@
 #include "template-panel.h"
 #include "theme-panel.h"
 #include "participant-panel.h"
+#include "scenes-panel.h"
+#include "macros-panel.h"
 #include "template-manager.h"
 #include "settings-page.h"
 #include "obs-connect-dialog.h"
@@ -113,6 +115,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     connect(m_obsClient, &OBSClient::stateChanged,       this, &MainWindow::onObsState);
     connect(m_obsClient, &OBSClient::log,                this, &MainWindow::onObsLog);
     connect(m_obsClient, &OBSClient::scenesReceived,     this, &MainWindow::onScenesReceived);
+    connect(m_obsClient, &OBSClient::sceneChanged,       this, [this](const QString &name) {
+        m_scenesPanel->setCurrentScene(name);
+    });
     connect(m_obsClient, &OBSClient::virtualCamStateChanged, this, &MainWindow::onVirtualCamState);
     connect(m_obsClient, &OBSClient::templateApplied,    this,
             [this](const QString &name, int n) {
@@ -228,7 +233,22 @@ void MainWindow::buildRightPanel(QWidget *parent)
             this, &MainWindow::onThemeSelected);
     m_pageThemes = m_rightStack->addWidget(m_themePanel);
 
-    // Page 2: Settings
+    // Page 2: Scenes
+    m_scenesPanel = new ScenesPanel;
+    connect(m_scenesPanel, &ScenesPanel::sceneActivated,
+            this, &MainWindow::onSceneActivated);
+    connect(m_scenesPanel, &ScenesPanel::refreshRequested, this, [this]() {
+        m_obsClient->requestSceneList();
+    });
+    m_pageScenes = m_rightStack->addWidget(m_scenesPanel);
+
+    // Page 3: Macros
+    m_macrosPanel = new MacrosPanel;
+    connect(m_macrosPanel, &MacrosPanel::macroTriggered,
+            this, &MainWindow::onMacroTriggered);
+    m_pageMacros = m_rightStack->addWidget(m_macrosPanel);
+
+    // Page 4: Settings
     m_settingsPage = new SettingsPage;
     connect(m_settingsPage, &SettingsPage::settingsChanged,
             this, &MainWindow::onSettingsChanged);
@@ -279,16 +299,17 @@ void MainWindow::onPageSelected(Sidebar::Page p)
     switch (p) {
     case P::Templates:
     case P::Participants:
-        m_rightStack->setCurrentIndex(m_pageTemplates);
-        break;
+        m_rightStack->setCurrentIndex(m_pageTemplates);  break;
     case P::Themes:
-        m_rightStack->setCurrentIndex(m_pageThemes);
+        m_rightStack->setCurrentIndex(m_pageThemes);     break;
+    case P::Scenes:
+        m_rightStack->setCurrentIndex(m_pageScenes);
+        m_obsClient->requestSceneList();
         break;
+    case P::Macros:
+        m_rightStack->setCurrentIndex(m_pageMacros);     break;
     case P::Settings:
-        m_rightStack->setCurrentIndex(m_pageSettings);
-        break;
-    default:
-        break;
+        m_rightStack->setCurrentIndex(m_pageSettings);   break;
     }
 }
 
@@ -395,13 +416,32 @@ void MainWindow::onObsLog(const QString &msg)
 
 void MainWindow::onScenesReceived(const QStringList &scenes)
 {
-    const QString scene = m_settingsPage->targetScene();
-    if (scenes.contains(scene)) {
-        m_obsClient->requestSceneItems(scene);
+    m_scenesPanel->setScenes(scenes);
+
+    const QString target = m_settingsPage->targetScene();
+    if (scenes.contains(target)) {
+        m_obsClient->requestSceneItems(target);
     } else if (!scenes.isEmpty()) {
         onObsLog(QStringLiteral("Scene '%1' not found. Available: %2")
-                     .arg(scene, scenes.join(", ")));
+                     .arg(target, scenes.join(", ")));
     }
+}
+
+void MainWindow::onSceneActivated(const QString &name)
+{
+    m_obsClient->setCurrentScene(name);
+    onObsLog(QStringLiteral("Switched to scene: %1").arg(name));
+}
+
+void MainWindow::onMacroTriggered(const Macro &macro)
+{
+    if (!m_obsClient->isConnected()) {
+        onObsLog(QStringLiteral("Macro '%1' — not connected to OBS.").arg(macro.label));
+        return;
+    }
+    m_obsClient->executeMacro(macro);
+    onObsLog(QStringLiteral("Macro '%1' triggered (%2 steps).")
+                 .arg(macro.label).arg(macro.steps.size()));
 }
 
 void MainWindow::onVirtualCamToggle()

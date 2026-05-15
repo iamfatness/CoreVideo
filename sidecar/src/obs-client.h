@@ -1,5 +1,6 @@
 #pragma once
 #include "layout-template.h"
+#include "macro.h"
 #include <QObject>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -95,6 +96,9 @@ public:
     // Returns false if not connected or template malformed.
     bool applyTemplate(const QJsonObject &templateJson);
 
+    // Execute a Macro: sends all steps as a RequestBatch.
+    void executeMacro(const Macro &macro);
+
 signals:
     void stateChanged(OBSClient::State s);
     void connected();
@@ -102,6 +106,7 @@ signals:
     void errorOccurred(const QString &msg);
     void scenesReceived(const QStringList &scenes);
     void sceneItemsReceived(const QString &scene, const QVector<SceneItem> &items);
+    void sceneChanged(const QString &name);
     void templateApplied(const QString &name, int itemCount);
     void virtualCamStateChanged(bool active);
     void log(const QString &msg);

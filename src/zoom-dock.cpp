@@ -623,6 +623,22 @@ void ZoomDock::on_join_clicked()
         return;
     }
 
+    const bool needs_oauth_zak =
+        tokens.user_zak.empty() &&
+        tokens.on_behalf_token.empty() &&
+        tokens.app_privilege_token.empty();
+    if (needs_oauth_zak &&
+        s.oauth_access_token.empty() && s.oauth_refresh_token.empty()) {
+        QString error;
+        if (!ZoomOAuthManager::instance().begin_authorization(this, &error)) {
+            QMessageBox::warning(this, "Zoom OAuth", error);
+            return;
+        }
+        QMessageBox::information(this, "Zoom OAuth",
+            "Finish Zoom authorization in the browser, then click Join again.");
+        return;
+    }
+
     m_join_started_ms = QDateTime::currentMSecsSinceEpoch();
     m_join_timeout_reported = false;
 
@@ -641,14 +657,31 @@ void ZoomDock::on_join_clicked()
     m_join_thread = std::thread([self, alive, jwt, meeting_id, passcode,
                                  display_name, kind, webinar, join_generation,
                                  tokens]() mutable {
-        if (tokens.user_zak.empty()) {
+        if (tokens.user_zak.empty() &&
+            tokens.on_behalf_token.empty() &&
+            tokens.app_privilege_token.empty()) {
             std::string zak;
             QString zak_error;
             if (ZoomOAuthManager::instance().fetch_zak_blocking(zak, &zak_error))
                 tokens.user_zak = zak;
-            else if (!zak_error.isEmpty())
+            else {
+                if (zak_error.isEmpty())
+                    zak_error = "Authorize with Zoom before joining external meetings.";
                 blog(LOG_WARNING, "[obs-zoom-plugin] OAuth ZAK unavailable: %s",
                      zak_error.toUtf8().constData());
+
+                QMetaObject::invokeMethod(self, [self, alive, zak_error, join_generation]() {
+                    if (!alive->load(std::memory_order_acquire)) return;
+                    if (self->m_join_generation.load(std::memory_order_acquire) != join_generation)
+                        return;
+                    self->m_join_in_progress.store(false, std::memory_order_release);
+                    ZoomEngineClient::instance().set_state(MeetingState::Failed);
+                    QMessageBox::warning(self, "Zoom OAuth",
+                        "Could not get a Zoom ZAK for this join.\n\n" + zak_error);
+                    self->update_state_indicator();
+                }, Qt::QueuedConnection);
+                return;
+            }
         }
         const bool started = ZoomEngineClient::instance().start(jwt);
         const bool still_current =

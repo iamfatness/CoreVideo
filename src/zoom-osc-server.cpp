@@ -226,17 +226,32 @@ void ZoomOscServer::dispatch(const QString &address,
         tokens.on_behalf_token = parsed.on_behalf_token;
         tokens.user_zak = parsed.user_zak;
         tokens.app_privilege_token = parsed.app_privilege_token;
-        if (tokens.user_zak.empty()) {
+        const bool needs_oauth_zak =
+            tokens.user_zak.empty() &&
+            tokens.on_behalf_token.empty() &&
+            tokens.app_privilege_token.empty();
+        const ZoomPluginSettings settings = ZoomPluginSettings::load();
+        if (needs_oauth_zak &&
+            settings.oauth_access_token.empty() &&
+            settings.oauth_refresh_token.empty()) {
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] OSC /zoom/join: OAuth authorization required before joining external meetings");
+            return;
+        }
+        if (needs_oauth_zak) {
             std::string zak;
             QString zak_error;
             if (ZoomOAuthManager::instance().fetch_zak_blocking(zak, &zak_error))
                 tokens.user_zak = zak;
-            else if (!zak_error.isEmpty())
+            else {
+                if (zak_error.isEmpty())
+                    zak_error = "Authorize with Zoom before joining external meetings.";
                 blog(LOG_WARNING, "[obs-zoom-plugin] OAuth ZAK unavailable: %s",
                      zak_error.toUtf8().constData());
+                return;
+            }
         }
 
-        const ZoomPluginSettings settings = ZoomPluginSettings::load();
         if (!ZoomEngineClient::instance().start(settings.resolved_jwt_token())) {
             blog(LOG_WARNING,
                  "[obs-zoom-plugin] OSC /zoom/join: engine failed to start");

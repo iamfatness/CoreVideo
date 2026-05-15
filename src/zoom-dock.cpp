@@ -1,4 +1,5 @@
 #include "zoom-dock.h"
+#include "obs-utils.h"
 #include "zoom-engine-client.h"
 #include "zoom-output-manager.h"
 #include "zoom-reconnect.h"
@@ -97,11 +98,18 @@ ZoomDock::ZoomDock(QWidget *parent)
     auto *join_layout = new QVBoxLayout(join_group);
 
     m_meeting_id = new QLineEdit(join_group);
-    m_meeting_id->setPlaceholderText("Meeting ID");
+    m_meeting_id->setPlaceholderText("Meeting ID or Zoom URL");
+    m_meeting_id->setToolTip(
+        "Enter a numeric meeting ID or paste a full Zoom URL "
+        "(e.g. https://zoom.us/j/123?pwd=abc) — the ID and passcode "
+        "will be extracted automatically.");
 
     m_passcode = new QLineEdit(join_group);
     m_passcode->setPlaceholderText("Passcode (optional)");
     m_passcode->setEchoMode(QLineEdit::Password);
+
+    m_display_name = new QLineEdit(join_group);
+    m_display_name->setPlaceholderText("Display name");
 
     m_join_btn  = new QPushButton("Join",  join_group);
     m_leave_btn = new QPushButton("Leave", join_group);
@@ -115,9 +123,22 @@ ZoomDock::ZoomDock(QWidget *parent)
 
     join_layout->addWidget(m_meeting_id);
     join_layout->addWidget(m_passcode);
+    join_layout->addWidget(m_display_name);
     join_layout->addWidget(m_webinar_cb);
     join_layout->addLayout(join_btn_row);
     vLayout->addWidget(join_group);
+
+    // Pre-populate join fields from the last successful join, if any.
+    {
+        const ZoomPluginSettings prefill = ZoomPluginSettings::load();
+        if (!prefill.last_meeting_id.empty())
+            m_meeting_id->setText(QString::fromStdString(prefill.last_meeting_id));
+        m_display_name->setText(
+            prefill.last_display_name.empty()
+                ? QStringLiteral("OBS")
+                : QString::fromStdString(prefill.last_display_name));
+        m_webinar_cb->setChecked(prefill.last_was_webinar);
+    }
 
     connect(m_join_btn,  &QPushButton::clicked, this, [this]() { on_join_clicked(); });
     connect(m_leave_btn, &QPushButton::clicked, this, [this]() { on_leave_clicked(); });
@@ -392,20 +413,42 @@ void ZoomDock::apply_outputs()
 
 void ZoomDock::on_join_clicked()
 {
-    const QString meeting_id = m_meeting_id->text().trimmed();
-    if (meeting_id.isEmpty()) return;
+    const QString raw_input = m_meeting_id->text().trimmed();
+    if (raw_input.isEmpty()) return;
 
-    const ZoomPluginSettings s = ZoomPluginSettings::load();
+    // Accept either a raw meeting ID or a Zoom URL; the parser strips out a
+    // numeric meeting ID and an optional pwd= passcode from the URL.
+    const auto parsed = zoom_join_utils::parse_join_input(raw_input.toStdString());
+    if (parsed.meeting_id.empty()) {
+        m_meeting_id->setStyleSheet("border: 1px solid #ee3333;");
+        m_meeting_id->setToolTip(
+            "Could not parse a numeric meeting ID from this input. "
+            "Enter the ID directly or paste a Zoom join URL.");
+        return;
+    }
+    m_meeting_id->setStyleSheet(QString());
+
+    // If the URL carried a passcode, prefer it over an empty UI field;
+    // otherwise the user-entered passcode wins.
+    std::string passcode = m_passcode->text().toStdString();
+    if (passcode.empty()) passcode = parsed.passcode;
+
+    std::string display_name = m_display_name->text().trimmed().toStdString();
+    if (display_name.empty()) display_name = "OBS";
+
+    ZoomPluginSettings s = ZoomPluginSettings::load();
     if (!ZoomEngineClient::instance().start(s.jwt_token)) return;
 
-    const MeetingKind kind = (m_webinar_cb && m_webinar_cb->isChecked())
-        ? MeetingKind::Webinar : MeetingKind::Meeting;
+    const bool webinar = m_webinar_cb && m_webinar_cb->isChecked();
+    const MeetingKind kind = webinar ? MeetingKind::Webinar : MeetingKind::Meeting;
 
-    ZoomEngineClient::instance().join(
-        meeting_id.toStdString(),
-        m_passcode->text().toStdString(),
-        "OBS",
-        kind);
+    if (ZoomEngineClient::instance().join(parsed.meeting_id, passcode,
+                                          display_name, kind)) {
+        s.last_meeting_id   = parsed.meeting_id;
+        s.last_display_name = display_name;
+        s.last_was_webinar  = webinar;
+        s.save();
+    }
 
     update_state_indicator();
 }

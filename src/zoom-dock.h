@@ -34,6 +34,7 @@ private:
     QLabel      *m_state_label  = nullptr;
     QLineEdit   *m_meeting_id   = nullptr;
     QLineEdit   *m_passcode     = nullptr;
+    QLineEdit   *m_display_name = nullptr;
     QPushButton *m_join_btn     = nullptr;
     QPushButton *m_leave_btn    = nullptr;
     QCheckBox   *m_webinar_cb   = nullptr;

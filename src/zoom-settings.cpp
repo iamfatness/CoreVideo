@@ -46,6 +46,12 @@ ZoomPluginSettings ZoomPluginSettings::load()
     const int rc_auth = config_get_int(cfg, SECTION, "ReconnectOnAuthFail");
     if (rc_auth >= 0) s.reconnect_policy.on_auth_fail = (rc_auth != 0);
 
+    const char *last_id   = config_get_string(cfg, SECTION, "LastMeetingId");
+    const char *last_name = config_get_string(cfg, SECTION, "LastDisplayName");
+    s.last_meeting_id   = last_id   ? last_id   : "";
+    s.last_display_name = last_name ? last_name : "";
+    s.last_was_webinar  = config_get_int(cfg, SECTION, "LastWasWebinar") != 0;
+
     return s;
 }
 
@@ -66,5 +72,8 @@ void ZoomPluginSettings::save() const
     config_set_int   (cfg, SECTION, "ReconnectOnCrash",       reconnect_policy.on_engine_crash ? 1 : 0);
     config_set_int   (cfg, SECTION, "ReconnectOnDisconnect",  reconnect_policy.on_disconnect ? 1 : 0);
     config_set_int   (cfg, SECTION, "ReconnectOnAuthFail",    reconnect_policy.on_auth_fail ? 1 : 0);
+    config_set_string(cfg, SECTION, "LastMeetingId",          last_meeting_id.c_str());
+    config_set_string(cfg, SECTION, "LastDisplayName",        last_display_name.c_str());
+    config_set_int   (cfg, SECTION, "LastWasWebinar",         last_was_webinar ? 1 : 0);
     config_save_safe(cfg, "tmp", nullptr);
 }

@@ -6,6 +6,7 @@
 #include "zoom-settings.h"
 #include "zoom-oauth.h"
 #include <QHostAddress>
+#include <QMetaObject>
 #include <QUdpSocket>
 #include <obs-module.h>
 #include <cstring>
@@ -150,11 +151,28 @@ bool ZoomOscServer::start(quint16 port)
 
     blog(LOG_INFO, "[obs-zoom-plugin] OSC server listening on 127.0.0.1:%u",
          static_cast<unsigned>(port));
+
+    ZoomEngineClient::instance().add_roster_callback(this, [this]() {
+        QMetaObject::invokeMethod(this, [this]() {
+            const QByteArray pkt = build_osc("/zoom/event/roster_changed", "", {});
+            for (const auto &sub : m_subscribers)
+                m_socket->writeDatagram(pkt, sub.addr, sub.port);
+            for (const auto &sub : m_subscribers)
+                send_participants(sub.addr, sub.port);
+        }, Qt::QueuedConnection);
+    });
+
+    m_poll_timer = new QTimer(this);
+    connect(m_poll_timer, &QTimer::timeout, this, [this]() { poll_and_push(); });
+    m_poll_timer->start(kPollIntervalMs);
+
     return true;
 }
 
 void ZoomOscServer::stop()
 {
+    if (m_poll_timer) m_poll_timer->stop();
+    ZoomEngineClient::instance().remove_roster_callback(this);
     if (m_socket) m_socket->close();
 }
 
@@ -202,6 +220,28 @@ void ZoomOscServer::dispatch(const QString &address,
     // /zoom/list_participants  →  reply with current roster
     if (address == "/zoom/list_participants") {
         send_participants(sender, sender_port);
+        return;
+    }
+
+    // /zoom/subscribe  →  register caller for push events
+    if (address == "/zoom/subscribe") {
+        handle_subscribe(sender, sender_port);
+        std::vector<OscArg> a(1);
+        a[0].type = OscArg::Int32; a[0].i = kSubscriberTtlMs;
+        m_socket->writeDatagram(build_osc("/zoom/subscribed", "i", a), sender, sender_port);
+        return;
+    }
+
+    // /zoom/unsubscribe
+    if (address == "/zoom/unsubscribe") {
+        handle_unsubscribe(sender, sender_port);
+        m_socket->writeDatagram(build_osc("/zoom/unsubscribed", "", {}), sender, sender_port);
+        return;
+    }
+
+    // /zoom/ping
+    if (address == "/zoom/ping") {
+        m_socket->writeDatagram(build_osc("/zoom/pong", "", {}), sender, sender_port);
         return;
     }
 
@@ -302,6 +342,93 @@ void ZoomOscServer::dispatch(const QString &address,
         return;
     }
 
+    // /zoom/output/assign_ex  ,sisi  source mode participant_id spotlight_slot
+    if (address == "/zoom/output/assign_ex") {
+        if (args.size() < 4 ||
+            args[0].type != OscArg::String ||
+            args[1].type != OscArg::String ||
+            args[2].type != OscArg::Int32  ||
+            args[3].type != OscArg::Int32) {
+            blog(LOG_WARNING, "[obs-zoom-plugin] OSC /zoom/output/assign_ex: "
+                 "expected ,sisi source mode participant_id spotlight_slot");
+            return;
+        }
+        const std::string source = args[0].s;
+        const std::string mode_s = args[1].s;
+        const uint32_t pid       = static_cast<uint32_t>(args[2].i);
+        const uint32_t slot      = static_cast<uint32_t>(args[3].i);
+
+        AssignmentMode mode = AssignmentMode::Participant;
+        if      (mode_s == "active_speaker") mode = AssignmentMode::ActiveSpeaker;
+        else if (mode_s == "spotlight")      mode = AssignmentMode::SpotlightIndex;
+        else if (mode_s == "screen_share")   mode = AssignmentMode::ScreenShare;
+
+        bool isolate          = false;
+        AudioChannelMode amode = AudioChannelMode::Mono;
+        uint32_t failover     = 0;
+        for (const auto &o : ZoomOutputManager::instance().outputs()) {
+            if (o.source_name == source) {
+                isolate  = o.isolate_audio;
+                amode    = o.audio_mode;
+                failover = o.failover_participant_id;
+                break;
+            }
+        }
+        ZoomOutputManager::instance().configure_output_ex(
+            source, mode, pid, slot, failover, isolate, amode);
+        return;
+    }
+
+    // /zoom/output/audio_mode  ,ss  source "mono"|"stereo"
+    if (address == "/zoom/output/audio_mode") {
+        if (args.size() < 2 ||
+            args[0].type != OscArg::String ||
+            args[1].type != OscArg::String) {
+            blog(LOG_WARNING, "[obs-zoom-plugin] OSC /zoom/output/audio_mode: "
+                 "expected ,ss source mono|stereo");
+            return;
+        }
+        const std::string source = args[0].s;
+        const AudioChannelMode amode = (args[1].s == "stereo")
+                                       ? AudioChannelMode::Stereo
+                                       : AudioChannelMode::Mono;
+        for (const auto &o : ZoomOutputManager::instance().outputs()) {
+            if (o.source_name == source) {
+                ZoomOutputManager::instance().configure_output_ex(
+                    source, o.assignment, o.participant_id, o.spotlight_slot,
+                    o.failover_participant_id, o.isolate_audio, amode);
+                return;
+            }
+        }
+        blog(LOG_WARNING, "[obs-zoom-plugin] OSC /zoom/output/audio_mode: unknown source '%s'",
+             source.c_str());
+        return;
+    }
+
+    // /zoom/output/failover  ,si  source failover_participant_id
+    if (address == "/zoom/output/failover") {
+        if (args.size() < 2 ||
+            args[0].type != OscArg::String ||
+            args[1].type != OscArg::Int32) {
+            blog(LOG_WARNING, "[obs-zoom-plugin] OSC /zoom/output/failover: "
+                 "expected ,si source failover_participant_id");
+            return;
+        }
+        const std::string source  = args[0].s;
+        const uint32_t failover   = static_cast<uint32_t>(args[1].i);
+        for (const auto &o : ZoomOutputManager::instance().outputs()) {
+            if (o.source_name == source) {
+                ZoomOutputManager::instance().configure_output_ex(
+                    source, o.assignment, o.participant_id, o.spotlight_slot,
+                    failover, o.isolate_audio, o.audio_mode);
+                return;
+            }
+        }
+        blog(LOG_WARNING, "[obs-zoom-plugin] OSC /zoom/output/failover: unknown source '%s'",
+             source.c_str());
+        return;
+    }
+
     // /zoom/isolate_audio  ,si source 0|1
     if (address == "/zoom/isolate_audio") {
         if (args.size() < 2 ||
@@ -321,6 +448,12 @@ void ZoomOscServer::dispatch(const QString &address,
         }
         blog(LOG_WARNING, "[obs-zoom-plugin] OSC /zoom/isolate_audio: unknown source '%s'",
              source.c_str());
+        return;
+    }
+
+    // /zoom/recovery/cancel
+    if (address == "/zoom/recovery/cancel") {
+        ZoomReconnectManager::instance().cancel();
         return;
     }
 
@@ -402,5 +535,73 @@ void ZoomOscServer::send_participants(const QHostAddress &to, quint16 port)
         a[3].type = OscArg::Int32;  a[3].i = p.is_talking ? 1 : 0;
         a[4].type = OscArg::Int32;  a[4].i = p.is_muted   ? 1 : 0;
         m_socket->writeDatagram(build_osc("/zoom/participant", "isiii", a), to, port);
+    }
+}
+
+// ── Push / subscription helpers ───────────────────────────────────────────────
+
+void ZoomOscServer::handle_subscribe(const QHostAddress &addr, quint16 port)
+{
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+    for (auto &sub : m_subscribers) {
+        if (sub.addr == addr && sub.port == port) {
+            sub.renewed_at = now;
+            return;
+        }
+    }
+    m_subscribers.append({addr, port, now});
+}
+
+void ZoomOscServer::handle_unsubscribe(const QHostAddress &addr, quint16 port)
+{
+    for (int i = m_subscribers.size() - 1; i >= 0; --i) {
+        if (m_subscribers[i].addr == addr && m_subscribers[i].port == port)
+            m_subscribers.removeAt(i);
+    }
+}
+
+void ZoomOscServer::push_to_all(const std::string &address,
+                                 const std::string &type_tags,
+                                 const std::vector<OscArg> &args)
+{
+    const QDateTime cutoff = QDateTime::currentDateTimeUtc().addMSecs(-kSubscriberTtlMs);
+    for (int i = m_subscribers.size() - 1; i >= 0; --i) {
+        if (m_subscribers[i].renewed_at < cutoff)
+            m_subscribers.removeAt(i);
+    }
+    const QByteArray pkt = build_osc(address, type_tags, args);
+    for (const auto &sub : m_subscribers)
+        m_socket->writeDatagram(pkt, sub.addr, sub.port);
+}
+
+void ZoomOscServer::poll_and_push()
+{
+    const MeetingState newState = ZoomEngineClient::instance().state();
+    if (newState != m_last_state) {
+        m_last_state = newState;
+        std::vector<OscArg> a(1);
+        a[0].type = OscArg::String; a[0].s = meeting_state_str(newState);
+        push_to_all("/zoom/event/meeting_state", "s", a);
+    }
+
+    const uint32_t spk = ZoomEngineClient::instance().active_speaker_id();
+    if (spk != m_last_speaker) {
+        m_last_speaker = spk;
+        std::string name;
+        for (const auto &p : ZoomEngineClient::instance().roster()) {
+            if (p.user_id == spk) { name = p.display_name; break; }
+        }
+        std::vector<OscArg> a(2);
+        a[0].type = OscArg::Int32;  a[0].i = static_cast<int32_t>(spk);
+        a[1].type = OscArg::String; a[1].s = name;
+        push_to_all("/zoom/event/active_speaker", "is", a);
+    }
+
+    // Prune expired subscribers (push_to_all prunes on send; this covers the
+    // quiet path where no events fire for a long time).
+    const QDateTime cutoff = QDateTime::currentDateTimeUtc().addMSecs(-kSubscriberTtlMs);
+    for (int i = m_subscribers.size() - 1; i >= 0; --i) {
+        if (m_subscribers[i].renewed_at < cutoff)
+            m_subscribers.removeAt(i);
     }
 }

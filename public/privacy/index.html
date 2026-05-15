@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy Policy | CoreVideo</title>
+  <meta name="description" content="Privacy Policy for the CoreVideo OBS Studio plugin.">
+  <link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/">CoreVideo</a>
+    <nav><a href="/">Home</a><a href="/documentation/">Documentation</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a><a href="https://github.com/iamfatness/CoreVideo">GitHub</a></nav>
+  </header>
+  <main class="content">
+    <h1>Privacy Policy</h1>
+<p><em>Last updated: May 2026</em></p>
+<h2>Overview</h2>
+<p>CoreVideo is an open-source OBS Studio plugin. This privacy policy explains what data the plugin processes, where it goes, and what is stored.</p>
+<hr>
+<h2>Data Processed</h2>
+<h3>Meeting Audio and Video</h3>
+<p>CoreVideo receives raw video (I420 YUV) and audio (48 kHz PCM) streams from the Zoom Meeting SDK. These streams are:</p>
+<ul><li>Processed <strong>locally on the operator's machine only</strong></li><li>Delivered directly to OBS Studio as native source frames</li><li><strong>Never transmitted to any CoreVideo server, third-party service, or remote endpoint</strong></li></ul>
+<h3>Participant Roster</h3>
+<p>CoreVideo receives participant metadata from the Zoom SDK (display names, user IDs, mute/video/talking state, host/co-host status, spotlight position). This information is:</p>
+<ul><li>Held in memory only for the duration of the meeting session</li><li>Displayed within OBS for source assignment purposes</li><li><strong>Not stored to disk, logged, or transmitted outside the local machine</strong></li></ul>
+<h3>Credentials</h3>
+<p>The following credentials may be saved locally by the plugin:</p>
+<table><thead><tr><th>Credential</th><th>Storage location</th><th>Purpose</th></tr></thead><tbody><tr><td>Zoom SDK App Key</td><td>OBS plugin config directory</td><td>Generating Meeting SDK JWTs</td></tr><tr><td>Zoom SDK App Secret</td><td>OBS plugin config directory</td><td>Generating Meeting SDK JWTs</td></tr><tr><td>JWT override token</td><td>OBS plugin config directory</td><td>Optional manual JWT override</td></tr><tr><td>Control server token</td><td>OBS plugin config directory</td><td>Authenticating TCP/OSC API clients</td></tr><tr><td>Control server ports</td><td>OBS plugin config directory</td><td>TCP JSON and UDP OSC port configuration</td></tr></tbody></table>
+<p>Credentials are stored in the OBS plugin configuration directory on the operator's local machine and are <strong>not transmitted to any remote service by CoreVideo</strong>.</p>
+<hr>
+<h2>Third-Party Services</h2>
+<h3>Zoom Meeting SDK</h3>
+<p>CoreVideo uses the <strong>Zoom Meeting SDK</strong> to join and capture meeting content. When joining a meeting, your machine connects to Zoom's infrastructure (HTTPS/WSS). Zoom's own privacy policy governs all data exchanged with Zoom's servers:</p>
+<ul><li><a href="https://explore.zoom.us/en/privacy/">Zoom Privacy Policy</a></li><li><a href="https://marketplace.zoom.us/docs/api-reference/developer-agreement">Zoom Marketplace Developer Agreement</a></li></ul>
+<h3>GitHub (Documentation)</h3>
+<p>The documentation site at <code>iamfatness.github.io/CoreVideo</code> is hosted by GitHub Pages. GitHub's privacy policy applies to visits to that site:</p>
+<ul><li><a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">GitHub Privacy Statement</a></li></ul>
+<hr>
+<h2>Data Retention</h2>
+<ul><li><strong>No user data is retained by CoreVideo</strong> beyond the local OBS session.</li><li>Credentials saved in the OBS config directory persist until deleted via the Settings dialog or plugin removal.</li><li>OBS itself may retain scenes, sources, and recordings per its own configuration — outside the scope of this policy.</li></ul>
+<hr>
+<h2>Children's Privacy</h2>
+<p>CoreVideo is a professional broadcast tool not directed at children. No data from minors is knowingly collected.</p>
+<hr>
+<h2>Changes to This Policy</h2>
+<p>Updates will be reflected in the <code>Last updated</code> date above. Significant changes will be noted in the <a href="https://github.com/iamfatness/CoreVideo/releases">release notes</a>.</p>
+<hr>
+<h2>Contact</h2>
+<p>For privacy questions, open an issue at <a href="https://github.com/iamfatness/CoreVideo/issues">github.com/iamfatness/CoreVideo/issues</a> with the label <code>privacy</code>.</p>
+  </main>
+  <footer class="site-footer">
+    <span>CoreVideo is an independent open-source project and is not affiliated with Zoom Video Communications, Inc.</span>
+  </footer>
+</body>
+</html>

@@ -36,6 +36,9 @@ const pages = [
   },
 ];
 
+const publicDocumentationUrl =
+  process.env.COREVIDEO_SITE_URL?.replace(/\/$/, "") || "";
+
 function ensureDir(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
@@ -79,7 +82,9 @@ function normalizeText(value) {
     .replaceAll("â†’", "->")
     .replaceAll("â€¦", "...")
     .replaceAll("ðŸ“–", "")
-    .replaceAll("behaviour", "behavior");
+    .replaceAll("behaviour", "behavior")
+    .replaceAll("https://iamfatness.github.io/CoreVideo/", "/documentation/")
+    .replaceAll("https://iamfatness.github.io/CoreVideo", "/documentation");
 }
 
 function renderTable(lines) {
@@ -246,7 +251,9 @@ for (const page of pages) {
 }
 
 const docsHtml = fs.readFileSync(path.join(docsDir, "index.html"), "utf8")
-  .replaceAll("iamfatness.github.io/CoreVideo", "iamfatness.net/documentation")
+  .replaceAll("iamfatness.github.io/CoreVideo", publicDocumentationUrl
+    ? new URL("/documentation", publicDocumentationUrl).host + "/documentation"
+    : "CoreVideo documentation")
   .replaceAll("https://iamfatness.github.io/CoreVideo/", "/documentation/");
 writeText("documentation/index.html", docsHtml);
 writeText("docs/index.html", docsHtml);

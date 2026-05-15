@@ -1,6 +1,7 @@
 #include "zoom-control-server.h"
 #include "obs-utils.h"
 #include "zoom-engine-client.h"
+#include "zoom-oauth.h"
 #include "zoom-output-manager.h"
 #include "zoom-reconnect.h"
 #include "zoom-settings.h"
@@ -187,15 +188,15 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
 
     const QJsonObject req = doc.object();
 
-    if (!m_token.empty()) {
+    const QString cmd = req.value("cmd").toString();
+
+    if (!m_token.empty() && cmd != "oauth_callback") {
         const std::string provided = req.value("token").toString().toStdString();
         if (!ct_equal(provided, m_token)) {
             write_response(socket, {{"ok", false}, {"error", "unauthorized"}});
             return;
         }
     }
-
-    const QString cmd = req.value("cmd").toString();
 
     if (cmd == "help") {
         QJsonArray commands;
@@ -206,6 +207,7 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
         commands.append("assign_output");
         commands.append("join");
         commands.append("leave");
+        commands.append("oauth_callback");
         write_response(socket, {
             {"ok", true},
             {"commands", commands}
@@ -282,13 +284,40 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
         }
         std::string passcode = passcode_in.toStdString();
         if (passcode.empty()) passcode = parsed.passcode;
+        ZoomJoinAuthTokens tokens;
+        tokens.on_behalf_token = req.value("on_behalf_token").toString(
+            QString::fromStdString(parsed.on_behalf_token)).toStdString();
+        tokens.user_zak = req.value("user_zak").toString(
+            QString::fromStdString(parsed.user_zak)).toStdString();
+        tokens.app_privilege_token = req.value("app_privilege_token").toString(
+            QString::fromStdString(parsed.app_privilege_token)).toStdString();
+        if (tokens.user_zak.empty()) {
+            std::string zak;
+            QString zak_error;
+            if (ZoomOAuthManager::instance().fetch_zak_blocking(zak, &zak_error))
+                tokens.user_zak = zak;
+            else if (!zak_error.isEmpty())
+                blog(LOG_WARNING, "[obs-zoom-plugin] OAuth ZAK unavailable: %s",
+                     zak_error.toUtf8().constData());
+        }
 
         const ZoomPluginSettings settings = ZoomPluginSettings::load();
         const bool ok =
             ZoomEngineClient::instance().start(settings.resolved_jwt_token()) &&
             ZoomEngineClient::instance().join(parsed.meeting_id, passcode,
-                                              display_name.toStdString());
+                                              display_name.toStdString(),
+                                              MeetingKind::Meeting, tokens);
         write_response(socket, {{"ok", ok}});
+        return;
+    }
+
+    if (cmd == "oauth_callback") {
+        QString error;
+        const bool ok = ZoomOAuthManager::instance().handle_redirect_url(
+            req.value("url").toString(), &error);
+        write_response(socket, ok
+            ? QJsonObject{{"ok", true}}
+            : QJsonObject{{"ok", false}, {"error", error}});
         return;
     }
 

@@ -260,6 +260,60 @@ static std::string json_escape(const std::string &in)
     return out;
 }
 
+static const char *meeting_fail_name(int code)
+{
+    switch (code) {
+    case ZOOMSDK::MEETING_FAIL_CONNECTION_ERR:
+        return "MEETING_FAIL_CONNECTION_ERR";
+    case ZOOMSDK::MEETING_FAIL_RECONNECT_ERR:
+        return "MEETING_FAIL_RECONNECT_ERR";
+    case ZOOMSDK::MEETING_FAIL_PASSWORD_ERR:
+        return "MEETING_FAIL_PASSWORD_ERR";
+    case ZOOMSDK::MEETING_FAIL_MEETING_OVER:
+        return "MEETING_FAIL_MEETING_OVER";
+    case ZOOMSDK::MEETING_FAIL_MEETING_NOT_START:
+        return "MEETING_FAIL_MEETING_NOT_START";
+    case ZOOMSDK::MEETING_FAIL_MEETING_NOT_EXIST:
+        return "MEETING_FAIL_MEETING_NOT_EXIST";
+    case ZOOMSDK::MEETING_FAIL_MEETING_USER_FULL:
+        return "MEETING_FAIL_MEETING_USER_FULL";
+    case ZOOMSDK::MEETING_FAIL_CONFLOCKED:
+        return "MEETING_FAIL_CONFLOCKED";
+    case ZOOMSDK::MEETING_FAIL_MEETING_RESTRICTED:
+        return "MEETING_FAIL_MEETING_RESTRICTED";
+    case ZOOMSDK::MEETING_FAIL_ENFORCE_LOGIN:
+        return "MEETING_FAIL_ENFORCE_LOGIN";
+    case ZOOMSDK::MEETING_FAIL_FORBID_TO_JOIN_INTERNAL_MEETING:
+        return "MEETING_FAIL_FORBID_TO_JOIN_INTERNAL_MEETING";
+    case ZOOMSDK::MEETING_FAIL_HOST_DISALLOW_OUTSIDE_USER_JOIN:
+        return "MEETING_FAIL_HOST_DISALLOW_OUTSIDE_USER_JOIN";
+    case ZOOMSDK::MEETING_FAIL_UNABLE_TO_JOIN_EXTERNAL_MEETING:
+        return "MEETING_FAIL_UNABLE_TO_JOIN_EXTERNAL_MEETING";
+    case ZOOMSDK::MEETING_FAIL_BLOCKED_BY_ACCOUNT_ADMIN:
+        return "MEETING_FAIL_BLOCKED_BY_ACCOUNT_ADMIN";
+    case ZOOMSDK::MEETING_FAIL_NEED_SIGN_IN_FOR_PRIVATE_MEETING:
+        return "MEETING_FAIL_NEED_SIGN_IN_FOR_PRIVATE_MEETING";
+    case ZOOMSDK::MEETING_FAIL_APP_PRIVILEGE_TOKEN_ERROR:
+        return "MEETING_FAIL_APP_PRIVILEGE_TOKEN_ERROR";
+    case ZOOMSDK::MEETING_FAIL_AUTHORIZED_USER_NOT_INMEETING:
+        return "MEETING_FAIL_AUTHORIZED_USER_NOT_INMEETING";
+    case ZOOMSDK::MEETING_FAIL_APP_CAN_NOT_ANONYMOUS_JOIN_MEETING:
+        return "MEETING_FAIL_APP_CAN_NOT_ANONYMOUS_JOIN_MEETING";
+    case ZOOMSDK::MEETING_FAIL_ON_BEHALF_TOKEN_CONFLICT_LOGIN_ERROR:
+        return "MEETING_FAIL_ON_BEHALF_TOKEN_CONFLICT_LOGIN_ERROR";
+    case ZOOMSDK::MEETING_FAIL_USER_LEVEL_TOKEN_NOT_HAVE_HOST_ZAK_OBF:
+        return "MEETING_FAIL_USER_LEVEL_TOKEN_NOT_HAVE_HOST_ZAK_OBF";
+    case ZOOMSDK::MEETING_FAIL_ON_BEHALF_TOKEN_INVALID:
+        return "MEETING_FAIL_ON_BEHALF_TOKEN_INVALID";
+    case ZOOMSDK::MEETING_FAIL_ON_BEHALF_TOKEN_NOT_MATCH_MEETING:
+        return "MEETING_FAIL_ON_BEHALF_TOKEN_NOT_MATCH_MEETING";
+    case ZOOMSDK::MEETING_FAIL_JMAK_USER_EMAIL_NOT_MATCH:
+        return "MEETING_FAIL_JMAK_USER_EMAIL_NOT_MATCH";
+    default:
+        return "MEETING_FAIL_UNKNOWN";
+    }
+}
+
 // UUID may only contain alphanumerics, hyphens, and underscores to prevent
 // path traversal when used as a POSIX shared-memory name.
 static bool is_valid_source_uuid(const std::string &uuid)
@@ -627,7 +681,8 @@ public:
             EngineAudio::instance().reset_subscription("meeting_failed");
             if (m_participants) m_participants->detach();
             EngineIpc::write( R"({"cmd":"error","msg":"meeting_failed","code":)" +
-                           std::to_string(iResult) + "}");
+                           std::to_string(iResult) + R"(,"reason":")" +
+                           meeting_fail_name(iResult) + "\"}");
             break;
         default: break;
         }
@@ -738,10 +793,16 @@ int main()
     std::wstring g_wide_jwt;
     std::wstring g_wide_name;
     std::wstring g_wide_psw;
+    std::wstring g_wide_on_behalf_token;
+    std::wstring g_wide_user_zak;
+    std::wstring g_wide_app_privilege_token;
 #else
     std::string g_wide_jwt;
     std::string g_wide_name;
     std::string g_wide_psw;
+    std::string g_wide_on_behalf_token;
+    std::string g_wide_user_zak;
+    std::string g_wide_app_privilege_token;
 #endif
 
     std::atomic<bool> running{true};
@@ -809,9 +870,17 @@ int main()
             std::string meeting_id   = json_str(line, "meeting_id");
             std::string passcode     = json_str(line, "passcode");
             std::string display_name = json_str(line, "display_name");
+            std::string on_behalf_token = json_str(line, "on_behalf_token");
+            std::string user_zak = json_str(line, "user_zak");
+            std::string app_privilege_token = json_str(line, "app_privilege_token");
             if (display_name.empty()) display_name = "OBS";
             EngineIpc::write(R"({"cmd":"debug","stage":"join_received","meeting_id":")" +
-                json_escape(meeting_id) + "\"}");
+                json_escape(meeting_id) + R"(","has_on_behalf_token":)" +
+                std::string(on_behalf_token.empty() ? "false" : "true") +
+                R"(,"has_user_zak":)" +
+                std::string(user_zak.empty() ? "false" : "true") +
+                R"(,"has_app_privilege_token":)" +
+                std::string(app_privilege_token.empty() ? "false" : "true") + "}");
 
             if (!meeting_svc) {
                 ZOOMSDK::CreateMeetingService(&meeting_svc);
@@ -822,6 +891,9 @@ int main()
                 // remain valid for the duration of the async Join() call.
                 g_wide_name = to_zstr(display_name);
                 g_wide_psw  = to_zstr(passcode);
+                g_wide_on_behalf_token = to_zstr(on_behalf_token);
+                g_wide_user_zak = to_zstr(user_zak);
+                g_wide_app_privilege_token = to_zstr(app_privilege_token);
 
                 uint64_t meeting_number = 0;
                 try {
@@ -837,6 +909,9 @@ int main()
                 p.meetingNumber             = meeting_number;
                 p.userName                  = g_wide_name.c_str();
                 p.psw                       = passcode.empty() ? nullptr : g_wide_psw.c_str();
+                p.onBehalfToken             = on_behalf_token.empty() ? nullptr : g_wide_on_behalf_token.c_str();
+                p.userZAK                   = user_zak.empty() ? nullptr : g_wide_user_zak.c_str();
+                p.app_privilege_token       = app_privilege_token.empty() ? nullptr : g_wide_app_privilege_token.c_str();
                 p.isVideoOff                = true;
                 p.isAudioOff                = false;
                 p.isMyVoiceInMix            = true;

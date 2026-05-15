@@ -43,13 +43,17 @@ ZoomReconnectPolicy ZoomReconnectManager::policy() const
 void ZoomReconnectManager::store_session(const std::string &jwt,
                                          const std::string &meeting_id,
                                          const std::string &passcode,
-                                         const std::string &display_name)
+                                         const std::string &display_name,
+                                         MeetingKind kind,
+                                         const ZoomJoinAuthTokens &tokens)
 {
     std::lock_guard<std::mutex> lk(m_mtx);
     m_jwt          = jwt;
     m_meeting_id   = meeting_id;
     m_passcode     = passcode;
     m_display_name = display_name;
+    m_kind         = kind;
+    m_tokens       = tokens;
 }
 
 // Zero-fill a std::string via volatile writes so the compiler cannot elide it.
@@ -70,6 +74,9 @@ void ZoomReconnectManager::clear_session()
     m_meeting_id.clear();
     secure_clear(m_passcode);
     m_display_name.clear();
+    secure_clear(m_tokens.on_behalf_token);
+    secure_clear(m_tokens.user_zak);
+    secure_clear(m_tokens.app_privilege_token);
 }
 
 int ZoomReconnectManager::compute_delay_locked(int attempt) const
@@ -289,6 +296,8 @@ void ZoomReconnectManager::execute_retry(uint64_t generation)
 {
     // Runs on the OBS UI thread.
     std::string jwt, meeting_id, passcode, display_name;
+    MeetingKind kind = MeetingKind::Meeting;
+    ZoomJoinAuthTokens tokens;
     {
         std::lock_guard<std::mutex> lk(m_mtx);
         if (m_generation != generation) return;     // cancelled or superseded
@@ -297,6 +306,8 @@ void ZoomReconnectManager::execute_retry(uint64_t generation)
         meeting_id   = m_meeting_id;
         passcode     = m_passcode;
         display_name = m_display_name;
+        kind         = m_kind;
+        tokens       = m_tokens;
     }
 
     // Note: the actual "attempt N" log message has already been emitted by
@@ -311,6 +322,7 @@ void ZoomReconnectManager::execute_retry(uint64_t generation)
         on_join_failed(false);
         return;
     }
-    ZoomEngineClient::instance().join(meeting_id, passcode, display_name);
+    ZoomEngineClient::instance().join(meeting_id, passcode, display_name,
+                                      kind, tokens);
     // Result reported via on_join_success() / on_join_failed() from handle_event().
 }

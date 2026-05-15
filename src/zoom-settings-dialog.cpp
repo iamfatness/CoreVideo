@@ -2,6 +2,7 @@
 #include "cv-style.h"
 #include "zoom-settings.h"
 #include "zoom-control-server.h"
+#include "zoom-oauth.h"
 #include "zoom-osc-server.h"
 #include "zoom-reconnect.h"
 #include <QVBoxLayout>
@@ -14,6 +15,7 @@
 #include <QSpinBox>
 #include <QLabel>
 #include <QMessageBox>
+#include <QPushButton>
 
 ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     : QDialog(parent)
@@ -27,6 +29,12 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     m_sdk_key_edit    = new QLineEdit(QString::fromStdString(s.sdk_key),    this);
     m_sdk_secret_edit = new QLineEdit(QString::fromStdString(s.sdk_secret), this);
     m_jwt_token_edit  = new QLineEdit(QString::fromStdString(s.jwt_token),  this);
+    m_oauth_client_id_edit = new QLineEdit(QString::fromStdString(s.oauth_client_id), this);
+    m_oauth_authorization_url_edit =
+        new QLineEdit(QString::fromStdString(s.oauth_authorization_url), this);
+    m_oauth_redirect_uri_edit =
+        new QLineEdit(QString::fromStdString(s.oauth_redirect_uri), this);
+    m_oauth_scopes_edit = new QLineEdit(QString::fromStdString(s.oauth_scopes), this);
 
     m_sdk_secret_edit->setEchoMode(QLineEdit::Password);
     m_jwt_token_edit->setEchoMode(QLineEdit::Password);
@@ -59,6 +67,28 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     m_control_token_edit = new QLineEdit(QString::fromStdString(s.control_token), this);
     m_control_token_edit->setEchoMode(QLineEdit::Password);
     m_control_token_edit->setPlaceholderText("Leave blank to allow unauthenticated access");
+
+    // ── OAuth / PKCE ──────────────────────────────────────────────────────────
+    m_oauth_authorize_btn = new QPushButton("Authorize with Zoom", this);
+    m_oauth_register_scheme_btn = new QPushButton("Register corevideo:// URL Scheme", this);
+    m_oauth_authorize_btn->setProperty("role", "primary");
+    connect(m_oauth_authorize_btn, &QPushButton::clicked,
+            this, &ZoomSettingsDialog::onAuthorizeOAuth);
+    connect(m_oauth_register_scheme_btn, &QPushButton::clicked,
+            this, &ZoomSettingsDialog::onRegisterUrlScheme);
+
+    auto *oauth_form = new QFormLayout;
+    oauth_form->setSpacing(8);
+    oauth_form->addRow(new QLabel("Client ID:",          this), m_oauth_client_id_edit);
+    oauth_form->addRow(new QLabel("Authorization URL:",  this), m_oauth_authorization_url_edit);
+    oauth_form->addRow(new QLabel("Redirect URI:",       this), m_oauth_redirect_uri_edit);
+    oauth_form->addRow(new QLabel("Scopes:",             this), m_oauth_scopes_edit);
+    oauth_form->addRow("", m_oauth_register_scheme_btn);
+    oauth_form->addRow("", m_oauth_authorize_btn);
+
+    auto *oauth_group = new QGroupBox("Zoom OAuth (PKCE)", this);
+    oauth_group->setLayout(oauth_form);
+
 
     auto *ctrl_form = new QFormLayout;
     ctrl_form->setSpacing(8);
@@ -161,6 +191,7 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     auto *layout = new QVBoxLayout(this);
     layout->setSpacing(8);
     layout->addWidget(sdk_group);
+    layout->addWidget(oauth_group);
     layout->addWidget(ctrl_group);
     layout->addWidget(osc_group);
     layout->addWidget(hw_group);
@@ -173,10 +204,15 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
 
 void ZoomSettingsDialog::onSave()
 {
-    ZoomPluginSettings s;
+    ZoomPluginSettings s = ZoomPluginSettings::load();
     s.sdk_key             = m_sdk_key_edit->text().toStdString();
     s.sdk_secret          = m_sdk_secret_edit->text().toStdString();
     s.jwt_token           = m_jwt_token_edit->text().toStdString();
+    s.oauth_client_id     = m_oauth_client_id_edit->text().toStdString();
+    s.oauth_authorization_url =
+        m_oauth_authorization_url_edit->text().toStdString();
+    s.oauth_redirect_uri  = m_oauth_redirect_uri_edit->text().toStdString();
+    s.oauth_scopes        = m_oauth_scopes_edit->text().toStdString();
     s.control_server_port = static_cast<uint16_t>(m_control_port_spin->value());
     s.osc_server_port     = static_cast<uint16_t>(m_osc_port_spin->value());
     s.control_token       = m_control_token_edit->text().toStdString();
@@ -204,4 +240,37 @@ void ZoomSettingsDialog::onSave()
     }
 
     accept();
+}
+
+void ZoomSettingsDialog::onAuthorizeOAuth()
+{
+    ZoomPluginSettings s = ZoomPluginSettings::load();
+    s.oauth_client_id = m_oauth_client_id_edit->text().toStdString();
+    s.oauth_authorization_url =
+        m_oauth_authorization_url_edit->text().toStdString();
+    s.oauth_redirect_uri = m_oauth_redirect_uri_edit->text().toStdString();
+    s.oauth_scopes = m_oauth_scopes_edit->text().toStdString();
+    s.save();
+    QString error;
+    if (!ZoomOAuthManager::instance().begin_authorization(this, &error)) {
+        QMessageBox::warning(this, "Zoom OAuth", error);
+    }
+}
+
+void ZoomSettingsDialog::onRegisterUrlScheme()
+{
+    ZoomPluginSettings s = ZoomPluginSettings::load();
+    s.oauth_client_id = m_oauth_client_id_edit->text().toStdString();
+    s.oauth_authorization_url =
+        m_oauth_authorization_url_edit->text().toStdString();
+    s.oauth_redirect_uri = m_oauth_redirect_uri_edit->text().toStdString();
+    s.oauth_scopes = m_oauth_scopes_edit->text().toStdString();
+    s.save();
+    QString error;
+    if (!ZoomOAuthManager::instance().register_url_scheme(&error)) {
+        QMessageBox::warning(this, "Zoom OAuth", error);
+        return;
+    }
+    QMessageBox::information(this, "Zoom OAuth",
+        "Registered corevideo://oauth/callback for this Windows user.");
 }

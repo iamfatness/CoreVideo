@@ -4,6 +4,7 @@
 class QCheckBox;
 class QComboBox;
 class QLineEdit;
+class QPushButton;
 class QSpinBox;
 
 class ZoomSettingsDialog : public QDialog {
@@ -13,11 +14,19 @@ public:
 
 private slots:
     void onSave();
+    void onAuthorizeOAuth();
+    void onRegisterUrlScheme();
 
 private:
     QLineEdit *m_sdk_key_edit           = nullptr;
     QLineEdit *m_sdk_secret_edit        = nullptr;
     QLineEdit *m_jwt_token_edit         = nullptr;
+    QLineEdit *m_oauth_client_id_edit   = nullptr;
+    QLineEdit *m_oauth_authorization_url_edit = nullptr;
+    QLineEdit *m_oauth_redirect_uri_edit = nullptr;
+    QLineEdit *m_oauth_scopes_edit      = nullptr;
+    QPushButton *m_oauth_authorize_btn  = nullptr;
+    QPushButton *m_oauth_register_scheme_btn = nullptr;
     QSpinBox  *m_control_port_spin      = nullptr;
     QSpinBox  *m_osc_port_spin          = nullptr;
     QLineEdit *m_control_token_edit     = nullptr;

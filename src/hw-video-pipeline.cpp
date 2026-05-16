@@ -29,6 +29,29 @@ static const BackendSpec kBackends[] = {
     { AV_HWDEVICE_TYPE_QSV,          HwAccelMode::Qsv,          "vpp_qsv=format=nv12"     },
 };
 
+static bool attach_hw_device_to_upload_filters(AVFilterGraph *graph,
+                                               AVBufferRef *device_ctx)
+{
+    if (!graph || !device_ctx)
+        return false;
+
+    bool attached = false;
+    for (unsigned i = 0; i < graph->nb_filters; ++i) {
+        AVFilterContext *ctx = graph->filters[i];
+        if (!ctx || !ctx->filter || std::strcmp(ctx->filter->name, "hwupload") != 0)
+            continue;
+
+        AVBufferRef *ref = av_buffer_ref(device_ctx);
+        if (!ref)
+            return false;
+
+        av_buffer_unref(&ctx->hw_device_ctx);
+        ctx->hw_device_ctx = ref;
+        attached = true;
+    }
+    return attached;
+}
+
 // ── public interface ──────────────────────────────────────────────────────────
 
 bool HwVideoPipeline::init(HwAccelMode mode)
@@ -150,9 +173,6 @@ bool HwVideoPipeline::build_filter_graph(int w, int h)
     if (!m_graph)
         return false;
 
-    // Attach the hardware device so hwupload can find it automatically.
-    m_graph->hw_device = av_buffer_ref(m_hw_device_ctx);
-
     const AVFilter *buf_src_flt  = avfilter_get_by_name("buffer");
     const AVFilter *buf_sink_flt = avfilter_get_by_name("buffersink");
 
@@ -200,6 +220,12 @@ bool HwVideoPipeline::build_filter_graph(int w, int h)
     avfilter_inout_free(&inputs);
     avfilter_inout_free(&outputs);
     if (ret < 0) {
+        teardown_graph();
+        return false;
+    }
+
+    if (!attach_hw_device_to_upload_filters(m_graph, m_hw_device_ctx)) {
+        blog(LOG_WARNING, "[obs-zoom-plugin] HW accel: hwupload filter did not accept a hardware device");
         teardown_graph();
         return false;
     }

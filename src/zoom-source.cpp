@@ -17,6 +17,7 @@
 #define PROP_SPEAKER_HOLD         "speaker_hold_ms"
 #define PROP_VIDEO_LOSS_MODE      "video_loss_mode"
 #define PROP_ISOLATE_AUDIO        "isolate_audio"
+#define PROP_AUDIENCE_AUDIO       "audience_audio"
 #define PROP_AUDIO_CHANNELS       "audio_channels"
 #define PROP_RESOLUTION           "resolution"
 #define PROP_STATUS               "status_label"
@@ -158,6 +159,12 @@ void ZoomSource::apply_settings(obs_data_t *settings)
     const AssignmentMode old_assignment = assignment.load(std::memory_order_acquire);
     const uint32_t old_spotlight_slot = spotlight_slot.load(std::memory_order_acquire);
     const uint32_t old_failover = failover_participant_id.load(std::memory_order_acquire);
+    // Snapshot audio routing flags so a toggle re-subscribes — without this
+    // the engine keeps the previous flag and the source plays the wrong feed
+    // (e.g. enabling isolate after the fact would silently leave the source
+    // on the full mix).
+    const bool old_isolate_audio = isolate_audio;
+    const bool old_audience_audio = audience_audio;
 
     output_display_name = obs_data_get_string(settings, PROP_OUTPUT_DISPLAY_NAME);
     participant_id = static_cast<uint32_t>(obs_data_get_int(settings, PROP_PARTICIPANT_ID));
@@ -166,6 +173,9 @@ void ZoomSource::apply_settings(obs_data_t *settings)
         obs_data_get_int(settings, PROP_SPEAKER_SENSITIVITY));
     speaker_hold_ms = static_cast<uint32_t>(obs_data_get_int(settings, PROP_SPEAKER_HOLD));
     isolate_audio = obs_data_get_bool(settings, PROP_ISOLATE_AUDIO);
+    audience_audio = obs_data_get_bool(settings, PROP_AUDIENCE_AUDIO);
+    // isolate wins if both were saved together (legacy scenes).
+    if (isolate_audio) audience_audio = false;
     audio_mode = audio_mode_from_data(settings);
     resolution = resolution_from_data(settings);
     video_loss_mode = obs_data_get_int(settings, PROP_VIDEO_LOSS_MODE) == VIDEO_LOSS_BLACK
@@ -206,7 +216,9 @@ void ZoomSource::apply_settings(obs_data_t *settings)
         old_audio_mode != audio_mode || old_resolution != resolution ||
         old_assignment != new_assignment ||
         old_spotlight_slot != new_spot ||
-        old_failover != new_failover)) {
+        old_failover != new_failover ||
+        old_isolate_audio != isolate_audio ||
+        old_audience_audio != audience_audio)) {
         subscribe();
     }
 
@@ -244,6 +256,7 @@ ZoomOutputInfo ZoomSource::output_info() const
     const AssignmentMode mode = assignment.load(std::memory_order_acquire);
     info.active_speaker = is_active_speaker_assignment(mode);
     info.isolate_audio = isolate_audio;
+    info.audience_audio = audience_audio;
     info.audio_mode = audio_mode;
     info.video_resolution = resolution;
     info.observed_width = m_width.load(std::memory_order_relaxed);
@@ -369,7 +382,8 @@ void ZoomSource::subscribe()
         }
         if (target != 0)
             ZoomEngineClient::instance().subscribe(source_uuid, target,
-                                                   isolate_audio, resolution);
+                                                   isolate_audio, audience_audio,
+                                                   resolution);
         blog(LOG_INFO,
              "[obs-zoom-plugin] Zoom source subscription: source=%s uuid=%s participant_id=%u",
              output_name().c_str(), source_uuid.c_str(), target);
@@ -927,8 +941,27 @@ static obs_properties_t *zoom_source_get_properties(void *data)
         obs_property_list_add_int(failover, label.c_str(),
                                   static_cast<long long>(p.user_id));
     }
-    obs_properties_add_bool(props, PROP_ISOLATE_AUDIO,
+    // Mutually exclusive audio routing toggles. Default is the full meeting
+    // mix; isolate plays a single participant; audience plays the residual
+    // active speaker (everyone not bound to an isolate target). A modified
+    // callback enforces "only one checked" for clarity, with isolate winning
+    // server-side if both somehow get set.
+    obs_property_t *iso_prop = obs_properties_add_bool(props, PROP_ISOLATE_AUDIO,
         obs_module_text("ZoomSource.IsolateAudio"));
+    obs_property_t *aud_prop = obs_properties_add_bool(props, PROP_AUDIENCE_AUDIO,
+        obs_module_text("ZoomSource.AudienceAudio"));
+    obs_property_set_modified_callback(iso_prop,
+        [](obs_properties_t *, obs_property_t *, obs_data_t *settings) -> bool {
+            if (obs_data_get_bool(settings, PROP_ISOLATE_AUDIO))
+                obs_data_set_bool(settings, PROP_AUDIENCE_AUDIO, false);
+            return false;
+        });
+    obs_property_set_modified_callback(aud_prop,
+        [](obs_properties_t *, obs_property_t *, obs_data_t *settings) -> bool {
+            if (obs_data_get_bool(settings, PROP_AUDIENCE_AUDIO))
+                obs_data_set_bool(settings, PROP_ISOLATE_AUDIO, false);
+            return false;
+        });
 
     obs_property_t *ch = obs_properties_add_list(props, PROP_AUDIO_CHANNELS,
         obs_module_text("ZoomSource.AudioChannels"),
@@ -981,6 +1014,7 @@ static void zoom_source_get_defaults(obs_data_t *settings)
     obs_data_set_default_int(settings, PROP_SPEAKER_SENSITIVITY, 300);
     obs_data_set_default_int(settings, PROP_SPEAKER_HOLD, 2000);
     obs_data_set_default_bool(settings, PROP_ISOLATE_AUDIO, false);
+    obs_data_set_default_bool(settings, PROP_AUDIENCE_AUDIO, false);
     obs_data_set_default_int(settings, PROP_PARTICIPANT_ID, 0);
     obs_data_set_default_int(settings, PROP_AUDIO_CHANNELS, AUDIO_CH_MONO);
     obs_data_set_default_int(settings, PROP_RESOLUTION, RES_1080P);

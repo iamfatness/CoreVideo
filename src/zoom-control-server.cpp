@@ -205,6 +205,7 @@ static QJsonObject output_to_json(const ZoomOutputInfo &o)
     obj["failover_participant_id"] =
         static_cast<double>(o.failover_participant_id);
     obj["isolate_audio"]  = o.isolate_audio;
+    obj["audience_audio"] = o.audience_audio;
     obj["audio_channels"] = o.audio_mode == AudioChannelMode::Stereo
         ? "stereo" : "mono";
     switch (o.video_resolution) {

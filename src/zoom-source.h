@@ -27,6 +27,11 @@ struct ZoomSource {
     std::atomic<uint32_t> participant_id{0};
     std::atomic<bool> active_speaker_mode{false};
     bool isolate_audio = false;
+    // When true, this source receives one-way audio for every participant
+    // NOT bound to any isolate-audio target — i.e. the "residual active
+    // speaker." Mutually exclusive with isolate_audio (isolate wins if both
+    // somehow get set).
+    bool audience_audio = false;
     std::atomic<AudioChannelMode> audio_mode{AudioChannelMode::Mono};
     VideoResolution resolution = VideoResolution::P1080;
     VideoLossMode video_loss_mode = VideoLossMode::LastFrame;

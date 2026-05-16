@@ -354,6 +354,7 @@ void ZoomEngineClient::stop_media()
 void ZoomEngineClient::subscribe(const std::string &source_uuid,
                                  uint32_t participant_id,
                                  bool isolate_audio,
+                                 bool audience_audio,
                                  VideoResolution video_resolution)
 {
     if (!m_running.load(std::memory_order_acquire) || source_uuid.empty()) return;
@@ -361,6 +362,7 @@ void ZoomEngineClient::subscribe(const std::string &source_uuid,
         R"(","participant_id":)" + std::to_string(participant_id) +
         R"(,"resolution":)" + std::to_string(static_cast<int>(video_resolution)) +
         R"(,"isolate_audio":)" + std::string(isolate_audio ? "true" : "false") +
+        R"(,"audience_audio":)" + std::string(audience_audio ? "true" : "false") +
         "}");
 }
 

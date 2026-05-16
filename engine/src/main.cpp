@@ -1101,9 +1101,12 @@ int main()
             if (res > 2) res = 1;
             const bool isolate_audio =
                 line.find(R"("isolate_audio":true)") != std::string::npos;
+            const bool audience_audio =
+                line.find(R"("audience_audio":true)") != std::string::npos;
             if (is_valid_source_uuid(uuid)) {
                 video_engine.subscribe(pid, uuid, e2p, res);
-                EngineAudio::instance().init(e2p, uuid, pid, isolate_audio);
+                EngineAudio::instance().init(e2p, uuid, pid,
+                                             isolate_audio, audience_audio);
             }
 
         } else if (line.find(IPC_CMD_UNSUBSCRIBE) != std::string::npos) {

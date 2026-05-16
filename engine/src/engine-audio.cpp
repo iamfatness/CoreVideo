@@ -13,19 +13,25 @@ EngineAudio &EngineAudio::instance() { static EngineAudio inst; return inst; }
 bool EngineAudio::init(IpcFd e2p_fd,
                        const std::string &source_uuid,
                        uint32_t participant_id,
-                       bool isolate_audio)
+                       bool isolate_audio,
+                       bool audience_audio)
 {
+    // isolate wins if both are set — defensive, the plugin UI prevents this.
+    if (isolate_audio) audience_audio = false;
+
     m_e2p_fd = e2p_fd;
     {
         std::lock_guard<std::mutex> lock(m_targets_mtx);
         auto it = m_targets.find(source_uuid);
         if (it == m_targets.end()) {
             m_targets.emplace(source_uuid,
-                std::make_unique<AudioTarget>(e2p_fd, participant_id, isolate_audio));
+                std::make_unique<AudioTarget>(e2p_fd, participant_id,
+                                              isolate_audio, audience_audio));
         } else if (it->second) {
             it->second->e2p_fd = e2p_fd;
             it->second->participant_id = participant_id;
             it->second->isolate_audio = isolate_audio;
+            it->second->audience_audio = audience_audio;
         }
     }
 
@@ -186,7 +192,9 @@ void EngineAudio::onMixedAudioRawDataReceived(AudioRawData *data)
 
     std::lock_guard<std::mutex> lock(m_targets_mtx);
     for (auto &entry : m_targets) {
-        if (!entry.second || entry.second->isolate_audio) continue;
+        if (!entry.second) continue;
+        // Skip isolate AND audience targets — both receive only one-way audio.
+        if (entry.second->isolate_audio || entry.second->audience_audio) continue;
         output_audio_frame(*entry.second, entry.first, data,
                            "audio_frame_received");
     }
@@ -197,11 +205,27 @@ void EngineAudio::onOneWayAudioRawDataReceived(AudioRawData *data, uint32_t user
     if (!data || m_e2p_fd == kIpcInvalidFd || data->GetBufferLen() == 0) return;
 
     std::lock_guard<std::mutex> lock(m_targets_mtx);
+
+    // First pass: deliver to any isolate target bound to this user_id, and
+    // determine whether this user is "claimed" by any isolate target.
+    bool claimed_by_isolate = false;
     for (auto &entry : m_targets) {
         if (!entry.second || !entry.second->isolate_audio) continue;
         if (entry.second->participant_id != user_id) continue;
+        claimed_by_isolate = true;
         output_audio_frame(*entry.second, entry.first, data,
                            "audio_one_way_frame_received");
+    }
+
+    // Second pass: audience targets get every non-isolated participant's
+    // one-way audio. Because Zoom only fires this callback for active
+    // talkers, an audience target naturally behaves as "active speaker
+    // among the non-isolated set."
+    if (claimed_by_isolate) return;
+    for (auto &entry : m_targets) {
+        if (!entry.second || !entry.second->audience_audio) continue;
+        output_audio_frame(*entry.second, entry.first, data,
+                           "audio_audience_frame_received");
     }
 }
 void EngineAudio::onShareAudioRawDataReceived(AudioRawData *, uint32_t) {}

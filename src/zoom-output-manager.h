@@ -14,6 +14,7 @@ struct ZoomOutputInfo {
     uint32_t participant_id = 0;
     bool active_speaker = false;
     bool isolate_audio = false;
+    bool audience_audio = false;
     AudioChannelMode audio_mode = AudioChannelMode::Mono;
     VideoResolution video_resolution = VideoResolution::P720;
     uint32_t observed_width = 0;

@@ -44,6 +44,7 @@ public:
     void subscribe(const std::string &source_uuid,
                    uint32_t participant_id,
                    bool isolate_audio,
+                   bool audience_audio = false,
                    VideoResolution video_resolution = VideoResolution::P720);
     void unsubscribe(const std::string &source_uuid);
 

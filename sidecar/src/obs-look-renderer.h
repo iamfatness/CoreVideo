@@ -5,6 +5,7 @@
 #include <QString>
 #include <QStringList>
 #include <QVector>
+#include <utility>
 
 class OBSLookRenderer {
 public:
@@ -13,6 +14,16 @@ public:
         QString fallbackSceneName;
         double canvasWidth = 1920.0;
         double canvasHeight = 1080.0;
+
+        void normalizeBroadcastCanvas()
+        {
+            if (canvasWidth <= 0.0)
+                canvasWidth = 1920.0;
+            if (canvasHeight <= 0.0)
+                canvasHeight = 1080.0;
+            if (canvasHeight > canvasWidth)
+                std::swap(canvasWidth, canvasHeight);
+        }
     };
 
     OBSLookRenderer(OBSClient *client, Config config);

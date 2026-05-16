@@ -146,6 +146,31 @@ The script builds, installs into a staging folder, verifies
 `obs-zoom-plugin.dll`, `ZoomObsEngine.exe`, and `zoom-runtime\sdk.dll`, creates a
 ZIP under `dist/`, and optionally uploads it to the matching GitHub Release.
 
+### OBS scene smoke test
+
+Use the OBS smoke test when validating Sidecar/OBS scene graph behavior on a
+machine with OBS running and obs-websocket enabled. The script connects directly
+to obs-websocket v5, creates a deterministic CoreVideo test scene, links
+participant sources through nested slot scenes, switches OBS to the test scene,
+and audits that the expected scenes, inputs, and scene items are present.
+
+```powershell
+.\scripts\obs-scene-smoke-test.ps1
+```
+
+If obs-websocket has a password, pass it explicitly or use the environment:
+
+```powershell
+$env:OBS_WEBSOCKET_PASSWORD = "your-websocket-password"
+.\scripts\obs-scene-smoke-test.ps1 -ParticipantCount 8
+```
+
+To verify an already-created scene graph without creating or modifying sources:
+
+```powershell
+.\scripts\obs-scene-smoke-test.ps1 -AuditOnly -SceneName "CoreVideo Smoke Test"
+```
+
 5. **Set up OAuth (for Marketplace / external-account joins)** — in the Settings dialog, enter your OAuth Client ID, set the Redirect URI to `corevideo://oauth/callback`, click **Register corevideo:// URL Scheme**, then click **Authorize with Zoom**. See [`docs/ZOOM_MARKETPLACE_OAUTH.md`](docs/ZOOM_MARKETPLACE_OAUTH.md) for the full walkthrough.
 
 6. **Join once, then assign outputs** — use the CoreVideo dock or the TCP/OSC control APIs to join the meeting once per OBS session. Then add **Zoom Participant**, **Zoom Participant Audio**, **Zoom Share**, or **Zoom Interpretation Audio** sources and assign them to participants or dynamic roles.

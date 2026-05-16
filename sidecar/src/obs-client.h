@@ -138,6 +138,11 @@ public:
                               const QStringList &slotLabels,
                               double canvasW, double canvasH,
                               bool retryAfterCreate = true);
+    void applyLookLayerOrder(const QString &sceneName,
+                             const LayoutTemplate &tmpl,
+                             const TileStyle &tileStyle,
+                             bool hasBackgroundImage,
+                             int overlayCount);
 
     // Apply a flat applied-template JSON in the format:
     //   { "name": "...", "scene": "...", "items": [

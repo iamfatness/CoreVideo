@@ -201,14 +201,14 @@ jobs:
           Compress-Archive -Path install\* -DestinationPath CoreVideo-Windows-x64.zip
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: CoreVideo-Windows
           path: CoreVideo-Windows-x64.zip
           if-no-files-found: warn
 
       - name: Upload build logs on failure
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: CoreVideo-Windows-build-logs
@@ -308,14 +308,14 @@ jobs:
           cd install && zip -r ../CoreVideo-macOS-universal.zip .
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: CoreVideo-macOS
           path: CoreVideo-macOS-universal.zip
           if-no-files-found: warn
 
       - name: Upload build logs on failure
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: CoreVideo-macOS-build-logs

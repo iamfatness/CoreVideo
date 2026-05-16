@@ -28,6 +28,7 @@ Makefile
 # Local package/dependency output
 node_modules/
 .npm-cache/
+__pycache__/
 companion/companion-module-corevideo-obs/package-lock.json
 deploy-*.ps1
 deploy-*.done

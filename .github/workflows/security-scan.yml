@@ -1,0 +1,141 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "43 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  security-events: write
+
+jobs:
+  static-analysis:
+    name: Cppcheck and Flawfinder
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install scanners
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cppcheck python3-pip
+          python3 -m pip install --user flawfinder
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run Cppcheck
+        continue-on-error: true
+        run: |
+          mkdir -p security-reports
+          cppcheck \
+            --enable=warning,style,performance,portability,information \
+            --inline-suppr \
+            --suppress=missingIncludeSystem \
+            --xml --xml-version=2 \
+            src engine/src sidecar/src sidecar/tests \
+            2> security-reports/cppcheck.xml
+          cppcheck \
+            --enable=warning,style,performance,portability,information \
+            --inline-suppr \
+            --suppress=missingIncludeSystem \
+            --template="{severity}:{id}:{file}:{line}: {message}" \
+            src engine/src sidecar/src sidecar/tests \
+            > security-reports/cppcheck.txt 2>&1 || true
+
+      - name: Run Flawfinder
+        continue-on-error: true
+        run: |
+          mkdir -p security-reports
+          flawfinder --columns --context --minlevel=1 src engine/src sidecar/src sidecar/tests \
+            > security-reports/flawfinder.txt || true
+          if flawfinder --help | grep -q -- "--sarif"; then
+            flawfinder --sarif --minlevel=1 src engine/src sidecar/src sidecar/tests \
+              > security-reports/flawfinder.sarif || true
+          fi
+
+      - name: Upload Flawfinder SARIF
+        if: hashFiles('security-reports/flawfinder.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: security-reports/flawfinder.sarif
+          category: flawfinder
+
+      - name: Summarize public code-quality findings
+        run: |
+          python3 scripts/summarize-cppcheck-quality.py \
+            security-reports/cppcheck.xml \
+            --out security-reports/code-quality-issue.md
+
+      - name: Upload scan reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-scan-reports
+          path: security-reports/
+          if-no-files-found: error
+
+      - name: Create or update code-quality issue
+        if: github.event_name != 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- corevideo-cppcheck-quality -->';
+            const body = fs.readFileSync('security-reports/code-quality-issue.md', 'utf8');
+            if (!body.includes(marker)) {
+              core.info('No public code-quality issue needed.');
+              return;
+            }
+
+            const { owner, repo } = context.repo;
+            const title = 'Code quality findings from Cppcheck';
+            const labels = ['code-quality', 'automated'];
+            for (const label of labels) {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name: label });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                await github.rest.issues.createLabel({
+                  owner,
+                  repo,
+                  name: label,
+                  color: label === 'code-quality' ? '0e8a16' : 'ededed',
+                  description: label === 'code-quality'
+                    ? 'Non-sensitive automated code quality findings'
+                    : 'Created or updated by automation'
+                });
+              }
+            }
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              labels: 'code-quality',
+              per_page: 100
+            });
+            const existing = issues.find(issue => issue.title === title && !issue.pull_request);
+            const issueBody = `${body}\n\nWorkflow run: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}\n`;
+            if (existing) {
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: existing.number,
+                body: issueBody,
+                labels
+              });
+            } else {
+              await github.rest.issues.create({
+                owner,
+                repo,
+                title,
+                body: issueBody,
+                labels
+              });
+            }

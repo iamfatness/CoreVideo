@@ -1,6 +1,7 @@
 #pragma once
 #include "layout-template.h"
 #include "macro.h"
+#include "overlay.h"
 #include <QObject>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -9,7 +10,7 @@
 #include <QTimer>
 #include <optional>
 
-class QWebSocket;
+class SimpleWebSocket;
 
 // obs-websocket v5 client with auto-reconnect, sceneItemId resolution,
 // transform application, and JSON-based template apply.
@@ -86,6 +87,20 @@ public:
                      const QStringList      &sourceNames,
                      double canvasW, double canvasH);
 
+    // Create the target scene and CoreVideo source placeholders when needed,
+    // then apply the normalized template once OBS has refreshed scene items.
+    void loadSceneTemplate(const QString        &sceneName,
+                           const LayoutTemplate &tmpl,
+                           const QStringList    &sourceNames,
+                           double canvasW, double canvasH,
+                           const QVector<Overlay> &overlays = {},
+                           bool makeProgram = false);
+    void ensureCoreVideoSources(const QString &sceneName,
+                                const QStringList &sourceNames);
+    void applyOverlays(const QString &sceneName,
+                       const QVector<Overlay> &overlays,
+                       double canvasW, double canvasH);
+
     // Apply a flat applied-template JSON in the format:
     //   { "name": "...", "scene": "...", "items": [
     //       { "source": "...", "x": 0, "y": 0, "scale": 0.5,
@@ -131,7 +146,7 @@ private:
                                const QString &salt,
                                const QString &challenge);
 
-    QWebSocket *m_ws       = nullptr;
+    SimpleWebSocket *m_ws       = nullptr;
     QTimer     *m_reconnectTimer = nullptr;
     Config      m_cfg;
     State       m_state = State::Disconnected;
@@ -139,5 +154,6 @@ private:
     int         m_reconnectAttempt = 0;
     QHash<QString, QString> m_pending;               // requestId → requestType
     QHash<QString, QHash<QString, int>> m_itemCache; // scene → (source → itemId)
+    QHash<QString, QVector<SceneItem>> m_sceneItems;
     bool m_virtualCamActive = false;
 };

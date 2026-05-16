@@ -9,6 +9,7 @@
 #include "look.h"
 #include "me-bus.h"
 #include "preview-canvas.h"
+#include "zoom-control-client.h"
 #include <QMainWindow>
 #include <optional>
 
@@ -69,6 +70,7 @@ private slots:
     void onSlotAssigned(int slotIndex, int participantId);
     void onSlotClicked(int slotIndex);
     void onParticipantAssignClicked(int participantId);
+    void openParticipantMappingWindow();
     void openCommandPalette();
     void populateCommandPalette();
 
@@ -78,7 +80,11 @@ private:
     void buildRightPanel(QWidget *parent);
     void buildLogDock();
     void loadMockParticipants();
+    void provisionPlaceholderSources();
+    void provisionLookScenes();
     QVector<PreviewCanvas::Participant> participantsForLook(const Look &look) const;
+    QStringList sourceNamesForSlots(int slotCount) const;
+    QString obsSceneNameForLook(const Look &look) const;
 
     // Top bar
     QWidget     *m_topBar         = nullptr;
@@ -101,6 +107,7 @@ private:
     QPushButton *m_autoBtn = nullptr;
     QPushButton *m_ftbBtn  = nullptr;
     QPushButton *m_swapBtn = nullptr;
+    QPushButton *m_mapBtn  = nullptr;
     QComboBox   *m_autoDurationCombo = nullptr;
 
     // Center — m_liveCanvas renders PGM (on-air), m_sceneCanvas renders PVW.
@@ -140,8 +147,10 @@ private:
     OBSClient::Config          m_obsConfig;
     Sidebar                   *m_sidebar        = nullptr;
     QVector<ParticipantInfo>   m_participants;
+    QStringList                m_outputSources;
     QStringList                m_lastScenes;
     SidecarControlServer      *m_controlServer  = nullptr;
+    ZoomControlClient         *m_zoomClient     = nullptr;
 
     // Click-to-assign mode: when ≥ 0, the next participant card click is
     // routed to this slot index instead of starting a drag flow.

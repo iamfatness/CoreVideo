@@ -6,6 +6,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(COREVIDEO_BUILD_PLUGIN "Build the OBS plugin module" ON)
 option(COREVIDEO_BUILD_ENGINE "Build the ZoomObsEngine helper process" ON)
+option(COREVIDEO_BUILD_SIDECAR "Build the CoreVideo Sidecar control app" ON)
+
+include(CTest)
 
 # ── Embedded credentials (set via -D or CI secrets; empty = user must enter) ──
 set(ZOOM_EMBED_SDK_KEY          "" CACHE STRING "Pre-embedded Zoom SDK key")
@@ -287,6 +290,12 @@ endif()
 # The ZIP contains the standard OBS plugin layout:
 #   obs-plugins/64bit/<plugin>.(dll|so)
 #   data/obs-plugins/obs-zoom-plugin/locale/en-US.ini
+if(COREVIDEO_BUILD_SIDECAR)
+    set(COREVIDEO_SIDECAR_INSTALL_DIR "obs-plugins/64bit" CACHE STRING
+        "Install directory for the CoreVideo Sidecar executable")
+    add_subdirectory(sidecar)
+endif()
+
 set(CPACK_GENERATOR                 "ZIP")
 set(CPACK_PACKAGE_NAME              "CoreVideo")
 set(CPACK_PACKAGE_VENDOR            "CoreVideo")

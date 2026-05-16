@@ -58,6 +58,7 @@ private:
     void   drawSlot(QPainter &p, const QRectF &rect, int index) const;
     void   drawAvatar(QPainter &p, QPointF center, float r,
                       const Participant &part) const;
+    QRectF canvasRect() const;
     QRectF slotRect(const TemplateSlot &s) const;
     void   drawOverlay(QPainter &p, const Overlay &ov, const QRectF &canvas) const;
 };

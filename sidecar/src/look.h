@@ -24,7 +24,7 @@ struct Look {
     QString               templateId;   // resolves via TemplateManager
     QString               themeId;      // resolves via ShowTheme::builtIns (optional)
     LayoutTemplate        tmpl;
-    QVector<SlotAssignment> slots;
+    QVector<SlotAssignment> slotAssignments;
     QVector<Overlay>      overlays;
 
     bool isValid() const { return tmpl.isValid(); }
@@ -32,7 +32,7 @@ struct Look {
     // Look up the participant id assigned to a given slot, or -1.
     int participantInSlot(int slotIndex) const
     {
-        for (const auto &s : slots)
+        for (const auto &s : slotAssignments)
             if (s.slotIndex == slotIndex) return s.participantId;
         return -1;
     }
@@ -51,8 +51,8 @@ struct Look {
         const auto arr = obj.value("slots").toArray();
         for (const auto &v : arr) {
             const auto o = v.toObject();
-            l.slots.append({ o.value("slotIndex").toInt(-1),
-                             o.value("participantId").toInt(-1) });
+            l.slotAssignments.append({ o.value("slotIndex").toInt(-1),
+                                       o.value("participantId").toInt(-1) });
         }
         const auto ov = obj.value("overlays").toArray();
         for (const auto &v : ov)

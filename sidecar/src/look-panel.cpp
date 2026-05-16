@@ -155,7 +155,7 @@ void LookPanel::loadLooks(const QVector<Look> &looks)
         if (!categories.contains(c)) categories.append(c);
     }
 
-    const int insertAt = [this]() { return m_listLayout->count() - 1; };
+    auto insertAt = [this]() { return m_listLayout->count() - 1; };
 
     for (const QString &cat : categories) {
         auto *hdr = new QLabel(cat.toUpper(), this);

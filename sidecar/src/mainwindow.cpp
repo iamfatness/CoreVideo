@@ -13,6 +13,7 @@
 #include "obs-connect-dialog.h"
 #include "command-palette.h"
 #include "sidecar-style.h"
+#include "zoom-control-client.h"
 #include <QShortcut>
 #include <QKeySequence>
 #include <QTimer>
@@ -21,7 +22,9 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QComboBox>
+#include <QDialog>
 #include <QFrame>
+#include <QGridLayout>
 #include <QPlainTextEdit>
 #include <QDockWidget>
 #include <QStackedWidget>
@@ -31,6 +34,8 @@
 #include <QDateTime>
 #include <QApplication>
 #include <QStyle>
+#include <QSizePolicy>
+#include <QRegularExpression>
 
 MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
     : QMainWindow(parent)
@@ -66,17 +71,16 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
 
     // Bottom toolbar
     auto *toolbar = new QWidget(centerCol);
-    toolbar->setObjectName("toolbar");
-    toolbar->setFixedHeight(52);
-    toolbar->setStyleSheet("#toolbar { background: #101016; border-top: 1px solid #1e1e2e; }");
+    toolbar->setObjectName("bottomBar");
+    toolbar->setFixedHeight(76);
     auto *tbRow = new QHBoxLayout(toolbar);
-    tbRow->setContentsMargins(12, 0, 12, 0);
+    tbRow->setContentsMargins(12, 10, 12, 10);
     tbRow->setSpacing(8);
 
     auto makeBtn = [&](const QString &label, bool primary = false) -> QPushButton * {
         auto *btn = new QPushButton(label, toolbar);
         btn->setObjectName("toolBtn");
-        btn->setFixedHeight(34);
+        btn->setFixedHeight(44);
         if (primary) btn->setProperty("primary", "true");
         return btn;
     };
@@ -88,14 +92,17 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
     auto *streamBtn = makeBtn("⏩  Stream");
     m_vcamBtn       = makeBtn("⏺  V-Cam OFF");
 
+    m_mapBtn        = makeBtn("Map");
+
     m_takeBtn->setFixedWidth(110);
     m_autoBtn->setFixedWidth(100);
     m_ftbBtn->setFixedWidth(80);
     m_swapBtn->setFixedWidth(90);
+    m_mapBtn->setFixedWidth(82);
 
     // AUTO duration picker — common broadcast values 0.5s..5s.
     m_autoDurationCombo = new QComboBox(toolbar);
-    m_autoDurationCombo->setFixedHeight(30);
+    m_autoDurationCombo->setFixedHeight(36);
     m_autoDurationCombo->setFixedWidth(76);
     m_autoDurationCombo->addItem("0.5s",  500);
     m_autoDurationCombo->addItem("1.0s", 1000);
@@ -109,6 +116,7 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
     tbRow->addWidget(m_autoBtn);
     tbRow->addWidget(m_autoDurationCombo);
     tbRow->addWidget(m_ftbBtn);
+    tbRow->addWidget(m_mapBtn);
     tbRow->addStretch(1);
     tbRow->addWidget(m_vcamBtn);
     tbRow->addWidget(streamBtn);
@@ -166,6 +174,7 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
     connect(m_ftbBtn,  &QPushButton::clicked,  this, &MainWindow::onFTB);
     connect(m_swapBtn, &QPushButton::clicked,  this, &MainWindow::onSwapBuses);
     connect(m_engineBtn, &QPushButton::clicked, this, &MainWindow::onEngineToggle);
+    connect(m_mapBtn, &QPushButton::clicked, this, &MainWindow::openParticipantMappingWindow);
     connect(m_obsBtn,  &QPushButton::clicked,  this, &MainWindow::onObsConnect);
     connect(m_vcamBtn, &QPushButton::clicked,  this, &MainWindow::onVirtualCamToggle);
 
@@ -224,6 +233,9 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
             [this](const QString &name, int n) {
                 onObsLog(QStringLiteral("✓ Applied '%1' (%2 items).").arg(name).arg(n));
             });
+    connect(m_obsClient, &OBSClient::connected, this, [this]() {
+        provisionLookScenes();
+    });
 
     m_controlServer = new SidecarControlServer(this);
     m_controlServer->start();
@@ -257,6 +269,33 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
             this, [this](const QString &scene) {
         onSceneActivated(scene);
     });
+
+    m_zoomClient = new ZoomControlClient(this);
+    connect(m_zoomClient, &ZoomControlClient::log, this, &MainWindow::onObsLog);
+    connect(m_zoomClient, &ZoomControlClient::participantsUpdated,
+            this, [this](const QVector<ParticipantInfo> &participants) {
+        if (participants.isEmpty())
+            return;
+
+        QVector<ParticipantInfo> merged = participants;
+        for (auto &participant : merged) {
+            for (const auto &existing : m_participants) {
+                if (existing.id == participant.id) {
+                    participant.slotAssign = existing.slotAssign;
+                    break;
+                }
+            }
+        }
+        m_participants = merged;
+        m_participantPanel->setParticipants(m_participants);
+        if (m_sceneCanvas) m_sceneCanvas->setParticipants(participantsForLook(m_working));
+        if (m_liveCanvas && m_bus) m_liveCanvas->setParticipants(participantsForLook(m_bus->program()));
+    });
+    connect(m_zoomClient, &ZoomControlClient::outputSourcesUpdated,
+            this, [this](const QStringList &sourceNames) {
+        m_outputSources = sourceNames;
+    });
+    m_zoomClient->start();
 
     // Canvas slot assignment from drag-and-drop
     connect(m_liveCanvas,  &PreviewCanvas::slotAssigned, this, &MainWindow::onSlotAssigned);
@@ -401,8 +440,10 @@ void MainWindow::buildTopBar(QWidget *parent)
 void MainWindow::buildCenterArea(QWidget *parent)
 {
     m_canvasArea = new QWidget(parent);
+    m_canvasArea->setMaximumHeight(560);
+    m_canvasArea->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     auto *row = new QHBoxLayout(m_canvasArea);
-    row->setContentsMargins(12, 12, 12, 8);
+    row->setContentsMargins(12, 10, 12, 4);
     row->setSpacing(12);
 
     auto buildPane = [&](const QString &label, const QString &color,
@@ -416,6 +457,7 @@ void MainWindow::buildCenterArea(QWidget *parent)
                                       "letter-spacing: 0.1em; background: transparent;")
                                   .arg(color));
         out = new PreviewCanvas(wrap);
+        out->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
         v->addWidget(outLbl);
         v->addWidget(out, 1);
         return wrap;
@@ -432,7 +474,7 @@ MainWindow::participantsForLook(const Look &look) const
 {
     const int nSlots = look.tmpl.slotList.size();
     QVector<PreviewCanvas::Participant> cp(nSlots);
-    for (const auto &s : look.slots) {
+    for (const auto &s : look.slotAssignments) {
         if (s.slotIndex < 0 || s.slotIndex >= nSlots) continue;
         for (const auto &p : m_participants) {
             if (p.id == s.participantId) {
@@ -442,6 +484,26 @@ MainWindow::participantsForLook(const Look &look) const
         }
     }
     return cp;
+}
+
+QStringList MainWindow::sourceNamesForSlots(int slotCount) const
+{
+    QStringList sources;
+    const int sourceCount = qMax(slotCount, 8);
+    for (int i = 0; i < sourceCount; ++i) {
+        sources << m_settingsPage->sourcePattern().arg(i + 1);
+    }
+    return sources;
+}
+
+QString MainWindow::obsSceneNameForLook(const Look &look) const
+{
+    QString base = look.name.trimmed();
+    if (base.isEmpty()) base = look.tmpl.name.trimmed();
+    if (base.isEmpty()) base = m_settingsPage->targetScene();
+    base.replace(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|]")), QStringLiteral("-"));
+    base.replace(QRegularExpression(QStringLiteral("\\s+")), QStringLiteral(" "));
+    return QStringLiteral("CoreVideo - %1").arg(base.left(64));
 }
 
 // ── Right panel ───────────────────────────────────────────────────────────────
@@ -461,13 +523,14 @@ void MainWindow::buildRightPanel(QWidget *parent)
     m_lookPanel = new LookPanel(tmplPage);
     connect(m_lookPanel, &LookPanel::lookSelected,
             this, &MainWindow::onLookSelected);
-    tmplV->addWidget(m_lookPanel, 1);
+    tmplV->addWidget(m_lookPanel, 3);
     auto *div = new QFrame(tmplPage);
     div->setFrameShape(QFrame::HLine);
     div->setStyleSheet("color: #1e1e2e;");
     tmplV->addWidget(div);
     m_participantPanel = new ParticipantPanel(tmplPage);
-    tmplV->addWidget(m_participantPanel, 1);
+    m_participantPanel->setMinimumHeight(300);
+    tmplV->addWidget(m_participantPanel, 2);
     m_pageTemplates = m_rightStack->addWidget(tmplPage);
 
     // TemplatePanel still constructed (off-screen) so the command-palette
@@ -545,6 +608,7 @@ void MainWindow::buildLogDock()
         "QPlainTextEdit { background-color: #0a0a10; color: #b0b0d0; "
         "font-family: 'Menlo', 'Consolas', monospace; font-size: 11px; "
         "border: none; padding: 6px; }");
+    m_logDock->setMaximumHeight(160);
     m_logDock->setWidget(m_logView);
     addDockWidget(Qt::BottomDockWidgetArea, m_logDock);
     m_logDock->hide();
@@ -554,24 +618,183 @@ void MainWindow::buildLogDock()
 void MainWindow::loadMockParticipants()
 {
     m_participants = {
-        {1, "Alex Rivera",   "AR", QColor(0x1e, 0x6a, 0xe0), false, true,  0},
-        {2, "Sam Chen",      "SC", QColor(0x20, 0xa0, 0x60), false, false, 1},
-        {3, "Jordan Kim",    "JK", QColor(0x9b, 0x40, 0xd0), false, true,  2},
-        {4, "Taylor Brooks", "TB", QColor(0xe0, 0x60, 0x20), false, false, 3},
+        {1, "Placeholder 1", "P1", QColor(0x1e, 0x6a, 0xe0), true, false, 0},
+        {2, "Placeholder 2", "P2", QColor(0x20, 0xa0, 0x60), true, false, 1},
+        {3, "Placeholder 3", "P3", QColor(0x9b, 0x40, 0xd0), true, false, 2},
+        {4, "Placeholder 4", "P4", QColor(0xe0, 0x60, 0x20), true, false, 3},
+        {5, "Placeholder 5", "P5", QColor(0x29, 0x79, 0xff), true, false, 4},
+        {6, "Placeholder 6", "P6", QColor(0xd0, 0x40, 0x90), true, false, 5},
+        {7, "Placeholder 7", "P7", QColor(0xb0, 0x90, 0x20), true, false, 6},
+        {8, "Placeholder 8", "P8", QColor(0x40, 0xa0, 0xc0), true, false, 7},
     };
     m_participantPanel->setParticipants(m_participants);
 
     // Seed the working Look's slot assignments from each participant's
     // default slotAssign so first-paint shows people in slots.
-    m_working.slots.clear();
+    m_working.slotAssignments.clear();
     for (const auto &p : m_participants) {
         if (p.slotAssign >= 0)
-            m_working.slots.append({p.slotAssign, p.id});
+            m_working.slotAssignments.append({p.slotAssign, p.id});
     }
     if (m_bus) m_bus->stageLook(m_working);
 }
 
 // ── Slots ─────────────────────────────────────────────────────────────────────
+void MainWindow::provisionPlaceholderSources()
+{
+    if (!m_obsClient || !m_obsClient->isConnected() || !m_settingsPage)
+        return;
+
+    const QStringList sources = sourceNamesForSlots(8);
+    m_obsClient->ensureCoreVideoSources(QStringLiteral("CoreVideo Sources"), sources);
+}
+
+void MainWindow::provisionLookScenes()
+{
+    if (!m_obsClient || !m_obsClient->isConnected() || !m_settingsPage)
+        return;
+
+    provisionPlaceholderSources();
+
+    const double canvasW = m_settingsPage->canvasWidth();
+    const double canvasH = m_settingsPage->canvasHeight();
+    for (const auto &look : LookLibrary::instance().looks()) {
+        if (!look.tmpl.isValid()) continue;
+        const QString scene = obsSceneNameForLook(look);
+        const QStringList sources = sourceNamesForSlots(look.tmpl.slotList.size());
+        m_obsClient->loadSceneTemplate(scene, look.tmpl, sources, canvasW, canvasH, look.overlays, false);
+    }
+    onObsLog("Control ON: provisioning shared sources and Look scenes in OBS.");
+}
+
+void MainWindow::openParticipantMappingWindow()
+{
+    auto *dlg = new QDialog(this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setWindowTitle("CoreVideo Participant Mapping");
+    dlg->resize(760, 520);
+
+    auto *root = new QVBoxLayout(dlg);
+    root->setContentsMargins(16, 16, 16, 16);
+    root->setSpacing(12);
+
+    auto *status = new QLabel(dlg);
+    status->setWordWrap(true);
+    root->addWidget(status);
+
+    auto refreshStatus = [this, status]() {
+        const QString obs = (m_obsClient && m_obsClient->isConnected())
+            ? QStringLiteral("connected")
+            : QStringLiteral("not connected");
+        status->setText(QStringLiteral("OBS %1. Zoom video participants: %2. Known CoreVideo sources: %3.")
+                            .arg(obs)
+                            .arg(m_participants.size())
+                            .arg(m_outputSources.size()));
+    };
+    refreshStatus();
+
+    auto *actions = new QHBoxLayout;
+    auto *refreshBtn = new QPushButton("Refresh Zoom/OBS", dlg);
+    auto *sourceBtn = new QPushButton("Create Source Scene", dlg);
+    auto *looksBtn = new QPushButton("Create Sources + Looks", dlg);
+    auto *openSourcesBtn = new QPushButton("Open Source Scene", dlg);
+    actions->addWidget(refreshBtn);
+    actions->addWidget(sourceBtn);
+    actions->addWidget(looksBtn);
+    actions->addWidget(openSourcesBtn);
+    actions->addStretch(1);
+    root->addLayout(actions);
+
+    auto *grid = new QGridLayout;
+    grid->setHorizontalSpacing(10);
+    grid->setVerticalSpacing(8);
+    grid->addWidget(new QLabel("Slot", dlg), 0, 0);
+    grid->addWidget(new QLabel("OBS source", dlg), 0, 1);
+    grid->addWidget(new QLabel("Zoom participant", dlg), 0, 2);
+    grid->addWidget(new QLabel("Action", dlg), 0, 3);
+
+    QStringList sources = sourceNamesForSlots(8);
+    while (sources.size() < 8)
+        sources << m_settingsPage->sourcePattern().arg(sources.size() + 1);
+
+    QVector<QComboBox *> combos;
+    combos.reserve(8);
+    for (int i = 0; i < 8; ++i) {
+        auto *slotLabel = new QLabel(QStringLiteral("Slot %1").arg(i + 1), dlg);
+        auto *sourceLabel = new QLabel(sources.value(i), dlg);
+        sourceLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+
+        auto *combo = new QComboBox(dlg);
+        combo->addItem("Unassigned", -1);
+        for (const auto &participant : m_participants) {
+            if (!participant.hasVideo)
+                continue;
+            combo->addItem(participant.name, participant.id);
+            if (participant.slotAssign == i)
+                combo->setCurrentIndex(combo->count() - 1);
+        }
+        combos << combo;
+
+        auto *assignBtn = new QPushButton("Assign", dlg);
+        connect(assignBtn, &QPushButton::clicked, dlg, [this, combo, i]() {
+            const int participantId = combo->currentData().toInt();
+            if (participantId >= 0)
+                onSlotAssigned(i, participantId);
+        });
+
+        const int row = i + 1;
+        grid->addWidget(slotLabel, row, 0);
+        grid->addWidget(sourceLabel, row, 1);
+        grid->addWidget(combo, row, 2);
+        grid->addWidget(assignBtn, row, 3);
+    }
+    root->addLayout(grid);
+
+    auto *footer = new QHBoxLayout;
+    auto *applyBtn = new QPushButton("Apply Mapping", dlg);
+    auto *closeBtn = new QPushButton("Close", dlg);
+    footer->addStretch(1);
+    footer->addWidget(applyBtn);
+    footer->addWidget(closeBtn);
+    root->addLayout(footer);
+
+    connect(refreshBtn, &QPushButton::clicked, dlg, [this, refreshStatus]() {
+        if (m_zoomClient) {
+            m_zoomClient->refreshParticipants();
+            m_zoomClient->refreshOutputs();
+        }
+        if (m_obsClient && m_obsClient->isConnected())
+            m_obsClient->requestSceneList();
+        refreshStatus();
+    });
+    connect(sourceBtn, &QPushButton::clicked, dlg, [this, refreshStatus]() {
+        provisionPlaceholderSources();
+        onObsLog("Requested CoreVideo Sources scene and 8 participant sources in OBS.");
+        refreshStatus();
+    });
+    connect(looksBtn, &QPushButton::clicked, dlg, [this, refreshStatus]() {
+        provisionLookScenes();
+        refreshStatus();
+    });
+    connect(openSourcesBtn, &QPushButton::clicked, dlg, [this]() {
+        provisionPlaceholderSources();
+        QTimer::singleShot(500, this, [this]() {
+            if (m_obsClient && m_obsClient->isConnected())
+                m_obsClient->setCurrentScene(QStringLiteral("CoreVideo Sources"));
+        });
+    });
+    connect(applyBtn, &QPushButton::clicked, dlg, [this, combos]() {
+        for (int i = 0; i < combos.size(); ++i) {
+            const int participantId = combos[i]->currentData().toInt();
+            if (participantId >= 0)
+                onSlotAssigned(i, participantId);
+        }
+    });
+    connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::close);
+
+    dlg->show();
+}
+
 void MainWindow::onPageSelected(Sidebar::Page p)
 {
     using P = Sidebar::Page;
@@ -613,7 +836,7 @@ void MainWindow::onLookSelected(const Look &look)
     // assignments are carried over so swapping a Look doesn't blank the
     // participants the operator already placed.
     Look staged          = look;
-    staged.slots         = m_working.slots;
+    staged.slotAssignments = m_working.slotAssignments;
     m_working            = staged;
     m_working.templateId = look.tmpl.id.isEmpty() ? look.templateId
                                                   : look.tmpl.id;
@@ -627,6 +850,8 @@ void MainWindow::onLookSelected(const Look &look)
 
     onObsLog(QStringLiteral("Staged Look on PVW: %1 — press TAKE to go on air.")
                  .arg(look.name));
+    if (m_obsClient && m_obsClient->isConnected())
+        m_bus->take();
 }
 
 void MainWindow::onThemeSelected(const ShowTheme &theme)
@@ -674,25 +899,13 @@ void MainWindow::onApplyLayout()
     if (!m_currentTemplate.isValid()) { onObsLog("No template on PGM."); return; }
     if (!m_obsClient->isConnected())  { onObsLog("Not connected — preview only."); return; }
 
-    const QString scene   = m_settingsPage->targetScene();
+    const QString scene   = obsSceneNameForLook(m_bus->program());
     const double  canvasW = m_settingsPage->canvasWidth();
     const double  canvasH = m_settingsPage->canvasHeight();
-    const QString pattern = m_settingsPage->sourcePattern();
 
-    // Try bundled applied-JSON first
-    QFile f(QString(":/applied/data/applied/%1.applied.json").arg(m_currentTemplate.id));
-    if (f.open(QIODevice::ReadOnly)) {
-        QJsonObject obj = QJsonDocument::fromJson(f.readAll()).object();
-        obj["scene"] = scene;
-        m_obsClient->applyTemplate(obj);
-        return;
-    }
-
-    // Fall back to normalized layout
-    QStringList sources;
-    for (int i = 0; i < m_currentTemplate.slotList.size(); ++i)
-        sources << pattern.arg(i + 1);
-    m_obsClient->applyLayout(scene, m_currentTemplate, sources, canvasW, canvasH);
+    const QStringList sources = sourceNamesForSlots(m_currentTemplate.slotList.size());
+    m_obsClient->loadSceneTemplate(scene, m_currentTemplate, sources, canvasW, canvasH,
+                                   m_bus->program().overlays, true);
 }
 
 void MainWindow::onEngineToggle()
@@ -702,6 +915,9 @@ void MainWindow::onEngineToggle()
     m_engineBtn->setText(m_engineOn ? "⏻  Engine ON" : "⏻  Engine OFF");
     m_engineBtn->style()->unpolish(m_engineBtn);
     m_engineBtn->style()->polish(m_engineBtn);
+    if (m_engineOn) {
+        provisionLookScenes();
+    }
 }
 
 void MainWindow::onObsConnect()
@@ -754,7 +970,6 @@ void MainWindow::onObsLog(const QString &msg)
     if (!m_logView) return;
     m_logView->appendPlainText(
         QString("[%1] %2").arg(QDateTime::currentDateTime().toString("HH:mm:ss"), msg));
-    if (!m_logDock->isVisible()) m_logDock->show();
 }
 
 void MainWindow::onScenesReceived(const QStringList &scenes)
@@ -843,15 +1058,21 @@ void MainWindow::onSlotAssigned(int slotIndex, int participantId)
 
     // Update the staged Look's slot assignments and re-stage on PVW. PGM
     // is unchanged until the operator takes.
-    m_working.slots.erase(
-        std::remove_if(m_working.slots.begin(), m_working.slots.end(),
+    m_working.slotAssignments.erase(
+        std::remove_if(m_working.slotAssignments.begin(), m_working.slotAssignments.end(),
                        [slotIndex, participantId](const SlotAssignment &s) {
                            return s.slotIndex == slotIndex
                                || s.participantId == participantId;
                        }),
-        m_working.slots.end());
-    m_working.slots.append({slotIndex, participantId});
+        m_working.slotAssignments.end());
+    m_working.slotAssignments.append({slotIndex, participantId});
     m_bus->stageLook(m_working);
+
+    if (m_zoomClient && m_settingsPage) {
+        const QStringList sources = sourceNamesForSlots(slotIndex + 1);
+        const QString sourceName = sources.value(slotIndex);
+        m_zoomClient->assignOutput(sourceName, participantId, false, "mono");
+    }
 
     // Refresh panel to show updated slot labels
     m_participantPanel->setParticipants(m_participants);

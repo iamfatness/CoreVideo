@@ -278,18 +278,18 @@ QPushButton#phasePostBtn:checked { background-color: #252545; color: #9090d0; }
 #bottomBar {
     background-color: #0d0d12;
     border-top: 1px solid #181828;
-    min-height: 64px;
-    max-height: 64px;
+    min-height: 76px;
+    max-height: 76px;
 }
 QPushButton#toolBtn {
     background-color: #17172296;
     border: 1px solid #25253a;
-    border-radius: 22px;
+    border-radius: 18px;
     color: #dde0f0;
     font-size: 13px;
     font-weight: 500;
-    padding: 10px 20px;
-    min-height: 44px;
+    padding: 6px 16px;
+    min-height: 36px;
 }
 QPushButton#toolBtn:hover {
     background-color: #22223a;

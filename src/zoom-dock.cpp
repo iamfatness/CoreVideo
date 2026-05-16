@@ -34,6 +34,7 @@
 #include <QFileInfo>
 #include <QPointer>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QPushButton>
 #include <QSettings>
 #include <QStandardPaths>
@@ -44,6 +45,9 @@
 #include <obs-module.h>
 #include <algorithm>
 #include <unordered_map>
+#if defined(Q_OS_WIN)
+#include <windows.h>
+#endif
 
 // ── Column layout for the output table ───────────────────────────────────────
 enum DockOutputColumns {
@@ -58,6 +62,22 @@ enum DockOutputColumns {
 static constexpr int kThumbW = 80;
 static constexpr int kThumbH = 45;
 static constexpr int kRowH   = 50;
+
+static QString plugin_binary_dir()
+{
+#if defined(Q_OS_WIN)
+    HMODULE module = nullptr;
+    wchar_t module_path[MAX_PATH] = {};
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&plugin_binary_dir),
+                           &module) &&
+        GetModuleFileNameW(module, module_path, MAX_PATH) > 0) {
+        return QFileInfo(QString::fromWCharArray(module_path)).absolutePath();
+    }
+#endif
+    return {};
+}
 
 // Fast I420 → RGB888 for dock thumbnails (shared with output dialog logic)
 static QImage i420_to_qimage_dock(uint32_t w, uint32_t h,
@@ -225,10 +245,11 @@ ZoomDock::ZoomDock(QWidget *parent)
     connect(launch_btn, &QPushButton::clicked, this, [this, launch_btn]() {
         // Discover the sidecar binary. Order:
         //   1. COREVIDEO_SIDECAR_BIN env var
-        //   2. QSettings key "sidecar/binPath" (remembered last choice)
+        //   2. Same directory as this loaded OBS plugin DLL
         //   3. Same directory as the running OBS executable
-        //   4. PATH lookup ("CoreVideoSidecar" / ".app/Contents/MacOS/...")
-        //   5. Prompt the user to locate it, then remember.
+        //   4. QSettings key "sidecar/binPath" (remembered manual choice)
+        //   5. PATH lookup ("CoreVideoSidecar" / ".app/Contents/MacOS/...")
+        //   6. Prompt the user to locate it, then remember.
         const QStringList candidateNames = {
 #if defined(Q_OS_WIN)
             "CoreVideoSidecar.exe",
@@ -245,8 +266,11 @@ ZoomDock::ZoomDock(QWidget *parent)
 
         QString path = qEnvironmentVariable("COREVIDEO_SIDECAR_BIN");
         if (!fileExists(path)) {
-            QSettings s;
-            path = s.value("sidecar/binPath").toString();
+            const QString pluginDir = plugin_binary_dir();
+            for (const QString &name : candidateNames) {
+                const QString p = QDir(pluginDir).filePath(name);
+                if (fileExists(p)) { path = p; break; }
+            }
         }
         if (!fileExists(path)) {
             const QString appDir = QCoreApplication::applicationDirPath();
@@ -254,6 +278,10 @@ ZoomDock::ZoomDock(QWidget *parent)
                 const QString p = QDir(appDir).filePath(name);
                 if (fileExists(p)) { path = p; break; }
             }
+        }
+        if (!fileExists(path)) {
+            QSettings s;
+            path = s.value("sidecar/binPath").toString();
         }
         if (!fileExists(path)) {
             for (const QString &name : candidateNames) {
@@ -273,12 +301,32 @@ ZoomDock::ZoomDock(QWidget *parent)
         }
 
         QStringList args;
-        args << "--obs-host"        << "localhost"
+        args << "--obs-host"        << "127.0.0.1"
              << "--obs-port"        << "4455"
              << "--obs-autoconnect";
 
+        const QString workDir = QFileInfo(path).absolutePath();
+        QProcess proc;
+        proc.setProgram(path);
+        proc.setArguments(args);
+        proc.setWorkingDirectory(workDir);
+        auto env = QProcessEnvironment::systemEnvironment();
+        const QString appDir = QCoreApplication::applicationDirPath();
+        const QString pathKey =
+            env.contains("Path") ? QStringLiteral("Path") : QStringLiteral("PATH");
+        const QString existingPath = env.value(pathKey);
+#if defined(Q_OS_WIN)
+        env.insert(pathKey, appDir + ";" + workDir + ";" + existingPath);
+#else
+        env.insert(pathKey, appDir + ":" + workDir + ":" + existingPath);
+#endif
+        const QString platformDir = QDir(appDir).filePath("platforms");
+        if (QFileInfo::exists(QDir(platformDir).filePath("qwindows.dll")))
+            env.insert("QT_QPA_PLATFORM_PLUGIN_PATH", platformDir);
+        env.insert("QT_PLUGIN_PATH", appDir);
+        proc.setProcessEnvironment(env);
         qint64 pid = 0;
-        const bool ok = QProcess::startDetached(path, args, QString(), &pid);
+        const bool ok = proc.startDetached(&pid);
         if (!ok) {
             QMessageBox::warning(this, "Launch Sidecar",
                 QString("Failed to launch sidecar at:\n%1").arg(path));

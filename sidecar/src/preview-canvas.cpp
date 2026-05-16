@@ -9,12 +9,14 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QApplication>
+#include <algorithm>
 #include <cmath>
 
 static const QColor kSlotBg   {0x22, 0x22, 0x30};
 static const QColor kSlotBdr  {0x32, 0x32, 0x48};
 static const QColor kNameBg   {0x00, 0x00, 0x00, 160};
 static const float  kGap = 4.0f;
+static const double kProgramAspect = 16.0 / 9.0;
 
 PreviewCanvas::PreviewCanvas(QWidget *parent)
     : QWidget(parent)
@@ -127,13 +129,32 @@ void PreviewCanvas::mouseReleaseEvent(QMouseEvent *e)
     QWidget::mouseReleaseEvent(e);
 }
 
+QRectF PreviewCanvas::canvasRect() const
+{
+    const QRectF outer = rect();
+    if (outer.isEmpty()) return outer;
+
+    double canvasW = outer.width();
+    double canvasH = canvasW / kProgramAspect;
+    if (canvasH > outer.height()) {
+        canvasH = outer.height();
+        canvasW = canvasH * kProgramAspect;
+    }
+
+    return QRectF(outer.left() + (outer.width() - canvasW) * 0.5,
+                  outer.top() + (outer.height() - canvasH) * 0.5,
+                  canvasW,
+                  canvasH);
+}
+
 QRectF PreviewCanvas::slotRect(const TemplateSlot &s) const
 {
-    const float W = width()  - kGap;
-    const float H = height() - kGap;
+    const QRectF canvas = canvasRect();
+    const float W = canvas.width()  - kGap;
+    const float H = canvas.height() - kGap;
     return {
-        kGap / 2 + s.x * W,
-        kGap / 2 + s.y * H,
+        canvas.left() + kGap / 2 + s.x * W,
+        canvas.top()  + kGap / 2 + s.y * H,
         s.width  * W - kGap,
         s.height * H - kGap
     };
@@ -144,19 +165,22 @@ void PreviewCanvas::paintEvent(QPaintEvent *)
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
     p.fillRect(rect(), QColor(0x0d, 0x0d, 0x12));
+    const QRectF canvas = canvasRect();
+    p.fillRect(canvas, QColor(0x10, 0x10, 0x18));
+    p.setPen(QPen(QColor(0x2a, 0x2a, 0x3a), 1));
+    p.drawRect(canvas.adjusted(0.5, 0.5, -0.5, -0.5));
 
     if (!m_tmpl.isValid()) {
         p.setPen(QColor(0x40, 0x40, 0x60));
-        p.drawText(rect(), Qt::AlignCenter, "No template selected");
+        p.drawText(canvas, Qt::AlignCenter, "No template selected");
         return;
     }
 
     for (int i = 0; i < m_tmpl.slotList.size(); ++i)
         drawSlot(p, slotRect(m_tmpl.slotList[i]), i);
 
-    // Overlays sit on top of the slot composition. Canvas rect = full
-    // widget rect (overlay coords are 0..1 of the program output area).
-    const QRectF canvas(0, 0, width(), height());
+    // Overlays sit on top of the 16:9 program canvas. Overlay coords are
+    // normalized 0..1 of the program output area.
     for (const auto &ov : m_overlays)
         drawOverlay(p, ov, canvas);
 
@@ -164,7 +188,7 @@ void PreviewCanvas::paintEvent(QPaintEvent *)
     if (m_opacity < 1.0f) {
         const int alpha = int(std::clamp((1.0f - m_opacity) * 255.0f,
                                          0.0f, 255.0f));
-        p.fillRect(rect(), QColor(0, 0, 0, alpha));
+        p.fillRect(canvas, QColor(0, 0, 0, alpha));
     }
 }
 

@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 COMPONENTS Core Widgets Network WebSockets REQUIRED)
+find_package(Qt6 COMPONENTS Core Widgets Network REQUIRED)
 
 set(SOURCES
     src/main.cpp
@@ -26,6 +26,8 @@ set(SOURCES
     src/me-bus.cpp
     src/overlay-panel.cpp
     src/obs-client.cpp
+    src/simple-websocket.cpp
+    src/zoom-control-client.cpp
     src/obs-connect-dialog.cpp
     src/sidecar-control-server.cpp
     src/command-palette.cpp
@@ -43,7 +45,6 @@ target_link_libraries(CoreVideoSidecar PRIVATE
     Qt6::Core
     Qt6::Widgets
     Qt6::Network
-    Qt6::WebSockets
 )
 
 # Embed the data directory at build time
@@ -53,6 +54,24 @@ add_custom_command(TARGET CoreVideoSidecar POST_BUILD
         "$<TARGET_FILE_DIR:CoreVideoSidecar>/data"
     COMMENT "Copying Sidecar data directory"
 )
+
+if(BUILD_TESTING)
+    get_target_property(_qt_core_dll Qt6::Core IMPORTED_LOCATION_RELEASE)
+    if(NOT _qt_core_dll)
+        get_target_property(_qt_core_dll Qt6::Core IMPORTED_LOCATION)
+    endif()
+    if(_qt_core_dll)
+        get_filename_component(_qt_runtime_dir "${_qt_core_dll}" DIRECTORY)
+    endif()
+
+    add_test(NAME CoreVideoSidecarVersion
+        COMMAND CoreVideoSidecar --version)
+    if(WIN32 AND _qt_runtime_dir)
+        set_tests_properties(CoreVideoSidecarVersion PROPERTIES
+            ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:CoreVideoSidecar>;PATH=path_list_prepend:${_qt_runtime_dir}")
+    endif()
+endif()
 
 if(APPLE)
     set_target_properties(CoreVideoSidecar PROPERTIES
@@ -65,8 +84,12 @@ elseif(WIN32)
     set_target_properties(CoreVideoSidecar PROPERTIES WIN32_EXECUTABLE TRUE)
 endif()
 
+if(NOT DEFINED COREVIDEO_SIDECAR_INSTALL_DIR)
+    set(COREVIDEO_SIDECAR_INSTALL_DIR "bin")
+endif()
+
 install(TARGETS CoreVideoSidecar
     BUNDLE  DESTINATION .
-    RUNTIME DESTINATION bin
+    RUNTIME DESTINATION "${COREVIDEO_SIDECAR_INSTALL_DIR}"
 )
-install(DIRECTORY data/ DESTINATION bin/data)
+install(DIRECTORY data/ DESTINATION "${COREVIDEO_SIDECAR_INSTALL_DIR}/data")

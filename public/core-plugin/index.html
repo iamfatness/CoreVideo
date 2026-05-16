@@ -43,6 +43,10 @@
 <p>ISO recording is controlled by the OBS plugin, not the engine. When enabled, CoreVideo records one video file and one PCM WAV audio file per active source segment. A new segment starts when the resolved participant or source resolution changes.</p>
 <p>Requirements:</p>
 <ul><li><code>ffmpeg</code> must be available on <code>PATH</code>, or pass an explicit <code>ffmpeg_path</code>.</li><li>Raw media must be active.</li><li>Sources must be assigned to participant, active speaker, or spotlight modes.</li></ul>
+<h3>OBS ISO Recorder Panel</h3>
+<p>Open <strong>Tools &gt; Zoom ISO Recorder</strong> to manage ISO recording from a separate OBS dock. The panel provides:</p>
+<ul><li>Output folder picker.</li><li>FFmpeg executable field with a test button.</li><li><strong>Also start/stop OBS program recording</strong> toggle.</li><li><strong>Start ISO Recording</strong> and <strong>Stop ISO Recording</strong> buttons.</li><li>Live status showing idle/recording and active session count.</li><li>Active session table with source, participant, resolution, video frame count, audio chunk count, and the current video/audio file paths.</li></ul>
+<p>The panel uses the same <code>ZoomIsoRecorder</code> backend as the TCP and OSC APIs. It persists the output folder, FFmpeg path, and program-recording toggle in OBS global settings.</p>
 <p>TCP start example:</p>
 <pre><code class="language-json">{&quot;cmd&quot;:&quot;iso_recording_start&quot;,&quot;output_dir&quot;:&quot;C:/Recordings/CoreVideo&quot;,&quot;ffmpeg_path&quot;:&quot;ffmpeg&quot;,&quot;record_program&quot;:true}</code></pre>
 <p>TCP status example:</p>

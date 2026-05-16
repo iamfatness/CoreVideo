@@ -105,6 +105,23 @@ Requirements:
 - Raw media must be active.
 - Sources must be assigned to participant, active speaker, or spotlight modes.
 
+### OBS ISO Recorder Panel
+
+Open **Tools > Zoom ISO Recorder** to manage ISO recording from a separate OBS
+dock. The panel provides:
+
+- Output folder picker.
+- FFmpeg executable field with a test button.
+- **Also start/stop OBS program recording** toggle.
+- **Start ISO Recording** and **Stop ISO Recording** buttons.
+- Live status showing idle/recording and active session count.
+- Active session table with source, participant, resolution, video frame count,
+  audio chunk count, and the current video/audio file paths.
+
+The panel uses the same `ZoomIsoRecorder` backend as the TCP and OSC APIs. It
+persists the output folder, FFmpeg path, and program-recording toggle in OBS
+global settings.
+
 TCP start example:
 
 ```json

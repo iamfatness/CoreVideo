@@ -1661,6 +1661,21 @@ sequenceDiagram
       I420 video and PCM audio through the existing IPC and shared-memory path.
     </p>
 
+    <h3>OBS ISO Recorder Panel</h3>
+    <p>
+      Open <strong>Tools → Zoom ISO Recorder</strong> to manage ISO recording from
+      a separate OBS dock. The panel lets operators choose an output folder,
+      set or test the FFmpeg executable, choose whether to also control OBS
+      program recording, start/stop ISO recording, and monitor active ISO
+      sessions with source, participant, resolution, frame counts, audio chunk
+      counts, and output file paths.
+    </p>
+    <p>
+      The panel uses the same <code>ZoomIsoRecorder</code> backend as the TCP and
+      OSC APIs and persists its folder, FFmpeg path, and program-recording toggle
+      in OBS global settings.
+    </p>
+
     <div class="diagram-wrap">
       <img src="/core-plugin/images/iso-recording-flow.svg" alt="CoreVideo ISO recording flow" style="max-width:100%;height:auto;">
       <div class="diagram-caption">Assignments resolve the participant IDs. Each assigned Zoom source can feed an FFmpeg writer for video/audio ISO files while OBS continues to own the program output.</div>

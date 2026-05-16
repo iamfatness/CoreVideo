@@ -9,6 +9,7 @@
 #include "zoom-output-dialog.h"
 #include "zoom-dock.h"
 #include "zoom-iso-recorder.h"
+#include "zoom-iso-panel.h"
 #include "zoom-control-server.h"
 #include "zoom-osc-server.h"
 #include <QCoreApplication>
@@ -26,6 +27,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #endif
 
 static QPointer<ZoomDock> g_dock;
+static QPointer<ZoomIsoPanel> g_iso_panel;
 
 static void configure_qt_plugin_paths()
 {
@@ -93,6 +95,43 @@ static void show_zoom_dock()
     dock_widget->activateWindow();
 }
 
+static ZoomIsoPanel *ensure_iso_panel()
+{
+    auto *main_win = static_cast<QMainWindow *>(obs_frontend_get_main_window());
+    if (!main_win) {
+        blog(LOG_WARNING, "[obs-zoom-plugin] obs_frontend_get_main_window() returned null - ISO panel not created");
+        return nullptr;
+    }
+
+    if (!g_iso_panel) {
+        g_iso_panel = new ZoomIsoPanel(main_win);
+        obs_frontend_add_dock_by_id("ZoomIsoRecorderDock", "Zoom ISO Recorder", g_iso_panel);
+    }
+    return g_iso_panel;
+}
+
+static void show_iso_panel()
+{
+    ZoomIsoPanel *panel = ensure_iso_panel();
+    if (!panel) return;
+
+    QWidget *parent = panel;
+    while (parent && !qobject_cast<QDockWidget *>(parent))
+        parent = parent->parentWidget();
+
+    if (auto *dock = qobject_cast<QDockWidget *>(parent)) {
+        dock->show();
+        dock->raise();
+        dock->activateWindow();
+        panel->setFocus();
+        return;
+    }
+
+    panel->show();
+    panel->raise();
+    panel->activateWindow();
+}
+
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("obs-zoom-plugin", "en-US")
 
@@ -139,10 +178,15 @@ bool obs_module_load(void)
         show_zoom_dock();
     }, nullptr);
 
+    obs_frontend_add_tools_menu_item("Zoom ISO Recorder", [](void *) {
+        show_iso_panel();
+    }, nullptr);
+
     obs_frontend_add_event_callback(
         [](enum obs_frontend_event event, void *) {
             if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
                 ensure_zoom_dock();
+                ensure_iso_panel();
             }
             if (event == OBS_FRONTEND_EVENT_EXIT)
                 ZoomEngineClient::instance().stop();

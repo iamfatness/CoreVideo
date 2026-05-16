@@ -162,6 +162,10 @@ Commands: `help`, `status`, `list_participants`, `list_outputs`, `assign_output`
 
 ### Auto ISO Recording
 
+Use **OBS -> Tools -> Zoom ISO Recorder** for the operator UI. The dock provides
+an output-folder picker, FFmpeg path/test controls, a program-recording toggle,
+Start/Stop buttons, and a live table of active ISO sessions and file paths.
+
 ```sh
 # Start ISO recording. record_program=true also starts OBS program recording.
 echo '{"cmd":"iso_recording_start","output_dir":"C:/Recordings/CoreVideo","ffmpeg_path":"ffmpeg","record_program":true}' | nc 127.0.0.1 19870

@@ -26,6 +26,11 @@ struct ZoomPluginSettings {
     std::string         last_display_name;
     bool                last_was_webinar     = false;
 
+    // ISO recorder panel defaults.
+    std::string         iso_output_dir;
+    std::string         iso_ffmpeg_path = "ffmpeg";
+    bool                iso_record_program = true;
+
     static ZoomPluginSettings load();
     std::string resolved_jwt_token() const;
     void save() const;

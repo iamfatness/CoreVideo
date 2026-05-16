@@ -131,11 +131,12 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
-          $buildEngine = if ($env:COREVIDEO_HAS_ZOOM_RUNTIME -eq "true") { "ON" } else { "OFF" }
+          $fullPackage = if ($env:COREVIDEO_HAS_ZOOM_RUNTIME -eq "true") { "ON" } else { "OFF" }
           cmake -B build `
             -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_BUILD_TYPE=Release `
-            "-DCOREVIDEO_BUILD_ENGINE=$buildEngine" `
+            "-DCOREVIDEO_BUILD_PLUGIN=$fullPackage" `
+            "-DCOREVIDEO_BUILD_ENGINE=$fullPackage" `
             -DZOOM_SDK_DIR=third_party/zoom-sdk `
             "-DCMAKE_PREFIX_PATH=$env:OBS_SDK_DIR;$env:QT_ROOT_DIR" `
             "-DLibObs_DIR=$env:OBS_SDK_DIR\cmake\LibObs" `

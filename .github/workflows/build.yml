@@ -166,12 +166,13 @@ jobs:
               $obsFe   = "C:\obs-runtime\cmake\obs-frontend-api"
           }
 
-          $buildEngine = if ($env:COREVIDEO_HAS_ZOOM_RUNTIME -eq "true") { "ON" } else { "OFF" }
+          $fullPackage = if ($env:COREVIDEO_HAS_ZOOM_RUNTIME -eq "true") { "ON" } else { "OFF" }
 
           cmake -B build `
               -G "Visual Studio 17 2022" -A x64 `
               -DCMAKE_BUILD_TYPE=Release `
-              "-DCOREVIDEO_BUILD_ENGINE=$buildEngine" `
+              "-DCOREVIDEO_BUILD_PLUGIN=$fullPackage" `
+              "-DCOREVIDEO_BUILD_ENGINE=$fullPackage" `
               -DZOOM_SDK_DIR=third_party/zoom-sdk `
               -DENABLE_FFMPEG_HW_ACCEL=ON `
               "-DFFMPEG_ROOT=C:/ffmpeg" `
@@ -287,6 +288,8 @@ jobs:
               -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_OSX_ARCHITECTURES="$HOST_ARCH" \
               -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
+              -DCOREVIDEO_BUILD_PLUGIN=OFF \
+              -DCOREVIDEO_BUILD_ENGINE=OFF \
               -DZOOM_SDK_DIR=third_party/zoom-sdk \
               "-DCMAKE_PREFIX_PATH=/tmp/obs-sdk;$QT_PREFIX" \
               "-DLibObs_DIR=/tmp/obs-sdk/cmake/LibObs" \

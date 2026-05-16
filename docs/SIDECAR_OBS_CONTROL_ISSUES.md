@@ -22,6 +22,20 @@ Acceptance criteria:
 - Name tag text sources are created and positioned in OBS.
 - Tile opacity and shadows have an OBS-side representation or explicit unsupported status.
 
+Progress:
+- Canvas color is rendered as a deterministic bottom layer.
+- Background image is rendered above canvas color and disabled when no image is selected.
+- Tile shadows are rendered as per-slot offset color layers.
+- Tile borders are rendered as per-slot color layers.
+- Tile opacity is approximated with per-slot dim overlays.
+- Name tags are rendered as per-slot OBS text layers.
+- Stale border, shadow, dim, and name layers are disabled when the Look no longer uses them.
+- Layer order is deterministic: canvas, background, shadows, borders, participant slots, dim overlays, name tags, overlays.
+
+Remaining:
+- True rounded-corner masking still needs an OBS-side matte/filter strategy.
+- Layer creation needs one more read-back pass so newly created design items are transformed immediately on first render instead of the next sync cycle.
+
 ## Issue 3 - Add OBS read-back sync status
 Status: Pending
 

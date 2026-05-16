@@ -1014,6 +1014,7 @@ static obs_properties_t *zoom_source_get_properties(void *data)
     obs_property_t *hw = obs_properties_add_list(props, PROP_HW_ACCEL_MODE,
         obs_module_text("ZoomSource.HwAccelMode"),
         OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+#ifdef COREVIDEO_HW_ACCEL
     obs_property_list_add_int(hw, obs_module_text("ZoomSource.HwAccelGlobal"),  -1);
     obs_property_list_add_int(hw, obs_module_text("ZoomSource.HwAccelNone"),
                               static_cast<int>(HwAccelMode::None));
@@ -1027,6 +1028,17 @@ static obs_properties_t *zoom_source_get_properties(void *data)
                               static_cast<int>(HwAccelMode::VideoToolbox));
     obs_property_list_add_int(hw, obs_module_text("ZoomSource.HwAccelQsv"),
                               static_cast<int>(HwAccelMode::Qsv));
+#else
+    // Plugin compiled without ENABLE_FFMPEG_HW_ACCEL — no backend can run.
+    // Show a single read-only entry and disable the control so the operator
+    // doesn't pick a mode that will silently fall back to CPU.
+    obs_property_list_add_int(hw, "Unavailable (build without ENABLE_FFMPEG_HW_ACCEL)",
+                              static_cast<int>(HwAccelMode::None));
+    obs_property_set_enabled(hw, false);
+    obs_property_set_long_description(hw,
+        "Rebuild the plugin with -DENABLE_FFMPEG_HW_ACCEL=ON and FFmpeg "
+        "dev libraries present to enable hardware video conversion.");
+#endif
 
     obs_properties_add_button(props, "btn_refresh",
         obs_module_text("ZoomSource.RefreshParticipants"),

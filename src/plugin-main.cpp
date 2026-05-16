@@ -143,6 +143,11 @@ MODULE_EXPORT const char *obs_module_description(void)
 bool obs_module_load(void)
 {
     blog(LOG_INFO, "[obs-zoom-plugin] Loading plugin v%s", OBS_ZOOM_PLUGIN_VERSION);
+#ifdef COREVIDEO_HW_ACCEL
+    blog(LOG_INFO, "[obs-zoom-plugin] Hardware video acceleration: enabled at build (FFmpeg)");
+#else
+    blog(LOG_INFO, "[obs-zoom-plugin] Hardware video acceleration: disabled (built without ENABLE_FFMPEG_HW_ACCEL — CPU path only)");
+#endif
     configure_qt_plugin_paths();
 
 #if !defined(WIN32)

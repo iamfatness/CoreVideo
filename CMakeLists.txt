@@ -43,11 +43,36 @@ option(ENABLE_FFMPEG_HW_ACCEL
     OFF)
 
 if(ENABLE_FFMPEG_HW_ACCEL)
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
-        libavfilter>=7
-        libavutil>=57
-    )
+    # Two ways to find FFmpeg:
+    #  (a) FFMPEG_ROOT pointing at a prebuilt dev tree with include/, lib/,
+    #      bin/ — used on Windows where pkg-config isn't standard.
+    #  (b) pkg-config (libavfilter / libavutil) — Linux + Homebrew on macOS.
+    if(DEFINED FFMPEG_ROOT AND EXISTS "${FFMPEG_ROOT}")
+        find_path(COREVIDEO_AVFILTER_INC libavfilter/avfilter.h
+            HINTS "${FFMPEG_ROOT}/include" REQUIRED NO_DEFAULT_PATH)
+        find_library(COREVIDEO_AVFILTER_LIB
+            NAMES avfilter avfilter-10 avfilter-9 avfilter-8
+            HINTS "${FFMPEG_ROOT}/lib" REQUIRED NO_DEFAULT_PATH)
+        find_library(COREVIDEO_AVUTIL_LIB
+            NAMES avutil avutil-59 avutil-58 avutil-57
+            HINTS "${FFMPEG_ROOT}/lib" REQUIRED NO_DEFAULT_PATH)
+        add_library(corevideo_ffmpeg INTERFACE)
+        target_include_directories(corevideo_ffmpeg INTERFACE
+            "${COREVIDEO_AVFILTER_INC}")
+        target_link_libraries(corevideo_ffmpeg INTERFACE
+            "${COREVIDEO_AVFILTER_LIB}" "${COREVIDEO_AVUTIL_LIB}")
+        set(COREVIDEO_FFMPEG_TARGET corevideo_ffmpeg)
+        set(COREVIDEO_FFMPEG_BIN_DIR "${FFMPEG_ROOT}/bin")
+        message(STATUS "FFmpeg HW accel: using FFMPEG_ROOT=${FFMPEG_ROOT}")
+    else()
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
+            libavfilter>=7
+            libavutil>=57
+        )
+        set(COREVIDEO_FFMPEG_TARGET PkgConfig::FFMPEG)
+        message(STATUS "FFmpeg HW accel: using pkg-config")
+    endif()
 endif()
 
 set(ZOOM_SDK_DIR "third_party/zoom-sdk" CACHE PATH "Zoom Meeting SDK directory")
@@ -196,8 +221,24 @@ if(COREVIDEO_BUILD_PLUGIN)
     endif()
 
     if(ENABLE_FFMPEG_HW_ACCEL)
-        target_link_libraries(obs-zoom-plugin PRIVATE PkgConfig::FFMPEG)
+        target_link_libraries(obs-zoom-plugin PRIVATE ${COREVIDEO_FFMPEG_TARGET})
         target_compile_definitions(obs-zoom-plugin PRIVATE COREVIDEO_HW_ACCEL)
+        # Ship the FFmpeg runtime DLLs alongside the plugin on Windows so
+        # OBS's plugin loader can resolve avfilter / avutil / avcodec /
+        # swscale / swresample without polluting PATH.
+        if(WIN32 AND COREVIDEO_FFMPEG_BIN_DIR AND EXISTS "${COREVIDEO_FFMPEG_BIN_DIR}")
+            file(GLOB COREVIDEO_FFMPEG_DLLS "${COREVIDEO_FFMPEG_BIN_DIR}/*.dll")
+            if(COREVIDEO_FFMPEG_DLLS)
+                add_custom_command(TARGET obs-zoom-plugin POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        ${COREVIDEO_FFMPEG_DLLS}
+                        "$<TARGET_FILE_DIR:obs-zoom-plugin>"
+                    COMMENT "Copying FFmpeg runtime DLLs for obs-zoom-plugin")
+            endif()
+            install(DIRECTORY "${COREVIDEO_FFMPEG_BIN_DIR}/"
+                DESTINATION "obs-plugins/64bit"
+                FILES_MATCHING PATTERN "*.dll")
+        endif()
     endif()
 
     if(APPLE)

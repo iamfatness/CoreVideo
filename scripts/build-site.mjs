@@ -699,5 +699,6 @@ writeText("_redirects", `/terms-of-use /terms/ 301
 /ZOOM_MARKETPLACE_OAUTH.md /oauth/ 301
 /docs/ZOOM_MARKETPLACE_OAUTH.md /oauth/ 301
 `);
+writeText("CNAME", "corevideo.iamfatness.us\n");
 
 console.log(`Built CoreVideo site in ${path.relative(root, outDir)}`);

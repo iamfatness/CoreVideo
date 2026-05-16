@@ -63,6 +63,13 @@ static constexpr int kThumbW = 80;
 static constexpr int kThumbH = 45;
 static constexpr int kRowH   = 50;
 
+static std::string redacted_tail(const std::string &value)
+{
+    if (value.empty()) return "empty";
+    if (value.size() <= 4) return "****";
+    return "****" + value.substr(value.size() - 4);
+}
+
 static QString plugin_binary_dir()
 {
 #if defined(Q_OS_WIN)
@@ -374,18 +381,29 @@ ZoomDock::ZoomDock(QWidget *parent)
     m_display_name->setPlaceholderText("Display name");
 
     m_join_token_type = new QComboBox(join_group);
-    m_join_token_type->addItem("OBF / on-behalf token", "on_behalf_token");
+    m_join_token_type->addItem("Auto Zoom sign-in / ZAK", "auto_zak");
     m_join_token_type->addItem("User ZAK", "user_zak");
     m_join_token_type->addItem("App privilege token", "app_privilege_token");
     m_join_token_type->setToolTip(
-        "External-account meetings can require a Zoom user attribution token.");
+        "Use Auto. App privilege tokens are only for raw media permission; "
+        "CoreVideo will still use Zoom sign-in/ZAK for the meeting join.");
 
     m_join_token = new QLineEdit(join_group);
-    m_join_token->setPlaceholderText("External meeting token (optional)");
+    m_join_token->setPlaceholderText("Automatic from Zoom sign-in");
     m_join_token->setEchoMode(QLineEdit::Password);
     m_join_token->setToolTip(
-        "Paste the OBF/on-behalf token, ZAK, or app privilege token for "
-        "meetings that reject anonymous external SDK joins.");
+        "Paste a user ZAK only when Zoom support provides one. Paste an app "
+        "privilege token only for raw media permission.");
+    m_join_token->setEnabled(false);
+    connect(m_join_token_type, &QComboBox::currentIndexChanged, this, [this]() {
+        const bool manual =
+            m_join_token_type &&
+            m_join_token_type->currentData().toString() != "auto_zak";
+        m_join_token->setEnabled(manual);
+        m_join_token->setPlaceholderText(
+            manual ? QStringLiteral("Paste ZAK or app privilege token")
+                   : QStringLiteral("Automatic from Zoom sign-in"));
+    });
 
     m_join_btn  = new QPushButton("Join",  join_group);
     m_leave_btn = new QPushButton("Leave", join_group);
@@ -958,8 +976,20 @@ void ZoomDock::on_join_clicked()
     tokens.user_zak = parsed.user_zak;
     tokens.app_privilege_token = parsed.app_privilege_token;
     const std::string typed_token = m_join_token->text().trimmed().toStdString();
-    if (!typed_token.empty() && m_join_token_type) {
-        const QString token_type = m_join_token_type->currentData().toString();
+    const QString token_type = m_join_token_type
+        ? m_join_token_type->currentData().toString()
+        : QStringLiteral("auto_zak");
+    const bool manual_token_mode = token_type != "auto_zak";
+    if (manual_token_mode && typed_token.empty() &&
+        tokens.on_behalf_token.empty() &&
+        tokens.user_zak.empty() &&
+        tokens.app_privilege_token.empty()) {
+        QMessageBox::warning(this, "Zoom Join Token",
+            "A manual token type was selected, but the token field is empty. "
+            "Use Auto Zoom sign-in / ZAK, or paste the selected token before joining.");
+        return;
+    }
+    if (!typed_token.empty()) {
         if (token_type == "user_zak") {
             tokens.user_zak = typed_token;
         } else if (token_type == "app_privilege_token") {
@@ -976,6 +1006,38 @@ void ZoomDock::on_join_clicked()
             "This CoreVideo build does not have Zoom Meeting SDK credentials "
             "configured. Rebuild with embedded SDK credentials or restore a "
             "valid SDK JWT before joining.");
+        return;
+    }
+
+    const bool needs_oauth_zak =
+        tokens.user_zak.empty() &&
+        tokens.on_behalf_token.empty();
+    blog(LOG_INFO,
+         "[obs-zoom-plugin] Zoom join token mode=%s zak_needed=%d typed_token=%d parsed_obf=%d parsed_zak=%d parsed_app=%d app_privilege_present=%d sdk_key=%s oauth_client_id=%s oauth_scopes=\"%s\"",
+         token_type.toUtf8().constData(),
+         needs_oauth_zak ? 1 : 0,
+         typed_token.empty() ? 0 : 1,
+         parsed.on_behalf_token.empty() ? 0 : 1,
+         parsed.user_zak.empty() ? 0 : 1,
+         parsed.app_privilege_token.empty() ? 0 : 1,
+         tokens.app_privilege_token.empty() ? 0 : 1,
+         redacted_tail(s.sdk_key).c_str(),
+         redacted_tail(s.oauth_client_id).c_str(),
+         s.oauth_scopes.c_str());
+    if (needs_oauth_zak &&
+        s.oauth_access_token.empty() &&
+        s.oauth_refresh_token.empty()) {
+        QString error;
+        if (!ZoomOAuthManager::instance().begin_authorization(this, &error)) {
+            QMessageBox::warning(this, "Zoom Authentication",
+                error.isEmpty()
+                    ? QStringLiteral("Sign in with Zoom before joining meetings that require owner/host context.")
+                    : error);
+            return;
+        }
+        start_pending_oauth_join();
+        QMessageBox::information(this, "Zoom Authentication",
+            "Zoom sign-in was opened in your browser. After authorization completes, CoreVideo will retry this join.");
         return;
     }
 
@@ -997,6 +1059,32 @@ void ZoomDock::on_join_clicked()
     m_join_thread = std::thread([self, alive, jwt, meeting_id, passcode,
                                  display_name, kind, webinar, join_generation,
                                  tokens]() mutable {
+        if (tokens.user_zak.empty() &&
+            tokens.on_behalf_token.empty()) {
+            std::string zak;
+            QString zak_error;
+            if (ZoomOAuthManager::instance().fetch_zak_blocking(zak, meeting_id, &zak_error)) {
+                tokens.user_zak = zak;
+                blog(LOG_INFO, "[obs-zoom-plugin] Zoom OAuth ZAK fetched for Meeting SDK join");
+            } else {
+                blog(LOG_WARNING, "[obs-zoom-plugin] Zoom OAuth ZAK fetch failed: %s",
+                     zak_error.toUtf8().constData());
+                QMetaObject::invokeMethod(self, [self, alive, zak_error, join_generation]() {
+                    if (!alive->load(std::memory_order_acquire)) return;
+                    if (self->m_join_generation.load(std::memory_order_acquire) != join_generation)
+                        return;
+                    self->m_join_in_progress.store(false, std::memory_order_release);
+                    ZoomEngineClient::instance().set_state(MeetingState::Failed);
+                    QMessageBox::warning(self, "Zoom Authentication",
+                        zak_error.isEmpty()
+                            ? QStringLiteral("Could not fetch Zoom ZAK. Sign in with Zoom and try again.")
+                            : zak_error);
+                    self->update_state_indicator();
+                }, Qt::QueuedConnection);
+                return;
+            }
+        }
+
         const bool started = ZoomEngineClient::instance().start(jwt);
         const bool still_current =
             self->m_join_generation.load(std::memory_order_acquire) == join_generation;

@@ -27,7 +27,7 @@ export function buildActions(inst: CoreVideoInstance): CompanionActionDefinition
 			name: 'Zoom: Assign Participant to Output',
 			options: [
 				{ type: 'textinput', id: 'source',         label: 'OBS Source Name',                 default: '' },
-				{ type: 'number',    id: 'participant_id', label: 'Participant ID (0 = active spkr)', default: 0, min: 0 },
+				{ type: 'number',    id: 'participant_id', label: 'Participant ID (0 = active spkr)', default: 0, min: 0, max: 999999999 },
 				{ type: 'checkbox',  id: 'active_speaker', label: 'Track Active Speaker',             default: false },
 				{ type: 'checkbox',  id: 'isolate_audio',  label: 'Isolate Audio',                   default: false },
 			],

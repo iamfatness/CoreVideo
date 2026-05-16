@@ -54,6 +54,8 @@ static bool json_to_uint32(const QJsonObject &obj, const char *key, uint32_t &ou
     return true;
 }
 
+static QString meeting_state_to_string(MeetingState state);
+
 ZoomControlServer &ZoomControlServer::instance()
 {
     static ZoomControlServer inst;
@@ -277,6 +279,8 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
         write_response(socket, {
             {"ok", true},
             {"meeting_state", meeting_state_to_string(ZoomEngineClient::instance().state())},
+            {"last_error", QString::fromStdString(
+                ZoomEngineClient::instance().last_error())},
             {"active_speaker_id", static_cast<double>(
                 ZoomEngineClient::instance().active_speaker_id())},
             {"recovery", recovery}

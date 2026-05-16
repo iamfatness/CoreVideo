@@ -64,7 +64,7 @@ export function buildFeedbacks(inst: CoreVideoInstance): CompanionFeedbackDefini
 			description: 'True when the participant with the given ID is speaking',
 			defaultStyle: { bgcolor: BLUE, color: WHITE },
 			options: [
-				{ type: 'number', id: 'participant_id', label: 'Participant ID', default: 0, min: 0 },
+				{ type: 'number', id: 'participant_id', label: 'Participant ID', default: 0, min: 0, max: 999999999 },
 			],
 			callback: (fb) => inst.state.zoom.activeSpeakerId === (fb.options['participant_id'] as number),
 		},

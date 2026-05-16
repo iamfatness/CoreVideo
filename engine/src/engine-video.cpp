@@ -6,8 +6,27 @@
 #include <zoom_rawdata_api.h>
 #endif
 #include <cstring>
+#include <limits>
 #include <tuple>
 #include <vector>
+
+static bool valid_i420_frame(YUVRawDataI420 *data, uint32_t w, uint32_t h, size_t &y_len)
+{
+    if (w == 0 || h == 0) return false;
+    if (w > 8192 || h > 8192) return false;
+    if ((w & 1) != 0 || (h & 1) != 0) return false;
+    if (!data->GetYBuffer() || !data->GetUBuffer() || !data->GetVBuffer()) return false;
+
+    const uint64_t pixels = static_cast<uint64_t>(w) * static_cast<uint64_t>(h);
+    const uint64_t max_reasonable_i420 = 8192ull * 8192ull;
+    constexpr uint64_t max_size_t_value = static_cast<uint64_t>(~size_t{0});
+    if (pixels > max_reasonable_i420 || pixels > max_size_t_value) {
+        return false;
+    }
+
+    y_len = static_cast<size_t>(pixels);
+    return true;
+}
 
 ParticipantSubscription::ParticipantSubscription(uint32_t participant_id,
                                                  const std::string &initial_source_uuid,
@@ -21,7 +40,6 @@ ParticipantSubscription::ParticipantSubscription(uint32_t participant_id,
             initial_source_uuid + R"(","participant_id":)" +
             std::to_string(m_participant_id) + R"(,"code":)" +
             std::to_string(static_cast<int>(err)) + "}");
-        add_source(initial_source_uuid, e2p_fd);
         return;
     }
 
@@ -32,6 +50,11 @@ ParticipantSubscription::ParticipantSubscription(uint32_t participant_id,
         initial_source_uuid + R"(","participant_id":)" +
         std::to_string(m_participant_id) + R"(,"code":)" +
         std::to_string(static_cast<int>(err)) + "}");
+    if (err != ZOOMSDK::SDKERR_SUCCESS) {
+        ZOOMSDK::destroyRenderer(m_renderer);
+        m_renderer = nullptr;
+        return;
+    }
     add_source(initial_source_uuid, e2p_fd);
 }
 
@@ -83,9 +106,10 @@ std::vector<std::pair<std::string, IpcFd>> ParticipantSubscription::sources() co
 
 bool ParticipantSubscription::ensure_shm(SourceTarget &target,
                                          const std::string &source_uuid,
-                                         uint32_t y_len)
+                                         size_t y_len)
 {
     const size_t total = sizeof(ShmFrameHeader) + y_len + y_len / 4 + y_len / 4;
+    if (total < y_len) return false;
     if (target.shm.ptr && target.shm.size >= total) return true;
 
     const std::string region_name = IPC_SHM_PREFIX + source_uuid;
@@ -97,8 +121,14 @@ void ParticipantSubscription::onRawDataFrameReceived(YUVRawDataI420 *data)
     if (!data) return;
     const uint32_t w     = data->GetStreamWidth();
     const uint32_t h     = data->GetStreamHeight();
-    const uint32_t y_len = w * h;
-    if (w == 0 || h == 0) return;
+    size_t y_len = 0;
+    if (!valid_i420_frame(data, w, h, y_len)) {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"video_frame_invalid","participant_id":)" +
+            std::to_string(m_participant_id) + R"(,"w":)" +
+            std::to_string(w) + R"(,"h":)" + std::to_string(h) + "}");
+        return;
+    }
 
     std::lock_guard<std::mutex> lock(m_targets_mtx);
     for (auto &entry : m_targets) {
@@ -118,7 +148,9 @@ void ParticipantSubscription::onRawDataFrameReceived(YUVRawDataI420 *data)
 
         auto *hdr    = static_cast<ShmFrameHeader *>(target.shm.ptr);
         auto *pixels = static_cast<char *>(target.shm.ptr) + sizeof(ShmFrameHeader);
-        hdr->width = w; hdr->height = h; hdr->y_len = y_len;
+        hdr->width = w;
+        hdr->height = h;
+        hdr->y_len = static_cast<uint32_t>(y_len);
 
         std::memcpy(pixels,                   data->GetYBuffer(), y_len);
         std::memcpy(pixels + y_len,           data->GetUBuffer(), y_len / 4);
@@ -170,6 +202,10 @@ void EngineVideo::subscribe(uint32_t participant_id,
             participant_id,
             std::make_unique<ParticipantSubscription>(
                 participant_id, source_uuid, e2p_fd)).first;
+        if (!it->second || it->second->empty()) {
+            m_subs.erase(it);
+            return;
+        }
     } else {
         it->second->add_source(source_uuid, e2p_fd);
     }

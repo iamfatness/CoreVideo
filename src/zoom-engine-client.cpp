@@ -170,7 +170,9 @@ bool ZoomEngineClient::start(const std::string &jwt_token)
 {
     if (m_running.load(std::memory_order_acquire)) return true;
     if (jwt_token.empty()) {
-        blog(LOG_ERROR, "[obs-zoom-plugin] Cannot start Zoom engine: JWT token is empty");
+        const std::string message = "Cannot start Zoom engine: JWT token is empty";
+        set_last_error(message);
+        blog(LOG_ERROR, "[obs-zoom-plugin] %s", message.c_str());
         return false;
     }
     m_last_jwt = jwt_token;
@@ -373,13 +375,18 @@ bool ZoomEngineClient::launch_engine()
     const std::string engine_path = engine_executable_path();
     const std::string engine_dir = parent_directory(engine_path);
     std::string command = "\"" + engine_path + "\"";
+    blog(LOG_INFO, "[obs-zoom-plugin] Launching ZoomObsEngine: %s",
+         engine_path.c_str());
 
     if (!CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE,
                         CREATE_NO_WINDOW, nullptr,
                         engine_dir.empty() ? nullptr : engine_dir.c_str(),
                         &si, &pi)) {
-        blog(LOG_ERROR, "[obs-zoom-plugin] Failed to launch ZoomObsEngine: %lu",
-             GetLastError());
+        const DWORD code = GetLastError();
+        const std::string message =
+            "Failed to launch ZoomObsEngine: Windows error " + std::to_string(code);
+        set_last_error(message);
+        blog(LOG_ERROR, "[obs-zoom-plugin] %s", message.c_str());
         return false;
     }
     CloseHandle(pi.hThread);
@@ -387,7 +394,10 @@ bool ZoomEngineClient::launch_engine()
     return true;
 #else
     const pid_t pid = fork();
-    if (pid < 0) return false;
+    if (pid < 0) {
+        set_last_error("Failed to fork ZoomObsEngine process.");
+        return false;
+    }
     if (pid == 0) {
         const std::string path = engine_executable_path();
         execlp(path.c_str(), path.c_str(), nullptr);
@@ -411,6 +421,12 @@ bool ZoomEngineClient::connect_ipc()
         disconnect_ipc();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
+    blog(LOG_ERROR,
+         "[obs-zoom-plugin] Timed out connecting to ZoomObsEngine IPC pipes. "
+         "The engine may have exited during startup; check that Zoom SDK runtime "
+         "DLLs are beside ZoomObsEngine.exe.");
+    set_last_error("Timed out connecting to ZoomObsEngine. Check that the full "
+                   "Zoom SDK runtime DLLs are beside ZoomObsEngine.exe.");
     return false;
 #else
     auto connect_one = [](const char *path) -> int {
@@ -433,6 +449,11 @@ bool ZoomEngineClient::connect_ipc()
         disconnect_ipc();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
+    blog(LOG_ERROR,
+         "[obs-zoom-plugin] Timed out connecting to ZoomObsEngine IPC sockets. "
+         "The engine may have exited during startup.");
+    set_last_error("Timed out connecting to ZoomObsEngine IPC sockets. The engine "
+                   "may have exited during startup.");
     return false;
 #endif
 }
@@ -448,6 +469,12 @@ void ZoomEngineClient::disconnect_ipc()
     if (m_p2e != kIpcInvalidFd) { close(m_p2e); m_p2e = kIpcInvalidFd; }
     if (m_e2p != kIpcInvalidFd) { close(m_e2p); m_e2p = kIpcInvalidFd; }
 #endif
+}
+
+void ZoomEngineClient::set_last_error(const std::string &message)
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    m_last_error = message;
 }
 
 void ZoomEngineClient::reader_loop()

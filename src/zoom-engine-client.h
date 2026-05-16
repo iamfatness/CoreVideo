@@ -67,6 +67,7 @@ private:
     bool launch_engine();
     bool connect_ipc();
     void disconnect_ipc();
+    void set_last_error(const std::string &message);
     void reader_loop();
     void monitor_loop();
     void handle_event(const std::string &line);

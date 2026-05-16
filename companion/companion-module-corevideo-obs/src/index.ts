@@ -14,6 +14,7 @@ import { OBSWebSocketClient } from './obs-ws-client.js'
 import { SidecarClient } from './sidecar-client.js'
 
 export class CoreVideoInstance extends InstanceBase<CoreVideoConfig> {
+	public config!: CoreVideoConfig
 	public state: ModuleState = defaultState()
 
 	// CoreVideo plugin TCP

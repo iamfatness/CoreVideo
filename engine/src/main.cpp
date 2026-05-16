@@ -578,6 +578,9 @@ class EngineMeetingEvent : public ZOOMSDK::IMeetingServiceEvent
 #if defined(COREVIDEO_HAS_RECORDING_CTRL)
                          , public ZOOMSDK::IMeetingRecordingCtrlEvent
 #endif
+#if defined(COREVIDEO_HAS_LIVE_STREAM_CTRL)
+                         , public ZOOMSDK::IMeetingLiveStreamCtrlEvent
+#endif
 {
 public:
     EngineMeetingEvent(IpcFd e2p, ZOOMSDK::IMeetingService **meeting_svc,
@@ -585,6 +588,71 @@ public:
                        EngineVideo *video_engine)
         : m_e2p(e2p), m_meeting_svc(meeting_svc),
           m_participants(participants), m_video_engine(video_engine) {}
+
+    void resubscribe_raw_media(const char *reason)
+    {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"raw_media_ready","reason":")" +
+            std::string(reason ? reason : "unknown") + "\"}");
+        if (m_video_engine)
+            m_video_engine->resubscribe_all();
+        EngineAudio::instance().retry_subscribe(reason ? reason : "raw_media_ready");
+    }
+
+#if defined(COREVIDEO_HAS_LIVE_STREAM_CTRL)
+    bool start_raw_live_stream(const char *reason)
+    {
+        if (!m_meeting_svc || !*m_meeting_svc) return false;
+        auto *stream = (*m_meeting_svc)->GetMeetingLiveStreamController();
+        if (!stream) {
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"raw_live_stream_controller","code":-1})");
+            return false;
+        }
+
+        const ZOOMSDK::SDKError set_event = stream->SetEvent(this);
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"raw_live_stream_set_event","code":)" +
+            std::to_string(static_cast<int>(set_event)) + "}");
+
+        const bool supported = stream->IsRawLiveStreamSupported();
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"raw_live_stream_supported","supported":)" +
+            std::string(supported ? "true" : "false") + "}");
+        if (!supported) return false;
+
+        const ZOOMSDK::SDKError can_raw = stream->CanStartRawLiveStream();
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"can_start_raw_live_stream","code":)" +
+            std::to_string(static_cast<int>(can_raw)) + "}");
+
+#if defined(WIN32)
+        const zchar_t *broadcast_url = L"https://corevideo.local/raw";
+        const zchar_t *broadcast_name = L"CoreVideo Raw Media";
+#else
+        const zchar_t *broadcast_url = "https://corevideo.local/raw";
+        const zchar_t *broadcast_name = "CoreVideo Raw Media";
+#endif
+        if (can_raw == ZOOMSDK::SDKERR_SUCCESS) {
+            const ZOOMSDK::SDKError start_raw =
+                stream->StartRawLiveStreaming(broadcast_url, broadcast_name);
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"start_raw_live_stream","code":)" +
+                std::to_string(static_cast<int>(start_raw)) + "}");
+            if (start_raw == ZOOMSDK::SDKERR_SUCCESS) {
+                resubscribe_raw_media(reason ? reason : "raw_live_stream_started");
+                return true;
+            }
+        }
+
+        const ZOOMSDK::SDKError req =
+            stream->RequestRawLiveStreaming(broadcast_url, broadcast_name);
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"request_raw_live_stream","code":)" +
+            std::to_string(static_cast<int>(req)) + "}");
+        return false;
+    }
+#endif
 
     void onMeetingStatusChanged(ZOOMSDK::MeetingStatus status, int iResult) override {
         EngineIpc::write(R"({"cmd":"debug","stage":"meeting_status","status":)" +
@@ -605,7 +673,14 @@ public:
                     EngineIpc::write(
                         R"({"cmd":"debug","stage":"can_start_raw_recording","code":)" +
                         std::to_string(static_cast<int>(can_raw)) + "}");
-                    if (can_raw != ZOOMSDK::SDKERR_SUCCESS) {
+                    if (can_raw == ZOOMSDK::SDKERR_SUCCESS) {
+                        const ZOOMSDK::SDKError start_raw = rec->StartRawRecording();
+                        EngineIpc::write(
+                            R"({"cmd":"debug","stage":"start_raw_recording","code":)" +
+                            std::to_string(static_cast<int>(start_raw)) + "}");
+                        if (start_raw == ZOOMSDK::SDKERR_SUCCESS)
+                            resubscribe_raw_media("raw_recording_started");
+                    } else {
                         const ZOOMSDK::SDKError support_req =
                             rec->IsSupportRequestLocalRecordingPrivilege();
                         EngineIpc::write(
@@ -616,14 +691,16 @@ public:
                         EngineIpc::write(
                             R"({"cmd":"debug","stage":"request_recording_privilege","code":)" +
                             std::to_string(static_cast<int>(req)) + "}");
+#if defined(COREVIDEO_HAS_LIVE_STREAM_CTRL)
+                        start_raw_live_stream("raw_recording_unavailable");
+#endif
                     }
-                    const ZOOMSDK::SDKError start_raw = rec->StartRawRecording();
-                    EngineIpc::write(
-                        R"({"cmd":"debug","stage":"start_raw_recording","code":)" +
-                        std::to_string(static_cast<int>(start_raw)) + "}");
                 } else {
                     EngineIpc::write(
                         R"({"cmd":"debug","stage":"recording_controller","code":-1})");
+#if defined(COREVIDEO_HAS_LIVE_STREAM_CTRL)
+                    start_raw_live_stream("recording_controller_missing");
+#endif
                 }
 #endif
 #if defined(COREVIDEO_HAS_RAW_ARCHIVING)
@@ -659,6 +736,18 @@ public:
                     const ZOOMSDK::SDKError err = rec->StopRawRecording();
                     EngineIpc::write(
                         R"({"cmd":"debug","stage":"stop_raw_recording","code":)" +
+                        std::to_string(static_cast<int>(err)) + "}");
+                }
+            }
+#endif
+#if defined(COREVIDEO_HAS_LIVE_STREAM_CTRL)
+            if (m_meeting_svc && *m_meeting_svc) {
+                auto *stream = (*m_meeting_svc)->GetMeetingLiveStreamController();
+                if (stream) {
+                    stream->SetEvent(nullptr);
+                    const ZOOMSDK::SDKError err = stream->StopRawLiveStream();
+                    EngineIpc::write(
+                        R"({"cmd":"debug","stage":"stop_raw_live_stream","code":)" +
                         std::to_string(static_cast<int>(err)) + "}");
                 }
             }
@@ -732,9 +821,12 @@ public:
         EngineIpc::write(
             R"({"cmd":"debug","stage":"start_raw_recording_after_grant","code":)" +
             std::to_string(static_cast<int>(start_raw)) + "}");
-        if (m_video_engine)
-            m_video_engine->resubscribe_all();
-        EngineAudio::instance().retry_subscribe("recording_privilege_granted");
+        if (start_raw == ZOOMSDK::SDKERR_SUCCESS)
+            resubscribe_raw_media("recording_privilege_granted");
+#if defined(COREVIDEO_HAS_LIVE_STREAM_CTRL)
+        else
+            start_raw_live_stream("recording_grant_start_failed");
+#endif
     }
     void onRequestCloudRecordingResponse(
         ZOOMSDK::RequestStartCloudRecordingStatus status) override
@@ -761,6 +853,41 @@ public:
 #if defined(__linux__)
     void onTranscodingStatusChanged(ZOOMSDK::TranscodingStatus, const zchar_t *) override {}
 #endif
+#endif
+#if defined(COREVIDEO_HAS_LIVE_STREAM_CTRL)
+    void onLiveStreamStatusChange(ZOOMSDK::LiveStreamStatus status) override
+    {
+        EngineIpc::write(R"({"cmd":"debug","stage":"live_stream_status","status":)" +
+            std::to_string(static_cast<int>(status)) + "}");
+    }
+    void onRawLiveStreamPrivilegeChanged(bool has_privilege) override
+    {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"raw_live_stream_privilege_changed","has_privilege":)" +
+            std::string(has_privilege ? "true" : "false") + "}");
+        if (has_privilege)
+            start_raw_live_stream("raw_live_stream_privilege_granted");
+    }
+    void onRawLiveStreamPrivilegeRequestTimeout() override
+    {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"raw_live_stream_privilege_timeout"})");
+    }
+    void onUserRawLiveStreamPrivilegeChanged(unsigned int userid,
+                                             bool has_privilege) override
+    {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"user_raw_live_stream_privilege_changed","user_id":)" +
+            std::to_string(userid) + R"(,"has_privilege":)" +
+            std::string(has_privilege ? "true" : "false") + "}");
+    }
+    void onRawLiveStreamPrivilegeRequested(
+        ZOOMSDK::IRequestRawLiveStreamPrivilegeHandler *) override {}
+    void onUserRawLiveStreamingStatusChanged(
+        ZOOMSDK::IList<ZOOMSDK::RawLiveStreamInfo> *) override {}
+    void onLiveStreamReminderStatusChanged(bool) override {}
+    void onLiveStreamReminderStatusChangeFailed() override {}
+    void onUserThresholdReachedForLiveStream(int) override {}
 #endif
 private:
     IpcFd m_e2p;

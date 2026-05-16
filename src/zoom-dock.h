@@ -35,6 +35,8 @@ private:
     void update_state_indicator();
     void update_recovery_panel();
     void update_credentials_banner();
+    void start_pending_oauth_join();
+    void stop_pending_oauth_join();
 
     // Status bar
     CvStatusDot *m_state_dot   = nullptr;
@@ -71,6 +73,7 @@ private:
     std::thread  m_join_thread;
     std::atomic<bool>     m_join_in_progress{false};
     std::atomic<uint64_t> m_join_generation{0};
+    QTimer      *m_pending_oauth_join_timer = nullptr;
 
     // Output assignment table
     QTableWidget *m_output_table = nullptr;

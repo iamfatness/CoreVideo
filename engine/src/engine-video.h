@@ -44,7 +44,7 @@ private:
 
     bool ensure_shm(SourceTarget &target,
                     const std::string &source_uuid,
-                    uint32_t y_len);
+                    size_t y_len);
 
     uint32_t    m_participant_id;
     ZOOMSDK::IZoomSDKRenderer *m_renderer = nullptr;

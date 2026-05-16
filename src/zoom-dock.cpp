@@ -377,6 +377,15 @@ ZoomDock::ZoomDock(QWidget *parent)
 
     connect(m_join_btn,  &QPushButton::clicked, this, [this]() { on_join_clicked(); });
     connect(m_leave_btn, &QPushButton::clicked, this, [this]() { on_leave_clicked(); });
+    m_pending_oauth_join_timer = new QTimer(this);
+    m_pending_oauth_join_timer->setInterval(500);
+    connect(m_pending_oauth_join_timer, &QTimer::timeout, this, [this]() {
+        const ZoomPluginSettings s = ZoomPluginSettings::load();
+        if (s.oauth_access_token.empty() && s.oauth_refresh_token.empty())
+            return;
+        stop_pending_oauth_join();
+        on_join_clicked();
+    });
 
     // ── Recovery panel ────────────────────────────────────────────────────────
     m_recovery_frame = new QFrame(this);
@@ -500,6 +509,7 @@ ZoomDock::ZoomDock(QWidget *parent)
 ZoomDock::~ZoomDock()
 {
     m_alive->store(false, std::memory_order_release);
+    stop_pending_oauth_join();
     if (m_join_thread.joinable())
         m_join_thread.join();
     ZoomEngineClient::instance().remove_roster_callback(this);
@@ -513,6 +523,18 @@ void ZoomDock::update_credentials_banner()
     const ZoomPluginSettings s = ZoomPluginSettings::load();
     const bool missing = s.sdk_key.empty() && s.sdk_secret.empty() && s.jwt_token.empty();
     m_credentials_banner->setVisible(missing);
+}
+
+void ZoomDock::start_pending_oauth_join()
+{
+    if (m_pending_oauth_join_timer && !m_pending_oauth_join_timer->isActive())
+        m_pending_oauth_join_timer->start();
+}
+
+void ZoomDock::stop_pending_oauth_join()
+{
+    if (m_pending_oauth_join_timer)
+        m_pending_oauth_join_timer->stop();
 }
 
 void ZoomDock::update_recovery_panel()
@@ -823,6 +845,7 @@ void ZoomDock::on_join_clicked()
     const QString raw_input = m_meeting_id->text().trimmed();
     if (raw_input.isEmpty()) return;
     if (m_join_in_progress.load(std::memory_order_acquire)) return;
+    stop_pending_oauth_join();
     if (m_join_thread.joinable())
         m_join_thread.join();
 
@@ -871,19 +894,10 @@ void ZoomDock::on_join_clicked()
     ZoomPluginSettings s = ZoomPluginSettings::load();
     std::string jwt = s.resolved_jwt_token();
     if (!ZoomEngineClient::instance().is_authenticated() && jwt.empty()) {
-        QMessageBox::information(this, "Zoom Authentication",
-            "Enter your Zoom Meeting SDK credentials before joining.");
-        ZoomSettingsDialog dlg(this);
-        if (dlg.exec() != QDialog::Accepted) return;
-        update_credentials_banner();
-        s = ZoomPluginSettings::load();
-        jwt = s.resolved_jwt_token();
-    }
-
-    if (!ZoomEngineClient::instance().is_authenticated() && jwt.empty()) {
         QMessageBox::warning(this, "Zoom Authentication",
-            "Zoom Meeting SDK authentication is still missing. Enter an SDK key "
-            "and secret, or a valid SDK JWT override, then try Join again.");
+            "This CoreVideo build does not have Zoom Meeting SDK credentials "
+            "configured. Rebuild with embedded SDK credentials or restore a "
+            "valid SDK JWT before joining.");
         return;
     }
 
@@ -893,13 +907,22 @@ void ZoomDock::on_join_clicked()
         tokens.app_privilege_token.empty();
     if (needs_oauth_zak &&
         s.oauth_access_token.empty() && s.oauth_refresh_token.empty()) {
+        const auto answer = QMessageBox::question(this, "Zoom Sign In",
+            "CoreVideo needs a Zoom sign-in before joining this meeting. "
+            "Sign in with Zoom now?",
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::Yes);
+        if (answer != QMessageBox::Yes) return;
+
         QString error;
         if (!ZoomOAuthManager::instance().begin_authorization(this, &error)) {
             QMessageBox::warning(this, "Zoom OAuth", error);
             return;
         }
+        start_pending_oauth_join();
         QMessageBox::information(this, "Zoom OAuth",
-            "Finish Zoom authorization in the browser, then click Join again.");
+            "Finish Zoom authorization in the browser. CoreVideo will continue "
+            "the pending join automatically.");
         return;
     }
 
@@ -966,8 +989,14 @@ void ZoomDock::on_join_clicked()
             self->m_join_in_progress.store(false, std::memory_order_release);
             if (!started) {
                 ZoomEngineClient::instance().set_state(MeetingState::Failed);
+                const std::string last_error =
+                    ZoomEngineClient::instance().last_error();
+                QString message =
+                    "Could not start Zoom authentication. Check the OBS log for details.";
+                if (!last_error.empty())
+                    message += "\n\n" + QString::fromStdString(last_error);
                 QMessageBox::warning(self, "Zoom Authentication",
-                    "Could not start Zoom authentication. Check the OBS log for details.");
+                    message);
             } else if (!joined) {
                 ZoomEngineClient::instance().set_state(MeetingState::Failed);
                 QMessageBox::warning(self, "Zoom Join",

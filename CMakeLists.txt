@@ -65,8 +65,14 @@ if(WIN32 AND NOT EXISTS "${ZOOM_SDK_BASE}/h/zoom_sdk.h")
     endif()
 endif()
 
-set(ZOOM_SDK_INCLUDE_DIR "${ZOOM_SDK_DIR}/h")
-set(ZOOM_SDK_LIBRARY "${ZOOM_SDK_DIR}/lib/sdk.lib")
+if(IS_ABSOLUTE "${ZOOM_SDK_DIR}")
+    set(ZOOM_SDK_ACTIVE_DIR "${ZOOM_SDK_DIR}")
+else()
+    set(ZOOM_SDK_ACTIVE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/${ZOOM_SDK_DIR}")
+endif()
+
+set(ZOOM_SDK_INCLUDE_DIR "${ZOOM_SDK_ACTIVE_DIR}/h")
+set(ZOOM_SDK_LIBRARY "${ZOOM_SDK_ACTIVE_DIR}/lib/sdk.lib")
 
 if(WIN32)
     if(EXISTS "${ZOOM_SDK_DIR}/bin/sdk.dll")

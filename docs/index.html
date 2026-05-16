@@ -786,7 +786,7 @@ sequenceDiagram
     Engine->>SDK: InitSDK() + SDKAuth({jwt})
     SDK-->>Engine: onAuthenticationReturn(SUCCESS)
     Engine-->>ZEC5: {"cmd":"auth_ok"}
-    Note over ZEC5: m_authenticated = true; send pending join if queued
+    Note over ZEC5: authenticated true, send pending join if queued
 
     opt Identity expires later
         SDK-->>Engine: onZoomIdentityExpired()
@@ -943,7 +943,7 @@ sequenceDiagram
     loop Live capture
         Engine-->>ZEC6: {"cmd":"frame","uuid":"…","w":W,"h":H}
         ZEC6-->>ZS3: on_engine_frame(w, h)
-        ZS3->>ZS3: read I420 from m_video_shm; HwVideoPipeline.process() if enabled
+        ZS3->>ZS3: read I420 from video shm, process with HwVideoPipeline if enabled
         ZS3->>OBS: obs_source_output_video()
         Engine-->>ZEC6: {"cmd":"audio","uuid":"…","byte_len":B}
         ZEC6-->>ZS3: on_engine_audio(byte_len)
@@ -1011,10 +1011,10 @@ flowchart LR
         SS["ScreenShare\nactive share feed"]
     end
 
-    P -->|subscribe(uuid, pid, isolate)| ZEC7["ZoomEngineClient"]
-    AS -->|subscribe(uuid, active_spk_pid, isolate)| ZEC7
-    SP -->|subscribe_spotlight(uuid, slot)| ZEC7
-    SS -->|subscribe_screenshare(uuid)| ZEC7
+    P -->|subscribe fixed participant| ZEC7["ZoomEngineClient"]
+    AS -->|subscribe active speaker| ZEC7
+    SP -->|subscribe spotlight slot| ZEC7
+    SS -->|subscribe screen share| ZEC7
 
     ZEC7 -->|JSON IPC| Engine2["ZoomObsEngine\n(resolves → SDK renderer)"]
 

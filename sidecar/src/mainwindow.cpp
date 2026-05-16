@@ -7,6 +7,7 @@
 #include "participant-panel.h"
 #include "scenes-panel.h"
 #include "macros-panel.h"
+#include "overlay-panel.h"
 #include "template-manager.h"
 #include "settings-page.h"
 #include "obs-connect-dialog.h"
@@ -129,10 +130,13 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
     connect(m_bus, &MEBus::previewChanged, this, [this](const Look &l) {
         m_sceneCanvas->setTemplate(l.tmpl);
         m_sceneCanvas->setParticipants(participantsForLook(l));
+        m_sceneCanvas->setOverlays(l.overlays);
+        if (m_overlayPanel) m_overlayPanel->setActiveOverlays(l.overlays);
     });
     connect(m_bus, &MEBus::programChanged, this, [this](const Look &l) {
         m_liveCanvas->setTemplate(l.tmpl);
         m_liveCanvas->setParticipants(participantsForLook(l));
+        m_liveCanvas->setOverlays(l.overlays);
     });
     // TAKE is the only path that pushes to OBS.
     connect(m_bus, &MEBus::tookProgram, this, [this](const Look &l) {
@@ -441,6 +445,31 @@ void MainWindow::buildRightPanel(QWidget *parent)
             this, &MainWindow::onMacroTriggered);
     m_pageMacros = m_rightStack->addWidget(m_macrosPanel);
 
+    // Page: Overlays
+    m_overlayPanel = new OverlayPanel;
+    connect(m_overlayPanel, &OverlayPanel::overlayRequested,
+            this, [this](const Overlay &ov) {
+        m_working.overlays.append(ov);
+        m_bus->stageLook(m_working);
+        m_overlayPanel->setActiveOverlays(m_working.overlays);
+        onObsLog(QStringLiteral("Overlay staged on PVW: %1").arg(Overlay::humanLabel(ov)));
+    });
+    connect(m_overlayPanel, &OverlayPanel::removeOverlayRequested,
+            this, [this](int idx) {
+        if (idx < 0 || idx >= m_working.overlays.size()) return;
+        m_working.overlays.remove(idx);
+        m_bus->stageLook(m_working);
+        m_overlayPanel->setActiveOverlays(m_working.overlays);
+    });
+    connect(m_overlayPanel, &OverlayPanel::clearOverlaysRequested,
+            this, [this]() {
+        m_working.overlays.clear();
+        m_bus->stageLook(m_working);
+        m_overlayPanel->setActiveOverlays(m_working.overlays);
+        onObsLog("Cleared PVW overlays.");
+    });
+    m_pageOverlays = m_rightStack->addWidget(m_overlayPanel);
+
     // Page 4: Settings
     m_settingsPage = new SettingsPage;
     connect(m_settingsPage, &SettingsPage::settingsChanged,
@@ -502,6 +531,8 @@ void MainWindow::onPageSelected(Sidebar::Page p)
         m_rightStack->setCurrentIndex(m_pageScenes);
         m_obsClient->requestSceneList();
         break;
+    case P::Overlays:
+        m_rightStack->setCurrentIndex(m_pageOverlays);   break;
     case P::Macros:
         m_rightStack->setCurrentIndex(m_pageMacros);     break;
     case P::Settings:
@@ -547,6 +578,8 @@ void MainWindow::onLookSelected(const Look &look)
 void MainWindow::onThemeSelected(const ShowTheme &theme)
 {
     qApp->setStyleSheet(sidecar_stylesheet(&theme));
+    if (m_liveCanvas)  m_liveCanvas->setAccent(theme.accent);
+    if (m_sceneCanvas) m_sceneCanvas->setAccent(theme.accent);
     onObsLog(QStringLiteral("Theme applied: %1.").arg(theme.name));
 }
 
@@ -826,6 +859,22 @@ void MainWindow::populateCommandPalette()
                    [this]() { onTake(); });
     cp->addCommand("SWAP buses (PGM ⇄ PVW)", "Switcher",
                    [this]() { onSwapBuses(); });
+
+    // Overlays — fire / clear on PVW
+    for (const auto &ov : Overlay::builtInPresets()) {
+        const Overlay snap = ov;
+        cp->addCommand(QString("Stage overlay: %1").arg(Overlay::humanLabel(ov)),
+                       "Overlay", [this, snap]() {
+            m_working.overlays.append(snap);
+            m_bus->stageLook(m_working);
+            if (m_overlayPanel) m_overlayPanel->setActiveOverlays(m_working.overlays);
+        });
+    }
+    cp->addCommand("Clear PVW overlays", "Overlay", [this]() {
+        m_working.overlays.clear();
+        m_bus->stageLook(m_working);
+        if (m_overlayPanel) m_overlayPanel->setActiveOverlays(m_working.overlays);
+    });
     cp->addCommand("Re-apply current PGM to OBS", "OBS",
                    [this]() { onApplyLayout(); });
 

@@ -4,5 +4,11 @@
   "category": "News",
   "description": "Anchor solo, clean blue",
   "template": "1-up",
-  "theme": "midnight"
+  "theme": "midnight",
+  "overlays": [
+    { "type": "LowerThird", "text1": "Alex Rivera", "text2": "Anchor",
+      "x": 0.04, "y": 0.78, "w": 0.50, "h": 0.12 },
+    { "type": "Bug", "text1": "ON AIR", "accent": "#2979ff",
+      "x": 0.04, "y": 0.04, "w": 0.08, "h": 0.05 }
+  ]
 }

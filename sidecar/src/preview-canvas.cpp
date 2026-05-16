@@ -36,6 +36,20 @@ void PreviewCanvas::setParticipants(const QVector<Participant> &participants)
     update();
 }
 
+void PreviewCanvas::setOverlays(const QVector<Overlay> &overlays)
+{
+    m_overlays = overlays;
+    update();
+}
+
+void PreviewCanvas::setAccent(const QColor &c)
+{
+    if (c.isValid()) {
+        m_accent = c;
+        update();
+    }
+}
+
 // ── Drag-and-drop ─────────────────────────────────────────────────────────────
 
 int PreviewCanvas::slotAtPoint(QPoint pt) const
@@ -131,6 +145,182 @@ void PreviewCanvas::paintEvent(QPaintEvent *)
 
     for (int i = 0; i < m_tmpl.slotList.size(); ++i)
         drawSlot(p, slotRect(m_tmpl.slotList[i]), i);
+
+    // Overlays sit on top of the slot composition. Canvas rect = full
+    // widget rect (overlay coords are 0..1 of the program output area).
+    const QRectF canvas(0, 0, width(), height());
+    for (const auto &ov : m_overlays)
+        drawOverlay(p, ov, canvas);
+}
+
+void PreviewCanvas::drawOverlay(QPainter &p, const Overlay &ov,
+                                const QRectF &canvas) const
+{
+    const QColor accent = ov.accent.isValid() ? ov.accent : m_accent;
+    const QRectF r(canvas.left() + ov.x * canvas.width(),
+                   canvas.top()  + ov.y * canvas.height(),
+                   ov.w * canvas.width(),
+                   ov.h * canvas.height());
+    if (r.width() < 2 || r.height() < 2) return;
+
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing);
+
+    switch (ov.type) {
+    case Overlay::LowerThird: {
+        // Two-band bar: accent stripe on the left, dark body on the right.
+        const float radius = std::min(6.0, r.height() * 0.25);
+        const float stripeW = std::min(8.0, r.width() * 0.04);
+
+        QPainterPath body;
+        body.addRoundedRect(r, radius, radius);
+        p.fillPath(body, QColor(0x0a, 0x0a, 0x12, 230));
+        p.setPen(QPen(QColor(255, 255, 255, 30), 1));
+        p.drawPath(body);
+
+        // Accent stripe
+        p.fillRect(QRectF(r.left() + 2, r.top() + 2,
+                          stripeW, r.height() - 4), accent);
+
+        const QRectF text = r.adjusted(stripeW + 12, 6, -10, -6);
+        p.setPen(Qt::white);
+        QFont f = p.font();
+        f.setPointSizeF(std::max(9.0, r.height() * 0.32));
+        f.setWeight(QFont::Black);
+        p.setFont(f);
+        p.drawText(QRectF(text.left(), text.top(),
+                          text.width(), text.height() * 0.6),
+                   Qt::AlignLeft | Qt::AlignVCenter, ov.text1);
+
+        if (!ov.text2.isEmpty()) {
+            f.setPointSizeF(std::max(7.5, r.height() * 0.22));
+            f.setWeight(QFont::Normal);
+            p.setFont(f);
+            p.setPen(QColor(0xc0, 0xc0, 0xe0));
+            p.drawText(QRectF(text.left(), text.top() + text.height() * 0.55,
+                              text.width(), text.height() * 0.45),
+                       Qt::AlignLeft | Qt::AlignVCenter, ov.text2);
+        }
+        break;
+    }
+
+    case Overlay::Bug: {
+        // Pill-shaped bug with accent fill.
+        QPainterPath pill;
+        const float radius = r.height() * 0.5;
+        pill.addRoundedRect(r, radius, radius);
+        p.fillPath(pill, accent);
+        p.setPen(QPen(QColor(0, 0, 0, 80), 1));
+        p.drawPath(pill);
+
+        p.setPen(Qt::white);
+        QFont f = p.font();
+        f.setPointSizeF(std::max(8.0, r.height() * 0.5));
+        f.setWeight(QFont::Black);
+        p.setFont(f);
+        p.drawText(r, Qt::AlignCenter, ov.text1);
+        break;
+    }
+
+    case Overlay::Ticker: {
+        // Full-width band: accent label on the left, scrolling text body.
+        p.fillRect(r, QColor(0x08, 0x08, 0x12, 235));
+
+        QFont f = p.font();
+        f.setPointSizeF(std::max(8.0, r.height() * 0.55));
+        f.setWeight(QFont::Black);
+        p.setFont(f);
+
+        // Static "LIVE"-style chip on the left (uses text up to em-dash)
+        QString chip = ov.text1;
+        QString body = QString();
+        const int sep = ov.text1.indexOf(" — ");
+        if (sep > 0) {
+            chip = ov.text1.left(sep);
+            body = ov.text1.mid(sep + 3);
+        }
+
+        const QFontMetrics fm(f);
+        const int chipW = fm.horizontalAdvance(chip) + 16;
+        const QRectF chipR(r.left(), r.top(), chipW, r.height());
+        p.fillRect(chipR, accent);
+        p.setPen(Qt::white);
+        p.drawText(chipR, Qt::AlignCenter, chip);
+
+        if (!body.isEmpty()) {
+            p.setPen(QColor(0xe0, 0xe0, 0xf0));
+            f.setWeight(QFont::DemiBold);
+            p.setFont(f);
+            p.drawText(QRectF(chipR.right() + 12, r.top(),
+                              r.width() - chipR.width() - 16, r.height()),
+                       Qt::AlignLeft | Qt::AlignVCenter, body);
+        }
+        break;
+    }
+
+    case Overlay::TitleCard: {
+        // Bold accent block with stacked text.
+        p.fillRect(r, QColor(0x06, 0x06, 0x0c, 240));
+        // Accent ribbon on the left third
+        const QRectF ribbon(r.left(), r.top(), r.width() * 0.20, r.height());
+        p.fillRect(ribbon, accent);
+
+        const QRectF text = r.adjusted(ribbon.width() + 16, 8, -16, -8);
+
+        p.setPen(Qt::white);
+        QFont f = p.font();
+        f.setPointSizeF(std::max(12.0, r.height() * 0.42));
+        f.setWeight(QFont::Black);
+        f.setLetterSpacing(QFont::AbsoluteSpacing, 1.5);
+        p.setFont(f);
+        p.drawText(QRectF(text.left(), text.top(),
+                          text.width(), text.height() * 0.58),
+                   Qt::AlignLeft | Qt::AlignVCenter, ov.text1.toUpper());
+
+        if (!ov.text2.isEmpty()) {
+            f.setPointSizeF(std::max(8.5, r.height() * 0.22));
+            f.setWeight(QFont::Normal);
+            f.setLetterSpacing(QFont::AbsoluteSpacing, 0.5);
+            p.setFont(f);
+            p.setPen(QColor(0xd0, 0xd0, 0xe8));
+            p.drawText(QRectF(text.left(), text.top() + text.height() * 0.55,
+                              text.width(), text.height() * 0.45),
+                       Qt::AlignLeft | Qt::AlignVCenter, ov.text2);
+        }
+        break;
+    }
+
+    case Overlay::Bumper: {
+        // Center-screen card with large stacked headline.
+        p.fillRect(r, QColor(0x04, 0x04, 0x0a, 230));
+        p.setPen(QPen(accent, 2));
+        p.drawRect(r.adjusted(1, 1, -1, -1));
+
+        p.setPen(Qt::white);
+        QFont f = p.font();
+        f.setPointSizeF(std::max(14.0, r.height() * 0.30));
+        f.setWeight(QFont::Black);
+        f.setLetterSpacing(QFont::AbsoluteSpacing, 2.0);
+        p.setFont(f);
+        p.drawText(QRectF(r.left(), r.top() + r.height() * 0.20,
+                          r.width(), r.height() * 0.40),
+                   Qt::AlignCenter, ov.text1.toUpper());
+
+        if (!ov.text2.isEmpty()) {
+            f.setPointSizeF(std::max(10.0, r.height() * 0.16));
+            f.setWeight(QFont::Normal);
+            f.setLetterSpacing(QFont::AbsoluteSpacing, 0.5);
+            p.setFont(f);
+            p.setPen(QColor(0xd0, 0xd0, 0xe8));
+            p.drawText(QRectF(r.left(), r.top() + r.height() * 0.58,
+                              r.width(), r.height() * 0.30),
+                       Qt::AlignCenter, ov.text2);
+        }
+        break;
+    }
+    }
+
+    p.restore();
 }
 
 void PreviewCanvas::drawSlot(QPainter &p, const QRectF &rect, int idx) const

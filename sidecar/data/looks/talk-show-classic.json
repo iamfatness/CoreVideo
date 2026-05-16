@@ -4,5 +4,9 @@
   "category": "Talk Show",
   "description": "Host with three-guest strip",
   "template": "talk-show",
-  "theme": "midnight"
+  "theme": "midnight",
+  "overlays": [
+    { "type": "LowerThird", "text1": "Sam Chen", "text2": "Host",
+      "x": 0.04, "y": 0.62, "w": 0.45, "h": 0.08 }
+  ]
 }

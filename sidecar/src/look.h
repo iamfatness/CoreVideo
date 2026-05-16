@@ -1,5 +1,6 @@
 #pragma once
 #include "layout-template.h"
+#include "overlay.h"
 #include <QString>
 #include <QVector>
 #include <QJsonObject>
@@ -24,6 +25,7 @@ struct Look {
     QString               themeId;      // resolves via ShowTheme::builtIns (optional)
     LayoutTemplate        tmpl;
     QVector<SlotAssignment> slots;
+    QVector<Overlay>      overlays;
 
     bool isValid() const { return tmpl.isValid(); }
 
@@ -52,6 +54,9 @@ struct Look {
             l.slots.append({ o.value("slotIndex").toInt(-1),
                              o.value("participantId").toInt(-1) });
         }
+        const auto ov = obj.value("overlays").toArray();
+        for (const auto &v : ov)
+            l.overlays.append(Overlay::fromJson(v.toObject()));
         return l;
     }
 };

@@ -1,5 +1,6 @@
 #pragma once
 #include "layout-template.h"
+#include "overlay.h"
 #include <QWidget>
 #include <QVector>
 #include <QColor>
@@ -23,6 +24,10 @@ public:
 
     void setTemplate(const LayoutTemplate &tmpl);
     void setParticipants(const QVector<Participant> &participants);
+    void setOverlays(const QVector<Overlay> &overlays);
+    // Accent color used when an overlay doesn't specify one — usually the
+    // active theme accent. Defaults to a neutral blue.
+    void setAccent(const QColor &c);
 
 signals:
     void slotAssigned(int slotIndex, int participantId);
@@ -40,6 +45,8 @@ protected:
 private:
     LayoutTemplate       m_tmpl;
     QVector<Participant> m_parts;
+    QVector<Overlay>     m_overlays;
+    QColor               m_accent = QColor(0x29, 0x79, 0xff);
     int                  m_hoveredSlot = -1;
     int                  m_pressedSlot = -1;
     QPoint               m_pressPos;
@@ -49,4 +56,5 @@ private:
     void   drawAvatar(QPainter &p, QPointF center, float r,
                       const Participant &part) const;
     QRectF slotRect(const TemplateSlot &s) const;
+    void   drawOverlay(QPainter &p, const Overlay &ov, const QRectF &canvas) const;
 };

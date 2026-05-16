@@ -63,6 +63,7 @@ Sidebar::Sidebar(QWidget *parent) : QWidget(parent)
         {"  ⊟", "Looks",             Page::Templates},
         {"  ◉", "Show Themes",       Page::Themes},
         {"  ◎", "Participants",      Page::Participants},
+        {"  ▼", "Overlays",          Page::Overlays},
         {"  ⚡", "Macros",           Page::Macros},
         {"  ⚙", "Settings",         Page::Settings},
     };

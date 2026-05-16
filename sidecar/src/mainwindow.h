@@ -20,6 +20,7 @@ class ThemePanel;
 class ScenesPanel;
 class MacrosPanel;
 class SettingsPage;
+class OverlayPanel;
 class QLabel;
 class QPushButton;
 class QPlainTextEdit;
@@ -111,6 +112,7 @@ private:
     ScenesPanel      *m_scenesPanel      = nullptr;
     MacrosPanel      *m_macrosPanel      = nullptr;
     SettingsPage     *m_settingsPage     = nullptr;
+    OverlayPanel     *m_overlayPanel     = nullptr;
 
     // Right panel page indices
     int m_pageTemplates = 0;
@@ -118,6 +120,7 @@ private:
     int m_pageScenes    = 0;
     int m_pageMacros    = 0;
     int m_pageSettings  = 0;
+    int m_pageOverlays  = 0;
 
     // Log
     QDockWidget    *m_logDock = nullptr;

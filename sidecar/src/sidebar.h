@@ -7,7 +7,7 @@ class QPushButton;
 class Sidebar : public QWidget {
     Q_OBJECT
 public:
-    enum class Page { Scenes, Templates, Themes, Participants, Macros, Settings };
+    enum class Page { Scenes, Templates, Themes, Participants, Overlays, Macros, Settings };
 
     explicit Sidebar(QWidget *parent = nullptr);
     void setActivePage(Page p);

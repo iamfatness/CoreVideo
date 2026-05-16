@@ -4,5 +4,11 @@
   "category": "News",
   "description": "Full-frame host, crimson urgency",
   "template": "1-up",
-  "theme": "crimson"
+  "theme": "crimson",
+  "overlays": [
+    { "type": "TitleCard", "text1": "BREAKING", "text2": "Developing Story",
+      "accent": "#e03040", "x": 0.0, "y": 0.82, "w": 1.0, "h": 0.14 },
+    { "type": "Bug", "text1": "● LIVE", "accent": "#e03040",
+      "x": 0.91, "y": 0.04, "w": 0.07, "h": 0.05 }
+  ]
 }

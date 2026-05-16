@@ -62,7 +62,7 @@ jobs:
 
       - name: Upload Flawfinder SARIF
         if: hashFiles('security-reports/flawfinder.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: security-reports/flawfinder.sarif
           category: flawfinder

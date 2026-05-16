@@ -1,5 +1,6 @@
 #pragma once
 #include "layout-template.h"
+#include "look.h"
 #include "overlay.h"
 #include <QWidget>
 #include <QVector>
@@ -25,6 +26,8 @@ public:
     void setTemplate(const LayoutTemplate &tmpl);
     void setParticipants(const QVector<Participant> &participants);
     void setOverlays(const QVector<Overlay> &overlays);
+    void setBackgroundImage(const QString &path);
+    void setTileStyle(const TileStyle &style);
     // Accent color used when an overlay doesn't specify one — usually the
     // active theme accent. Defaults to a neutral blue.
     void setAccent(const QColor &c);
@@ -48,6 +51,9 @@ private:
     LayoutTemplate       m_tmpl;
     QVector<Participant> m_parts;
     QVector<Overlay>     m_overlays;
+    QString              m_backgroundImagePath;
+    QPixmap              m_backgroundImage;
+    TileStyle            m_tileStyle;
     QColor               m_accent = QColor(0x29, 0x79, 0xff);
     float                m_opacity = 1.0f;
     int                  m_hoveredSlot = -1;

@@ -9,13 +9,13 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QApplication>
+#include <QPixmap>
 #include <algorithm>
 #include <cmath>
 
 static const QColor kSlotBg   {0x22, 0x22, 0x30};
 static const QColor kSlotBdr  {0x32, 0x32, 0x48};
 static const QColor kNameBg   {0x00, 0x00, 0x00, 160};
-static const float  kGap = 4.0f;
 static const double kProgramAspect = 16.0 / 9.0;
 
 PreviewCanvas::PreviewCanvas(QWidget *parent)
@@ -44,6 +44,20 @@ void PreviewCanvas::setOverlays(const QVector<Overlay> &overlays)
     update();
 }
 
+void PreviewCanvas::setBackgroundImage(const QString &path)
+{
+    if (m_backgroundImagePath == path) return;
+    m_backgroundImagePath = path;
+    m_backgroundImage = path.isEmpty() ? QPixmap() : QPixmap(path);
+    update();
+}
+
+void PreviewCanvas::setTileStyle(const TileStyle &style)
+{
+    m_tileStyle = style;
+    update();
+}
+
 void PreviewCanvas::setAccent(const QColor &c)
 {
     if (c.isValid()) {
@@ -66,7 +80,7 @@ int PreviewCanvas::slotAtPoint(QPoint pt) const
 {
     for (int i = 0; i < m_tmpl.slotList.size(); ++i) {
         if (slotRect(m_tmpl.slotList[i]).contains(pt))
-            return i;
+            return m_tmpl.slotList[i].index;
     }
     return -1;
 }
@@ -150,13 +164,11 @@ QRectF PreviewCanvas::canvasRect() const
 QRectF PreviewCanvas::slotRect(const TemplateSlot &s) const
 {
     const QRectF canvas = canvasRect();
-    const float W = canvas.width()  - kGap;
-    const float H = canvas.height() - kGap;
     return {
-        canvas.left() + kGap / 2 + s.x * W,
-        canvas.top()  + kGap / 2 + s.y * H,
-        s.width  * W - kGap,
-        s.height * H - kGap
+        canvas.left() + s.x * canvas.width(),
+        canvas.top()  + s.y * canvas.height(),
+        s.width  * canvas.width(),
+        s.height * canvas.height()
     };
 }
 
@@ -166,7 +178,23 @@ void PreviewCanvas::paintEvent(QPaintEvent *)
     p.setRenderHint(QPainter::Antialiasing);
     p.fillRect(rect(), QColor(0x0d, 0x0d, 0x12));
     const QRectF canvas = canvasRect();
-    p.fillRect(canvas, QColor(0x10, 0x10, 0x18));
+    const QColor canvasColor = m_tileStyle.canvasColor.isValid()
+        ? m_tileStyle.canvasColor
+        : QColor(0x10, 0x10, 0x18);
+    p.fillRect(canvas, canvasColor);
+    if (!m_backgroundImage.isNull()) {
+        p.save();
+        p.setClipRect(canvas);
+        const QSizeF srcSize = m_backgroundImage.size();
+        const double scale = std::max(canvas.width() / srcSize.width(),
+                                      canvas.height() / srcSize.height());
+        const QSizeF drawSize(srcSize.width() * scale, srcSize.height() * scale);
+        const QRectF target(canvas.center().x() - drawSize.width() * 0.5,
+                            canvas.center().y() - drawSize.height() * 0.5,
+                            drawSize.width(), drawSize.height());
+        p.drawPixmap(target, m_backgroundImage, QRectF(QPointF(0, 0), srcSize));
+        p.restore();
+    }
     p.setPen(QPen(QColor(0x2a, 0x2a, 0x3a), 1));
     p.drawRect(canvas.adjusted(0.5, 0.5, -0.5, -0.5));
 
@@ -177,7 +205,7 @@ void PreviewCanvas::paintEvent(QPaintEvent *)
     }
 
     for (int i = 0; i < m_tmpl.slotList.size(); ++i)
-        drawSlot(p, slotRect(m_tmpl.slotList[i]), i);
+        drawSlot(p, slotRect(m_tmpl.slotList[i]), m_tmpl.slotList[i].index);
 
     // Overlays sit on top of the 16:9 program canvas. Overlay coords are
     // normalized 0..1 of the program output area.
@@ -369,8 +397,16 @@ void PreviewCanvas::drawSlot(QPainter &p, const QRectF &rect, int idx) const
 
     // Slot background
     QPainterPath path;
-    path.addRoundedRect(rect, 10, 10);
-    p.fillPath(path, kSlotBg);
+    const double radius = std::max(0.0, m_tileStyle.cornerRadius);
+    path.addRoundedRect(rect, radius, radius);
+    if (m_tileStyle.dropShadow) {
+        QPainterPath shadow;
+        shadow.addRoundedRect(rect.translated(5, 6), radius, radius);
+        p.fillPath(shadow, QColor(0, 0, 0, 120));
+    }
+    QColor slotBg = kSlotBg;
+    slotBg.setAlphaF(std::clamp(m_tileStyle.opacity, 0.1, 1.0));
+    p.fillPath(path, slotBg);
 
     // Border: drop-target highlight > talking ring > normal
     if (idx == m_hoveredSlot) {
@@ -380,7 +416,10 @@ void PreviewCanvas::drawSlot(QPainter &p, const QRectF &rect, int idx) const
         p.setPen(QPen(QColor(0x20, 0x90, 0xff), 2.5));
         p.drawPath(path);
     } else {
-        p.setPen(QPen(kSlotBdr, 1));
+        const QColor border = m_tileStyle.borderColor.isValid()
+            ? m_tileStyle.borderColor
+            : kSlotBdr;
+        p.setPen(QPen(border, std::max(0.0, m_tileStyle.borderWidth)));
         p.drawPath(path);
     }
 
@@ -390,7 +429,7 @@ void PreviewCanvas::drawSlot(QPainter &p, const QRectF &rect, int idx) const
     drawAvatar(p, center, avatarR, part);
 
     // Name + resize strip at bottom
-    if (hasPart && !part.name.isEmpty()) {
+    if (m_tileStyle.showNameTag && hasPart && !part.name.isEmpty()) {
         const float stripH = 34;
         const QRectF strip{rect.left(), rect.bottom() - stripH,
                            rect.width(), stripH};

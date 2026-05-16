@@ -5,8 +5,11 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPushButton>
+#include <QPixmap>
 #include <QScrollArea>
 #include <QVBoxLayout>
+#include <algorithm>
 
 // ── LookCard ──────────────────────────────────────────────────────────────────
 
@@ -47,16 +50,45 @@ void LookCard::paintEvent(QPaintEvent *)
     p.setPen(QPen(border, m_selected ? 2.0 : 1.0));
     p.drawPath(card);
 
-    // Schematic on the left
+    // 16:9 schematic on the left. The full PVW/PGM canvases render the
+    // operator preview; cards intentionally stay compact navigation items.
     const QRectF diag(8, 8, 88, height() - 16);
+    const double aspect = 16.0 / 9.0;
+    double diagW = diag.width();
+    double diagH = diagW / aspect;
+    if (diagH > diag.height()) {
+        diagH = diag.height();
+        diagW = diagH * aspect;
+    }
+    const QRectF program(diag.left(), diag.center().y() - diagH * 0.5, diagW, diagH);
     p.fillRect(diag, QColor(0x08, 0x08, 0x10));
+    const QColor canvasColor = m_look.tileStyle.canvasColor.isValid()
+        ? m_look.tileStyle.canvasColor
+        : QColor(0x10, 0x10, 0x18);
+    p.fillRect(program, canvasColor);
+    if (!m_look.backgroundImagePath.isEmpty()) {
+        const QPixmap bg(m_look.backgroundImagePath);
+        if (!bg.isNull()) {
+            p.save();
+            p.setClipRect(program);
+            const QSizeF src = bg.size();
+            const double scale = std::max(program.width() / src.width(),
+                                          program.height() / src.height());
+            const QSizeF draw(src.width() * scale, src.height() * scale);
+            const QRectF target(program.center().x() - draw.width() * 0.5,
+                                program.center().y() - draw.height() * 0.5,
+                                draw.width(), draw.height());
+            p.drawPixmap(target, bg, QRectF(QPointF(0, 0), src));
+            p.restore();
+        }
+    }
     const float gap = 1.5f;
     for (const auto &slot : m_look.tmpl.slotList) {
         QRectF r(
-            diag.left() + slot.x * diag.width()  + gap,
-            diag.top()  + slot.y * diag.height() + gap,
-            slot.width  * diag.width()  - gap * 2,
-            slot.height * diag.height() - gap * 2
+            program.left() + slot.x * program.width()  + gap,
+            program.top()  + slot.y * program.height() + gap,
+            slot.width  * program.width()  - gap * 2,
+            slot.height * program.height() - gap * 2
         );
         QPainterPath sp;
         sp.addRoundedRect(r, 2, 2);
@@ -115,6 +147,27 @@ LookPanel::LookPanel(QWidget *parent) : QWidget(parent)
     hdr->setObjectName("sectionHeader");
     hdr->setStyleSheet("QLabel { padding: 10px 12px 6px 12px; }");
     vl->addWidget(hdr);
+
+    auto *tools = new QWidget(this);
+    auto *toolRow = new QHBoxLayout(tools);
+    toolRow->setContentsMargins(10, 0, 10, 8);
+    toolRow->setSpacing(6);
+    auto *newBtn = new QPushButton("New Look", tools);
+    auto *designBtn = new QPushButton("Design", tools);
+    auto *bgBtn = new QPushButton("Background", tools);
+    newBtn->setObjectName("toolBtn");
+    designBtn->setObjectName("toolBtn");
+    bgBtn->setObjectName("toolBtn");
+    newBtn->setFixedHeight(30);
+    designBtn->setFixedHeight(30);
+    bgBtn->setFixedHeight(30);
+    toolRow->addWidget(newBtn);
+    toolRow->addWidget(designBtn);
+    toolRow->addWidget(bgBtn);
+    vl->addWidget(tools);
+    connect(newBtn, &QPushButton::clicked, this, &LookPanel::createLookRequested);
+    connect(designBtn, &QPushButton::clicked, this, &LookPanel::designLookRequested);
+    connect(bgBtn, &QPushButton::clicked, this, &LookPanel::setBackgroundRequested);
 
     auto *scroll = new QScrollArea(this);
     scroll->setWidgetResizable(true);

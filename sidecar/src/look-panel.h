@@ -18,6 +18,9 @@ public:
 
 signals:
     void lookSelected(const Look &look);
+    void createLookRequested();
+    void setBackgroundRequested();
+    void designLookRequested();
 
 private:
     QString m_selectedId;

@@ -1,4 +1,5 @@
 #pragma once
+#include "look.h"
 #include "layout-template.h"
 #include "macro.h"
 #include "overlay.h"
@@ -112,6 +113,9 @@ public:
                            const QStringList    &sourceNames,
                            double canvasW, double canvasH,
                            const QVector<Overlay> &overlays = {},
+                           const QString &backgroundImagePath = {},
+                           const TileStyle &tileStyle = {},
+                           const QStringList &slotLabels = {},
                            bool makeProgram = false);
     void ensureCoreVideoSources(const QString &sceneName,
                                 const QStringList &sourceNames);
@@ -120,6 +124,17 @@ public:
     void applyOverlays(const QString &sceneName,
                        const QVector<Overlay> &overlays,
                        double canvasW, double canvasH);
+    void applyBackgroundImage(const QString &sceneName,
+                              const QString &imagePath,
+                              double canvasW, double canvasH);
+    void applyCanvasColor(const QString &sceneName,
+                          const TileStyle &tileStyle,
+                          double canvasW, double canvasH);
+    void applyTileDecorations(const QString &sceneName,
+                              const LayoutTemplate &tmpl,
+                              const TileStyle &tileStyle,
+                              const QStringList &slotLabels,
+                              double canvasW, double canvasH);
 
     // Apply a flat applied-template JSON in the format:
     //   { "name": "...", "scene": "...", "items": [

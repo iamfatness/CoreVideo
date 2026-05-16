@@ -3,10 +3,57 @@
 #include <QJsonDocument>
 #include <QCryptographicHash>
 #include <QDebug>
+#include <QDir>
+#include <QFileInfo>
 #include <QRegularExpression>
 #include <memory>
 
 static const QString kCoreVideoSourcesScene = QStringLiteral("CoreVideo Sources");
+
+static QString coreVideoBackgroundSourceName(const QString &sceneName)
+{
+    QString safe = sceneName;
+    safe.replace(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|]")), QStringLiteral("-"));
+    safe.replace(QRegularExpression(QStringLiteral("\\s+")), QStringLiteral(" "));
+    return QStringLiteral("CoreVideo Background - %1").arg(safe.left(72));
+}
+
+static QString coreVideoCanvasSourceName(const QString &sceneName)
+{
+    QString safe = sceneName;
+    safe.replace(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|]")), QStringLiteral("-"));
+    safe.replace(QRegularExpression(QStringLiteral("\\s+")), QStringLiteral(" "));
+    return QStringLiteral("CoreVideo Canvas - %1").arg(safe.left(72));
+}
+
+static QString coreVideoBorderSourceName(const QString &sceneName, int slotIndex)
+{
+    QString safe = sceneName;
+    safe.replace(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|]")), QStringLiteral("-"));
+    safe.replace(QRegularExpression(QStringLiteral("\\s+")), QStringLiteral(" "));
+    return QStringLiteral("CoreVideo Border - %1 - Slot %2")
+        .arg(safe.left(58))
+        .arg(slotIndex + 1);
+}
+
+static QString coreVideoNameTagSourceName(const QString &sceneName, int slotIndex)
+{
+    QString safe = sceneName;
+    safe.replace(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|]")), QStringLiteral("-"));
+    safe.replace(QRegularExpression(QStringLiteral("\\s+")), QStringLiteral(" "));
+    return QStringLiteral("CoreVideo Name - %1 - Slot %2")
+        .arg(safe.left(60))
+        .arg(slotIndex + 1);
+}
+
+static double obsColor(const QColor &color)
+{
+    const QColor c = color.isValid() ? color : QColor("#101018");
+    return double((0xffu << 24)
+                  | (uint(c.red()) << 16)
+                  | (uint(c.green()) << 8)
+                  | uint(c.blue()));
+}
 
 static QString coreVideoSlotSceneName(int index)
 {
@@ -583,6 +630,30 @@ void OBSClient::applyLayout(const QString        &sceneName,
     QJsonArray requests;
     int matched = 0;
     QList<int> usedItemIds;
+    QSet<QString> desiredSources;
+    for (const QString &source : sourceNames) {
+        if (!source.trimmed().isEmpty())
+            desiredSources.insert(source.trimmed());
+    }
+
+    const auto existingItems = m_sceneItems.value(sceneName);
+    for (const SceneItem &item : existingItems) {
+        if (!item.sourceName.startsWith(QStringLiteral("CoreVideo Slot ")))
+            continue;
+        const bool shouldEnable = desiredSources.contains(item.sourceName);
+        if (item.enabled == shouldEnable)
+            continue;
+        requests.append(QJsonObject{
+            {"requestType", "SetSceneItemEnabled"},
+            {"requestId",   nextId()},
+            {"requestData", QJsonObject{
+                {"sceneName",        sceneName},
+                {"sceneItemId",      item.sceneItemId},
+                {"sceneItemEnabled", shouldEnable},
+            }},
+        });
+    }
+
     for (int i = 0; i < tmpl.slotList.size(); ++i) {
         const TemplateSlot &slot = tmpl.slotList[i];
         const int sourceIndex = (slot.index >= 0 && slot.index < sourceNames.size())
@@ -609,6 +680,16 @@ void OBSClient::applyLayout(const QString        &sceneName,
         }
         ++matched;
         usedItemIds.append(itemId);
+
+        requests.append(QJsonObject{
+            {"requestType", "SetSceneItemEnabled"},
+            {"requestId",   nextId()},
+            {"requestData", QJsonObject{
+                {"sceneName",        sceneName},
+                {"sceneItemId",      itemId},
+                {"sceneItemEnabled", true},
+            }},
+        });
 
         const QJsonObject transform{
             {"positionX",    slot.x      * canvasW},
@@ -649,6 +730,9 @@ void OBSClient::loadSceneTemplate(const QString        &sceneName,
                                   const QStringList    &sourceNames,
                                   double canvasW, double canvasH,
                                   const QVector<Overlay> &overlays,
+                                  const QString &backgroundImagePath,
+                                  const TileStyle &tileStyle,
+                                  const QStringList &slotLabels,
                                   bool makeProgram)
 {
     if (m_state != State::Connected) return;
@@ -715,8 +799,20 @@ void OBSClient::loadSceneTemplate(const QString        &sceneName,
     QTimer::singleShot(1300, this, [this, sceneName]() {
         requestSceneItems(sceneName);
     });
+    QTimer::singleShot(1750, this, [this, sceneName, tileStyle, canvasW, canvasH]() {
+        applyCanvasColor(sceneName, tileStyle, canvasW, canvasH);
+    });
     QTimer::singleShot(1800, this, [this, sceneName, tmpl, slotSceneNames, canvasW, canvasH, overlays, makeProgram]() {
+        Q_UNUSED(makeProgram);
         applyLayout(sceneName, tmpl, slotSceneNames, canvasW, canvasH);
+    });
+    QTimer::singleShot(1900, this, [this, sceneName, backgroundImagePath, canvasW, canvasH]() {
+        applyBackgroundImage(sceneName, backgroundImagePath, canvasW, canvasH);
+    });
+    QTimer::singleShot(2000, this, [this, sceneName, tmpl, tileStyle, slotLabels, canvasW, canvasH]() {
+        applyTileDecorations(sceneName, tmpl, tileStyle, slotLabels, canvasW, canvasH);
+    });
+    QTimer::singleShot(2100, this, [this, sceneName, overlays, canvasW, canvasH, makeProgram]() {
         applyOverlays(sceneName, overlays, canvasW, canvasH);
         if (makeProgram)
             setCurrentScene(sceneName);
@@ -981,6 +1077,402 @@ void OBSClient::removeStaleCoreVideoDuplicates(const QStringList &participantSou
     emit log(QStringLiteral("Repair: removing %1 stale CoreVideo duplicate(s).")
                  .arg(requests.size()));
     QTimer::singleShot(800, this, [this]() { refreshInventory(); });
+}
+
+void OBSClient::applyBackgroundImage(const QString &sceneName,
+                                     const QString &imagePath,
+                                     double canvasW, double canvasH)
+{
+    if (m_state != State::Connected || sceneName.isEmpty() || imagePath.trimmed().isEmpty())
+        return;
+
+    const QFileInfo info(imagePath);
+    if (!info.exists() || !info.isFile()) {
+        emit log(QStringLiteral("Background skipped: file not found '%1'.").arg(imagePath));
+        return;
+    }
+
+    const QString sourceName = coreVideoBackgroundSourceName(sceneName);
+    const QString nativePath = QDir::toNativeSeparators(info.absoluteFilePath());
+    const QJsonObject inputSettings{{"file", nativePath}};
+
+    QJsonArray requests;
+    enqueueCreateInputIfMissing(requests,
+                                sceneName,
+                                sourceName,
+                                QStringLiteral("image_source"),
+                                inputSettings);
+    requests.append(QJsonObject{
+        {"requestType", "SetInputSettings"},
+        {"requestId",   nextId()},
+        {"requestData", QJsonObject{
+            {"inputName",     sourceName},
+            {"inputSettings", inputSettings},
+            {"overlay",       true},
+        }},
+    });
+
+    if (!requests.isEmpty()) {
+        sendOp(8, QJsonObject{
+            {"requestId",     nextId()},
+            {"haltOnFailure", false},
+            {"requests",      requests},
+        });
+        m_itemCache.remove(sceneName);
+        m_sceneItems.remove(sceneName);
+    }
+
+    QTimer::singleShot(500, this, [this, sceneName]() {
+        requestSceneItems(sceneName);
+    });
+    QTimer::singleShot(1000, this, [this, sceneName, sourceName, canvasW, canvasH]() {
+        if (!m_itemCache.contains(sceneName)) {
+            requestSceneItems(sceneName);
+            return;
+        }
+
+        QJsonArray bgRequests;
+        int itemId = resolveItemId(sceneName, sourceName);
+        if (itemId < 0) {
+            bgRequests.append(QJsonObject{
+                {"requestType", "CreateSceneItem"},
+                {"requestId",   nextId()},
+                {"requestData", QJsonObject{
+                    {"sceneName",        sceneName},
+                    {"sourceName",       sourceName},
+                    {"sceneItemEnabled", true},
+                }},
+            });
+            QTimer::singleShot(650, this, [this, sceneName, sourceName, canvasW, canvasH]() {
+                requestSceneItems(sceneName);
+                const int refreshedId = resolveItemId(sceneName, sourceName);
+                if (refreshedId < 0)
+                    return;
+                QJsonArray followup;
+                followup.append(QJsonObject{
+                    {"requestType", "SetSceneItemIndex"},
+                    {"requestId",   nextId()},
+                    {"requestData", QJsonObject{
+                        {"sceneName",      sceneName},
+                        {"sceneItemId",    refreshedId},
+                        {"sceneItemIndex", 0},
+                    }},
+                });
+                followup.append(QJsonObject{
+                    {"requestType", "SetSceneItemTransform"},
+                    {"requestId",   nextId()},
+                    {"requestData", QJsonObject{
+                        {"sceneName",   sceneName},
+                        {"sceneItemId", refreshedId},
+                        {"sceneItemTransform", QJsonObject{
+                            {"positionX",    0},
+                            {"positionY",    0},
+                            {"boundsWidth",  canvasW},
+                            {"boundsHeight", canvasH},
+                            {"boundsType",   "OBS_BOUNDS_SCALE_OUTER"},
+                            {"alignment",    5},
+                        }},
+                    }},
+                });
+                sendOp(8, QJsonObject{
+                    {"requestId",     nextId()},
+                    {"haltOnFailure", false},
+                    {"requests",      followup},
+                });
+            });
+        } else {
+            bgRequests.append(QJsonObject{
+                {"requestType", "SetSceneItemEnabled"},
+                {"requestId",   nextId()},
+                {"requestData", QJsonObject{
+                    {"sceneName",        sceneName},
+                    {"sceneItemId",      itemId},
+                    {"sceneItemEnabled", true},
+                }},
+            });
+            bgRequests.append(QJsonObject{
+                {"requestType", "SetSceneItemIndex"},
+                {"requestId",   nextId()},
+                {"requestData", QJsonObject{
+                    {"sceneName",      sceneName},
+                    {"sceneItemId",    itemId},
+                    {"sceneItemIndex", 0},
+                }},
+            });
+            bgRequests.append(QJsonObject{
+                {"requestType", "SetSceneItemTransform"},
+                {"requestId",   nextId()},
+                {"requestData", QJsonObject{
+                    {"sceneName",   sceneName},
+                    {"sceneItemId", itemId},
+                    {"sceneItemTransform", QJsonObject{
+                        {"positionX",    0},
+                        {"positionY",    0},
+                        {"boundsWidth",  canvasW},
+                        {"boundsHeight", canvasH},
+                        {"boundsType",   "OBS_BOUNDS_SCALE_OUTER"},
+                        {"alignment",    5},
+                    }},
+                }},
+            });
+        }
+
+        if (bgRequests.isEmpty()) return;
+        sendOp(8, QJsonObject{
+            {"requestId",     nextId()},
+            {"haltOnFailure", false},
+            {"requests",      bgRequests},
+        });
+        emit log(QStringLiteral("Background applied to '%1'.").arg(sceneName));
+    });
+}
+
+void OBSClient::applyCanvasColor(const QString &sceneName,
+                                 const TileStyle &tileStyle,
+                                 double canvasW, double canvasH)
+{
+    if (m_state != State::Connected || sceneName.isEmpty())
+        return;
+
+    const QString sourceName = coreVideoCanvasSourceName(sceneName);
+    const QJsonObject inputSettings{
+        {"color", obsColor(tileStyle.canvasColor)},
+        {"width", int(canvasW)},
+        {"height", int(canvasH)},
+    };
+
+    QJsonArray requests;
+    enqueueCreateInputIfMissing(requests,
+                                sceneName,
+                                sourceName,
+                                QStringLiteral("color_source_v3"),
+                                inputSettings);
+    requests.append(QJsonObject{
+        {"requestType", "SetInputSettings"},
+        {"requestId",   nextId()},
+        {"requestData", QJsonObject{
+            {"inputName",     sourceName},
+            {"inputSettings", inputSettings},
+            {"overlay",       true},
+        }},
+    });
+
+    if (!requests.isEmpty()) {
+        sendOp(8, QJsonObject{
+            {"requestId",     nextId()},
+            {"haltOnFailure", false},
+            {"requests",      requests},
+        });
+        m_itemCache.remove(sceneName);
+        m_sceneItems.remove(sceneName);
+    }
+
+    QTimer::singleShot(700, this, [this, sceneName, sourceName, canvasW, canvasH]() {
+        if (!m_itemCache.contains(sceneName)) {
+            requestSceneItems(sceneName);
+            return;
+        }
+
+        QJsonArray requests;
+        int itemId = resolveItemId(sceneName, sourceName);
+        if (itemId < 0) {
+            requests.append(QJsonObject{
+                {"requestType", "CreateSceneItem"},
+                {"requestId",   nextId()},
+                {"requestData", QJsonObject{
+                    {"sceneName",        sceneName},
+                    {"sourceName",       sourceName},
+                    {"sceneItemEnabled", true},
+                }},
+            });
+        } else {
+            requests.append(QJsonObject{
+                {"requestType", "SetSceneItemIndex"},
+                {"requestId",   nextId()},
+                {"requestData", QJsonObject{
+                    {"sceneName",      sceneName},
+                    {"sceneItemId",    itemId},
+                    {"sceneItemIndex", 0},
+                }},
+            });
+            requests.append(QJsonObject{
+                {"requestType", "SetSceneItemTransform"},
+                {"requestId",   nextId()},
+                {"requestData", QJsonObject{
+                    {"sceneName",   sceneName},
+                    {"sceneItemId", itemId},
+                    {"sceneItemTransform", QJsonObject{
+                        {"positionX",    0},
+                        {"positionY",    0},
+                        {"boundsWidth",  canvasW},
+                        {"boundsHeight", canvasH},
+                        {"boundsType",   "OBS_BOUNDS_STRETCH"},
+                        {"alignment",    5},
+                    }},
+                }},
+            });
+        }
+
+        if (requests.isEmpty()) return;
+        sendOp(8, QJsonObject{
+            {"requestId",     nextId()},
+            {"haltOnFailure", false},
+            {"requests",      requests},
+        });
+    });
+}
+
+void OBSClient::applyTileDecorations(const QString &sceneName,
+                                     const LayoutTemplate &tmpl,
+                                     const TileStyle &tileStyle,
+                                     const QStringList &slotLabels,
+                                     double canvasW, double canvasH)
+{
+    if (m_state != State::Connected || sceneName.isEmpty() || !tmpl.isValid())
+        return;
+
+    QJsonArray createRequests;
+    const bool showBorder = tileStyle.borderWidth > 0.0;
+    for (const auto &slot : tmpl.slotList) {
+        if (showBorder) {
+            enqueueCreateInputIfMissing(createRequests,
+                                        sceneName,
+                                        coreVideoBorderSourceName(sceneName, slot.index),
+                                        QStringLiteral("color_source_v3"),
+                                        QJsonObject{
+                                            {"color", obsColor(tileStyle.borderColor)},
+                                            {"width", int(canvasW)},
+                                            {"height", int(canvasH)},
+                                        });
+        }
+        if (tileStyle.showNameTag) {
+            const QString label = slot.index >= 0 && slot.index < slotLabels.size()
+                ? slotLabels.value(slot.index)
+                : QStringLiteral("Slot %1").arg(slot.index + 1);
+            enqueueCreateInputIfMissing(createRequests,
+                                        sceneName,
+                                        coreVideoNameTagSourceName(sceneName, slot.index),
+                                        QStringLiteral("text_gdiplus_v3"),
+                                        QJsonObject{
+                                            {"text", label},
+                                            {"color", -1},
+                                            {"bk_color", 0},
+                                            {"bk_opacity", 180},
+                                            {"font", QJsonObject{
+                                                {"face", "Arial"},
+                                                {"size", 28},
+                                                {"style", "Bold"},
+                                            }},
+                                        });
+        }
+    }
+
+    if (!createRequests.isEmpty()) {
+        sendOp(8, QJsonObject{
+            {"requestId",     nextId()},
+            {"haltOnFailure", false},
+            {"requests",      createRequests},
+        });
+        m_itemCache.remove(sceneName);
+        m_sceneItems.remove(sceneName);
+    }
+
+    QTimer::singleShot(850, this, [this, sceneName, tmpl, tileStyle, slotLabels, canvasW, canvasH, showBorder]() {
+        if (!m_itemCache.contains(sceneName)) {
+            requestSceneItems(sceneName);
+            return;
+        }
+
+        QJsonArray requests;
+        for (const auto &slot : tmpl.slotList) {
+            if (showBorder) {
+                const QString borderName = coreVideoBorderSourceName(sceneName, slot.index);
+                int borderId = resolveItemId(sceneName, borderName);
+                if (borderId < 0) {
+                    requests.append(QJsonObject{
+                        {"requestType", "CreateSceneItem"},
+                        {"requestId",   nextId()},
+                        {"requestData", QJsonObject{
+                            {"sceneName",        sceneName},
+                            {"sourceName",       borderName},
+                            {"sceneItemEnabled", true},
+                        }},
+                    });
+                } else {
+                    const double bw = tileStyle.borderWidth;
+                    requests.append(QJsonObject{
+                        {"requestType", "SetSceneItemTransform"},
+                        {"requestId",   nextId()},
+                        {"requestData", QJsonObject{
+                            {"sceneName",   sceneName},
+                            {"sceneItemId", borderId},
+                            {"sceneItemTransform", QJsonObject{
+                                {"positionX",    slot.x * canvasW - bw},
+                                {"positionY",    slot.y * canvasH - bw},
+                                {"boundsWidth",  slot.width * canvasW + bw * 2.0},
+                                {"boundsHeight", slot.height * canvasH + bw * 2.0},
+                                {"boundsType",   "OBS_BOUNDS_STRETCH"},
+                            }},
+                        }},
+                    });
+                }
+            }
+
+            if (!tileStyle.showNameTag)
+                continue;
+
+            const QString nameTag = coreVideoNameTagSourceName(sceneName, slot.index);
+            const QString label = slot.index >= 0 && slot.index < slotLabels.size()
+                ? slotLabels.value(slot.index)
+                : QStringLiteral("Slot %1").arg(slot.index + 1);
+            int nameId = resolveItemId(sceneName, nameTag);
+            requests.append(QJsonObject{
+                {"requestType", "SetInputSettings"},
+                {"requestId",   nextId()},
+                {"requestData", QJsonObject{
+                    {"inputName", nameTag},
+                    {"inputSettings", QJsonObject{{"text", label}}},
+                    {"overlay", true},
+                }},
+            });
+            if (nameId < 0) {
+                requests.append(QJsonObject{
+                    {"requestType", "CreateSceneItem"},
+                    {"requestId",   nextId()},
+                    {"requestData", QJsonObject{
+                        {"sceneName",        sceneName},
+                        {"sourceName",       nameTag},
+                        {"sceneItemEnabled", true},
+                    }},
+                });
+            } else {
+                const double tagH = qMax(36.0, slot.height * canvasH * 0.12);
+                requests.append(QJsonObject{
+                    {"requestType", "SetSceneItemTransform"},
+                    {"requestId",   nextId()},
+                    {"requestData", QJsonObject{
+                        {"sceneName",   sceneName},
+                        {"sceneItemId", nameId},
+                        {"sceneItemTransform", QJsonObject{
+                            {"positionX",    slot.x * canvasW + 12.0},
+                            {"positionY",    (slot.y + slot.height) * canvasH - tagH - 10.0},
+                            {"boundsWidth",  qMax(80.0, slot.width * canvasW - 24.0)},
+                            {"boundsHeight", tagH},
+                            {"boundsType",   "OBS_BOUNDS_SCALE_INNER"},
+                        }},
+                    }},
+                });
+            }
+        }
+
+        if (requests.isEmpty()) return;
+        sendOp(8, QJsonObject{
+            {"requestId",     nextId()},
+            {"haltOnFailure", false},
+            {"requests",      requests},
+        });
+        emit log(QStringLiteral("Applied tile design layers to '%1'.").arg(sceneName));
+    });
 }
 
 void OBSClient::applyOverlays(const QString &sceneName,

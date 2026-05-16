@@ -26,6 +26,7 @@ set(SOURCES
     src/me-bus.cpp
     src/overlay-panel.cpp
     src/obs-client.cpp
+    src/obs-look-renderer.cpp
     src/simple-websocket.cpp
     src/zoom-control-client.cpp
     src/obs-connect-dialog.cpp

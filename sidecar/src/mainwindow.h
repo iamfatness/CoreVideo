@@ -2,6 +2,7 @@
 #include "sidebar.h"
 #include "layout-template.h"
 #include "obs-client.h"
+#include "obs-look-renderer.h"
 #include "show-theme.h"
 #include "macro.h"
 #include "participant-panel.h"
@@ -73,6 +74,9 @@ private slots:
     void onSlotAssigned(int slotIndex, int participantId);
     void onSlotClicked(int slotIndex);
     void onParticipantAssignClicked(int participantId);
+    void onCreateLookRequested();
+    void onSetBackgroundRequested();
+    void onDesignLookRequested();
     void openParticipantMappingWindow();
     void openCommandPalette();
     void populateCommandPalette();
@@ -89,7 +93,18 @@ private:
     void renderLookToOBS(const Look &look, bool makeProgram);
     void reconcileParticipantSlots(const QVector<ParticipantInfo> &participants);
     void syncZoomOutputAssignments();
+    void loadCustomLooks();
+    void saveCustomLooks() const;
+    QVector<Look> allLooks() const;
+    void refreshLookPanel();
+    OBSLookRenderer::Config obsRendererConfig() const;
+    OBSLookRenderer obsRenderer() const;
+    QVector<int> participantSlotIndexesForLook(const Look &look) const;
+    Look lookWithCurrentAssignments(const Look &look) const;
+    const Look *lookForObsSceneName(const QString &sceneName) const;
+    void stageLookFromObsScene(const QString &sceneName);
     QVector<PreviewCanvas::Participant> participantsForLook(const Look &look) const;
+    QStringList slotLabelsForLook(const Look &look) const;
     QStringList sourceNamesForSlots(int slotCount) const;
     QStringList sourceNamesForLook(const Look &look) const;
     QStringList lookSceneNames() const;
@@ -158,6 +173,7 @@ private:
     OBSClient::Config          m_obsConfig;
     Sidebar                   *m_sidebar        = nullptr;
     QVector<ParticipantInfo>   m_participants;
+    QVector<Look>              m_customLooks;
     QStringList                m_outputSources;
     QHash<int, int>            m_lastSyncedSlotParticipants;
     QStringList                m_lastScenes;

@@ -11,6 +11,7 @@
 #include "template-manager.h"
 #include "settings-page.h"
 #include "obs-connect-dialog.h"
+#include "obs-look-renderer.h"
 #include "command-palette.h"
 #include "sidecar-style.h"
 #include "zoom-control-client.h"
@@ -35,7 +36,16 @@
 #include <QApplication>
 #include <QStyle>
 #include <QSizePolicy>
-#include <QRegularExpression>
+#include <QFileDialog>
+#include <QInputDialog>
+#include <QStandardPaths>
+#include <QDir>
+#include <QUuid>
+#include <QLineEdit>
+#include <QCheckBox>
+#include <QColorDialog>
+#include <QDoubleSpinBox>
+#include <QDialogButtonBox>
 
 MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
     : QMainWindow(parent)
@@ -156,12 +166,16 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
         m_sceneCanvas->setTemplate(l.tmpl);
         m_sceneCanvas->setParticipants(participantsForLook(l));
         m_sceneCanvas->setOverlays(l.overlays);
+        m_sceneCanvas->setBackgroundImage(l.backgroundImagePath);
+        m_sceneCanvas->setTileStyle(l.tileStyle);
         if (m_overlayPanel) m_overlayPanel->setActiveOverlays(l.overlays);
     });
     connect(m_bus, &MEBus::programChanged, this, [this](const Look &l) {
         m_liveCanvas->setTemplate(l.tmpl);
         m_liveCanvas->setParticipants(participantsForLook(l));
         m_liveCanvas->setOverlays(l.overlays);
+        m_liveCanvas->setBackgroundImage(l.backgroundImagePath);
+        m_liveCanvas->setTileStyle(l.tileStyle);
     });
     // TAKE is the only path that pushes to OBS.
     connect(m_bus, &MEBus::tookProgram, this, [this](const Look &l) {
@@ -235,6 +249,7 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
     });
     connect(m_obsClient, &OBSClient::sceneChanged,       this, [this](const QString &name) {
         m_scenesPanel->setCurrentScene(name);
+        stageLookFromObsScene(name);
     });
     connect(m_obsClient, &OBSClient::virtualCamStateChanged, this, &MainWindow::onVirtualCamState);
     connect(m_obsClient, &OBSClient::templateApplied,    this,
@@ -332,7 +347,8 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
     // templateId can be resolved into an in-memory LayoutTemplate.
     auto &ll = LookLibrary::instance();
     ll.loadBuiltIn();
-    m_lookPanel->loadLooks(ll.looks());
+    loadCustomLooks();
+    refreshLookPanel();
 
     // Themes
     m_themePanel->loadThemes(ShowTheme::builtIns());
@@ -471,15 +487,90 @@ void MainWindow::buildCenterArea(QWidget *parent)
     row->addWidget(buildPane("PGM  ●  ON AIR",  "#ff4040", m_liveCanvas,  m_pgmLabel), 1);
 }
 
+static QString customLooksPath()
+{
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QDir().mkpath(dir);
+    return QDir(dir).filePath(QStringLiteral("custom-looks.json"));
+}
+
+void MainWindow::loadCustomLooks()
+{
+    m_customLooks.clear();
+    QFile f(customLooksPath());
+    if (!f.open(QIODevice::ReadOnly))
+        return;
+
+    QJsonParseError err{};
+    const auto doc = QJsonDocument::fromJson(f.readAll(), &err);
+    if (err.error != QJsonParseError::NoError || !doc.isArray())
+        return;
+
+    auto &tm = TemplateManager::instance();
+    for (const auto &v : doc.array()) {
+        Look look = Look::fromJson(v.toObject());
+        if (const auto *t = tm.findById(look.templateId))
+            look.tmpl = *t;
+        if (look.isValid())
+            m_customLooks.append(look);
+    }
+}
+
+void MainWindow::saveCustomLooks() const
+{
+    QJsonArray arr;
+    for (const auto &look : m_customLooks)
+        arr.append(look.toJson());
+
+    QFile f(customLooksPath());
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return;
+    f.write(QJsonDocument(arr).toJson(QJsonDocument::Indented));
+}
+
+QVector<Look> MainWindow::allLooks() const
+{
+    QVector<Look> looks = LookLibrary::instance().looks();
+    looks += m_customLooks;
+    return looks;
+}
+
+void MainWindow::refreshLookPanel()
+{
+    if (m_lookPanel)
+        m_lookPanel->loadLooks(allLooks());
+}
+
+OBSLookRenderer::Config MainWindow::obsRendererConfig() const
+{
+    OBSLookRenderer::Config config;
+    if (m_settingsPage) {
+        config.sourcePattern = m_settingsPage->sourcePattern();
+        config.fallbackSceneName = m_settingsPage->targetScene();
+        config.canvasWidth = m_settingsPage->canvasWidth();
+        config.canvasHeight = m_settingsPage->canvasHeight();
+    }
+    return config;
+}
+
+OBSLookRenderer MainWindow::obsRenderer() const
+{
+    return OBSLookRenderer(m_obsClient, obsRendererConfig());
+}
+
 QVector<PreviewCanvas::Participant>
 MainWindow::participantsForLook(const Look &look) const
 {
     const int nSlots = look.tmpl.slotList.size();
     QVector<PreviewCanvas::Participant> cp(nSlots);
+    const QVector<int> participantSlots = participantSlotIndexesForLook(look);
     for (const auto &s : look.slotAssignments) {
+        if (!participantSlots.contains(s.slotIndex)) continue;
         if (s.slotIndex < 0 || s.slotIndex >= nSlots) continue;
         for (const auto &p : m_participants) {
             if (p.id == s.participantId) {
+                if (look.tileStyle.excludeNoVideo && !p.hasVideo)
+                    break;
                 cp[s.slotIndex] = {p.name, p.initials, p.color, p.isTalking, p.hasVideo};
                 break;
             }
@@ -488,49 +579,109 @@ MainWindow::participantsForLook(const Look &look) const
     return cp;
 }
 
+QStringList MainWindow::slotLabelsForLook(const Look &look) const
+{
+    QStringList labels;
+    labels.reserve(8);
+    for (int i = 0; i < 8; ++i)
+        labels << QStringLiteral("Slot %1").arg(i + 1);
+
+    const QVector<int> participantSlots = participantSlotIndexesForLook(look);
+    for (const auto &s : look.slotAssignments) {
+        if (!participantSlots.contains(s.slotIndex) || s.slotIndex < 0)
+            continue;
+        for (const auto &p : m_participants) {
+            if (p.id != s.participantId)
+                continue;
+            if (look.tileStyle.excludeNoVideo && !p.hasVideo)
+                break;
+            while (labels.size() <= s.slotIndex)
+                labels << QStringLiteral("Slot %1").arg(labels.size() + 1);
+            labels[s.slotIndex] = p.name;
+            break;
+        }
+    }
+    return labels;
+}
+
+QVector<int> MainWindow::participantSlotIndexesForLook(const Look &look) const
+{
+    QVector<int> participantSlots;
+    for (const TemplateSlot &slot : look.tmpl.slotList) {
+        if ((look.templateId == QStringLiteral("speaker-screenshare")
+             || look.tmpl.id == QStringLiteral("speaker-screenshare"))
+            && slot.index == 1) {
+            continue;
+        }
+        participantSlots.append(slot.index);
+    }
+    return participantSlots;
+}
+
+Look MainWindow::lookWithCurrentAssignments(const Look &look) const
+{
+    Look staged = look;
+    const QVector<int> participantSlots = participantSlotIndexesForLook(staged);
+    staged.slotAssignments.clear();
+
+    for (const auto &participant : m_participants) {
+        if (participant.slotAssign < 0 || !participantSlots.contains(participant.slotAssign))
+            continue;
+        staged.slotAssignments.append({participant.slotAssign, participant.id});
+    }
+
+    return staged;
+}
+
 QStringList MainWindow::sourceNamesForSlots(int slotCount) const
 {
-    QStringList sources;
-    const int sourceCount = qMax(slotCount, 8);
-    for (int i = 0; i < sourceCount; ++i) {
-        sources << m_settingsPage->sourcePattern().arg(i + 1);
-    }
-    return sources;
+    return obsRenderer().sourceNamesForSlots(slotCount);
 }
 
 QStringList MainWindow::sourceNamesForLook(const Look &look) const
 {
-    if (look.templateId == QStringLiteral("speaker-screenshare")
-        || look.tmpl.id == QStringLiteral("speaker-screenshare")) {
-        return {
-            m_settingsPage->sourcePattern().arg(1),
-            QStringLiteral("Zoom Screen Share"),
-        };
-    }
-
-    return sourceNamesForSlots(look.tmpl.slotList.size());
+    return obsRenderer().sourceNamesForLook(look);
 }
 
 QStringList MainWindow::lookSceneNames() const
 {
-    QStringList scenes;
-    for (const auto &look : LookLibrary::instance().looks()) {
-        if (!look.tmpl.isValid())
-            continue;
-        scenes << obsSceneNameForLook(look);
-    }
-    scenes.removeDuplicates();
-    return scenes;
+    return obsRenderer().sceneNamesForLooks(allLooks());
 }
 
 QString MainWindow::obsSceneNameForLook(const Look &look) const
 {
-    QString base = look.name.trimmed();
-    if (base.isEmpty()) base = look.tmpl.name.trimmed();
-    if (base.isEmpty()) base = m_settingsPage->targetScene();
-    base.replace(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|]")), QStringLiteral("-"));
-    base.replace(QRegularExpression(QStringLiteral("\\s+")), QStringLiteral(" "));
-    return QStringLiteral("CoreVideo - %1").arg(base.left(64));
+    return obsRenderer().sceneNameForLook(look);
+}
+
+const Look *MainWindow::lookForObsSceneName(const QString &sceneName) const
+{
+    const QString normalized = sceneName.trimmed();
+    for (const auto &look : LookLibrary::instance().looks()) {
+        if (!look.tmpl.isValid())
+            continue;
+        if (obsSceneNameForLook(look) == normalized)
+            return &look;
+    }
+    for (const auto &look : m_customLooks) {
+        if (!look.tmpl.isValid())
+            continue;
+        if (obsSceneNameForLook(look) == normalized)
+            return &look;
+    }
+    return nullptr;
+}
+
+void MainWindow::stageLookFromObsScene(const QString &sceneName)
+{
+    const Look *look = lookForObsSceneName(sceneName);
+    if (!look)
+        return;
+
+    m_working = lookWithCurrentAssignments(*look);
+    m_working.templateId = look->tmpl.id.isEmpty() ? look->templateId : look->tmpl.id;
+    if (m_bus)
+        m_bus->stageLook(m_working);
+    onObsLog(QStringLiteral("OBS scene linked to Look: %1.").arg(m_working.name));
 }
 
 // ── Right panel ───────────────────────────────────────────────────────────────
@@ -550,6 +701,12 @@ void MainWindow::buildRightPanel(QWidget *parent)
     m_lookPanel = new LookPanel(tmplPage);
     connect(m_lookPanel, &LookPanel::lookSelected,
             this, &MainWindow::onLookSelected);
+    connect(m_lookPanel, &LookPanel::createLookRequested,
+            this, &MainWindow::onCreateLookRequested);
+    connect(m_lookPanel, &LookPanel::setBackgroundRequested,
+            this, &MainWindow::onSetBackgroundRequested);
+    connect(m_lookPanel, &LookPanel::designLookRequested,
+            this, &MainWindow::onDesignLookRequested);
     tmplV->addWidget(m_lookPanel, 3);
     auto *div = new QFrame(tmplPage);
     div->setFrameShape(QFrame::HLine);
@@ -659,8 +816,9 @@ void MainWindow::loadMockParticipants()
     // Seed the working Look's slot assignments from each participant's
     // default slotAssign so first-paint shows people in slots.
     m_working.slotAssignments.clear();
+    const QVector<int> participantSlots = participantSlotIndexesForLook(m_working);
     for (const auto &p : m_participants) {
-        if (p.slotAssign >= 0)
+        if (p.slotAssign >= 0 && participantSlots.contains(p.slotAssign))
             m_working.slotAssignments.append({p.slotAssign, p.id});
     }
     if (m_bus) m_bus->stageLook(m_working);
@@ -672,8 +830,7 @@ void MainWindow::provisionPlaceholderSources()
     if (!m_obsClient || !m_obsClient->isConnected() || !m_settingsPage)
         return;
 
-    const QStringList sources = sourceNamesForSlots(8);
-    m_obsClient->ensureCoreVideoSources(QStringLiteral("CoreVideo Sources"), sources);
+    obsRenderer().provisionPlaceholders(8);
     QTimer::singleShot(3400, this, &MainWindow::updateSceneSyncStatus);
 }
 
@@ -682,16 +839,7 @@ void MainWindow::provisionLookScenes()
     if (!m_obsClient || !m_obsClient->isConnected() || !m_settingsPage)
         return;
 
-    provisionPlaceholderSources();
-
-    const double canvasW = m_settingsPage->canvasWidth();
-    const double canvasH = m_settingsPage->canvasHeight();
-    for (const auto &look : LookLibrary::instance().looks()) {
-        if (!look.tmpl.isValid()) continue;
-        const QString scene = obsSceneNameForLook(look);
-        const QStringList sources = sourceNamesForLook(look);
-        m_obsClient->loadSceneTemplate(scene, look.tmpl, sources, canvasW, canvasH, look.overlays, false);
-    }
+    obsRenderer().provisionLooks(allLooks());
     onObsLog("Control ON: provisioning shared sources and Look scenes in OBS.");
     QTimer::singleShot(3600, this, &MainWindow::updateSceneSyncStatus);
 }
@@ -715,13 +863,7 @@ void MainWindow::renderLookToOBS(const Look &look, bool makeProgram)
     }
 
     const QString scene = obsSceneNameForLook(look);
-    const double canvasW = m_settingsPage->canvasWidth();
-    const double canvasH = m_settingsPage->canvasHeight();
-    const QStringList sources = sourceNamesForLook(look);
-    m_obsClient->loadSceneTemplate(scene, look.tmpl, sources, canvasW, canvasH,
-                                   look.overlays, makeProgram);
-    if (!makeProgram)
-        m_obsClient->setCurrentPreviewScene(scene);
+    obsRenderer().renderLook(look, makeProgram, slotLabelsForLook(look));
     onObsLog(QStringLiteral("Rendered Look '%1' to OBS scene '%2'.")
                  .arg(look.name, scene));
 }
@@ -757,11 +899,7 @@ void MainWindow::reconcileParticipantSlots(const QVector<ParticipantInfo> &parti
     }
 
     m_participants = merged;
-    m_working.slotAssignments.clear();
-    for (const auto &participant : m_participants) {
-        if (participant.slotAssign >= 0 && participant.slotAssign < 8)
-            m_working.slotAssignments.append({participant.slotAssign, participant.id});
-    }
+    m_working = lookWithCurrentAssignments(m_working);
     if (m_bus)
         m_bus->stageLook(m_working);
 }
@@ -973,9 +1111,7 @@ void MainWindow::onLookSelected(const Look &look)
     // in a later slice) apply the Look's theme app-wide. Existing slot
     // assignments are carried over so swapping a Look doesn't blank the
     // participants the operator already placed.
-    Look staged          = look;
-    staged.slotAssignments = m_working.slotAssignments;
-    m_working            = staged;
+    m_working            = lookWithCurrentAssignments(look);
     m_working.templateId = look.tmpl.id.isEmpty() ? look.templateId
                                                   : look.tmpl.id;
     m_bus->stageLook(m_working);
@@ -989,6 +1125,251 @@ void MainWindow::onLookSelected(const Look &look)
     onObsLog(QStringLiteral("Staged Look on PVW: %1 — press TAKE to go on air.")
                  .arg(look.name));
     renderLookToOBS(m_working, false);
+}
+
+void MainWindow::onCreateLookRequested()
+{
+    if (!m_working.isValid()) {
+        onObsLog("Create Look skipped: no staged layout.");
+        return;
+    }
+
+    bool ok = false;
+    const QString defaultName = m_working.name.isEmpty()
+        ? QStringLiteral("Custom Look")
+        : QStringLiteral("%1 Custom").arg(m_working.name);
+    const QString name = QInputDialog::getText(this,
+                                               QStringLiteral("New Look"),
+                                               QStringLiteral("Look name"),
+                                               QLineEdit::Normal,
+                                               defaultName,
+                                               &ok).trimmed();
+    if (!ok || name.isEmpty())
+        return;
+
+    Look custom = m_working;
+    custom.id = QStringLiteral("custom-%1")
+        .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+    custom.name = name;
+    custom.category = QStringLiteral("Custom");
+    custom.description = QStringLiteral("User-created look");
+    custom.templateId = custom.tmpl.id.isEmpty() ? custom.templateId : custom.tmpl.id;
+
+    m_customLooks.append(custom);
+    saveCustomLooks();
+    refreshLookPanel();
+    onLookSelected(custom);
+    onObsLog(QStringLiteral("Created custom Look: %1.").arg(custom.name));
+}
+
+void MainWindow::onSetBackgroundRequested()
+{
+    if (!m_working.isValid()) {
+        onObsLog("Background skipped: no staged Look.");
+        return;
+    }
+
+    const QString file = QFileDialog::getOpenFileName(
+        this,
+        QStringLiteral("Choose Look Background"),
+        QString(),
+        QStringLiteral("Images (*.png *.jpg *.jpeg *.bmp *.webp);;All files (*.*)"));
+    if (file.isEmpty())
+        return;
+
+    m_working.backgroundImagePath = file;
+    m_bus->stageLook(m_working);
+
+    bool updated = false;
+    for (auto &look : m_customLooks) {
+        if (look.id != m_working.id)
+            continue;
+        look.backgroundImagePath = file;
+        look.slotAssignments = m_working.slotAssignments;
+        look.overlays = m_working.overlays;
+        updated = true;
+        break;
+    }
+    if (updated) {
+        saveCustomLooks();
+        refreshLookPanel();
+    } else {
+        onObsLog("Background staged. Use New Look to save it as a reusable custom Look.");
+    }
+
+    renderLookToOBS(m_working, false);
+}
+
+void MainWindow::onDesignLookRequested()
+{
+    if (!m_working.isValid()) {
+        onObsLog("Design skipped: no staged Look.");
+        return;
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("Look Designer"));
+    dlg.resize(1120, 680);
+    dlg.setStyleSheet(
+        "QDialog { background: #141418; color: #f4f4ff; }"
+        "QLabel { color: #d8d8ea; font-size: 12px; }"
+        "QLabel#designerTitle { color: white; font-size: 18px; font-weight: 800; }"
+        "QLabel#designerHint { color: #8d8da8; font-size: 11px; }"
+        "QFrame#stage { background: #202028; border: 1px solid #323246; border-radius: 8px; }"
+        "QFrame#inspector { background: #1a1a22; border-left: 1px solid #303044; }"
+        "QDoubleSpinBox { background: #101018; color: #f0f0ff; border: 1px solid #34344a; border-radius: 4px; padding: 4px; }"
+        "QPushButton { background: #262638; color: white; border: 1px solid #3a3a55; border-radius: 6px; padding: 7px 10px; }"
+        "QPushButton:hover { background: #303050; }"
+        "QCheckBox { color: #d8d8ea; spacing: 8px; }");
+
+    auto *root = new QHBoxLayout(&dlg);
+    root->setContentsMargins(0, 0, 0, 0);
+    root->setSpacing(0);
+
+    auto *stage = new QFrame(&dlg);
+    stage->setObjectName("stage");
+    auto *stageV = new QVBoxLayout(stage);
+    stageV->setContentsMargins(24, 20, 24, 24);
+    stageV->setSpacing(12);
+    auto *title = new QLabel(m_working.name, stage);
+    title->setObjectName("designerTitle");
+    auto *hint = new QLabel(QStringLiteral("Design the reusable broadcast look; participant slots remain linked to shared OBS sources."), stage);
+    hint->setObjectName("designerHint");
+    auto *designerPreview = new PreviewCanvas(stage);
+    designerPreview->setMinimumSize(720, 405);
+    designerPreview->setTemplate(m_working.tmpl);
+    designerPreview->setParticipants(participantsForLook(m_working));
+    designerPreview->setOverlays(m_working.overlays);
+    designerPreview->setBackgroundImage(m_working.backgroundImagePath);
+    designerPreview->setTileStyle(m_working.tileStyle);
+    stageV->addWidget(title);
+    stageV->addWidget(hint);
+    stageV->addWidget(designerPreview, 1);
+    root->addWidget(stage, 1);
+
+    auto *inspector = new QFrame(&dlg);
+    inspector->setObjectName("inspector");
+    inspector->setFixedWidth(320);
+    auto *layout = new QVBoxLayout(inspector);
+    layout->setContentsMargins(18, 18, 18, 18);
+    layout->setSpacing(10);
+    auto *inspectorTitle = new QLabel(QStringLiteral("Gallery"), inspector);
+    inspectorTitle->setObjectName("designerTitle");
+    auto *inspectorHint = new QLabel(QStringLiteral("Canvas, tile, and participant display"), inspector);
+    inspectorHint->setObjectName("designerHint");
+    layout->addWidget(inspectorTitle);
+    layout->addWidget(inspectorHint);
+
+    auto *borderWidth = new QDoubleSpinBox(&dlg);
+    borderWidth->setRange(0.0, 16.0);
+    borderWidth->setSingleStep(0.5);
+    borderWidth->setValue(m_working.tileStyle.borderWidth);
+    auto *radius = new QDoubleSpinBox(&dlg);
+    radius->setRange(0.0, 80.0);
+    radius->setSingleStep(1.0);
+    radius->setValue(m_working.tileStyle.cornerRadius);
+    auto *opacity = new QDoubleSpinBox(&dlg);
+    opacity->setRange(0.1, 1.0);
+    opacity->setSingleStep(0.05);
+    opacity->setValue(m_working.tileStyle.opacity);
+
+    auto *shadow = new QCheckBox(QStringLiteral("Drop shadow"), &dlg);
+    shadow->setChecked(m_working.tileStyle.dropShadow);
+    auto *names = new QCheckBox(QStringLiteral("Show name tags"), &dlg);
+    names->setChecked(m_working.tileStyle.showNameTag);
+    auto *videoOnly = new QCheckBox(QStringLiteral("Exclude participants without video"), &dlg);
+    videoOnly->setChecked(m_working.tileStyle.excludeNoVideo);
+
+    QColor selectedCanvas = m_working.tileStyle.canvasColor;
+    QColor selectedBorder = m_working.tileStyle.borderColor;
+    auto *canvasColor = new QPushButton(selectedCanvas.name(), &dlg);
+    connect(canvasColor, &QPushButton::clicked, &dlg, [&]() {
+        const QColor c = QColorDialog::getColor(selectedCanvas, &dlg, QStringLiteral("Canvas Color"));
+        if (!c.isValid()) return;
+        selectedCanvas = c;
+        canvasColor->setText(c.name());
+        TileStyle s = m_working.tileStyle;
+        s.canvasColor = selectedCanvas;
+        designerPreview->setTileStyle(s);
+    });
+    auto *borderColor = new QPushButton(selectedBorder.name(), &dlg);
+    connect(borderColor, &QPushButton::clicked, &dlg, [&]() {
+        const QColor c = QColorDialog::getColor(selectedBorder, &dlg, QStringLiteral("Tile Border"));
+        if (!c.isValid()) return;
+        selectedBorder = c;
+        borderColor->setText(c.name());
+        TileStyle s = m_working.tileStyle;
+        s.canvasColor = selectedCanvas;
+        s.borderColor = selectedBorder;
+        designerPreview->setTileStyle(s);
+    });
+
+    auto refreshDesignerPreview = [&]() {
+        TileStyle s = m_working.tileStyle;
+        s.canvasColor = selectedCanvas;
+        s.borderColor = selectedBorder;
+        s.borderWidth = borderWidth->value();
+        s.cornerRadius = radius->value();
+        s.opacity = opacity->value();
+        s.dropShadow = shadow->isChecked();
+        s.showNameTag = names->isChecked();
+        s.excludeNoVideo = videoOnly->isChecked();
+        designerPreview->setTileStyle(s);
+    };
+    connect(borderWidth, qOverload<double>(&QDoubleSpinBox::valueChanged), &dlg, refreshDesignerPreview);
+    connect(radius, qOverload<double>(&QDoubleSpinBox::valueChanged), &dlg, refreshDesignerPreview);
+    connect(opacity, qOverload<double>(&QDoubleSpinBox::valueChanged), &dlg, refreshDesignerPreview);
+    connect(shadow, &QCheckBox::toggled, &dlg, refreshDesignerPreview);
+    connect(names, &QCheckBox::toggled, &dlg, refreshDesignerPreview);
+    connect(videoOnly, &QCheckBox::toggled, &dlg, refreshDesignerPreview);
+
+    auto addRow = [&](const QString &label, QWidget *control) {
+        auto *row = new QHBoxLayout;
+        row->addWidget(new QLabel(label, &dlg));
+        row->addWidget(control);
+        layout->addLayout(row);
+    };
+    addRow(QStringLiteral("Canvas color"), canvasColor);
+    addRow(QStringLiteral("Border width"), borderWidth);
+    addRow(QStringLiteral("Corner radius"), radius);
+    addRow(QStringLiteral("Tile opacity"), opacity);
+    addRow(QStringLiteral("Border color"), borderColor);
+    layout->addWidget(shadow);
+    layout->addWidget(names);
+    layout->addWidget(videoOnly);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    layout->addStretch(1);
+    layout->addWidget(buttons);
+    root->addWidget(inspector);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    m_working.tileStyle.canvasColor = selectedCanvas;
+    m_working.tileStyle.borderColor = selectedBorder;
+    m_working.tileStyle.borderWidth = borderWidth->value();
+    m_working.tileStyle.cornerRadius = radius->value();
+    m_working.tileStyle.opacity = opacity->value();
+    m_working.tileStyle.dropShadow = shadow->isChecked();
+    m_working.tileStyle.showNameTag = names->isChecked();
+    m_working.tileStyle.excludeNoVideo = videoOnly->isChecked();
+    m_working = lookWithCurrentAssignments(m_working);
+    m_bus->stageLook(m_working);
+
+    for (auto &look : m_customLooks) {
+        if (look.id != m_working.id)
+            continue;
+        look.tileStyle = m_working.tileStyle;
+        look.slotAssignments = m_working.slotAssignments;
+        saveCustomLooks();
+        refreshLookPanel();
+        break;
+    }
+
+    renderLookToOBS(m_working, false);
+    onObsLog(QStringLiteral("Updated Look design: %1.").arg(m_working.name));
 }
 
 void MainWindow::onThemeSelected(const ShowTheme &theme)
@@ -1178,6 +1559,7 @@ void MainWindow::onScenesReceived(const QStringList &scenes)
 
 void MainWindow::onSceneActivated(const QString &name)
 {
+    stageLookFromObsScene(name);
     m_obsClient->setCurrentScene(name);
     onObsLog(QStringLiteral("Switched to scene: %1").arg(name));
 }
@@ -1236,6 +1618,13 @@ void MainWindow::onPhaseSelected(ShowPhase phase)
 
 void MainWindow::onSlotAssigned(int slotIndex, int participantId)
 {
+    const QVector<int> participantSlots = participantSlotIndexesForLook(m_working);
+    if (!participantSlots.contains(slotIndex)) {
+        onObsLog(QStringLiteral("Slot %1 is not participant-mappable for Look '%2'.")
+                     .arg(slotIndex + 1).arg(m_working.name));
+        return;
+    }
+
     // Evict the old occupant of this slot, then assign the new one
     for (auto &p : m_participants) {
         if (p.slotAssign == slotIndex)
@@ -1260,6 +1649,8 @@ void MainWindow::onSlotAssigned(int slotIndex, int participantId)
 
     m_lastSyncedSlotParticipants.remove(slotIndex);
     syncZoomOutputAssignments();
+    if (m_obsClient && m_obsClient->isConnected())
+        renderLookToOBS(m_working, false);
 
     // Refresh panel to show updated slot labels
     m_participantPanel->setParticipants(m_participants);
@@ -1275,7 +1666,7 @@ void MainWindow::onSlotAssigned(int slotIndex, int participantId)
 
 void MainWindow::onSlotClicked(int slotIndex)
 {
-    if (slotIndex < 0 || slotIndex >= m_working.tmpl.slotList.size()) return;
+    if (!participantSlotIndexesForLook(m_working).contains(slotIndex)) return;
 
     // Context-sensitive right panel: clicking a slot focuses the Templates
     // page (which hosts the participants list) and arms click-to-assign so
@@ -1390,24 +1781,21 @@ void MainWindow::populateCommandPalette()
     }
 
     // Looks (broadcast-ready presets) — stage or take in one keystroke
-    for (const auto &lk : LookLibrary::instance().looks()) {
-        const QString id   = lk.id;
+    for (const auto &lk : allLooks()) {
+        const Look look = lk;
         const QString name = lk.name;
         cp->addCommand(QString("Stage Look on PVW: %1").arg(name), "Look",
-                       [this, id]() {
-            if (const auto *l = LookLibrary::instance().findById(id))
-                onLookSelected(*l);
+                       [this, look]() {
+            onLookSelected(look);
         });
     }
-    for (const auto &lk : LookLibrary::instance().looks()) {
-        const QString id   = lk.id;
+    for (const auto &lk : allLooks()) {
+        const Look look = lk;
         const QString name = lk.name;
         cp->addCommand(QString("Take Look to PGM: %1").arg(name), "Look",
-                       [this, id]() {
-            if (const auto *l = LookLibrary::instance().findById(id)) {
-                onLookSelected(*l);
-                onTake();
-            }
+                       [this, look]() {
+            onLookSelected(look);
+            onTake();
         });
     }
 

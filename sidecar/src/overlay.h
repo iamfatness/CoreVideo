@@ -62,6 +62,24 @@ struct Overlay {
         return v;
     }
 
+    QJsonObject toJson() const
+    {
+        QJsonObject o{
+            {"id", id},
+            {"type", typeToString(type)},
+            {"text1", text1},
+            {"text2", text2},
+            {"x", x},
+            {"y", y},
+            {"w", w},
+            {"h", h},
+            {"durationMs", durationMs},
+        };
+        if (accent.isValid())
+            o["accent"] = accent.name();
+        return o;
+    }
+
     // Curated presets shown in OverlayPanel.
     static QVector<Overlay> builtInPresets()
     {

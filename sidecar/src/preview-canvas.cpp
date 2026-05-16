@@ -397,7 +397,10 @@ void PreviewCanvas::drawSlot(QPainter &p, const QRectF &rect, int idx) const
 
     // Slot background
     QPainterPath path;
-    const double radius = std::max(0.0, m_tileStyle.cornerRadius);
+    // OBS scene items are rectangular until we add a real mask/matte filter
+    // path. Keep the sidecar preview WYSIWYG with OBS instead of implying
+    // rounded clipping that OBS does not yet render.
+    const double radius = 0.0;
     path.addRoundedRect(rect, radius, radius);
     if (m_tileStyle.dropShadow) {
         QPainterPath shadow;

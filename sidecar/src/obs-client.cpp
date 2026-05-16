@@ -872,6 +872,13 @@ void OBSClient::loadSceneTemplate(const QString        &sceneName,
             setCurrentScene(sceneName);
         requestSceneList();
     });
+    QTimer::singleShot(3600, this, [this, sceneName, tmpl, tileStyle, backgroundImagePath, overlays]() {
+        applyLookLayerOrder(sceneName, tmpl, tileStyle, !backgroundImagePath.trimmed().isEmpty(), overlays.size());
+    });
+    QTimer::singleShot(4400, this, [this, sceneName, tmpl, tileStyle, backgroundImagePath, overlays]() {
+        applyLookLayerOrder(sceneName, tmpl, tileStyle, !backgroundImagePath.trimmed().isEmpty(), overlays.size());
+        requestSceneItems(sceneName);
+    });
 }
 
 void OBSClient::ensureCoreVideoSources(const QString &sceneName,
@@ -1753,6 +1760,80 @@ void OBSClient::applyTileDecorations(const QString &sceneName,
         });
         emit log(QStringLiteral("Applied tile design layers to '%1'.").arg(sceneName));
     });
+}
+
+void OBSClient::applyLookLayerOrder(const QString &sceneName,
+                                    const LayoutTemplate &tmpl,
+                                    const TileStyle &tileStyle,
+                                    bool hasBackgroundImage,
+                                    int overlayCount)
+{
+    if (m_state != State::Connected || sceneName.isEmpty() || !tmpl.isValid())
+        return;
+    if (!m_itemCache.contains(sceneName)) {
+        requestSceneItems(sceneName);
+        return;
+    }
+
+    QStringList bottomToTop;
+    bottomToTop << coreVideoCanvasSourceName(sceneName);
+    if (hasBackgroundImage)
+        bottomToTop << coreVideoBackgroundSourceName(sceneName);
+
+    if (tileStyle.dropShadow) {
+        for (const auto &slot : tmpl.slotList)
+            bottomToTop << coreVideoShadowSourceName(sceneName, slot.index);
+    }
+    if (tileStyle.borderWidth > 0.0) {
+        for (const auto &slot : tmpl.slotList)
+            bottomToTop << coreVideoBorderSourceName(sceneName, slot.index);
+    }
+    for (const auto &slot : tmpl.slotList)
+        bottomToTop << coreVideoSlotSceneName(slot.index);
+    if (tileStyle.opacity < 0.99) {
+        for (const auto &slot : tmpl.slotList)
+            bottomToTop << coreVideoDimSourceName(sceneName, slot.index);
+    }
+    if (tileStyle.showNameTag) {
+        for (const auto &slot : tmpl.slotList)
+            bottomToTop << coreVideoNameTagSourceName(sceneName, slot.index);
+    }
+    for (int i = 0; i < overlayCount; ++i)
+        bottomToTop << overlaySourceName(sceneName, i);
+
+    QJsonArray requests;
+    for (int i = 0; i < bottomToTop.size(); ++i) {
+        const int itemId = resolveItemId(sceneName, bottomToTop[i]);
+        if (itemId < 0)
+            continue;
+        requests.append(QJsonObject{
+            {"requestType", "SetSceneItemIndex"},
+            {"requestId",   nextId()},
+            {"requestData", QJsonObject{
+                {"sceneName",      sceneName},
+                {"sceneItemId",    itemId},
+                {"sceneItemIndex", i},
+            }},
+        });
+        requests.append(QJsonObject{
+            {"requestType", "SetSceneItemEnabled"},
+            {"requestId",   nextId()},
+            {"requestData", QJsonObject{
+                {"sceneName",        sceneName},
+                {"sceneItemId",      itemId},
+                {"sceneItemEnabled", true},
+            }},
+        });
+    }
+
+    if (requests.isEmpty())
+        return;
+    sendOp(8, QJsonObject{
+        {"requestId",     nextId()},
+        {"haltOnFailure", false},
+        {"requests",      requests},
+    });
+    emit log(QStringLiteral("Applied final Look layer order to '%1'.").arg(sceneName));
 }
 
 void OBSClient::applyOverlays(const QString &sceneName,

@@ -1297,6 +1297,8 @@ void MainWindow::onDesignLookRequested()
     radius->setRange(0.0, 80.0);
     radius->setSingleStep(1.0);
     radius->setValue(m_working.tileStyle.cornerRadius);
+    radius->setEnabled(false);
+    radius->setToolTip(QStringLiteral("Rounded corners need an OBS mask/matte implementation before they can be WYSIWYG."));
     auto *opacity = new QDoubleSpinBox(&dlg);
     opacity->setRange(0.1, 1.0);
     opacity->setSingleStep(0.05);

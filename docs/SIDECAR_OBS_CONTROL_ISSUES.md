@@ -34,6 +34,7 @@ Progress:
 
 Remaining:
 - True rounded-corner masking still needs an OBS-side matte/filter strategy.
+- Rounded corner controls are disabled in the designer and the sidecar preview renders rectangular tiles until that OBS mask/matte path exists, so preview and OBS remain WYSIWYG.
 
 ## Issue 3 - Add OBS read-back sync status
 Status: In progress

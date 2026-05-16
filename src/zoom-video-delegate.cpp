@@ -39,7 +39,17 @@ bool ZoomVideoDelegate::subscribe(uint32_t participant_id, VideoResolution res)
     case VideoResolution::P720:  sdk_res = ZOOMSDK::ZoomSDKResolution_720P;  break;
     default:                     sdk_res = ZOOMSDK::ZoomSDKResolution_1080P; break;
     }
-    renderer->setRawDataResolution(sdk_res);
+    ZOOMSDK::SDKError res_err = renderer->setRawDataResolution(sdk_res);
+    if (res_err != ZOOMSDK::SDKERR_SUCCESS) {
+        // Common cause: the meeting wasn't negotiated at the requested
+        // resolution (e.g. the account isn't entitled to Group HD, or
+        // bandwidth conditions caused the SDK to downgrade). The renderer
+        // will deliver whatever resolution the SDK picked instead.
+        blog(LOG_WARNING,
+             "[obs-zoom-plugin] setRawDataResolution(%d) returned %d — "
+             "the SDK may deliver a lower resolution than requested",
+             static_cast<int>(sdk_res), static_cast<int>(res_err));
+    }
 
     err = renderer->subscribe(participant_id, ZOOMSDK::RAW_DATA_TYPE_VIDEO);
     if (err != ZOOMSDK::SDKERR_SUCCESS) {

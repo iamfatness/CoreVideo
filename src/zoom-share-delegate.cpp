@@ -82,7 +82,14 @@ void ZoomShareDelegate::subscribe_to(uint32_t share_source_id)
         return;
     }
 
-    renderer->setRawDataResolution(ZOOMSDK::ZoomSDKResolution_1080P);
+    ZOOMSDK::SDKError res_err =
+        renderer->setRawDataResolution(ZOOMSDK::ZoomSDKResolution_1080P);
+    if (res_err != ZOOMSDK::SDKERR_SUCCESS) {
+        blog(LOG_WARNING,
+             "[obs-zoom-plugin] Share setRawDataResolution(1080P) returned %d — "
+             "screen share may arrive at a lower resolution",
+             static_cast<int>(res_err));
+    }
     err = renderer->subscribe(share_source_id, ZOOMSDK::RAW_DATA_TYPE_SHARE);
     if (err != ZOOMSDK::SDKERR_SUCCESS) {
         blog(LOG_ERROR, "[obs-zoom-plugin] Share renderer->subscribe failed: %d",

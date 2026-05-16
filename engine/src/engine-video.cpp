@@ -56,7 +56,14 @@ ParticipantSubscription::ParticipantSubscription(uint32_t participant_id,
         return;
     }
 
-    m_renderer->setRawDataResolution(sdk_resolution(m_resolution));
+    const ZOOMSDK::SDKError res_err =
+        m_renderer->setRawDataResolution(sdk_resolution(m_resolution));
+    EngineIpc::write(
+        R"({"cmd":"debug","stage":"set_resolution","source_uuid":")" +
+        initial_source_uuid + R"(","participant_id":)" +
+        std::to_string(m_participant_id) + R"(,"code":)" +
+        std::to_string(static_cast<int>(res_err)) + R"(,"resolution":)" +
+        std::to_string(m_resolution) + "}");
     err = m_renderer->subscribe(participant_id, ZOOMSDK::RAW_DATA_TYPE_VIDEO);
     EngineIpc::write(
         R"({"cmd":"debug","stage":"video_subscribe","source_uuid":")" +

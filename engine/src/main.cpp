@@ -4,6 +4,7 @@
 #include "engine-audio.h"
 #include <zoom_sdk.h>
 #include <auth_service_interface.h>
+#include <setting_service_interface.h>
 #include <meeting_service_interface.h>
 #if __has_include(<meeting_service_components/meeting_audio_interface.h>)
 #include <meeting_service_components/meeting_audio_interface.h>
@@ -550,9 +551,31 @@ public:
     explicit EngineAuthEvent(IpcFd e2p) : m_e2p(e2p) {}
 
     void onAuthenticationReturn(ZOOMSDK::AuthResult ret) override {
-        if (ret == ZOOMSDK::AUTHRET_SUCCESS)
+        if (ret == ZOOMSDK::AUTHRET_SUCCESS) {
+            // Opt into HD video so the meeting negotiates Group HD / 1080p
+            // streams when the account is entitled. Defaults to off on
+            // many account tiers — without this the SDK may downgrade.
+            ZOOMSDK::ISettingService *settings = nullptr;
+            ZOOMSDK::SDKError s_err =
+                ZOOMSDK::CreateSettingService(&settings);
+            if (s_err == ZOOMSDK::SDKERR_SUCCESS && settings) {
+                if (auto *vs = settings->GetVideoSettings()) {
+                    ZOOMSDK::SDKError h_err = vs->EnableHDVideo(true);
+                    EngineIpc::write(
+                        R"({"cmd":"debug","stage":"enable_hd_video","code":)" +
+                        std::to_string(static_cast<int>(h_err)) +
+                        R"(,"enabled":)" +
+                        std::string(vs->IsHDVideoEnabled() ? "true" : "false") +
+                        "}");
+                }
+                ZOOMSDK::DestroySettingService(settings);
+            } else {
+                EngineIpc::write(
+                    R"({"cmd":"debug","stage":"create_setting_service_failed","code":)" +
+                    std::to_string(static_cast<int>(s_err)) + "}");
+            }
             EngineIpc::write( R"({"cmd":"auth_ok"})");
-        else
+        } else
             EngineIpc::write( R"({"cmd":"auth_fail","code":)" +
                            std::to_string(static_cast<int>(ret)) + "}");
     }

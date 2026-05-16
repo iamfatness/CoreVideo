@@ -5,6 +5,8 @@
 #include <unordered_map>
 #include <auth_service_interface.h>
 
+namespace ZOOMSDK { class ISettingService; }
+
 enum class ZoomAuthState { Unauthenticated, Authenticating, Authenticated, Failed };
 
 class ZoomAuth : public ZOOMSDK::IAuthServiceEvent {
@@ -37,12 +39,19 @@ public:
 private:
     ZoomAuth() = default;
     void fire_state_cbs();
+    // Pull the highest-quality video Zoom's SDK can hand us. Calls
+    // EnableHDVideo(true) on the video setting context so the meeting
+    // negotiates Group HD / 1080p streams when the account is entitled.
+    // No-op if the setting service can't be created (rare).
+    void apply_quality_preferences();
 
     ZoomAuthState          m_state        = ZoomAuthState::Unauthenticated;
     std::mutex             m_cbs_mtx;
     std::unordered_map<void *, StateCallback> m_state_cbs;
     bool                   m_sdk_init     = false;
     ZOOMSDK::IAuthService *m_auth_service = nullptr;
+    // Lives for the lifetime of the SDK session; destroyed in shutdown().
+    ZOOMSDK::ISettingService *m_setting_service = nullptr;
     // Kept alive for the duration of the async SDKAuth call.
 #if defined(WIN32)
     std::wstring           m_wide_jwt;

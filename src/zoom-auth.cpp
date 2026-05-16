@@ -1,6 +1,7 @@
 #include "zoom-auth.h"
 #include <obs-module.h>
 #include <zoom_sdk.h>
+#include <setting_service_interface.h>
 
 #if defined(WIN32)
 #include <windows.h>
@@ -125,6 +126,11 @@ void ZoomAuth::shutdown()
 {
     if (!m_sdk_init) return;
 
+    if (m_setting_service) {
+        ZOOMSDK::DestroySettingService(m_setting_service);
+        m_setting_service = nullptr;
+    }
+
     if (m_auth_service) {
         m_auth_service->SetEvent(nullptr);
         ZOOMSDK::DestroyAuthService(m_auth_service);
@@ -142,11 +148,51 @@ void ZoomAuth::shutdown()
 
 // ── IAuthServiceEvent ────────────────────────────────────────────────────────
 
+void ZoomAuth::apply_quality_preferences()
+{
+    // The setting service only exists after a successful SDKAuth — calling
+    // CreateSettingService before that returns SDKERR_SERVICE_FAILED.
+    ZOOMSDK::SDKError err = ZOOMSDK::CreateSettingService(&m_setting_service);
+    if (err != ZOOMSDK::SDKERR_SUCCESS || !m_setting_service) {
+        blog(LOG_WARNING,
+             "[obs-zoom-plugin] CreateSettingService failed (%d) — "
+             "HD video preference will use SDK default",
+             static_cast<int>(err));
+        m_setting_service = nullptr;
+        return;
+    }
+
+    ZOOMSDK::IVideoSettingContext *vs = m_setting_service->GetVideoSettings();
+    if (!vs) {
+        blog(LOG_WARNING,
+             "[obs-zoom-plugin] Video setting context unavailable — "
+             "HD video preference will use SDK default");
+        return;
+    }
+
+    err = vs->EnableHDVideo(true);
+    if (err == ZOOMSDK::SDKERR_SUCCESS) {
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] HD video enabled (IsHDVideoEnabled=%d). "
+             "Group HD / 1080p streams require account entitlement.",
+             vs->IsHDVideoEnabled() ? 1 : 0);
+    } else {
+        // SDKERR_NO_PERMISSION here typically means the account tier
+        // doesn't include Group HD — not a hard failure, the meeting
+        // will just negotiate at 720p or lower.
+        blog(LOG_WARNING,
+             "[obs-zoom-plugin] EnableHDVideo(true) returned %d — "
+             "the account may not be entitled to Group HD",
+             static_cast<int>(err));
+    }
+}
+
 void ZoomAuth::onAuthenticationReturn(ZOOMSDK::AuthResult ret)
 {
     if (ret == ZOOMSDK::AUTHRET_SUCCESS) {
         m_state = ZoomAuthState::Authenticated;
         blog(LOG_INFO, "[obs-zoom-plugin] Authentication succeeded");
+        apply_quality_preferences();
     } else {
         m_state = ZoomAuthState::Failed;
         blog(LOG_ERROR, "[obs-zoom-plugin] Authentication failed: %d", static_cast<int>(ret));

@@ -37,7 +37,7 @@
   <text class="muted small" x="180" y="486">Requested video</text>
   <rect class="field" x="380" y="462" width="160" height="38" rx="6"/><text class="text small" x="430" y="487">1080p</text>
   <text class="muted small" x="586" y="486">Video loss</text>
-  <rect class="field" x="736" y="462" width="154" height="38" rx="6"/><text class="text small" x="768" y="487">Color bars</text>
+  <rect class="field" x="736" y="462" width="154" height="38" rx="6"/><text class="text small" x="760" y="487">Hold frame</text>
 
   <text class="muted small" x="180" y="538">Hardware accel</text>
   <rect class="field" x="380" y="514" width="510" height="38" rx="6"/><text class="text small" x="398" y="539">Auto - FFmpeg I420 to NV12 when available</text>

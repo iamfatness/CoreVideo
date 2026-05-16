@@ -27,6 +27,7 @@ public:
 private:
     void refresh();
     void refresh_outputs();
+    void refresh_output_signal_cells();
     void apply_outputs();
 
     void on_join_clicked();

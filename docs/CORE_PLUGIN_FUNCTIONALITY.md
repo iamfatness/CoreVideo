@@ -21,9 +21,10 @@ test independently from the Zoom SDK.
 
 ## What It Looks Like in OBS
 
-The CoreVideo plugin is operated from inside OBS. The main pieces operators see
-are the Zoom Control dock, regular OBS scenes/sources, the Zoom Output Manager,
-and the Zoom Participant source properties.
+The CoreVideo plugin is operated from inside OBS. These illustrations show the
+current core plugin UI after the OBS dock improvements: the Zoom Control dock,
+regular OBS scenes/sources, the Zoom Output Manager, and the Zoom Participant
+source properties. Exact styling can vary slightly by OBS theme and platform.
 
 ![CoreVideo OBS workspace with Zoom Control dock](images/corevideo-obs-workspace.svg)
 

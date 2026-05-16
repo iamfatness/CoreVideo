@@ -29,15 +29,9 @@
 #include <QMetaObject>
 #include <QMessageBox>
 #include <QMimeData>
-#include <QDir>
-#include <QFileDialog>
-#include <QFileInfo>
 #include <QPointer>
-#include <QProcess>
-#include <QProcessEnvironment>
 #include <QPushButton>
-#include <QSettings>
-#include <QStandardPaths>
+#include <QStringList>
 #include <QTableWidget>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -45,45 +39,28 @@
 #include <obs-module.h>
 #include <algorithm>
 #include <unordered_map>
-#if defined(Q_OS_WIN)
-#include <windows.h>
-#endif
 
 // ── Column layout for the output table ───────────────────────────────────────
 enum DockOutputColumns {
     DColPreview    = 0,
     DColName       = 1,
     DColAssignment = 2,
-    DColAudio      = 3,
-    DColIsolate    = 4,
-    DColCount      = 5
+    DColRequested  = 3,
+    DColSignal     = 4,
+    DColAudio      = 5,
+    DColIsolate    = 6,
+    DColCount      = 7
 };
 
-static constexpr int kThumbW = 80;
-static constexpr int kThumbH = 45;
-static constexpr int kRowH   = 50;
+static constexpr int kThumbW = 96;
+static constexpr int kThumbH = 54;
+static constexpr int kRowH   = 66;
 
 static std::string redacted_tail(const std::string &value)
 {
     if (value.empty()) return "empty";
     if (value.size() <= 4) return "****";
     return "****" + value.substr(value.size() - 4);
-}
-
-static QString plugin_binary_dir()
-{
-#if defined(Q_OS_WIN)
-    HMODULE module = nullptr;
-    wchar_t module_path[MAX_PATH] = {};
-    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           reinterpret_cast<LPCWSTR>(&plugin_binary_dir),
-                           &module) &&
-        GetModuleFileNameW(module, module_path, MAX_PATH) > 0) {
-        return QFileInfo(QString::fromWCharArray(module_path)).absolutePath();
-    }
-#endif
-    return {};
 }
 
 // Fast I420 → RGB888 for dock thumbnails (shared with output dialog logic)
@@ -201,11 +178,39 @@ static QString participant_label(const ParticipantInfo &p)
     return label;
 }
 
+static QString participant_roster_label(const ParticipantInfo &p)
+{
+    QString label = p.display_name.empty()
+        ? QString("ID %1").arg(p.user_id)
+        : QString::fromStdString(p.display_name);
+    QStringList tags;
+    tags << QString("ID %1").arg(p.user_id);
+    tags << (p.has_video ? QStringLiteral("video") : QStringLiteral("no video"));
+    tags << (p.is_muted ? QStringLiteral("muted") : QStringLiteral("audio"));
+    if (p.is_talking) tags << QStringLiteral("talking");
+    if (p.spotlight_index > 0) tags << QString("spotlight %1").arg(p.spotlight_index);
+    if (p.is_sharing_screen) tags << QStringLiteral("sharing");
+    return QString("%1  -  %2").arg(label, tags.join(" / "));
+}
+
+static QString signal_label(const ZoomOutputInfo &output)
+{
+    if (output.observed_width == 0 || output.observed_height == 0)
+        return QStringLiteral("Waiting");
+    if (output.observed_fps > 0.01) {
+        return QString("%1x%2\n%3 fps")
+            .arg(output.observed_width)
+            .arg(output.observed_height)
+            .arg(output.observed_fps, 0, 'f', 1);
+    }
+    return QString("%1x%2").arg(output.observed_width).arg(output.observed_height);
+}
+
 // ── Constructor ───────────────────────────────────────────────────────────────
 ZoomDock::ZoomDock(QWidget *parent)
     : QWidget(parent)
 {
-    setMinimumWidth(520);
+    setMinimumWidth(760);
 
     auto *vLayout = new QVBoxLayout(this);
     vLayout->setContentsMargins(8, 8, 8, 8);
@@ -236,118 +241,6 @@ ZoomDock::ZoomDock(QWidget *parent)
     speaker_row->addWidget(new QLabel("Active speaker:", this));
     speaker_row->addWidget(m_speaker_label, 1);
     vLayout->addLayout(speaker_row);
-
-    // ── Launch Sidecar (companion control surface) ────────────────────────────
-    auto *launch_row = new QHBoxLayout;
-    launch_row->setSpacing(6);
-    auto *launch_btn = new QPushButton("Launch Sidecar", this);
-    launch_btn->setToolTip(
-        "Open the CoreVideo Sidecar broadcast control surface and connect it "
-        "to this OBS instance automatically.");
-    launch_btn->setProperty("role", "secondary");
-    launch_row->addStretch(1);
-    launch_row->addWidget(launch_btn);
-    vLayout->addLayout(launch_row);
-
-    connect(launch_btn, &QPushButton::clicked, this, [this, launch_btn]() {
-        // Discover the sidecar binary. Order:
-        //   1. COREVIDEO_SIDECAR_BIN env var
-        //   2. Same directory as this loaded OBS plugin DLL
-        //   3. Same directory as the running OBS executable
-        //   4. QSettings key "sidecar/binPath" (remembered manual choice)
-        //   5. PATH lookup ("CoreVideoSidecar" / ".app/Contents/MacOS/...")
-        //   6. Prompt the user to locate it, then remember.
-        const QStringList candidateNames = {
-#if defined(Q_OS_WIN)
-            "CoreVideoSidecar.exe",
-#elif defined(Q_OS_MAC)
-            "CoreVideo Sidecar.app/Contents/MacOS/CoreVideoSidecar",
-            "CoreVideoSidecar.app/Contents/MacOS/CoreVideoSidecar",
-#endif
-            "CoreVideoSidecar",
-        };
-
-        auto fileExists = [](const QString &p) {
-            return !p.isEmpty() && QFileInfo(p).isFile();
-        };
-
-        QString path = qEnvironmentVariable("COREVIDEO_SIDECAR_BIN");
-        if (!fileExists(path)) {
-            const QString pluginDir = plugin_binary_dir();
-            for (const QString &name : candidateNames) {
-                const QString p = QDir(pluginDir).filePath(name);
-                if (fileExists(p)) { path = p; break; }
-            }
-        }
-        if (!fileExists(path)) {
-            const QString appDir = QCoreApplication::applicationDirPath();
-            for (const QString &name : candidateNames) {
-                const QString p = QDir(appDir).filePath(name);
-                if (fileExists(p)) { path = p; break; }
-            }
-        }
-        if (!fileExists(path)) {
-            QSettings s;
-            path = s.value("sidecar/binPath").toString();
-        }
-        if (!fileExists(path)) {
-            for (const QString &name : candidateNames) {
-                const QString p = QStandardPaths::findExecutable(name);
-                if (fileExists(p)) { path = p; break; }
-            }
-        }
-        if (!fileExists(path)) {
-            const QString picked = QFileDialog::getOpenFileName(
-                this, "Locate CoreVideo Sidecar",
-                QCoreApplication::applicationDirPath(),
-                "Executables (*)");
-            if (picked.isEmpty()) return;
-            path = picked;
-            QSettings s;
-            s.setValue("sidecar/binPath", path);
-        }
-
-        QStringList args;
-        args << "--obs-host"        << "127.0.0.1"
-             << "--obs-port"        << "4455"
-             << "--obs-autoconnect";
-
-        const QString workDir = QFileInfo(path).absolutePath();
-        QProcess proc;
-        proc.setProgram(path);
-        proc.setArguments(args);
-        proc.setWorkingDirectory(workDir);
-        auto env = QProcessEnvironment::systemEnvironment();
-        const QString appDir = QCoreApplication::applicationDirPath();
-        const QString pathKey =
-            env.contains("Path") ? QStringLiteral("Path") : QStringLiteral("PATH");
-        const QString existingPath = env.value(pathKey);
-#if defined(Q_OS_WIN)
-        env.insert(pathKey, appDir + ";" + workDir + ";" + existingPath);
-#else
-        env.insert(pathKey, appDir + ":" + workDir + ":" + existingPath);
-#endif
-        const QString platformDir = QDir(appDir).filePath("platforms");
-        if (QFileInfo::exists(QDir(platformDir).filePath("qwindows.dll")))
-            env.insert("QT_QPA_PLATFORM_PLUGIN_PATH", platformDir);
-        env.insert("QT_PLUGIN_PATH", appDir);
-        proc.setProcessEnvironment(env);
-        qint64 pid = 0;
-        const bool ok = proc.startDetached(&pid);
-        if (!ok) {
-            QMessageBox::warning(this, "Launch Sidecar",
-                QString("Failed to launch sidecar at:\n%1").arg(path));
-            return;
-        }
-        launch_btn->setText("Sidecar launched");
-        launch_btn->setEnabled(false);
-        QTimer::singleShot(2500, launch_btn, [launch_btn]() {
-            if (!launch_btn) return;
-            launch_btn->setText("Launch Sidecar");
-            launch_btn->setEnabled(true);
-        });
-    });
-
     // ── Credentials notice (hidden once credentials are set) ──────────────────
     m_credentials_banner = new CvBanner(
         CvBannerKind::Info,
@@ -530,10 +423,14 @@ ZoomDock::ZoomDock(QWidget *parent)
 
     m_output_table = new CvDropOutputTable(output_group);
     m_output_table->setColumnCount(DColCount);
-    m_output_table->setHorizontalHeaderLabels({"", "Output", "Assignment", "Audio", "Isolated"});
+    m_output_table->setHorizontalHeaderLabels({
+        "Preview", "Output", "Assignment", "Requested", "Signal", "Audio", "Isolated"
+    });
     m_output_table->horizontalHeader()->setSectionResizeMode(DColPreview,    QHeaderView::Fixed);
     m_output_table->horizontalHeader()->setSectionResizeMode(DColName,       QHeaderView::Stretch);
     m_output_table->horizontalHeader()->setSectionResizeMode(DColAssignment, QHeaderView::Stretch);
+    m_output_table->horizontalHeader()->setSectionResizeMode(DColRequested,  QHeaderView::ResizeToContents);
+    m_output_table->horizontalHeader()->setSectionResizeMode(DColSignal,     QHeaderView::ResizeToContents);
     m_output_table->horizontalHeader()->setSectionResizeMode(DColAudio,      QHeaderView::ResizeToContents);
     m_output_table->horizontalHeader()->setSectionResizeMode(DColIsolate,    QHeaderView::ResizeToContents);
     m_output_table->setColumnWidth(DColPreview, kThumbW + 2);
@@ -705,6 +602,7 @@ void ZoomDock::update_state_indicator()
     }
 
     update_recovery_panel();
+    refresh_output_signal_cells();
 
     // Active speaker name
     const uint32_t spk_id = ZoomEngineClient::instance().active_speaker_id();
@@ -734,25 +632,29 @@ void ZoomDock::refresh_outputs()
     // widgets right now would close the popup and lose the pick. Defer; the
     // next roster update (or any later refresh) will rebuild instead.
     for (int row = 0; row < m_output_table->rowCount(); ++row) {
-        if (auto *combo = qobject_cast<QComboBox *>(
-                m_output_table->cellWidget(row, DColAssignment))) {
-            if (combo->view() && combo->view()->isVisible()) return;
+        for (const int col : {DColAssignment, DColRequested, DColAudio}) {
+            if (auto *combo = qobject_cast<QComboBox *>(
+                    m_output_table->cellWidget(row, col))) {
+                if (combo->view() && combo->view()->isVisible()) return;
+            }
         }
     }
 
     // Snapshot any in-flight (picked-but-not-yet-applied) selections so that
     // a roster-driven rebuild does not silently revert the user's choice
     // before they have a chance to click Apply.
-    struct PendingPick { QString assignment; int audio_idx; bool isolate; };
+    struct PendingPick { QString assignment; int requested_idx; int audio_idx; bool isolate; };
     std::unordered_map<std::string, PendingPick> pending;
     for (int row = 0; row < m_output_table->rowCount(); ++row) {
         auto *name_item = m_output_table->item(row, DColName);
         auto *assign = qobject_cast<QComboBox *>(m_output_table->cellWidget(row, DColAssignment));
+        auto *requested = qobject_cast<QComboBox *>(m_output_table->cellWidget(row, DColRequested));
         auto *audio  = qobject_cast<QComboBox *>(m_output_table->cellWidget(row, DColAudio));
         auto *isolate = qobject_cast<QCheckBox *>(m_output_table->cellWidget(row, DColIsolate));
-        if (!name_item || !assign || !audio || !isolate) continue;
+        if (!name_item || !assign || !requested || !audio || !isolate) continue;
         pending[name_item->data(Qt::UserRole).toString().toStdString()] = {
             assign->currentData().toString(),
+            requested->currentIndex(),
             audio->currentIndex(),
             isolate->isChecked()
         };
@@ -772,7 +674,7 @@ void ZoomDock::refresh_outputs()
                 : QString::fromStdString(p.display_name);
             if (!filter.isEmpty() && !name.toLower().contains(filter) &&
                 !QString::number(p.user_id).contains(filter)) continue;
-            auto *item = new QListWidgetItem(name);
+            auto *item = new QListWidgetItem(participant_roster_label(p));
             item->setData(Qt::UserRole, QString::number(p.user_id));
             m_participant_list->addItem(item);
         }
@@ -867,6 +769,25 @@ void ZoomDock::refresh_outputs()
         if (idx >= 0) assignment->setCurrentIndex(idx);
         m_output_table->setCellWidget(row, DColAssignment, assignment);
 
+        auto *requested = new QComboBox(m_output_table);
+        requested->addItem("360p", static_cast<int>(VideoResolution::P360));
+        requested->addItem("720p", static_cast<int>(VideoResolution::P720));
+        requested->addItem("1080p", static_cast<int>(VideoResolution::P1080));
+        requested->setCurrentIndex(static_cast<int>(output.video_resolution));
+        m_output_table->setCellWidget(row, DColRequested, requested);
+
+        auto *signal_item = new QTableWidgetItem(signal_label(output));
+        signal_item->setFlags(signal_item->flags() & ~Qt::ItemIsEditable);
+        signal_item->setTextAlignment(Qt::AlignCenter);
+        signal_item->setToolTip(
+            output.observed_width == 0
+                ? QStringLiteral("No video frame has been received for this output yet.")
+                : QString("Live signal: %1x%2 at %3 fps")
+                    .arg(output.observed_width)
+                    .arg(output.observed_height)
+                    .arg(output.observed_fps, 0, 'f', 2));
+        m_output_table->setItem(row, DColSignal, signal_item);
+
         auto *audio = new QComboBox(m_output_table);
         audio->addItem("Mono",   static_cast<int>(AudioChannelMode::Mono));
         audio->addItem("Stereo", static_cast<int>(AudioChannelMode::Stereo));
@@ -885,10 +806,41 @@ void ZoomDock::refresh_outputs()
         if (pit != pending.end()) {
             const int aidx = assignment->findData(pit->second.assignment);
             if (aidx >= 0) assignment->setCurrentIndex(aidx);
+            if (pit->second.requested_idx >= 0 && pit->second.requested_idx < requested->count())
+                requested->setCurrentIndex(pit->second.requested_idx);
             if (pit->second.audio_idx >= 0 && pit->second.audio_idx < audio->count())
                 audio->setCurrentIndex(pit->second.audio_idx);
             isolate->setChecked(pit->second.isolate);
         }
+    }
+}
+
+void ZoomDock::refresh_output_signal_cells()
+{
+    if (!m_output_table) return;
+    const auto outputs = ZoomOutputManager::instance().outputs();
+    std::unordered_map<std::string, ZoomOutputInfo> by_source;
+    for (const auto &output : outputs)
+        by_source.emplace(output.source_name, output);
+
+    for (int row = 0; row < m_output_table->rowCount(); ++row) {
+        auto *name_item = m_output_table->item(row, DColName);
+        auto *signal_item = m_output_table->item(row, DColSignal);
+        if (!name_item || !signal_item) continue;
+
+        const std::string source_name =
+            name_item->data(Qt::UserRole).toString().toStdString();
+        const auto it = by_source.find(source_name);
+        if (it == by_source.end()) continue;
+
+        signal_item->setText(signal_label(it->second));
+        signal_item->setToolTip(
+            it->second.observed_width == 0
+                ? QStringLiteral("No video frame has been received for this output yet.")
+                : QString("Live signal: %1x%2 at %3 fps")
+                    .arg(it->second.observed_width)
+                    .arg(it->second.observed_height)
+                    .arg(it->second.observed_fps, 0, 'f', 2));
     }
 }
 
@@ -897,12 +849,15 @@ void ZoomDock::apply_outputs()
     for (int row = 0; row < m_output_table->rowCount(); ++row) {
         auto *name_item  = m_output_table->item(row, DColName);
         auto *assignment = qobject_cast<QComboBox *>(m_output_table->cellWidget(row, DColAssignment));
+        auto *requested  = qobject_cast<QComboBox *>(m_output_table->cellWidget(row, DColRequested));
         auto *audio      = qobject_cast<QComboBox *>(m_output_table->cellWidget(row, DColAudio));
         auto *isolate    = qobject_cast<QCheckBox *>(m_output_table->cellWidget(row, DColIsolate));
-        if (!name_item || !assignment || !audio || !isolate) continue;
+        if (!name_item || !assignment || !requested || !audio || !isolate) continue;
 
         const std::string source_name = name_item->data(Qt::UserRole).toString().toStdString();
         const QString ad = assignment->currentData().toString();
+        const auto video_resolution =
+            static_cast<VideoResolution>(requested->currentData().toInt());
         const auto audio_mode = static_cast<AudioChannelMode>(audio->currentData().toInt());
 
         AssignmentMode mode = AssignmentMode::Participant;
@@ -923,16 +878,18 @@ void ZoomDock::apply_outputs()
 
         // Preserve the existing failover by reading current output info.
         uint32_t failover = 0;
+        bool audience_audio = false;
         for (const auto &o : ZoomOutputManager::instance().outputs()) {
             if (o.source_name == source_name) {
                 failover = o.failover_participant_id;
+                audience_audio = o.audience_audio;
                 break;
             }
         }
 
         ZoomOutputManager::instance().configure_output_ex(
             source_name, mode, participant_id, spotlight_slot, failover,
-            isolate->isChecked(), audio_mode);
+            isolate->isChecked(), audio_mode, video_resolution, audience_audio);
     }
 }
 

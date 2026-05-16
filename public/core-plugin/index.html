@@ -20,7 +20,7 @@
 <p>CoreVideo keeps all Zoom Meeting SDK access inside the lightweight <code>ZoomObsEngine</code> helper process. The OBS plugin starts the engine, joins the meeting, and sends subscription requests over JSON IPC. Video and audio payloads move through named shared memory so large frames are not copied through the IPC pipe.</p>
 <p>The plugin-side <code>ZoomSource</code> reads the shared memory frame, outputs it into OBS, and forwards the same copied buffer to optional plugin-side services such as ISO recording. This keeps the engine minimal and makes OBS/plugin features easier to test independently from the Zoom SDK.</p>
 <h2>What It Looks Like in OBS</h2>
-<p>The CoreVideo plugin is operated from inside OBS. The main pieces operators see are the Zoom Control dock, regular OBS scenes/sources, the Zoom Output Manager, and the Zoom Participant source properties.</p>
+<p>The CoreVideo plugin is operated from inside OBS. These illustrations show the current core plugin UI after the OBS dock improvements: the Zoom Control dock, regular OBS scenes/sources, the Zoom Output Manager, and the Zoom Participant source properties. Exact styling can vary slightly by OBS theme and platform.</p>
 <figure class="doc-image"><img src="images/corevideo-obs-workspace.svg" alt="CoreVideo OBS workspace with Zoom Control dock"></figure>
 <p>The Zoom Control dock joins and leaves meetings, starts and stops raw media, shows meeting state, lists participants, and shows output assignments without leaving OBS.</p>
 <figure class="doc-image"><img src="images/corevideo-output-manager.svg" alt="CoreVideo Output Manager"></figure>

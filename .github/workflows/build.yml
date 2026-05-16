@@ -9,12 +9,12 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (e.g. v0.1.0) — leave blank to skip GitHub Release"
+        description: "Release version (e.g. v0.1.0) - leave blank to skip GitHub Release"
         required: false
         default: ""
 
 jobs:
-  # ── Windows ────────────────────────────────────────────────────────────────
+  # Windows
   build-windows:
     name: Windows x64
     runs-on: windows-2022
@@ -32,7 +32,7 @@ jobs:
 
       # Download the OBS portable zip for the DLLs (needed to generate import
       # libs via dumpbin).  Always use sparse-checkout for headers and always
-      # write our own cmake config files — the portable zip's bundled configs
+      # write our own cmake config files; the portable zip's bundled configs
       # do not set INTERFACE_INCLUDE_DIRECTORIES so headers would never be found.
       - name: Get OBS SDK (headers + import libs)
         shell: powershell
@@ -41,13 +41,13 @@ jobs:
           $obs = "C:\obs-runtime"
           $sdk = "C:\obs-sdk"
 
-          # ── OBS portable zip (needed for obs.dll / obs-frontend-api.dll) ─────
+          # OBS portable zip (needed for obs.dll / obs-frontend-api.dll)
           Invoke-WebRequest `
               "https://github.com/obsproject/obs-studio/releases/download/$ver/OBS-Studio-$ver-Windows.zip" `
               -OutFile obs.zip
           Expand-Archive obs.zip $obs -Force
 
-          # ── Headers via sparse checkout ───────────────────────────────────────
+          # Headers via sparse checkout
           git clone --depth 1 --branch $ver --filter=blob:none --sparse `
               https://github.com/obsproject/obs-studio.git C:\obs-source
           Push-Location C:\obs-source
@@ -58,11 +58,11 @@ jobs:
           Copy-Item "C:\obs-source\libobs\*.h"                             "$sdk\include\obs\"
           Copy-Item "C:\obs-source\UI\obs-frontend-api\obs-frontend-api.h" "$sdk\include\obs\"
 
-          # ── Import libs from DLL export tables ────────────────────────────────
+          # Import libs from DLL export tables
           New-Item -Force -ItemType Directory "$sdk\lib" | Out-Null
           foreach ($name in @("obs", "obs-frontend-api")) {
               $dll = "$obs\bin\64bit\$name.dll"
-              if (-not (Test-Path $dll)) { Write-Warning "$dll not found — skipping"; continue }
+              if (-not (Test-Path $dll)) { Write-Warning "$dll not found - skipping"; continue }
 
               $def = "$sdk\lib\$name.def"
               $lib = "$sdk\lib\$name.lib"
@@ -77,7 +77,7 @@ jobs:
               lib /nologo /def:$def /out:$lib /machine:x64
           }
 
-          # ── CMake config files (always generated — never use the zip's copies) ─
+          # CMake config files (always generated; never use the zip's copies)
           $sdkFwd = $sdk -replace '\\', '/'
           $obsFwd = $obs -replace '\\', '/'
           foreach ($pkg in @(
@@ -214,7 +214,7 @@ jobs:
           path: build/
           if-no-files-found: ignore
 
-  # ── macOS ──────────────────────────────────────────────────────────────────
+  # macOS
   build-macos:
     name: macOS Universal
     runs-on: macos-14
@@ -228,7 +228,7 @@ jobs:
 
       # Download OBS source archive for headers only.
       # The plugin links with -undefined dynamic_lookup so no libobs is
-      # needed at link time — OBS resolves all obs_* symbols at load time.
+      # needed at link time; OBS resolves all obs_* symbols at load time.
       - name: Get OBS headers
         run: |
           OBS_VER=30.2.2
@@ -282,9 +282,10 @@ jobs:
       - name: Configure
         run: |
           QT_PREFIX="$(brew --prefix qt@6)"
+          HOST_ARCH="$(uname -m)"
           cmake -B build \
               -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+              -DCMAKE_OSX_ARCHITECTURES="$HOST_ARCH" \
               -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
               -DZOOM_SDK_DIR=third_party/zoom-sdk \
               "-DCMAKE_PREFIX_PATH=/tmp/obs-sdk;$QT_PREFIX" \
@@ -318,7 +319,7 @@ jobs:
           path: build/
           if-no-files-found: ignore
 
-  # ── Release ────────────────────────────────────────────────────────────────
+  # Release
   release:
     name: Create GitHub Release
     needs: [build-windows, build-macos]

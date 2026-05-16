@@ -193,8 +193,11 @@ bool obs_module_load(void)
                 ensure_zoom_dock();
                 ensure_iso_panel();
             }
-            if (event == OBS_FRONTEND_EVENT_EXIT)
+            if (event == OBS_FRONTEND_EVENT_EXIT) {
+                if (g_dock)
+                    g_dock->prepare_shutdown();
                 ZoomEngineClient::instance().stop();
+            }
         }, nullptr);
 
     blog(LOG_INFO, "[obs-zoom-plugin] Plugin loaded successfully");

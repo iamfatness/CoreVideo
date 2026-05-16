@@ -23,6 +23,7 @@ class ZoomDock : public QWidget {
 public:
     explicit ZoomDock(QWidget *parent = nullptr);
     ~ZoomDock() override;
+    void prepare_shutdown();
 
 private:
     void refresh();
@@ -34,6 +35,7 @@ private:
     void on_leave_clicked();
     void on_start_engine_clicked();
     void on_stop_engine_clicked();
+    void on_launch_sidecar_clicked();
     void on_cancel_recovery_clicked();
     void update_state_indicator();
     void update_recovery_panel();
@@ -62,6 +64,7 @@ private:
     QPushButton *m_leave_btn    = nullptr;
     QPushButton *m_start_engine_btn = nullptr;
     QPushButton *m_stop_engine_btn  = nullptr;
+    QPushButton *m_launch_sidecar_btn = nullptr;
     QCheckBox   *m_webinar_cb   = nullptr;
     QLineEdit   *m_participant_filter = nullptr;
     QListWidget *m_participant_list   = nullptr;

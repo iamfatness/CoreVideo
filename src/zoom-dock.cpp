@@ -29,8 +29,11 @@
 #include <QMetaObject>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QFileInfo>
 #include <QPointer>
+#include <QProcess>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QStringList>
 #include <QTableWidget>
 #include <QTimer>
@@ -39,6 +42,9 @@
 #include <obs-module.h>
 #include <algorithm>
 #include <unordered_map>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 // ── Column layout for the output table ───────────────────────────────────────
 enum DockOutputColumns {
@@ -55,6 +61,37 @@ enum DockOutputColumns {
 static constexpr int kThumbW = 96;
 static constexpr int kThumbH = 54;
 static constexpr int kRowH   = 66;
+
+static QString sidecar_executable_path()
+{
+#if defined(_WIN32)
+    HMODULE module = nullptr;
+    wchar_t module_path[MAX_PATH] = {};
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&sidecar_executable_path),
+                           &module) &&
+        GetModuleFileNameW(module, module_path, MAX_PATH) > 0) {
+        QString path = QString::fromWCharArray(module_path);
+        const int slash = path.lastIndexOf(QRegularExpression("[\\\\/]"));
+        if (slash >= 0) {
+            const QString candidate =
+                path.left(slash + 1) + QStringLiteral("CoreVideoSidecar.exe");
+            if (QFileInfo::exists(candidate))
+                return candidate;
+        }
+    }
+
+    char *obs_path = obs_module_file("CoreVideoSidecar.exe");
+    const QString candidate = obs_path
+        ? QString::fromLocal8Bit(obs_path)
+        : QStringLiteral("CoreVideoSidecar.exe");
+    if (obs_path) bfree(obs_path);
+    return candidate;
+#else
+    return QStringLiteral("CoreVideoSidecar");
+#endif
+}
 
 static std::string redacted_tail(const std::string &value)
 {
@@ -327,15 +364,19 @@ ZoomDock::ZoomDock(QWidget *parent)
     engine_layout->setSpacing(6);
     m_start_engine_btn = new QPushButton("Start Engine", engine_group);
     m_stop_engine_btn = new QPushButton("Stop Engine", engine_group);
+    m_launch_sidecar_btn = new QPushButton("Launch Sidecar", engine_group);
     m_start_engine_btn->setProperty("role", "primary");
     m_stop_engine_btn->setProperty("role", "danger");
     m_start_engine_btn->setToolTip(
         "Start Zoom raw media capture and send participant video/audio to OBS outputs.");
     m_stop_engine_btn->setToolTip(
         "Stop Zoom raw media capture while staying joined to the meeting.");
+    m_launch_sidecar_btn->setToolTip(
+        "Open the CoreVideo Sidecar production console and connect it to OBS.");
     m_stop_engine_btn->setEnabled(false);
     engine_layout->addWidget(m_start_engine_btn);
     engine_layout->addWidget(m_stop_engine_btn);
+    engine_layout->addWidget(m_launch_sidecar_btn);
     vLayout->addWidget(engine_group);
 
     // Pre-populate join fields from the last successful join, if any.
@@ -356,9 +397,13 @@ ZoomDock::ZoomDock(QWidget *parent)
             this, [this]() { on_start_engine_clicked(); });
     connect(m_stop_engine_btn, &QPushButton::clicked,
             this, [this]() { on_stop_engine_clicked(); });
+    connect(m_launch_sidecar_btn, &QPushButton::clicked,
+            this, [this]() { on_launch_sidecar_clicked(); });
     m_pending_oauth_join_timer = new QTimer(this);
     m_pending_oauth_join_timer->setInterval(500);
     connect(m_pending_oauth_join_timer, &QTimer::timeout, this, [this]() {
+        if (!m_alive->load(std::memory_order_acquire))
+            return;
         const ZoomPluginSettings s = ZoomPluginSettings::load();
         if (s.oauth_access_token.empty() && s.oauth_refresh_token.empty())
             return;
@@ -493,8 +538,7 @@ ZoomDock::ZoomDock(QWidget *parent)
 
 ZoomDock::~ZoomDock()
 {
-    m_alive->store(false, std::memory_order_release);
-    stop_pending_oauth_join();
+    prepare_shutdown();
     if (m_join_thread.joinable())
         m_join_thread.join();
     ZoomEngineClient::instance().remove_roster_callback(this);
@@ -502,9 +546,21 @@ ZoomDock::~ZoomDock()
     ZoomOutputManager::instance().clear_all_preview_cbs();
 }
 
+void ZoomDock::prepare_shutdown()
+{
+    m_alive->store(false, std::memory_order_release);
+    stop_pending_oauth_join();
+    if (m_countdown_timer)
+        m_countdown_timer->stop();
+    if (m_refresh_timer)
+        m_refresh_timer->stop();
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
 void ZoomDock::update_credentials_banner()
 {
+    if (!m_alive->load(std::memory_order_acquire))
+        return;
     const ZoomPluginSettings s = ZoomPluginSettings::load();
     const bool missing = s.sdk_key.empty() && s.sdk_secret.empty() && s.jwt_token.empty();
     m_credentials_banner->setVisible(missing);
@@ -1109,6 +1165,26 @@ void ZoomDock::on_stop_engine_clicked()
 {
     ZoomEngineClient::instance().stop_media();
     update_state_indicator();
+}
+
+void ZoomDock::on_launch_sidecar_clicked()
+{
+    const QString sidecar_path = sidecar_executable_path();
+    if (!QFileInfo::exists(sidecar_path)) {
+        QMessageBox::warning(this, "Launch Sidecar",
+            QString("CoreVideoSidecar.exe was not found.\n\nExpected path:\n%1")
+                .arg(sidecar_path));
+        return;
+    }
+
+    const QString working_dir = QFileInfo(sidecar_path).absolutePath();
+    if (!QProcess::startDetached(sidecar_path,
+                                 QStringList{QStringLiteral("--obs-autoconnect")},
+                                 working_dir)) {
+        QMessageBox::warning(this, "Launch Sidecar",
+            QString("Could not launch CoreVideo Sidecar.\n\nPath:\n%1")
+                .arg(sidecar_path));
+    }
 }
 
 void ZoomDock::on_cancel_recovery_clicked()

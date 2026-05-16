@@ -58,7 +58,7 @@ jobs:
           Pop-Location
 
           New-Item -Force -ItemType Directory "$sdk\include\obs" | Out-Null
-          Copy-Item "C:\obs-source\libobs\*.h" "$sdk\include\obs\"
+          Copy-Item "C:\obs-source\libobs\*" "$sdk\include\obs\" -Recurse -Force
           Copy-Item "C:\obs-source\UI\obs-frontend-api\obs-frontend-api.h" "$sdk\include\obs\"
 
           New-Item -Force -ItemType Directory "$sdk\lib" | Out-Null
@@ -93,7 +93,7 @@ jobs:
               "set_target_properties($($pkg.target) PROPERTIES",
               "  IMPORTED_IMPLIB `"$sdkFwd/lib/$($pkg.dll).lib`"",
               "  IMPORTED_LOCATION `"$obsFwd/bin/64bit/$($pkg.dll).dll`"",
-              "  INTERFACE_INCLUDE_DIRECTORIES `"$sdkFwd/include`"",
+              "  INTERFACE_INCLUDE_DIRECTORIES `"$sdkFwd/include/obs`"",
               ")",
               "set($($pkg.name)_FOUND TRUE)"
             ) | Set-Content -Path "$dir\$($pkg.name)Config.cmake" -Encoding UTF8

@@ -55,7 +55,7 @@ jobs:
           Pop-Location
 
           New-Item -Force -ItemType Directory "$sdk\include\obs" | Out-Null
-          Copy-Item "C:\obs-source\libobs\*.h"                             "$sdk\include\obs\"
+          Copy-Item "C:\obs-source\libobs\*"                               "$sdk\include\obs\" -Recurse -Force
           Copy-Item "C:\obs-source\UI\obs-frontend-api\obs-frontend-api.h" "$sdk\include\obs\"
 
           # Import libs from DLL export tables
@@ -92,7 +92,7 @@ jobs:
                   "set_target_properties($($pkg.target) PROPERTIES",
                   "  IMPORTED_IMPLIB `"$sdkFwd/lib/$($pkg.dll).lib`"",
                   "  IMPORTED_LOCATION `"$obsFwd/bin/64bit/$($pkg.dll).dll`"",
-                  "  INTERFACE_INCLUDE_DIRECTORIES `"$sdkFwd/include`"",
+                  "  INTERFACE_INCLUDE_DIRECTORIES `"$sdkFwd/include/obs`"",
                   ")",
                   "set($($pkg.name)_FOUND TRUE)"
               ) | Set-Content -Path "$dir\$($pkg.name)Config.cmake" -Encoding UTF8
@@ -245,21 +245,21 @@ jobs:
                    /tmp/obs-sdk/cmake/LibObs \
                    /tmp/obs-sdk/cmake/obs-frontend-api
 
-          cp /tmp/obs-source/libobs/*.h                             /tmp/obs-sdk/include/obs/
+          cp -R /tmp/obs-source/libobs/*                            /tmp/obs-sdk/include/obs/
           cp /tmp/obs-source/UI/obs-frontend-api/obs-frontend-api.h /tmp/obs-sdk/include/obs/
 
           # Write cmake config files using printf (avoids heredoc quoting issues).
           printf '%s\n' \
               'add_library(OBS::libobs INTERFACE IMPORTED GLOBAL)' \
               'set_target_properties(OBS::libobs PROPERTIES' \
-              '    INTERFACE_INCLUDE_DIRECTORIES "/tmp/obs-sdk/include")' \
+              '    INTERFACE_INCLUDE_DIRECTORIES "/tmp/obs-sdk/include/obs")' \
               'set(LibObs_FOUND TRUE)' \
               > /tmp/obs-sdk/cmake/LibObs/LibObsConfig.cmake
 
           printf '%s\n' \
               'add_library(OBS::obs-frontend-api INTERFACE IMPORTED GLOBAL)' \
               'set_target_properties(OBS::obs-frontend-api PROPERTIES' \
-              '    INTERFACE_INCLUDE_DIRECTORIES "/tmp/obs-sdk/include")' \
+              '    INTERFACE_INCLUDE_DIRECTORIES "/tmp/obs-sdk/include/obs")' \
               'set(obs-frontend-api_FOUND TRUE)' \
               > /tmp/obs-sdk/cmake/obs-frontend-api/obs-frontend-apiConfig.cmake
 

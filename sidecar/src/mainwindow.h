@@ -11,6 +11,7 @@
 #include "preview-canvas.h"
 #include "zoom-control-client.h"
 #include <QMainWindow>
+#include <QHash>
 #include <optional>
 
 class PreviewCanvas;
@@ -52,6 +53,7 @@ private slots:
     void onLookSelected(const Look &look);
     void onThemeSelected(const ShowTheme &theme);
     void onApplyLayout();
+    void onRenderPreview();
     void onTake();
     void onAuto();
     void onFTB();
@@ -61,6 +63,7 @@ private slots:
     void onObsState(OBSClient::State s);
     void onObsLog(const QString &msg);
     void onScenesReceived(const QStringList &scenes);
+    void updateSceneSyncStatus();
     void onVirtualCamToggle();
     void onVirtualCamState(bool active);
     void onSettingsChanged();
@@ -82,8 +85,14 @@ private:
     void loadMockParticipants();
     void provisionPlaceholderSources();
     void provisionLookScenes();
+    void repairCoreVideoDuplicates();
+    void renderLookToOBS(const Look &look, bool makeProgram);
+    void reconcileParticipantSlots(const QVector<ParticipantInfo> &participants);
+    void syncZoomOutputAssignments();
     QVector<PreviewCanvas::Participant> participantsForLook(const Look &look) const;
     QStringList sourceNamesForSlots(int slotCount) const;
+    QStringList sourceNamesForLook(const Look &look) const;
+    QStringList lookSceneNames() const;
     QString obsSceneNameForLook(const Look &look) const;
 
     // Top bar
@@ -91,6 +100,7 @@ private:
     QWidget     *m_canvasArea     = nullptr;
     QLabel      *m_showNameLabel  = nullptr;
     QLabel      *m_obsStatusLabel = nullptr;
+    QLabel      *m_sceneSyncStatusLabel = nullptr;
     QPushButton *m_engineBtn      = nullptr;
     QPushButton *m_obsBtn         = nullptr;
     bool         m_engineOn       = false;
@@ -107,6 +117,7 @@ private:
     QPushButton *m_autoBtn = nullptr;
     QPushButton *m_ftbBtn  = nullptr;
     QPushButton *m_swapBtn = nullptr;
+    QPushButton *m_renderPreviewBtn = nullptr;
     QPushButton *m_mapBtn  = nullptr;
     QComboBox   *m_autoDurationCombo = nullptr;
 
@@ -148,6 +159,7 @@ private:
     Sidebar                   *m_sidebar        = nullptr;
     QVector<ParticipantInfo>   m_participants;
     QStringList                m_outputSources;
+    QHash<int, int>            m_lastSyncedSlotParticipants;
     QStringList                m_lastScenes;
     SidecarControlServer      *m_controlServer  = nullptr;
     ZoomControlClient         *m_zoomClient     = nullptr;

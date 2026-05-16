@@ -1,0 +1,8 @@
+{
+  "id": "one-up-clean",
+  "name": "1 Source Clean",
+  "category": "Source Counts",
+  "description": "Single source full frame",
+  "template": "1-up",
+  "theme": "midnight"
+}

@@ -6,6 +6,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QHash>
+#include <QSet>
 #include <QStringList>
 #include <QTimer>
 #include <optional>
@@ -40,6 +41,18 @@ public:
         bool    enabled = true;
     };
 
+    struct CoreVideoSyncStatus {
+        bool inventoryReady = false;
+        int expectedParticipantSources = 0;
+        int presentParticipantSources = 0;
+        int expectedSlotScenes = 0;
+        int presentSlotScenes = 0;
+        int expectedLookScenes = 0;
+        int presentLookScenes = 0;
+        QStringList missingInputs;
+        QStringList missingScenes;
+    };
+
     // Full transform spec for SetSceneItemTransform.
     // All fields optional — only set what you want to change.
     struct Transform {
@@ -66,7 +79,12 @@ public:
     // ── Scene queries ────────────────────────────────────────────────────────
     void requestSceneList();
     void requestSceneItems(const QString &sceneName);
+    void requestInputList();
+    void refreshInventory();
     void setCurrentScene(const QString &name);
+    void setCurrentPreviewScene(const QString &name);
+    CoreVideoSyncStatus coreVideoSyncStatus(const QStringList &participantSources,
+                                            const QStringList &lookScenes) const;
 
     // ── Virtual camera ───────────────────────────────────────────────────────
     void requestVirtualCamStatus();
@@ -97,6 +115,8 @@ public:
                            bool makeProgram = false);
     void ensureCoreVideoSources(const QString &sceneName,
                                 const QStringList &sourceNames);
+    void removeStaleCoreVideoDuplicates(const QStringList &participantSources,
+                                        const QStringList &lookScenes);
     void applyOverlays(const QString &sceneName,
                        const QVector<Overlay> &overlays,
                        double canvasW, double canvasH);
@@ -121,6 +141,7 @@ signals:
     void errorOccurred(const QString &msg);
     void scenesReceived(const QStringList &scenes);
     void sceneItemsReceived(const QString &scene, const QVector<SceneItem> &items);
+    void inventoryReady();
     void sceneChanged(const QString &name);
     void templateApplied(const QString &name, int itemCount);
     void virtualCamStateChanged(bool active);
@@ -142,6 +163,13 @@ private:
     void handleResponse(const QJsonObject &d);
     void handleEvent(const QJsonObject &d);
     int  resolveItemId(const QString &scene, const QString &source) const;
+    void enqueueCreateSceneIfMissing(QJsonArray &requests, const QString &sceneName);
+    void enqueueCreateInputIfMissing(QJsonArray &requests,
+                                     const QString &sceneName,
+                                     const QString &inputName,
+                                     const QString &inputKind,
+                                     const QJsonObject &inputSettings = {});
+    static QString overlaySourceName(const QString &sceneName, int index);
     static QString computeAuth(const QString &password,
                                const QString &salt,
                                const QString &challenge);
@@ -154,6 +182,12 @@ private:
     int         m_reconnectAttempt = 0;
     QHash<QString, QString> m_pending;               // requestId → requestType
     QHash<QString, QHash<QString, int>> m_itemCache; // scene → (source → itemId)
+    QHash<QString, QString> m_pendingSceneItemLists;
     QHash<QString, QVector<SceneItem>> m_sceneItems;
+    QSet<QString> m_knownScenes;
+    QSet<QString> m_knownInputs;
+    bool m_receivedSceneList = false;
+    bool m_receivedInputList = false;
+    bool m_inventoryReadyEmitted = false;
     bool m_virtualCamActive = false;
 };

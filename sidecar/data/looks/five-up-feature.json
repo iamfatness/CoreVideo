@@ -1,0 +1,8 @@
+{
+  "id": "five-up-feature",
+  "name": "5 Source Feature",
+  "category": "Source Counts",
+  "description": "Main source with four supporting sources",
+  "template": "5-up-feature",
+  "theme": "midnight"
+}

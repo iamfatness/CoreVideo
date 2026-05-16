@@ -34,7 +34,10 @@ ParticipantCard::ParticipantCard(const ParticipantInfo &info, QWidget *parent)
     auto *nameLabel = new QLabel(info.name, this);
     nameLabel->setStyleSheet("color: #e0e0f0; font-size: 13px; font-weight: 600; background: transparent;");
 
-    auto *idLabel   = new QLabel(QString("ID %1").arg(info.id), this);
+    const QString status = info.isSharingScreen
+        ? QStringLiteral("ID %1 - Sharing").arg(info.id)
+        : QStringLiteral("ID %1").arg(info.id);
+    auto *idLabel   = new QLabel(status, this);
     idLabel->setStyleSheet("color: #5a5a7a; font-size: 10px; background: transparent;");
 
     col->addWidget(nameLabel);
@@ -130,6 +133,11 @@ void ParticipantCard::paintEvent(QPaintEvent *)
         p.setPen(Qt::NoPen);
         p.setBrush(QColor(0x20, 0xd4, 0x60));
         p.drawEllipse(QPointF(center.x() + r - 4, center.y() + r - 4), 5, 5);
+    }
+    if (m_info.isSharingScreen) {
+        p.setPen(QPen(QColor(0x20, 0x90, 0xff), 2));
+        p.setBrush(Qt::NoBrush);
+        p.drawRoundedRect(QRectF(center.x() + r - 7, center.y() - r + 2, 12, 8), 2, 2);
     }
 }
 

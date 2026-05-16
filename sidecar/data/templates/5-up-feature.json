@@ -1,0 +1,14 @@
+{
+  "id": "5-up-feature",
+  "name": "5-up Feature",
+  "description": "Large featured speaker with four supporting guests",
+  "columns": 3,
+  "rows": 2,
+  "slots": [
+    { "index": 0, "x": 0.0, "y": 0.0, "width": 0.5, "height": 1.0, "label": "Feature", "isMain": true },
+    { "index": 1, "x": 0.5, "y": 0.0, "width": 0.25, "height": 0.5, "label": "Guest 1", "isMain": false },
+    { "index": 2, "x": 0.75, "y": 0.0, "width": 0.25, "height": 0.5, "label": "Guest 2", "isMain": false },
+    { "index": 3, "x": 0.5, "y": 0.5, "width": 0.25, "height": 0.5, "label": "Guest 3", "isMain": false },
+    { "index": 4, "x": 0.75, "y": 0.5, "width": 0.25, "height": 0.5, "label": "Guest 4", "isMain": false }
+  ]
+}

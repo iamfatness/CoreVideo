@@ -1,0 +1,8 @@
+{
+  "id": "two-up-clean",
+  "name": "2 Source Clean",
+  "category": "Source Counts",
+  "description": "Two equal sources side-by-side",
+  "template": "2-up-sbs",
+  "theme": "midnight"
+}

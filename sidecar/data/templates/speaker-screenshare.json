@@ -1,0 +1,11 @@
+{
+  "id": "speaker-screenshare",
+  "name": "Speaker + Screenshare",
+  "description": "Screenshare-led layout with speaker picture-in-picture",
+  "columns": 1,
+  "rows": 1,
+  "slots": [
+    { "index": 1, "x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0, "label": "Screen", "isMain": true },
+    { "index": 0, "x": 0.68, "y": 0.58, "width": 0.28, "height": 0.32, "label": "Speaker", "isMain": false }
+  ]
+}

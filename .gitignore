@@ -1,6 +1,7 @@
 build/
 build-*/
 build_*/
+dist/
 .cache/
 .vscode/
 .idea/
@@ -21,3 +22,11 @@ Makefile
 !third_party/**/*.dll
 !third_party/**/*.so
 !third_party/**/*.dylib
+
+# Local package/dependency output
+node_modules/
+.npm-cache/
+companion/companion-module-corevideo-obs/package-lock.json
+deploy-*.ps1
+deploy-*.done
+fix-*.ps1

@@ -1,0 +1,8 @@
+{
+  "id": "four-up-clean",
+  "name": "4 Source Grid",
+  "category": "Source Counts",
+  "description": "Four equal sources in a 2x2 grid",
+  "template": "4-up-grid",
+  "theme": "midnight"
+}

@@ -1,0 +1,8 @@
+{
+  "id": "six-up-grid",
+  "name": "6 Source Grid",
+  "category": "Source Counts",
+  "description": "Six equal sources in a 3x2 grid",
+  "template": "6-up-grid",
+  "theme": "midnight"
+}

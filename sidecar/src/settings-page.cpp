@@ -140,7 +140,7 @@ SettingsPage::SettingsPage(QWidget *parent)
     appName->setFont(boldFont);
     aboutLayout->addWidget(appName);
 
-    aboutLayout->addWidget(new QLabel("Version 0.1.0 — obs-websocket v5"));
+    aboutLayout->addWidget(new QLabel("Version 0.1.2 — obs-websocket v5"));
 
     rootLayout->addWidget(aboutSection);
 

@@ -1,0 +1,8 @@
+{
+  "id": "speaker-screenshare",
+  "name": "Speaker + Screenshare",
+  "category": "Screenshare",
+  "description": "Speaker picture-in-picture over a shared screen",
+  "template": "speaker-screenshare",
+  "theme": "midnight"
+}

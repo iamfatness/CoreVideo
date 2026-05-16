@@ -3,12 +3,26 @@
 #include <QJsonDocument>
 #include <QCryptographicHash>
 #include <QDebug>
+#include <QRegularExpression>
+#include <memory>
 
 static const QString kCoreVideoSourcesScene = QStringLiteral("CoreVideo Sources");
 
 static QString coreVideoSlotSceneName(int index)
 {
     return QStringLiteral("CoreVideo Slot %1").arg(index + 1);
+}
+
+static QString coreVideoSlotPlaceholderName(int index)
+{
+    return QStringLiteral("CoreVideo Placeholder Slot %1").arg(index + 1);
+}
+
+static QString coreVideoInputKindForSource(const QString &sourceName)
+{
+    return sourceName.compare(QStringLiteral("Zoom Screen Share"), Qt::CaseInsensitive) == 0
+        ? QStringLiteral("zoom_share_source")
+        : QStringLiteral("zoom_participant_source");
 }
 
 static QStringList coreVideoSlotSceneNames(int count)
@@ -72,6 +86,12 @@ void OBSClient::connectToOBS(const Config &cfg)
     m_reconnectAttempt = 0;
     m_itemCache.clear();
     m_sceneItems.clear();
+    m_pendingSceneItemLists.clear();
+    m_knownScenes.clear();
+    m_knownInputs.clear();
+    m_receivedSceneList = false;
+    m_receivedInputList = false;
+    m_inventoryReadyEmitted = false;
     setState(State::Connecting);
     emit log(QStringLiteral("Connecting to ws://%1:%2…").arg(cfg.host).arg(cfg.port));
     m_ws->open(cfg.host, static_cast<quint16>(cfg.port));
@@ -96,6 +116,12 @@ void OBSClient::onDisconnected()
     const bool wasConnected = (m_state == State::Connected);
     m_itemCache.clear();
     m_sceneItems.clear();
+    m_pendingSceneItemLists.clear();
+    m_knownScenes.clear();
+    m_knownInputs.clear();
+    m_receivedSceneList = false;
+    m_receivedInputList = false;
+    m_inventoryReadyEmitted = false;
     setState(State::Disconnected);
     emit disconnected();
 
@@ -133,6 +159,7 @@ void OBSClient::onTextMessageReceived(const QString &msg)
         emit connected();
         emit log("Identified — connection ready.");
         requestSceneList();
+        requestInputList();
         requestVirtualCamStatus();
         break;
     case 5: handleEvent(d);    break;
@@ -218,6 +245,8 @@ void OBSClient::handleResponse(const QJsonObject &d)
     const QString type = m_pending.take(id);
     const QJsonObject status = d["requestStatus"].toObject();
     if (!status["result"].toBool()) {
+        if (type == "GetSceneItemList")
+            m_pendingSceneItemLists.remove(id);
         const QString comment = status["comment"].toString();
         emit log(QStringLiteral("%1 failed: %2").arg(type, comment));
         return;
@@ -229,8 +258,33 @@ void OBSClient::handleResponse(const QJsonObject &d)
         QStringList names;
         for (const auto &v : rd["scenes"].toArray())
             names.prepend(v.toObject()["sceneName"].toString());
+        m_knownScenes.clear();
+        for (const QString &name : names) {
+            if (!name.isEmpty())
+                m_knownScenes.insert(name);
+        }
+        m_receivedSceneList = true;
+        if (m_receivedInputList && !m_inventoryReadyEmitted) {
+            m_inventoryReadyEmitted = true;
+            emit inventoryReady();
+        }
         emit scenesReceived(names);
         emit log(QStringLiteral("Scenes: %1").arg(names.join(", ")));
+    }
+    else if (type == "GetInputList") {
+        QSet<QString> names;
+        for (const auto &v : rd["inputs"].toArray()) {
+            const QString name = v.toObject()["inputName"].toString();
+            if (!name.isEmpty())
+                names.insert(name);
+        }
+        m_knownInputs = names;
+        m_receivedInputList = true;
+        if (m_receivedSceneList && !m_inventoryReadyEmitted) {
+            m_inventoryReadyEmitted = true;
+            emit inventoryReady();
+        }
+        emit log(QStringLiteral("Inputs cached: %1.").arg(m_knownInputs.size()));
     }
     else if (type == "GetVirtualCamStatus") {
         const bool active = rd["outputActive"].toBool();
@@ -251,7 +305,7 @@ void OBSClient::handleResponse(const QJsonObject &d)
         emit log("Virtual camera stopped.");
     }
     else if (type == "GetSceneItemList") {
-        const QString scene = rd["sceneName"].toString();
+        const QString scene = m_pendingSceneItemLists.take(id);
         QVector<SceneItem> items;
         QHash<QString, int> nameToId;
         for (const auto &v : rd["sceneItems"].toArray()) {
@@ -281,6 +335,26 @@ void OBSClient::handleEvent(const QJsonObject &d)
         m_itemCache.remove(scene);
         m_sceneItems.remove(scene);
     }
+    else if (type == "SceneCreated") {
+        const QString scene = d["eventData"].toObject()["sceneName"].toString();
+        if (!scene.isEmpty())
+            m_knownScenes.insert(scene);
+    }
+    else if (type == "SceneRemoved") {
+        const QString scene = d["eventData"].toObject()["sceneName"].toString();
+        if (!scene.isEmpty())
+            m_knownScenes.remove(scene);
+    }
+    else if (type == "InputCreated") {
+        const QString input = d["eventData"].toObject()["inputName"].toString();
+        if (!input.isEmpty())
+            m_knownInputs.insert(input);
+    }
+    else if (type == "InputRemoved") {
+        const QString input = d["eventData"].toObject()["inputName"].toString();
+        if (!input.isEmpty())
+            m_knownInputs.remove(input);
+    }
     else if (type == "VirtualcamStateChanged") {
         const bool active = d["eventData"].toObject()["outputActive"].toBool();
         if (m_virtualCamActive != active) {
@@ -299,8 +373,23 @@ void OBSClient::requestSceneList()
 
 void OBSClient::requestSceneItems(const QString &sceneName)
 {
+    if (m_state == State::Connected) {
+        const QString id = nextId();
+        m_pendingSceneItemLists.insert(id, sceneName);
+        sendRequest("GetSceneItemList", {{"sceneName", sceneName}}, id);
+    }
+}
+
+void OBSClient::requestInputList()
+{
     if (m_state == State::Connected)
-        sendRequest("GetSceneItemList", {{"sceneName", sceneName}});
+        sendRequest("GetInputList");
+}
+
+void OBSClient::refreshInventory()
+{
+    requestSceneList();
+    requestInputList();
 }
 
 void OBSClient::setCurrentScene(const QString &name)
@@ -309,11 +398,107 @@ void OBSClient::setCurrentScene(const QString &name)
         sendRequest("SetCurrentProgramScene", {{"sceneName", name}});
 }
 
+void OBSClient::setCurrentPreviewScene(const QString &name)
+{
+    if (m_state == State::Connected)
+        sendRequest("SetCurrentPreviewScene", {{"sceneName", name}});
+}
+
 int OBSClient::resolveItemId(const QString &scene, const QString &source) const
 {
     auto it = m_itemCache.find(scene);
     if (it == m_itemCache.end()) return -1;
     return it->value(source, -1);
+}
+
+OBSClient::CoreVideoSyncStatus
+OBSClient::coreVideoSyncStatus(const QStringList &participantSources,
+                               const QStringList &lookScenes) const
+{
+    CoreVideoSyncStatus status;
+    status.inventoryReady = m_receivedSceneList && m_receivedInputList;
+    status.expectedParticipantSources = participantSources.size();
+    status.expectedSlotScenes = participantSources.size();
+    status.expectedLookScenes = lookScenes.size();
+
+    for (const QString &source : participantSources) {
+        const QString name = source.trimmed();
+        if (name.isEmpty())
+            continue;
+        if (m_knownInputs.contains(name))
+            ++status.presentParticipantSources;
+        else
+            status.missingInputs << name;
+    }
+
+    if (!m_knownScenes.contains(kCoreVideoSourcesScene))
+        status.missingScenes << kCoreVideoSourcesScene;
+
+    for (int i = 0; i < participantSources.size(); ++i) {
+        const QString slotScene = coreVideoSlotSceneName(i);
+        if (m_knownScenes.contains(slotScene))
+            ++status.presentSlotScenes;
+        else
+            status.missingScenes << slotScene;
+    }
+
+    for (const QString &scene : lookScenes) {
+        const QString name = scene.trimmed();
+        if (name.isEmpty())
+            continue;
+        if (m_knownScenes.contains(name))
+            ++status.presentLookScenes;
+        else
+            status.missingScenes << name;
+    }
+
+    return status;
+}
+
+void OBSClient::enqueueCreateSceneIfMissing(QJsonArray &requests, const QString &sceneName)
+{
+    const QString name = sceneName.trimmed();
+    if (name.isEmpty() || m_knownScenes.contains(name))
+        return;
+
+    requests.append(QJsonObject{
+        {"requestType", "CreateScene"},
+        {"requestId",   nextId()},
+        {"requestData", QJsonObject{{"sceneName", name}}},
+    });
+    m_knownScenes.insert(name);
+}
+
+void OBSClient::enqueueCreateInputIfMissing(QJsonArray &requests,
+                                            const QString &sceneName,
+                                            const QString &inputName,
+                                            const QString &inputKind,
+                                            const QJsonObject &inputSettings)
+{
+    const QString name = inputName.trimmed();
+    if (sceneName.trimmed().isEmpty() || name.isEmpty() || m_knownInputs.contains(name))
+        return;
+
+    requests.append(QJsonObject{
+        {"requestType", "CreateInput"},
+        {"requestId",   nextId()},
+        {"requestData", QJsonObject{
+            {"sceneName",        sceneName},
+            {"inputName",        name},
+            {"inputKind",        inputKind},
+            {"inputSettings",    inputSettings},
+            {"sceneItemEnabled", true},
+        }},
+    });
+    m_knownInputs.insert(name);
+}
+
+QString OBSClient::overlaySourceName(const QString &sceneName, int index)
+{
+    QString safe = sceneName;
+    safe.replace(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|]")), QStringLiteral("-"));
+    safe.replace(QRegularExpression(QStringLiteral("\\s+")), QStringLiteral(" "));
+    return QStringLiteral("CoreVideo Overlay - %1 - %2").arg(safe.left(48)).arg(index + 1);
 }
 
 // ── Transform ─────────────────────────────────────────────────────────────────
@@ -398,9 +583,15 @@ void OBSClient::applyLayout(const QString        &sceneName,
     QJsonArray requests;
     int matched = 0;
     QList<int> usedItemIds;
-    for (int i = 0; i < tmpl.slotList.size() && i < sourceNames.size(); ++i) {
+    for (int i = 0; i < tmpl.slotList.size(); ++i) {
         const TemplateSlot &slot = tmpl.slotList[i];
-        int itemId = resolveItemId(sceneName, sourceNames[i]);
+        const int sourceIndex = (slot.index >= 0 && slot.index < sourceNames.size())
+                                    ? slot.index
+                                    : i;
+        if (sourceIndex < 0 || sourceIndex >= sourceNames.size()) continue;
+
+        const QString &sourceName = sourceNames[sourceIndex];
+        int itemId = resolveItemId(sceneName, sourceName);
         if (itemId < 0) {
             const auto ordered = m_sceneItems.value(sceneName);
             for (const SceneItem &item : ordered) {
@@ -413,7 +604,7 @@ void OBSClient::applyLayout(const QString        &sceneName,
         }
         if (itemId < 0) {
             emit log(QStringLiteral("Skip '%1' — not in scene '%2'.")
-                         .arg(sourceNames[i], sceneName));
+                         .arg(sourceName, sceneName));
             continue;
         }
         ++matched;
@@ -470,17 +661,14 @@ void OBSClient::loadSceneTemplate(const QString        &sceneName,
     const QStringList slotSceneNames = coreVideoSlotSceneNames(sourceNames.size());
 
     QJsonArray requests;
-    requests.append(QJsonObject{
-        {"requestType", "CreateScene"},
-        {"requestId",   nextId()},
-        {"requestData", QJsonObject{{"sceneName", sceneName}}},
-    });
-
-    sendOp(8, QJsonObject{
-        {"requestId",     nextId()},
-        {"haltOnFailure", false},
-        {"requests",      requests},
-    });
+    enqueueCreateSceneIfMissing(requests, sceneName);
+    if (!requests.isEmpty()) {
+        sendOp(8, QJsonObject{
+            {"requestId",     nextId()},
+            {"haltOnFailure", false},
+            {"requests",      requests},
+        });
+    }
 
     m_itemCache.remove(sceneName);
     m_sceneItems.remove(sceneName);
@@ -543,41 +731,44 @@ void OBSClient::ensureCoreVideoSources(const QString &sceneName,
         return;
 
     QJsonArray requests;
-    requests.append(QJsonObject{
-        {"requestType", "CreateScene"},
-        {"requestId",   nextId()},
-        {"requestData", QJsonObject{{"sceneName", sceneName}}},
-    });
+    enqueueCreateSceneIfMissing(requests, sceneName);
 
     for (int i = 0; i < sourceNames.size(); ++i) {
-        requests.append(QJsonObject{
-            {"requestType", "CreateScene"},
-            {"requestId",   nextId()},
-            {"requestData", QJsonObject{{"sceneName", coreVideoSlotSceneName(i)}}},
-        });
+        enqueueCreateSceneIfMissing(requests, coreVideoSlotSceneName(i));
+    }
+
+    const QVector<double> placeholderColors = {
+        0xff1e6ae0u, 0xff20a060u, 0xff9b40d0u, 0xffe06020u,
+        0xff2979ffu, 0xffd04090u, 0xffb09020u, 0xff40a0c0u,
+    };
+    for (int i = 0; i < sourceNames.size(); ++i) {
+        enqueueCreateInputIfMissing(requests,
+                                    coreVideoSlotSceneName(i),
+                                    coreVideoSlotPlaceholderName(i),
+                                    QStringLiteral("color_source_v3"),
+                                    QJsonObject{
+                                        {"color", placeholderColors.value(i % placeholderColors.size())},
+                                        {"width", 1920},
+                                        {"height", 1080},
+                                    });
     }
 
     for (const QString &source : sourceNames) {
         const QString sourceName = source.trimmed();
         if (sourceName.isEmpty()) continue;
-        requests.append(QJsonObject{
-            {"requestType", "CreateInput"},
-            {"requestId",   nextId()},
-            {"requestData", QJsonObject{
-                {"sceneName",        sceneName},
-                {"inputName",        sourceName},
-                {"inputKind",        "zoom_participant_source"},
-                {"inputSettings",    QJsonObject{}},
-                {"sceneItemEnabled", true},
-            }},
-        });
+        enqueueCreateInputIfMissing(requests,
+                                    sceneName,
+                                    sourceName,
+                                    coreVideoInputKindForSource(sourceName));
     }
 
-    sendOp(8, QJsonObject{
-        {"requestId",     nextId()},
-        {"haltOnFailure", false},
-        {"requests",      requests},
-    });
+    if (!requests.isEmpty()) {
+        sendOp(8, QJsonObject{
+            {"requestId",     nextId()},
+            {"haltOnFailure", false},
+            {"requests",      requests},
+        });
+    }
     m_itemCache.remove(sceneName);
     m_sceneItems.remove(sceneName);
     emit log(QStringLiteral("Provisioning %1 CoreVideo placeholder sources in '%2'.")
@@ -588,8 +779,10 @@ void OBSClient::ensureCoreVideoSources(const QString &sceneName,
         for (int i = 0; i < sourceNames.size(); ++i)
             requestSceneItems(coreVideoSlotSceneName(i));
         requestSceneList();
+        requestInputList();
     });
-    auto linkSources = [this, sceneName, sourceNames]() {
+    auto requestedLinks = std::make_shared<QSet<QString>>();
+    auto linkSources = [this, sceneName, sourceNames, requestedLinks]() {
         const bool sourceSceneReady = m_itemCache.contains(sceneName);
         if (!sourceSceneReady)
             requestSceneItems(sceneName);
@@ -600,6 +793,8 @@ void OBSClient::ensureCoreVideoSources(const QString &sceneName,
                 const QString sourceName = source.trimmed();
                 if (sourceName.isEmpty()) continue;
                 if (resolveItemId(sceneName, sourceName) >= 0) continue;
+                const QString linkKey = sceneName + QStringLiteral("\n") + sourceName;
+                if (requestedLinks->contains(linkKey)) continue;
 
                 requests.append(QJsonObject{
                     {"requestType", "CreateSceneItem"},
@@ -610,6 +805,7 @@ void OBSClient::ensureCoreVideoSources(const QString &sceneName,
                         {"sceneItemEnabled", true},
                     }},
                 });
+                requestedLinks->insert(linkKey);
             }
         }
 
@@ -621,8 +817,26 @@ void OBSClient::ensureCoreVideoSources(const QString &sceneName,
                 requestSceneItems(slotScene);
                 continue;
             }
+            const QString placeholderName = coreVideoSlotPlaceholderName(i);
+            if (resolveItemId(slotScene, placeholderName) < 0) {
+                const QString linkKey = slotScene + QStringLiteral("\n") + placeholderName;
+                if (!requestedLinks->contains(linkKey)) {
+                    requests.append(QJsonObject{
+                        {"requestType", "CreateSceneItem"},
+                        {"requestId",   nextId()},
+                        {"requestData", QJsonObject{
+                            {"sceneName",        slotScene},
+                            {"sourceName",       placeholderName},
+                            {"sceneItemEnabled", true},
+                        }},
+                    });
+                    requestedLinks->insert(linkKey);
+                }
+            }
             if (resolveItemId(slotScene, sourceName) >= 0)
                 continue;
+            const QString linkKey = slotScene + QStringLiteral("\n") + sourceName;
+            if (requestedLinks->contains(linkKey)) continue;
 
             requests.append(QJsonObject{
                 {"requestType", "CreateSceneItem"},
@@ -633,6 +847,7 @@ void OBSClient::ensureCoreVideoSources(const QString &sceneName,
                     {"sceneItemEnabled", true},
                 }},
             });
+            requestedLinks->insert(linkKey);
         }
 
         if (requests.isEmpty()) return;
@@ -643,6 +858,10 @@ void OBSClient::ensureCoreVideoSources(const QString &sceneName,
         });
         m_itemCache.remove(sceneName);
         m_sceneItems.remove(sceneName);
+        for (int i = 0; i < sourceNames.size(); ++i) {
+            m_itemCache.remove(coreVideoSlotSceneName(i));
+            m_sceneItems.remove(coreVideoSlotSceneName(i));
+        }
         emit log(QStringLiteral("Linked %1 CoreVideo source items into shared and slot scenes.")
                      .arg(requests.size()));
     };
@@ -654,16 +873,116 @@ void OBSClient::ensureCoreVideoSources(const QString &sceneName,
         for (int i = 0; i < sourceNames.size(); ++i)
             requestSceneItems(coreVideoSlotSceneName(i));
         requestSceneList();
+        requestInputList();
     });
     QTimer::singleShot(3200, this, [this, sceneName, sourceNames]() {
         requestSceneItems(sceneName);
         for (int i = 0; i < sourceNames.size(); ++i)
             requestSceneItems(coreVideoSlotSceneName(i));
         requestSceneList();
+        requestInputList();
     });
 }
 
 // ── applyTemplate (flat applied JSON) ─────────────────────────────────────────
+void OBSClient::removeStaleCoreVideoDuplicates(const QStringList &participantSources,
+                                               const QStringList &lookScenes)
+{
+    if (m_state != State::Connected)
+        return;
+
+    QSet<QString> canonicalScenes;
+    canonicalScenes.insert(kCoreVideoSourcesScene);
+    for (int i = 0; i < participantSources.size(); ++i)
+        canonicalScenes.insert(coreVideoSlotSceneName(i));
+    for (const QString &scene : lookScenes) {
+        if (!scene.trimmed().isEmpty())
+            canonicalScenes.insert(scene.trimmed());
+    }
+
+    QSet<QString> canonicalInputs;
+    for (const QString &source : participantSources) {
+        if (!source.trimmed().isEmpty())
+            canonicalInputs.insert(source.trimmed());
+    }
+    for (const QString &scene : lookScenes) {
+        for (int i = 0; i < 8; ++i)
+            canonicalInputs.insert(overlaySourceName(scene, i));
+    }
+
+    QJsonArray requests;
+    const QRegularExpression staleScenePattern(
+        QStringLiteral("^(CoreVideo Sources|CoreVideo Slot \\d+|CoreVideo - .+) \\d+$"));
+    const QRegularExpression staleInputPattern(
+        QStringLiteral("^(Zoom Participant \\d+|CoreVideo Overlay(?: - .+)?) \\d+$"));
+
+    for (const QString &scene : m_knownScenes) {
+        if (canonicalScenes.contains(scene))
+            continue;
+        if (!staleScenePattern.match(scene).hasMatch())
+            continue;
+        requests.append(QJsonObject{
+            {"requestType", "RemoveScene"},
+            {"requestId",   nextId()},
+            {"requestData", QJsonObject{{"sceneName", scene}}},
+        });
+    }
+
+    for (const QString &input : m_knownInputs) {
+        if (canonicalInputs.contains(input))
+            continue;
+        if (input == "CoreVideo Overlay 1" || input == "CoreVideo Overlay 2"
+            || staleInputPattern.match(input).hasMatch()) {
+            requests.append(QJsonObject{
+                {"requestType", "RemoveInput"},
+                {"requestId",   nextId()},
+                {"requestData", QJsonObject{{"inputName", input}}},
+            });
+        }
+    }
+
+    for (auto it = m_sceneItems.constBegin(); it != m_sceneItems.constEnd(); ++it) {
+        const QString scene = it.key();
+        if (!(scene == kCoreVideoSourcesScene
+              || scene.startsWith(QStringLiteral("CoreVideo Slot "))
+              || scene.startsWith(QStringLiteral("CoreVideo - ")))) {
+            continue;
+        }
+
+        QSet<QString> seenSources;
+        for (const SceneItem &item : it.value()) {
+            if (item.sourceName.trimmed().isEmpty())
+                continue;
+            if (!seenSources.contains(item.sourceName)) {
+                seenSources.insert(item.sourceName);
+                continue;
+            }
+            requests.append(QJsonObject{
+                {"requestType", "RemoveSceneItem"},
+                {"requestId",   nextId()},
+                {"requestData", QJsonObject{
+                    {"sceneName",   scene},
+                    {"sceneItemId", item.sceneItemId},
+                }},
+            });
+        }
+    }
+
+    if (requests.isEmpty()) {
+        emit log("Repair: no stale CoreVideo duplicates found.");
+        return;
+    }
+
+    sendOp(8, QJsonObject{
+        {"requestId",     nextId()},
+        {"haltOnFailure", false},
+        {"requests",      requests},
+    });
+    emit log(QStringLiteral("Repair: removing %1 stale CoreVideo duplicate(s).")
+                 .arg(requests.size()));
+    QTimer::singleShot(800, this, [this]() { refreshInventory(); });
+}
+
 void OBSClient::applyOverlays(const QString &sceneName,
                               const QVector<Overlay> &overlays,
                               double canvasW, double canvasH)
@@ -674,7 +993,7 @@ void OBSClient::applyOverlays(const QString &sceneName,
     QJsonArray requests;
     for (int i = 0; i < overlays.size(); ++i) {
         const Overlay &ov = overlays[i];
-        const QString sourceName = QStringLiteral("CoreVideo Overlay %1").arg(i + 1);
+        const QString sourceName = overlaySourceName(sceneName, i);
         const QString label = ov.text2.isEmpty()
             ? ov.text1
             : QStringLiteral("%1\n%2").arg(ov.text1, ov.text2);
@@ -695,17 +1014,11 @@ void OBSClient::applyOverlays(const QString &sceneName,
             }},
         };
 
-        requests.append(QJsonObject{
-            {"requestType", "CreateInput"},
-            {"requestId",   nextId()},
-            {"requestData", QJsonObject{
-                {"sceneName",        sceneName},
-                {"inputName",        sourceName},
-                {"inputKind",        "text_gdiplus_v3"},
-                {"inputSettings",    inputSettings},
-                {"sceneItemEnabled", true},
-            }},
-        });
+        enqueueCreateInputIfMissing(requests,
+                                    sceneName,
+                                    sourceName,
+                                    QStringLiteral("text_gdiplus_v3"),
+                                    inputSettings);
         requests.append(QJsonObject{
             {"requestType", "SetInputSettings"},
             {"requestId",   nextId()},
@@ -741,7 +1054,7 @@ void OBSClient::applyOverlays(const QString &sceneName,
         QJsonArray transformRequests;
         for (int i = 0; i < overlays.size(); ++i) {
             const Overlay &ov = overlays[i];
-            const QString sourceName = QStringLiteral("CoreVideo Overlay %1").arg(i + 1);
+            const QString sourceName = overlaySourceName(sceneName, i);
             const int itemId = resolveItemId(sceneName, sourceName);
             if (itemId < 0) {
                 transformRequests.append(QJsonObject{

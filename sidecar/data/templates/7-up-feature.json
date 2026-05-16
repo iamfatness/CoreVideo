@@ -1,0 +1,16 @@
+{
+  "id": "7-up-feature",
+  "name": "7-up Feature",
+  "description": "Featured speaker with six supporting guests",
+  "columns": 4,
+  "rows": 3,
+  "slots": [
+    { "index": 0, "x": 0.0, "y": 0.0, "width": 0.5, "height": 0.6667, "label": "Feature", "isMain": true },
+    { "index": 1, "x": 0.5, "y": 0.0, "width": 0.25, "height": 0.3333, "label": "Guest 1", "isMain": false },
+    { "index": 2, "x": 0.75, "y": 0.0, "width": 0.25, "height": 0.3333, "label": "Guest 2", "isMain": false },
+    { "index": 3, "x": 0.5, "y": 0.3333, "width": 0.25, "height": 0.3334, "label": "Guest 3", "isMain": false },
+    { "index": 4, "x": 0.75, "y": 0.3333, "width": 0.25, "height": 0.3334, "label": "Guest 4", "isMain": false },
+    { "index": 5, "x": 0.0, "y": 0.6667, "width": 0.5, "height": 0.3333, "label": "Guest 5", "isMain": false },
+    { "index": 6, "x": 0.5, "y": 0.6667, "width": 0.5, "height": 0.3333, "label": "Guest 6", "isMain": false }
+  ]
+}

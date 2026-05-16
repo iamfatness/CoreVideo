@@ -1,0 +1,8 @@
+{
+  "id": "seven-up-feature",
+  "name": "7 Source Feature",
+  "category": "Source Counts",
+  "description": "Large feature with six supporting sources",
+  "template": "7-up-feature",
+  "theme": "midnight"
+}

@@ -11,6 +11,7 @@ struct ParticipantInfo {
     QColor  color;
     bool    hasVideo   = false;
     bool    isTalking  = false;
+    bool    isSharingScreen = false;
     int     slotAssign = -1;  // -1 = unassigned
 };
 

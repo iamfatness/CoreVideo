@@ -16,7 +16,13 @@ void TemplateManager::loadBuiltIn()
         ":/templates/data/templates/1-up.json",
         ":/templates/data/templates/2-up-sbs.json",
         ":/templates/data/templates/2-up-pip.json",
+        ":/templates/data/templates/3-up-feature.json",
         ":/templates/data/templates/4-up-grid.json",
+        ":/templates/data/templates/5-up-feature.json",
+        ":/templates/data/templates/6-up-grid.json",
+        ":/templates/data/templates/7-up-feature.json",
+        ":/templates/data/templates/8-up-grid.json",
+        ":/templates/data/templates/speaker-screenshare.json",
         ":/templates/data/templates/talk-show.json",
         nullptr
     };

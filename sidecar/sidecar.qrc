@@ -3,7 +3,13 @@
         <file>data/templates/1-up.json</file>
         <file>data/templates/2-up-sbs.json</file>
         <file>data/templates/2-up-pip.json</file>
+        <file>data/templates/3-up-feature.json</file>
         <file>data/templates/4-up-grid.json</file>
+        <file>data/templates/5-up-feature.json</file>
+        <file>data/templates/6-up-grid.json</file>
+        <file>data/templates/7-up-feature.json</file>
+        <file>data/templates/8-up-grid.json</file>
+        <file>data/templates/speaker-screenshare.json</file>
         <file>data/templates/talk-show.json</file>
     </qresource>
     <qresource prefix="/applied">
@@ -18,5 +24,14 @@
         <file>data/looks/podcast-pip.json</file>
         <file>data/looks/panel-discussion.json</file>
         <file>data/looks/solo-spotlight.json</file>
+        <file>data/looks/one-up-clean.json</file>
+        <file>data/looks/two-up-clean.json</file>
+        <file>data/looks/three-up-feature.json</file>
+        <file>data/looks/four-up-clean.json</file>
+        <file>data/looks/five-up-feature.json</file>
+        <file>data/looks/six-up-grid.json</file>
+        <file>data/looks/seven-up-feature.json</file>
+        <file>data/looks/eight-up-grid.json</file>
+        <file>data/looks/speaker-screenshare.json</file>
     </qresource>
 </RCC>

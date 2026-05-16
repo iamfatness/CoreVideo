@@ -92,8 +92,10 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
     auto *streamBtn = makeBtn("⏩  Stream");
     m_vcamBtn       = makeBtn("⏺  V-Cam OFF");
 
+    m_renderPreviewBtn = makeBtn("Render PVW");
     m_mapBtn        = makeBtn("Map");
 
+    m_renderPreviewBtn->setFixedWidth(110);
     m_takeBtn->setFixedWidth(110);
     m_autoBtn->setFixedWidth(100);
     m_ftbBtn->setFixedWidth(80);
@@ -112,6 +114,7 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
     m_autoDurationCombo->setCurrentIndex(2); // 1.5s default
 
     tbRow->addWidget(m_swapBtn);
+    tbRow->addWidget(m_renderPreviewBtn);
     tbRow->addWidget(m_takeBtn);
     tbRow->addWidget(m_autoBtn);
     tbRow->addWidget(m_autoDurationCombo);
@@ -174,6 +177,7 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
     connect(m_ftbBtn,  &QPushButton::clicked,  this, &MainWindow::onFTB);
     connect(m_swapBtn, &QPushButton::clicked,  this, &MainWindow::onSwapBuses);
     connect(m_engineBtn, &QPushButton::clicked, this, &MainWindow::onEngineToggle);
+    connect(m_renderPreviewBtn, &QPushButton::clicked, this, &MainWindow::onRenderPreview);
     connect(m_mapBtn, &QPushButton::clicked, this, &MainWindow::openParticipantMappingWindow);
     connect(m_obsBtn,  &QPushButton::clicked,  this, &MainWindow::onObsConnect);
     connect(m_vcamBtn, &QPushButton::clicked,  this, &MainWindow::onVirtualCamToggle);
@@ -225,6 +229,10 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
     connect(m_obsClient, &OBSClient::stateChanged,       this, &MainWindow::onObsState);
     connect(m_obsClient, &OBSClient::log,                this, &MainWindow::onObsLog);
     connect(m_obsClient, &OBSClient::scenesReceived,     this, &MainWindow::onScenesReceived);
+    connect(m_obsClient, &OBSClient::sceneItemsReceived, this,
+            [this](const QString &, const QVector<OBSClient::SceneItem> &) {
+        updateSceneSyncStatus();
+    });
     connect(m_obsClient, &OBSClient::sceneChanged,       this, [this](const QString &name) {
         m_scenesPanel->setCurrentScene(name);
     });
@@ -233,8 +241,9 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
             [this](const QString &name, int n) {
                 onObsLog(QStringLiteral("✓ Applied '%1' (%2 items).").arg(name).arg(n));
             });
-    connect(m_obsClient, &OBSClient::connected, this, [this]() {
+    connect(m_obsClient, &OBSClient::inventoryReady, this, [this]() {
         provisionLookScenes();
+        updateSceneSyncStatus();
     });
 
     m_controlServer = new SidecarControlServer(this);
@@ -274,22 +283,11 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
     connect(m_zoomClient, &ZoomControlClient::log, this, &MainWindow::onObsLog);
     connect(m_zoomClient, &ZoomControlClient::participantsUpdated,
             this, [this](const QVector<ParticipantInfo> &participants) {
-        if (participants.isEmpty())
-            return;
-
-        QVector<ParticipantInfo> merged = participants;
-        for (auto &participant : merged) {
-            for (const auto &existing : m_participants) {
-                if (existing.id == participant.id) {
-                    participant.slotAssign = existing.slotAssign;
-                    break;
-                }
-            }
-        }
-        m_participants = merged;
+        reconcileParticipantSlots(participants);
         m_participantPanel->setParticipants(m_participants);
         if (m_sceneCanvas) m_sceneCanvas->setParticipants(participantsForLook(m_working));
         if (m_liveCanvas && m_bus) m_liveCanvas->setParticipants(participantsForLook(m_bus->program()));
+        syncZoomOutputAssignments();
     });
     connect(m_zoomClient, &ZoomControlClient::outputSourcesUpdated,
             this, [this](const QStringList &sourceNames) {
@@ -419,7 +417,10 @@ void MainWindow::buildTopBar(QWidget *parent)
     m_obsStatusLabel = new QLabel("Disconnected", m_topBar);
     m_obsStatusLabel->setStyleSheet("color: #8080a0; font-size: 11px; background: transparent;");
 
-    m_engineBtn = new QPushButton("⏻  Engine OFF", m_topBar);
+    m_sceneSyncStatusLabel = new QLabel("Sync idle", m_topBar);
+    m_sceneSyncStatusLabel->setStyleSheet("color: #8080a0; font-size: 11px; background: transparent;");
+
+    m_engineBtn = new QPushButton("Scene Sync OFF", m_topBar);
     m_engineBtn->setObjectName("engineOffBtn");
     m_engineBtn->setFixedHeight(34);
 
@@ -431,6 +432,7 @@ void MainWindow::buildTopBar(QWidget *parent)
     row->addStretch(1);
     row->addWidget(phaseBar);
     row->addWidget(m_obsStatusLabel);
+    row->addWidget(m_sceneSyncStatusLabel);
     row->addSpacing(4);
     row->addWidget(m_obsBtn);
     row->addWidget(m_engineBtn);
@@ -496,6 +498,31 @@ QStringList MainWindow::sourceNamesForSlots(int slotCount) const
     return sources;
 }
 
+QStringList MainWindow::sourceNamesForLook(const Look &look) const
+{
+    if (look.templateId == QStringLiteral("speaker-screenshare")
+        || look.tmpl.id == QStringLiteral("speaker-screenshare")) {
+        return {
+            m_settingsPage->sourcePattern().arg(1),
+            QStringLiteral("Zoom Screen Share"),
+        };
+    }
+
+    return sourceNamesForSlots(look.tmpl.slotList.size());
+}
+
+QStringList MainWindow::lookSceneNames() const
+{
+    QStringList scenes;
+    for (const auto &look : LookLibrary::instance().looks()) {
+        if (!look.tmpl.isValid())
+            continue;
+        scenes << obsSceneNameForLook(look);
+    }
+    scenes.removeDuplicates();
+    return scenes;
+}
+
 QString MainWindow::obsSceneNameForLook(const Look &look) const
 {
     QString base = look.name.trimmed();
@@ -552,7 +579,7 @@ void MainWindow::buildRightPanel(QWidget *parent)
     connect(m_scenesPanel, &ScenesPanel::sceneActivated,
             this, &MainWindow::onSceneActivated);
     connect(m_scenesPanel, &ScenesPanel::refreshRequested, this, [this]() {
-        m_obsClient->requestSceneList();
+        m_obsClient->refreshInventory();
     });
     m_pageScenes = m_rightStack->addWidget(m_scenesPanel);
 
@@ -618,14 +645,14 @@ void MainWindow::buildLogDock()
 void MainWindow::loadMockParticipants()
 {
     m_participants = {
-        {1, "Placeholder 1", "P1", QColor(0x1e, 0x6a, 0xe0), true, false, 0},
-        {2, "Placeholder 2", "P2", QColor(0x20, 0xa0, 0x60), true, false, 1},
-        {3, "Placeholder 3", "P3", QColor(0x9b, 0x40, 0xd0), true, false, 2},
-        {4, "Placeholder 4", "P4", QColor(0xe0, 0x60, 0x20), true, false, 3},
-        {5, "Placeholder 5", "P5", QColor(0x29, 0x79, 0xff), true, false, 4},
-        {6, "Placeholder 6", "P6", QColor(0xd0, 0x40, 0x90), true, false, 5},
-        {7, "Placeholder 7", "P7", QColor(0xb0, 0x90, 0x20), true, false, 6},
-        {8, "Placeholder 8", "P8", QColor(0x40, 0xa0, 0xc0), true, false, 7},
+        {1, "Placeholder 1", "P1", QColor(0x1e, 0x6a, 0xe0), true, false, false, 0},
+        {2, "Placeholder 2", "P2", QColor(0x20, 0xa0, 0x60), true, false, false, 1},
+        {3, "Placeholder 3", "P3", QColor(0x9b, 0x40, 0xd0), true, false, false, 2},
+        {4, "Placeholder 4", "P4", QColor(0xe0, 0x60, 0x20), true, false, false, 3},
+        {5, "Placeholder 5", "P5", QColor(0x29, 0x79, 0xff), true, false, false, 4},
+        {6, "Placeholder 6", "P6", QColor(0xd0, 0x40, 0x90), true, false, false, 5},
+        {7, "Placeholder 7", "P7", QColor(0xb0, 0x90, 0x20), true, false, false, 6},
+        {8, "Placeholder 8", "P8", QColor(0x40, 0xa0, 0xc0), true, false, false, 7},
     };
     m_participantPanel->setParticipants(m_participants);
 
@@ -647,6 +674,7 @@ void MainWindow::provisionPlaceholderSources()
 
     const QStringList sources = sourceNamesForSlots(8);
     m_obsClient->ensureCoreVideoSources(QStringLiteral("CoreVideo Sources"), sources);
+    QTimer::singleShot(3400, this, &MainWindow::updateSceneSyncStatus);
 }
 
 void MainWindow::provisionLookScenes()
@@ -661,10 +689,114 @@ void MainWindow::provisionLookScenes()
     for (const auto &look : LookLibrary::instance().looks()) {
         if (!look.tmpl.isValid()) continue;
         const QString scene = obsSceneNameForLook(look);
-        const QStringList sources = sourceNamesForSlots(look.tmpl.slotList.size());
+        const QStringList sources = sourceNamesForLook(look);
         m_obsClient->loadSceneTemplate(scene, look.tmpl, sources, canvasW, canvasH, look.overlays, false);
     }
     onObsLog("Control ON: provisioning shared sources and Look scenes in OBS.");
+    QTimer::singleShot(3600, this, &MainWindow::updateSceneSyncStatus);
+}
+
+void MainWindow::repairCoreVideoDuplicates()
+{
+    if (!m_obsClient || !m_obsClient->isConnected()) {
+        onObsLog("Repair skipped: OBS is not connected.");
+        return;
+    }
+    m_obsClient->removeStaleCoreVideoDuplicates(sourceNamesForSlots(8), lookSceneNames());
+}
+
+void MainWindow::renderLookToOBS(const Look &look, bool makeProgram)
+{
+    if (!m_obsClient || !m_obsClient->isConnected() || !m_settingsPage)
+        return;
+    if (!look.tmpl.isValid()) {
+        onObsLog(QStringLiteral("Look '%1' has no valid template to render.").arg(look.name));
+        return;
+    }
+
+    const QString scene = obsSceneNameForLook(look);
+    const double canvasW = m_settingsPage->canvasWidth();
+    const double canvasH = m_settingsPage->canvasHeight();
+    const QStringList sources = sourceNamesForLook(look);
+    m_obsClient->loadSceneTemplate(scene, look.tmpl, sources, canvasW, canvasH,
+                                   look.overlays, makeProgram);
+    if (!makeProgram)
+        m_obsClient->setCurrentPreviewScene(scene);
+    onObsLog(QStringLiteral("Rendered Look '%1' to OBS scene '%2'.")
+                 .arg(look.name, scene));
+}
+
+void MainWindow::reconcileParticipantSlots(const QVector<ParticipantInfo> &participants)
+{
+    QVector<ParticipantInfo> merged = participants;
+    QSet<int> usedSlots;
+
+    for (auto &participant : merged) {
+        for (const auto &existing : m_participants) {
+            if (existing.id != participant.id)
+                continue;
+            if (existing.slotAssign >= 0 && existing.slotAssign < 8
+                && !usedSlots.contains(existing.slotAssign)) {
+                participant.slotAssign = existing.slotAssign;
+                usedSlots.insert(existing.slotAssign);
+            }
+            break;
+        }
+    }
+
+    int nextSlot = 0;
+    for (auto &participant : merged) {
+        if (participant.slotAssign >= 0 || !participant.hasVideo)
+            continue;
+        while (nextSlot < 8 && usedSlots.contains(nextSlot))
+            ++nextSlot;
+        if (nextSlot >= 8)
+            break;
+        participant.slotAssign = nextSlot;
+        usedSlots.insert(nextSlot);
+    }
+
+    m_participants = merged;
+    m_working.slotAssignments.clear();
+    for (const auto &participant : m_participants) {
+        if (participant.slotAssign >= 0 && participant.slotAssign < 8)
+            m_working.slotAssignments.append({participant.slotAssign, participant.id});
+    }
+    if (m_bus)
+        m_bus->stageLook(m_working);
+}
+
+void MainWindow::syncZoomOutputAssignments()
+{
+    if (!m_zoomClient || !m_settingsPage)
+        return;
+
+    QHash<int, int> current;
+    for (const auto &participant : m_participants) {
+        if (!participant.hasVideo || participant.slotAssign < 0 || participant.slotAssign >= 8)
+            continue;
+        current.insert(participant.slotAssign, participant.id);
+    }
+
+    const QStringList sources = sourceNamesForSlots(8);
+    for (auto it = current.constBegin(); it != current.constEnd(); ++it) {
+        if (m_lastSyncedSlotParticipants.value(it.key(), -1) == it.value())
+            continue;
+        const QString sourceName = sources.value(it.key());
+        if (!sourceName.isEmpty())
+            m_zoomClient->assignOutput(sourceName, it.value(), false, "mono");
+    }
+
+    for (auto it = m_lastSyncedSlotParticipants.constBegin();
+         it != m_lastSyncedSlotParticipants.constEnd(); ++it) {
+        if (current.contains(it.key()))
+            continue;
+        const QString sourceName = sources.value(it.key());
+        if (!sourceName.isEmpty())
+            m_zoomClient->assignOutput(sourceName, 0, false, "mono");
+    }
+
+    m_lastSyncedSlotParticipants = current;
 }
 
 void MainWindow::openParticipantMappingWindow()
@@ -697,10 +829,12 @@ void MainWindow::openParticipantMappingWindow()
     auto *refreshBtn = new QPushButton("Refresh Zoom/OBS", dlg);
     auto *sourceBtn = new QPushButton("Create Source Scene", dlg);
     auto *looksBtn = new QPushButton("Create Sources + Looks", dlg);
+    auto *repairBtn = new QPushButton("Repair Duplicates", dlg);
     auto *openSourcesBtn = new QPushButton("Open Source Scene", dlg);
     actions->addWidget(refreshBtn);
     actions->addWidget(sourceBtn);
     actions->addWidget(looksBtn);
+    actions->addWidget(repairBtn);
     actions->addWidget(openSourcesBtn);
     actions->addStretch(1);
     root->addLayout(actions);
@@ -764,7 +898,7 @@ void MainWindow::openParticipantMappingWindow()
             m_zoomClient->refreshOutputs();
         }
         if (m_obsClient && m_obsClient->isConnected())
-            m_obsClient->requestSceneList();
+            m_obsClient->refreshInventory();
         refreshStatus();
     });
     connect(sourceBtn, &QPushButton::clicked, dlg, [this, refreshStatus]() {
@@ -774,6 +908,10 @@ void MainWindow::openParticipantMappingWindow()
     });
     connect(looksBtn, &QPushButton::clicked, dlg, [this, refreshStatus]() {
         provisionLookScenes();
+        refreshStatus();
+    });
+    connect(repairBtn, &QPushButton::clicked, dlg, [this, refreshStatus]() {
+        repairCoreVideoDuplicates();
         refreshStatus();
     });
     connect(openSourcesBtn, &QPushButton::clicked, dlg, [this]() {
@@ -806,7 +944,7 @@ void MainWindow::onPageSelected(Sidebar::Page p)
         m_rightStack->setCurrentIndex(m_pageThemes);     break;
     case P::Scenes:
         m_rightStack->setCurrentIndex(m_pageScenes);
-        m_obsClient->requestSceneList();
+        m_obsClient->refreshInventory();
         break;
     case P::Overlays:
         m_rightStack->setCurrentIndex(m_pageOverlays);   break;
@@ -850,8 +988,7 @@ void MainWindow::onLookSelected(const Look &look)
 
     onObsLog(QStringLiteral("Staged Look on PVW: %1 — press TAKE to go on air.")
                  .arg(look.name));
-    if (m_obsClient && m_obsClient->isConnected())
-        m_bus->take();
+    renderLookToOBS(m_working, false);
 }
 
 void MainWindow::onThemeSelected(const ShowTheme &theme)
@@ -899,25 +1036,33 @@ void MainWindow::onApplyLayout()
     if (!m_currentTemplate.isValid()) { onObsLog("No template on PGM."); return; }
     if (!m_obsClient->isConnected())  { onObsLog("Not connected — preview only."); return; }
 
-    const QString scene   = obsSceneNameForLook(m_bus->program());
-    const double  canvasW = m_settingsPage->canvasWidth();
-    const double  canvasH = m_settingsPage->canvasHeight();
+    renderLookToOBS(m_bus->program(), true);
+}
 
-    const QStringList sources = sourceNamesForSlots(m_currentTemplate.slotList.size());
-    m_obsClient->loadSceneTemplate(scene, m_currentTemplate, sources, canvasW, canvasH,
-                                   m_bus->program().overlays, true);
+void MainWindow::onRenderPreview()
+{
+    if (!m_working.isValid()) { onObsLog("Nothing staged on PVW."); return; }
+    if (!m_obsClient || !m_obsClient->isConnected()) {
+        onObsLog("Not connected to OBS; staged Look remains sidecar-only.");
+        return;
+    }
+
+    renderLookToOBS(m_working, false);
 }
 
 void MainWindow::onEngineToggle()
 {
     m_engineOn = !m_engineOn;
     m_engineBtn->setObjectName(m_engineOn ? "engineOnBtn" : "engineOffBtn");
-    m_engineBtn->setText(m_engineOn ? "⏻  Engine ON" : "⏻  Engine OFF");
+    m_engineBtn->setText(m_engineOn ? "Scene Sync ON" : "Scene Sync OFF");
     m_engineBtn->style()->unpolish(m_engineBtn);
     m_engineBtn->style()->polish(m_engineBtn);
     if (m_engineOn) {
+        if (m_obsClient && m_obsClient->isConnected())
+            m_obsClient->refreshInventory();
         provisionLookScenes();
     }
+    updateSceneSyncStatus();
 }
 
 void MainWindow::onObsConnect()
@@ -963,6 +1108,50 @@ void MainWindow::onObsState(OBSClient::State s)
     }
     m_obsStatusLabel->setStyleSheet(
         QString("color: %1; font-size: 11px; background: transparent;").arg(color));
+    updateSceneSyncStatus();
+}
+
+void MainWindow::updateSceneSyncStatus()
+{
+    if (!m_sceneSyncStatusLabel || !m_obsClient || !m_settingsPage)
+        return;
+
+    if (!m_obsClient->isConnected()) {
+        m_sceneSyncStatusLabel->setText("Sync offline");
+        m_sceneSyncStatusLabel->setToolTip("OBS is not connected.");
+        m_sceneSyncStatusLabel->setStyleSheet("color: #8080a0; font-size: 11px; background: transparent;");
+        return;
+    }
+
+    const auto status = m_obsClient->coreVideoSyncStatus(sourceNamesForSlots(8), lookSceneNames());
+    const bool complete = status.inventoryReady
+        && status.presentParticipantSources == status.expectedParticipantSources
+        && status.presentSlotScenes == status.expectedSlotScenes
+        && status.presentLookScenes == status.expectedLookScenes
+        && !status.missingScenes.contains(QStringLiteral("CoreVideo Sources"));
+
+    m_sceneSyncStatusLabel->setText(QStringLiteral("Sync %1/%2 src  %3/%4 slots  %5/%6 looks")
+        .arg(status.presentParticipantSources)
+        .arg(status.expectedParticipantSources)
+        .arg(status.presentSlotScenes)
+        .arg(status.expectedSlotScenes)
+        .arg(status.presentLookScenes)
+        .arg(status.expectedLookScenes));
+
+    m_sceneSyncStatusLabel->setStyleSheet(
+        QStringLiteral("color: %1; font-size: 11px; background: transparent;")
+            .arg(complete ? QStringLiteral("#20c460") : QStringLiteral("#e0a020")));
+
+    QStringList detail;
+    if (!status.inventoryReady)
+        detail << QStringLiteral("OBS inventory is still loading.");
+    if (!status.missingInputs.isEmpty())
+        detail << QStringLiteral("Missing inputs: %1").arg(status.missingInputs.join(", "));
+    if (!status.missingScenes.isEmpty())
+        detail << QStringLiteral("Missing scenes: %1").arg(status.missingScenes.join(", "));
+    if (detail.isEmpty())
+        detail << QStringLiteral("CoreVideo OBS scene graph is synced.");
+    m_sceneSyncStatusLabel->setToolTip(detail.join("\n"));
 }
 
 void MainWindow::onObsLog(const QString &msg)
@@ -976,6 +1165,7 @@ void MainWindow::onScenesReceived(const QStringList &scenes)
 {
     m_lastScenes = scenes;
     m_scenesPanel->setScenes(scenes);
+    updateSceneSyncStatus();
 
     const QString target = m_settingsPage->targetScene();
     if (scenes.contains(target)) {
@@ -1068,11 +1258,8 @@ void MainWindow::onSlotAssigned(int slotIndex, int participantId)
     m_working.slotAssignments.append({slotIndex, participantId});
     m_bus->stageLook(m_working);
 
-    if (m_zoomClient && m_settingsPage) {
-        const QStringList sources = sourceNamesForSlots(slotIndex + 1);
-        const QString sourceName = sources.value(slotIndex);
-        m_zoomClient->assignOutput(sourceName, participantId, false, "mono");
-    }
+    m_lastSyncedSlotParticipants.remove(slotIndex);
+    syncZoomOutputAssignments();
 
     // Refresh panel to show updated slot labels
     m_participantPanel->setParticipants(m_participants);
@@ -1131,7 +1318,7 @@ void MainWindow::populateCommandPalette()
     cp->addCommand("Go to Scenes", "Navigate", [this]() {
         m_sidebar->setActivePage(Sidebar::Page::Scenes);
         m_rightStack->setCurrentIndex(m_pageScenes);
-        m_obsClient->requestSceneList();
+        m_obsClient->refreshInventory();
     });
     cp->addCommand("Go to Macros", "Navigate", [this]() {
         m_sidebar->setActivePage(Sidebar::Page::Macros);
@@ -1184,6 +1371,8 @@ void MainWindow::populateCommandPalette()
     });
     cp->addCommand("Re-apply current PGM to OBS", "OBS",
                    [this]() { onApplyLayout(); });
+    cp->addCommand("Repair CoreVideo duplicate OBS scenes", "OBS",
+                   [this]() { repairCoreVideoDuplicates(); });
 
     // Phase
     cp->addCommand("Phase: Pre-show", "Phase",

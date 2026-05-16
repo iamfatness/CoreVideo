@@ -124,6 +124,7 @@ ParticipantInfo ZoomControlClient::participantFromJson(const QJsonObject &obj)
     p.color = colorForId(p.id);
     p.hasVideo = obj.value("has_video").toBool();
     p.isTalking = obj.value("is_talking").toBool();
+    p.isSharingScreen = obj.value("is_sharing_screen").toBool();
     p.slotAssign = -1;
     return p;
 }

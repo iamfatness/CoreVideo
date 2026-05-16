@@ -1,0 +1,15 @@
+{
+  "id": "6-up-grid",
+  "name": "6-up Grid",
+  "description": "Six equal sources in a 3x2 grid",
+  "columns": 3,
+  "rows": 2,
+  "slots": [
+    { "index": 0, "x": 0.0, "y": 0.0, "width": 0.3333, "height": 0.5, "label": "1", "isMain": false },
+    { "index": 1, "x": 0.3333, "y": 0.0, "width": 0.3334, "height": 0.5, "label": "2", "isMain": false },
+    { "index": 2, "x": 0.6667, "y": 0.0, "width": 0.3333, "height": 0.5, "label": "3", "isMain": false },
+    { "index": 3, "x": 0.0, "y": 0.5, "width": 0.3333, "height": 0.5, "label": "4", "isMain": false },
+    { "index": 4, "x": 0.3333, "y": 0.5, "width": 0.3334, "height": 0.5, "label": "5", "isMain": false },
+    { "index": 5, "x": 0.6667, "y": 0.5, "width": 0.3333, "height": 0.5, "label": "6", "isMain": false }
+  ]
+}

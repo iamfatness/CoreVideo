@@ -1,0 +1,8 @@
+{
+  "id": "three-up-feature",
+  "name": "3 Source Feature",
+  "category": "Source Counts",
+  "description": "Large feature with two supporting sources",
+  "template": "3-up-feature",
+  "theme": "midnight"
+}

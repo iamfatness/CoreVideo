@@ -1,0 +1,8 @@
+{
+  "id": "eight-up-grid",
+  "name": "8 Source Grid",
+  "category": "Source Counts",
+  "description": "Eight equal sources in a 4x2 grid",
+  "template": "8-up-grid",
+  "theme": "midnight"
+}

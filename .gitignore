@@ -3,6 +3,7 @@ build-*/
 build_*/
 dist/
 .cache/
+.wrangler/
 .vscode/
 .idea/
 *.user

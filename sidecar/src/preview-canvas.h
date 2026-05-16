@@ -26,6 +26,7 @@ public:
 
 signals:
     void slotAssigned(int slotIndex, int participantId);
+    void slotClicked(int slotIndex);
 
 protected:
     void paintEvent(QPaintEvent *) override;
@@ -33,11 +34,15 @@ protected:
     void dragMoveEvent(QDragMoveEvent *e) override;
     void dragLeaveEvent(QDragLeaveEvent *e) override;
     void dropEvent(QDropEvent *e) override;
+    void mousePressEvent(QMouseEvent *e) override;
+    void mouseReleaseEvent(QMouseEvent *e) override;
 
 private:
     LayoutTemplate       m_tmpl;
     QVector<Participant> m_parts;
     int                  m_hoveredSlot = -1;
+    int                  m_pressedSlot = -1;
+    QPoint               m_pressPos;
 
     int    slotAtPoint(QPoint pt) const;
     void   drawSlot(QPainter &p, const QRectF &rect, int index) const;

@@ -49,7 +49,7 @@ void TemplateThumbnail::paintEvent(QPaintEvent *)
                                         : QColor(0x3a, 0x3a, 0x58);
     const float  gap = 2.5f;
 
-    for (const auto &slot : m_tmpl.slots) {
+    for (const auto &slot : m_tmpl.slotList) {
         QRectF r(
             diag.left() + slot.x * diag.width()  + gap,
             diag.top()  + slot.y * diag.height() + gap,

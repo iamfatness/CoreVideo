@@ -1,4 +1,5 @@
 #include "sidebar.h"
+#include <QStyle>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>

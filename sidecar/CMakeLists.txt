@@ -24,6 +24,7 @@ set(SOURCES
     src/obs-client.cpp
     src/obs-connect-dialog.cpp
     src/sidecar-control-server.cpp
+    src/command-palette.cpp
 )
 
 set(RESOURCES sidecar.qrc)

@@ -15,6 +15,10 @@ struct ZoomOutputInfo {
     bool active_speaker = false;
     bool isolate_audio = false;
     AudioChannelMode audio_mode = AudioChannelMode::Mono;
+    VideoResolution video_resolution = VideoResolution::P720;
+    uint32_t observed_width = 0;
+    uint32_t observed_height = 0;
+    double observed_fps = 0.0;
     AssignmentMode   assignment = AssignmentMode::Participant;
     uint32_t         spotlight_slot = 1;     // used when assignment == SpotlightIndex
     uint32_t         failover_participant_id = 0; // 0 = none
@@ -32,7 +36,8 @@ public:
                           uint32_t participant_id,
                           bool active_speaker,
                           bool isolate_audio,
-                          AudioChannelMode audio_mode);
+                          AudioChannelMode audio_mode,
+                          VideoResolution video_resolution = VideoResolution::P720);
     // Extended variant supporting ZoomISO-style assignment modes (spotlight,
     // screen share) plus failover. Returns true if the output was found.
     bool configure_output_ex(const std::string &source_name,
@@ -41,7 +46,8 @@ public:
                              uint32_t spotlight_slot,
                              uint32_t failover_participant_id,
                              bool isolate_audio,
-                             AudioChannelMode audio_mode);
+                             AudioChannelMode audio_mode,
+                             VideoResolution video_resolution = VideoResolution::P720);
 
     // Re-send subscribe commands for all active sources after engine recovery.
     void resubscribe_all();

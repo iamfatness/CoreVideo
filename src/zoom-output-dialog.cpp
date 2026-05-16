@@ -30,6 +30,8 @@ enum OutputColumns {
     ColumnPreview = 0,
     ColumnName,
     ColumnAssignment,
+    ColumnResolution,
+    ColumnSignal,
     ColumnAudio,
     ColumnIsolate,
     ColumnCount
@@ -119,7 +121,7 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     m_table = new QTableWidget(this);
     m_table->setColumnCount(ColumnCount);
     m_table->setHorizontalHeaderLabels({
-        "Preview", "Output", "Assignment", "Audio", "Isolated audio"
+        "Preview", "Output", "Assignment", "Requested", "Signal", "Audio", "Isolated audio"
     });
     m_table->horizontalHeader()->setSectionResizeMode(ColumnPreview,    QHeaderView::Fixed);
     m_table->horizontalHeader()->setSectionResizeMode(ColumnName,       QHeaderView::Stretch);
@@ -242,6 +244,26 @@ void ZoomOutputDialog::refresh()
         audio->addItem("Mono", static_cast<int>(AudioChannelMode::Mono));
         audio->addItem("Stereo", static_cast<int>(AudioChannelMode::Stereo));
         audio->setCurrentIndex(output.audio_mode == AudioChannelMode::Stereo ? 1 : 0);
+
+        auto *resolution = new QComboBox(m_table);
+        resolution->addItem("360p", static_cast<int>(VideoResolution::P360));
+        resolution->addItem("720p", static_cast<int>(VideoResolution::P720));
+        resolution->addItem("1080p", static_cast<int>(VideoResolution::P1080));
+        resolution->setCurrentIndex(
+            output.video_resolution == VideoResolution::P360 ? 0 :
+            output.video_resolution == VideoResolution::P1080 ? 2 : 1);
+        m_table->setCellWidget(row, ColumnResolution, resolution);
+
+        auto *signal = new QLabel(m_table);
+        signal->setAlignment(Qt::AlignCenter);
+        signal->setText(output.observed_width > 0 && output.observed_height > 0
+            ? QString("%1x%2\n%3 fps")
+                .arg(output.observed_width)
+                .arg(output.observed_height)
+                .arg(output.observed_fps, 0, 'f', 1)
+            : QString("No signal"));
+        m_table->setCellWidget(row, ColumnSignal, signal);
+
         m_table->setCellWidget(row, ColumnAudio, audio);
 
         auto *isolate = new QCheckBox(m_table);
@@ -313,9 +335,10 @@ void ZoomOutputDialog::save_profile()
     for (int row = 0; row < m_table->rowCount(); ++row) {
         auto *name_item  = m_table->item(row, ColumnName);
         auto *assignment = qobject_cast<QComboBox *>(m_table->cellWidget(row, ColumnAssignment));
+        auto *resolution = qobject_cast<QComboBox *>(m_table->cellWidget(row, ColumnResolution));
         auto *audio      = qobject_cast<QComboBox *>(m_table->cellWidget(row, ColumnAudio));
         auto *isolate    = qobject_cast<QCheckBox *>(m_table->cellWidget(row, ColumnIsolate));
-        if (!name_item || !assignment || !audio || !isolate) continue;
+        if (!name_item || !assignment || !resolution || !audio || !isolate) continue;
 
         ZoomOutputInfo o;
         o.source_name    = name_item->data(Qt::UserRole).toString().toStdString();
@@ -324,6 +347,8 @@ void ZoomOutputDialog::save_profile()
         o.participant_id = ad.startsWith("user:") ? ad.mid(5).toUInt() : 0;
         o.isolate_audio  = isolate->isChecked();
         o.audio_mode     = static_cast<AudioChannelMode>(audio->currentData().toInt());
+        o.video_resolution =
+            static_cast<VideoResolution>(resolution->currentData().toInt());
         outputs.push_back(std::move(o));
     }
 
@@ -355,15 +380,19 @@ void ZoomOutputDialog::load_profile()
                 continue;
 
             auto *assignment = qobject_cast<QComboBox *>(m_table->cellWidget(row, ColumnAssignment));
+            auto *resolution = qobject_cast<QComboBox *>(m_table->cellWidget(row, ColumnResolution));
             auto *audio      = qobject_cast<QComboBox *>(m_table->cellWidget(row, ColumnAudio));
             auto *isolate    = qobject_cast<QCheckBox *>(m_table->cellWidget(row, ColumnIsolate));
-            if (!assignment || !audio || !isolate) continue;
+            if (!assignment || !resolution || !audio || !isolate) continue;
 
             const QString ad = o.active_speaker
                 ? "active"
                 : QString("user:%1").arg(o.participant_id);
             const int idx = assignment->findData(ad);
             if (idx >= 0) assignment->setCurrentIndex(idx);
+            const int res_idx = resolution->findData(
+                static_cast<int>(o.video_resolution));
+            if (res_idx >= 0) resolution->setCurrentIndex(res_idx);
             audio->setCurrentIndex(o.audio_mode == AudioChannelMode::Stereo ? 1 : 0);
             isolate->setChecked(o.isolate_audio);
             break;
@@ -389,11 +418,13 @@ void ZoomOutputDialog::apply()
         auto *name_item = m_table->item(row, ColumnName);
         auto *assignment = qobject_cast<QComboBox *>(
             m_table->cellWidget(row, ColumnAssignment));
+        auto *resolution = qobject_cast<QComboBox *>(
+            m_table->cellWidget(row, ColumnResolution));
         auto *audio = qobject_cast<QComboBox *>(
             m_table->cellWidget(row, ColumnAudio));
         auto *isolate = qobject_cast<QCheckBox *>(
             m_table->cellWidget(row, ColumnIsolate));
-        if (!name_item || !assignment || !audio || !isolate) continue;
+        if (!name_item || !assignment || !resolution || !audio || !isolate) continue;
 
         const std::string source_name =
             name_item->data(Qt::UserRole).toString().toStdString();
@@ -404,10 +435,12 @@ void ZoomOutputDialog::apply()
             participant_id = assignment_data.mid(5).toUInt();
         const auto audio_mode = static_cast<AudioChannelMode>(
             audio->currentData().toInt());
+        const auto video_resolution = static_cast<VideoResolution>(
+            resolution->currentData().toInt());
 
         ZoomOutputManager::instance().configure_output(
             source_name, participant_id, active_speaker,
-            isolate->isChecked(), audio_mode);
+            isolate->isChecked(), audio_mode, video_resolution);
     }
     refresh();
 }

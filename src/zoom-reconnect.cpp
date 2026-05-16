@@ -217,6 +217,14 @@ void ZoomReconnectManager::on_join_failed(bool permanent)
     }
 
     std::unique_lock<std::mutex> lk(m_mtx);
+    if (!m_recovering.load(std::memory_order_acquire) && !m_pending) {
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] Join failed outside recovery - not retrying");
+        reset_state_locked();
+        lk.unlock();
+        ZoomEngineClient::instance().set_state(MeetingState::Failed);
+        return;
+    }
 
     // Count this attempt as consumed.
     const int attempt = m_attempt.fetch_add(1, std::memory_order_acq_rel) + 1;

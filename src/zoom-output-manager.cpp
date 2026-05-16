@@ -70,7 +70,8 @@ bool ZoomOutputManager::configure_output_ex(const std::string &source_name,
                                             uint32_t spotlight_slot,
                                             uint32_t failover_participant_id,
                                             bool isolate_audio,
-                                            AudioChannelMode audio_mode)
+                                            AudioChannelMode audio_mode,
+                                            VideoResolution video_resolution)
 {
     std::lock_guard<std::mutex> lk(m_mtx);
     for (auto *source : m_sources) {
@@ -78,7 +79,7 @@ bool ZoomOutputManager::configure_output_ex(const std::string &source_name,
         if (source->output_name() != source_name) continue;
         source->configure_output_ex(mode, participant_id, spotlight_slot,
                                     failover_participant_id, isolate_audio,
-                                    audio_mode);
+                                    audio_mode, video_resolution);
         return true;
     }
     return false;
@@ -102,7 +103,8 @@ bool ZoomOutputManager::configure_output(const std::string &source_name,
                                          uint32_t participant_id,
                                          bool active_speaker,
                                          bool isolate_audio,
-                                         AudioChannelMode audio_mode)
+                                         AudioChannelMode audio_mode,
+                                         VideoResolution video_resolution)
 {
     // Hold the mutex for the full operation so a source cannot be unregistered
     // (and freed) between the find and the configure call.
@@ -111,7 +113,7 @@ bool ZoomOutputManager::configure_output(const std::string &source_name,
         if (!source) continue;
         if (source->output_name() != source_name) continue;
         source->configure_output(participant_id, active_speaker,
-                                 isolate_audio, audio_mode);
+                                 isolate_audio, audio_mode, video_resolution);
         return true;
     }
     return false;

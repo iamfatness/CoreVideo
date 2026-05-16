@@ -207,6 +207,21 @@ static QJsonObject output_to_json(const ZoomOutputInfo &o)
     obj["isolate_audio"]  = o.isolate_audio;
     obj["audio_channels"] = o.audio_mode == AudioChannelMode::Stereo
         ? "stereo" : "mono";
+    switch (o.video_resolution) {
+    case VideoResolution::P360:
+        obj["video_resolution"] = "360p";
+        break;
+    case VideoResolution::P1080:
+        obj["video_resolution"] = "1080p";
+        break;
+    case VideoResolution::P720:
+    default:
+        obj["video_resolution"] = "720p";
+        break;
+    }
+    obj["observed_width"] = static_cast<double>(o.observed_width);
+    obj["observed_height"] = static_cast<double>(o.observed_height);
+    obj["observed_fps"] = o.observed_fps;
     return obj;
 }
 
@@ -219,6 +234,14 @@ static QJsonObject participant_to_json(const ParticipantInfo &p)
     obj["is_talking"] = p.is_talking;
     obj["is_muted"] = p.is_muted;
     return obj;
+}
+
+static VideoResolution video_resolution_from_json(const QJsonObject &req)
+{
+    const QString value = req.value("video_resolution").toString("720p");
+    if (value == "360p" || value == "360") return VideoResolution::P360;
+    if (value == "1080p" || value == "1080") return VideoResolution::P1080;
+    return VideoResolution::P720;
 }
 
 static QString meeting_state_to_string(MeetingState state)
@@ -318,10 +341,11 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
         const QString audio_channels = req.value("audio_channels").toString("mono");
         const AudioChannelMode audio_mode = audio_channels == "stereo"
             ? AudioChannelMode::Stereo : AudioChannelMode::Mono;
+        const VideoResolution video_resolution = video_resolution_from_json(req);
 
         const bool ok = ZoomOutputManager::instance().configure_output(
             source.toStdString(), participant_id, active_speaker,
-            isolate_audio, audio_mode);
+            isolate_audio, audio_mode, video_resolution);
         QJsonObject response;
         response["ok"] = ok;
         if (!ok) response["error"] = "unknown_output";
@@ -349,39 +373,7 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
             QString::fromStdString(parsed.user_zak)).toStdString();
         tokens.app_privilege_token = req.value("app_privilege_token").toString(
             QString::fromStdString(parsed.app_privilege_token)).toStdString();
-        const bool needs_oauth_zak =
-            tokens.user_zak.empty() &&
-            tokens.on_behalf_token.empty() &&
-            tokens.app_privilege_token.empty();
         ZoomPluginSettings settings = ZoomPluginSettings::load();
-        if (needs_oauth_zak &&
-            settings.oauth_access_token.empty() &&
-            settings.oauth_refresh_token.empty()) {
-            write_response(socket, {
-                {"ok", false},
-                {"error", "oauth_required"},
-                {"message", "Authorize with Zoom in OBS before joining external meetings."},
-            });
-            return;
-        }
-        if (needs_oauth_zak) {
-            std::string zak;
-            QString zak_error;
-            if (ZoomOAuthManager::instance().fetch_zak_blocking(zak, &zak_error))
-                tokens.user_zak = zak;
-            else {
-                if (zak_error.isEmpty())
-                    zak_error = "Authorize with Zoom before joining external meetings.";
-                blog(LOG_WARNING, "[obs-zoom-plugin] OAuth ZAK unavailable: %s",
-                     zak_error.toUtf8().constData());
-                write_response(socket, {
-                    {"ok", false},
-                    {"error", "zak_unavailable"},
-                    {"message", zak_error},
-                });
-                return;
-            }
-        }
 
         const bool ok =
             ZoomEngineClient::instance().start(settings.resolved_jwt_token()) &&
@@ -451,10 +443,11 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
         const AudioChannelMode amode =
             req.value("audio_channels").toString() == "stereo"
             ? AudioChannelMode::Stereo : AudioChannelMode::Mono;
+        const VideoResolution vres = video_resolution_from_json(req);
 
         const bool ok = ZoomOutputManager::instance().configure_output_ex(
             source.toStdString(), mode, participant_id, spotlight_slot, failover_id,
-            isolate, amode);
+            isolate, amode, vres);
         write_response(socket, ok
             ? QJsonObject{{"ok", true}}
             : QJsonObject{{"ok", false}, {"error", "unknown_output"}});

@@ -50,8 +50,9 @@ static VideoResolution resolution_from_data(obs_data_t *s)
 {
     switch (obs_data_get_int(s, PROP_RESOLUTION)) {
     case RES_360P: return VideoResolution::P360;
-    case RES_720P: return VideoResolution::P720;
-    default:       return VideoResolution::P1080;
+    case RES_1080P: return VideoResolution::P1080;
+    case RES_720P:
+    default:       return VideoResolution::P720;
     }
 }
 
@@ -244,6 +245,11 @@ ZoomOutputInfo ZoomSource::output_info() const
     info.active_speaker = is_active_speaker_assignment(mode);
     info.isolate_audio = isolate_audio;
     info.audio_mode = audio_mode;
+    info.video_resolution = resolution;
+    info.observed_width = m_width.load(std::memory_order_relaxed);
+    info.observed_height = m_height.load(std::memory_order_relaxed);
+    info.observed_fps =
+        static_cast<double>(m_observed_fps_x100.load(std::memory_order_relaxed)) / 100.0;
     info.assignment = mode;
     info.spotlight_slot = spotlight_slot.load(std::memory_order_acquire);
     info.failover_participant_id = failover_participant_id.load(std::memory_order_acquire);
@@ -253,7 +259,8 @@ ZoomOutputInfo ZoomSource::output_info() const
 void ZoomSource::configure_output(uint32_t new_participant_id,
                                   bool new_active_speaker_mode,
                                   bool new_isolate_audio,
-                                  AudioChannelMode new_audio_mode)
+                                  AudioChannelMode new_audio_mode,
+                                  VideoResolution new_resolution)
 {
     if (source) {
         obs_data_t *settings = obs_source_get_settings(source);
@@ -267,6 +274,8 @@ void ZoomSource::configure_output(uint32_t new_participant_id,
         obs_data_set_int(settings, PROP_AUDIO_CHANNELS,
                          new_audio_mode == AudioChannelMode::Stereo
                          ? AUDIO_CH_STEREO : AUDIO_CH_MONO);
+        obs_data_set_int(settings, PROP_RESOLUTION,
+                         static_cast<int>(new_resolution));
         obs_source_update(source, settings);
         obs_data_release(settings);
         return;
@@ -280,6 +289,7 @@ void ZoomSource::configure_output(uint32_t new_participant_id,
     active_speaker_mode = new_active_speaker_mode;
     isolate_audio = new_isolate_audio;
     audio_mode = new_audio_mode;
+    resolution = new_resolution;
     if (m_subscribed) subscribe();
 }
 
@@ -288,7 +298,8 @@ void ZoomSource::configure_output_ex(AssignmentMode mode,
                                      uint32_t new_spotlight_slot,
                                      uint32_t new_failover_participant_id,
                                      bool new_isolate_audio,
-                                     AudioChannelMode new_audio_mode)
+                                     AudioChannelMode new_audio_mode,
+                                     VideoResolution new_resolution)
 {
     const bool active_speaker = (mode == AssignmentMode::ActiveSpeaker);
     if (source) {
@@ -302,6 +313,8 @@ void ZoomSource::configure_output_ex(AssignmentMode mode,
         obs_data_set_int(settings, PROP_AUDIO_CHANNELS,
                          new_audio_mode == AudioChannelMode::Stereo
                          ? AUDIO_CH_STEREO : AUDIO_CH_MONO);
+        obs_data_set_int(settings, PROP_RESOLUTION,
+                         static_cast<int>(new_resolution));
         obs_source_update(source, settings);
         obs_data_release(settings);
         return;
@@ -314,6 +327,7 @@ void ZoomSource::configure_output_ex(AssignmentMode mode,
     failover_participant_id.store(new_failover_participant_id, std::memory_order_release);
     isolate_audio = new_isolate_audio;
     audio_mode = new_audio_mode;
+    resolution = new_resolution;
     if (m_subscribed) subscribe();
 }
 
@@ -355,7 +369,7 @@ void ZoomSource::subscribe()
         }
         if (target != 0)
             ZoomEngineClient::instance().subscribe(source_uuid, target,
-                                                   isolate_audio);
+                                                   isolate_audio, resolution);
         blog(LOG_INFO,
              "[obs-zoom-plugin] Zoom source subscription: source=%s uuid=%s participant_id=%u",
              output_name().c_str(), source_uuid.c_str(), target);
@@ -446,37 +460,55 @@ void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height)
     }
 
     auto *hdr = static_cast<const ShmFrameHeader *>(m_video_shm.ptr);
-    const uint32_t w = hdr->width;
-    const uint32_t h = hdr->height;
-    const uint32_t y_len = hdr->y_len;
-    if (!source || w == 0 || h == 0 || y_len != w * h) {
+    uint32_t w = 0;
+    uint32_t h = 0;
+    uint32_t y_len = 0;
+    bool copied = false;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const uint32_t seq1 = hdr->sequence;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if ((seq1 & 1u) != 0) continue;
+        w = hdr->width;
+        h = hdr->height;
+        y_len = hdr->y_len;
+        if (!source || w == 0 || h == 0 || y_len != w * h) break;
+        const size_t needed_bytes = sizeof(ShmFrameHeader) +
+            static_cast<size_t>(y_len) + static_cast<size_t>(y_len) / 2;
+        if (needed_bytes > m_video_shm.size) {
+            if (m_frame_count == 0) {
+                blog(LOG_WARNING,
+                     "[obs-zoom-plugin] Video shared memory too small: source=%s uuid=%s need=%zu have=%zu",
+                     output_name().c_str(), source_uuid.c_str(), needed_bytes,
+                     m_video_shm.size);
+            }
+            return;
+        }
+        const auto *pixels = static_cast<const uint8_t *>(m_video_shm.ptr) +
+            sizeof(ShmFrameHeader);
+        const size_t payload_size = static_cast<size_t>(y_len) +
+            static_cast<size_t>(y_len) / 2;
+        if (m_video_buf.size() < payload_size)
+            m_video_buf.resize(payload_size);
+        std::memcpy(m_video_buf.data(), pixels, payload_size);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        const uint32_t seq2 = hdr->sequence;
+        if (seq1 == seq2 && (seq2 & 1u) == 0) {
+            copied = true;
+            break;
+        }
+    }
+    if (!copied) {
         if (m_frame_count == 0) {
             blog(LOG_WARNING,
-                 "[obs-zoom-plugin] Invalid video frame header: source=%s uuid=%s w=%u h=%u y_len=%u",
+                 "[obs-zoom-plugin] Incomplete video frame skipped: source=%s uuid=%s w=%u h=%u y_len=%u",
                  output_name().c_str(), source_uuid.c_str(), w, h, y_len);
         }
         return;
     }
 
-    // Bound the read: the header may claim a frame larger than the region
-    // we have mapped (engine wrote a bigger frame than the size we used to
-    // open the SHM). Reject those rather than walking past the mapping.
-    const size_t needed_bytes = sizeof(ShmFrameHeader) +
-        static_cast<size_t>(y_len) + static_cast<size_t>(y_len) / 2;
-    if (needed_bytes > m_video_shm.size) {
-        if (m_frame_count == 0) {
-            blog(LOG_WARNING,
-                 "[obs-zoom-plugin] Video shared memory too small: source=%s uuid=%s need=%zu have=%zu",
-                 output_name().c_str(), source_uuid.c_str(), needed_bytes,
-                 m_video_shm.size);
-        }
-        return;
-    }
-
-    const auto *pixels = static_cast<const uint8_t *>(m_video_shm.ptr) + sizeof(ShmFrameHeader);
-    const auto *y_ptr = pixels;
-    const auto *u_ptr = pixels + y_len;
-    const auto *v_ptr = pixels + y_len + y_len / 4;
+    const auto *y_ptr = m_video_buf.data();
+    const auto *u_ptr = y_ptr + y_len;
+    const auto *v_ptr = u_ptr + y_len / 4;
     const uint64_t ts = os_gettime_ns();
 
     // Try hardware-accelerated I420→NV12 conversion; fall back to CPU I420 path.
@@ -508,6 +540,20 @@ void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height)
 
     obs_source_output_video(source, &frame);
     ++m_frame_count;
+    if (m_fps_window_start_ns == 0) {
+        m_fps_window_start_ns = ts;
+        m_fps_window_frames = 0;
+    }
+    ++m_fps_window_frames;
+    const uint64_t fps_elapsed_ns = ts - m_fps_window_start_ns;
+    if (fps_elapsed_ns >= 1'000'000'000ULL) {
+        const double fps = static_cast<double>(m_fps_window_frames) *
+            1'000'000'000.0 / static_cast<double>(fps_elapsed_ns);
+        m_observed_fps_x100.store(static_cast<uint32_t>(fps * 100.0 + 0.5),
+                                  std::memory_order_relaxed);
+        m_fps_window_start_ns = ts;
+        m_fps_window_frames = 0;
+    }
     if (m_frame_count == 1 || m_frame_count % 120 == 0) {
         blog(LOG_INFO,
              "[obs-zoom-plugin] Output Zoom video frame: source=%s uuid=%s count=%llu w=%u h=%u fmt=%d y_center=%u y_tl=%u",
@@ -544,17 +590,39 @@ void ZoomSource::on_engine_audio(uint32_t event_byte_len)
     }
 
     auto *hdr = static_cast<const ShmAudioHeader *>(m_audio_shm.ptr);
-    const uint32_t byte_len = hdr->byte_len;
-    if (!source || byte_len == 0) return;
-    if (sizeof(ShmAudioHeader) + byte_len > m_audio_shm.size) return;
-    const auto *pcm = reinterpret_cast<const int16_t *>(
-        static_cast<const uint8_t *>(m_audio_shm.ptr) + sizeof(ShmAudioHeader));
+    uint32_t byte_len = 0;
+    uint32_t sample_rate = 0;
+    uint16_t channels = 0;
+    bool copied = false;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const uint32_t seq1 = hdr->sequence;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if ((seq1 & 1u) != 0) continue;
+        byte_len = hdr->byte_len;
+        sample_rate = hdr->sample_rate;
+        channels = hdr->channels;
+        if (!source || byte_len == 0) return;
+        if (sizeof(ShmAudioHeader) + byte_len > m_audio_shm.size) return;
+        const auto *pcm_src = static_cast<const uint8_t *>(m_audio_shm.ptr) +
+            sizeof(ShmAudioHeader);
+        if (m_audio_buf.size() < byte_len)
+            m_audio_buf.resize(byte_len);
+        std::memcpy(m_audio_buf.data(), pcm_src, byte_len);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        const uint32_t seq2 = hdr->sequence;
+        if (seq1 == seq2 && (seq2 & 1u) == 0) {
+            copied = true;
+            break;
+        }
+    }
+    if (!copied) return;
+    const auto *pcm = reinterpret_cast<const int16_t *>(m_audio_buf.data());
 
     obs_source_audio audio = {};
-    audio.samples_per_sec = hdr->sample_rate;
+    audio.samples_per_sec = sample_rate;
     audio.timestamp = os_gettime_ns();
 
-    if (audio_mode == AudioChannelMode::Stereo && hdr->channels == 1) {
+    if (audio_mode == AudioChannelMode::Stereo && channels == 1) {
         const uint32_t mono_frames = byte_len / kZoomBytesPerSample;
         const uint32_t stereo_count = mono_frames * 2;
         if (m_stereo_buf.size() < stereo_count)
@@ -569,9 +637,9 @@ void ZoomSource::on_engine_audio(uint32_t event_byte_len)
         audio.speakers = SPEAKERS_STEREO;
     } else {
         audio.data[0] = reinterpret_cast<const uint8_t *>(pcm);
-        audio.frames = byte_len / (kZoomBytesPerSample * std::max<uint16_t>(hdr->channels, 1));
+        audio.frames = byte_len / (kZoomBytesPerSample * std::max<uint16_t>(channels, 1));
         audio.format = AUDIO_FORMAT_16BIT;
-        audio.speakers = hdr->channels == 2 ? SPEAKERS_STEREO : SPEAKERS_MONO;
+        audio.speakers = channels == 2 ? SPEAKERS_STEREO : SPEAKERS_MONO;
     }
     obs_source_output_audio(source, &audio);
     ++m_audio_frame_count;
@@ -584,7 +652,7 @@ void ZoomSource::on_engine_audio(uint32_t event_byte_len)
              "[obs-zoom-plugin] Output Zoom audio frame: source=%s uuid=%s count=%llu frames=%u sample_rate=%u channels=%u byte_len=%u peak=%d",
              output_name().c_str(), source_uuid.c_str(),
              static_cast<unsigned long long>(m_audio_frame_count),
-             audio.frames, hdr->sample_rate, hdr->channels, byte_len, peak);
+             audio.frames, sample_rate, channels, byte_len, peak);
     }
 }
 

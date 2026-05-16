@@ -73,6 +73,7 @@ bool save(const std::string &name, const std::vector<ZoomOutputInfo> &outputs)
         obj["isolate_audio"]  = o.isolate_audio;
         obj["audio_channels"] = o.audio_mode == AudioChannelMode::Stereo
                                 ? "stereo" : "mono";
+        obj["video_resolution"] = static_cast<int>(o.video_resolution);
         arr.append(obj);
     }
 
@@ -111,6 +112,13 @@ std::vector<ZoomOutputInfo> load(const std::string &name)
         o.isolate_audio  = obj.value("isolate_audio").toBool(false);
         o.audio_mode     = obj.value("audio_channels").toString() == "stereo"
                            ? AudioChannelMode::Stereo : AudioChannelMode::Mono;
+        const int resolution = obj.value("video_resolution")
+            .toInt(static_cast<int>(VideoResolution::P720));
+        o.video_resolution = resolution == static_cast<int>(VideoResolution::P360)
+            ? VideoResolution::P360
+            : resolution == static_cast<int>(VideoResolution::P1080)
+                ? VideoResolution::P1080
+                : VideoResolution::P720;
         outputs.push_back(std::move(o));
     }
     blog(LOG_INFO, "[obs-zoom-plugin] Loaded output profile '%s' (%zu outputs)",

@@ -5,6 +5,7 @@
 #else
 #include <zoom_rawdata_api.h>
 #endif
+#include <atomic>
 #include <cstring>
 
 EngineAudio &EngineAudio::instance() { static EngineAudio inst; return inst; }
@@ -149,11 +150,18 @@ void EngineAudio::output_audio_frame(AudioTarget &target,
     }
 
     auto *hdr        = static_cast<ShmAudioHeader *>(target.shm.ptr);
+    uint32_t seq = hdr->sequence + 1;
+    if ((seq & 1u) == 0) ++seq;
+    hdr->sequence = seq;
+    std::atomic_thread_fence(std::memory_order_release);
     hdr->sample_rate = data->GetSampleRate();
     hdr->channels    = static_cast<uint16_t>(data->GetChannelNum());
+    hdr->reserved    = 0;
     hdr->byte_len    = byte_len;
     std::memcpy(static_cast<char *>(target.shm.ptr) + sizeof(ShmAudioHeader),
                 data->GetBuffer(), byte_len);
+    std::atomic_thread_fence(std::memory_order_release);
+    hdr->sequence = seq + 1;
 
     ++target.frame_count;
     if (target.frame_count == 1 || target.frame_count % 250 == 0) {

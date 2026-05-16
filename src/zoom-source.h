@@ -47,14 +47,16 @@ struct ZoomSource {
     void configure_output(uint32_t new_participant_id,
                           bool new_active_speaker_mode,
                           bool new_isolate_audio,
-                          AudioChannelMode new_audio_mode);
+                          AudioChannelMode new_audio_mode,
+                          VideoResolution new_resolution = VideoResolution::P720);
     // Extended variant accepting full ZoomISO-style assignment information.
     void configure_output_ex(AssignmentMode mode,
                              uint32_t new_participant_id,
                              uint32_t new_spotlight_slot,
                              uint32_t new_failover_participant_id,
                              bool new_isolate_audio,
-                             AudioChannelMode new_audio_mode);
+                             AudioChannelMode new_audio_mode,
+                             VideoResolution new_resolution = VideoResolution::P720);
     void subscribe();
     void unsubscribe();
     void activate();
@@ -82,12 +84,17 @@ private:
     ShmRegion m_video_shm;
     ShmRegion m_audio_shm;
     std::vector<uint8_t> m_placeholder_buf;
+    std::vector<uint8_t> m_video_buf;
+    std::vector<uint8_t> m_audio_buf;
     std::atomic<uint32_t> m_width{0};
     std::atomic<uint32_t> m_height{0};
+    std::atomic<uint32_t> m_observed_fps_x100{0};
     std::vector<int16_t> m_stereo_buf;
     ZoomPreviewCallback m_preview_cb;
     uint64_t m_preview_last_ns = 0;
     uint64_t m_frame_count = 0;
+    uint64_t m_fps_window_start_ns = 0;
+    uint32_t m_fps_window_frames = 0;
     uint64_t m_audio_frame_count = 0;
     std::atomic<bool> m_subscribed{false};
     std::atomic<bool> m_active{false};

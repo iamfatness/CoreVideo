@@ -7,8 +7,19 @@
 #endif
 #include <cstring>
 #include <limits>
+#include <atomic>
 #include <tuple>
 #include <vector>
+
+static ZOOMSDK::ZoomSDKResolution sdk_resolution(uint32_t resolution)
+{
+    switch (resolution) {
+    case 0: return ZOOMSDK::ZoomSDKResolution_360P;
+    case 2: return ZOOMSDK::ZoomSDKResolution_1080P;
+    case 1:
+    default: return ZOOMSDK::ZoomSDKResolution_720P;
+    }
+}
 
 static bool valid_i420_frame(YUVRawDataI420 *data, uint32_t w, uint32_t h, size_t &y_len)
 {
@@ -30,8 +41,10 @@ static bool valid_i420_frame(YUVRawDataI420 *data, uint32_t w, uint32_t h, size_
 
 ParticipantSubscription::ParticipantSubscription(uint32_t participant_id,
                                                  const std::string &initial_source_uuid,
-                                                 IpcFd e2p_fd)
+                                                 IpcFd e2p_fd,
+                                                 uint32_t resolution)
     : m_participant_id(participant_id)
+    , m_resolution(resolution)
 {
     ZOOMSDK::SDKError err = ZOOMSDK::createRenderer(&m_renderer, this);
     if (err != ZOOMSDK::SDKERR_SUCCESS || !m_renderer) {
@@ -43,13 +56,14 @@ ParticipantSubscription::ParticipantSubscription(uint32_t participant_id,
         return;
     }
 
-    m_renderer->setRawDataResolution(ZOOMSDK::ZoomSDKResolution_1080P);
+    m_renderer->setRawDataResolution(sdk_resolution(m_resolution));
     err = m_renderer->subscribe(participant_id, ZOOMSDK::RAW_DATA_TYPE_VIDEO);
     EngineIpc::write(
         R"({"cmd":"debug","stage":"video_subscribe","source_uuid":")" +
         initial_source_uuid + R"(","participant_id":)" +
         std::to_string(m_participant_id) + R"(,"code":)" +
-        std::to_string(static_cast<int>(err)) + "}");
+        std::to_string(static_cast<int>(err)) + R"(,"resolution":)" +
+        std::to_string(m_resolution) + "}");
     if (err != ZOOMSDK::SDKERR_SUCCESS) {
         ZOOMSDK::destroyRenderer(m_renderer);
         m_renderer = nullptr;
@@ -148,6 +162,10 @@ void ParticipantSubscription::onRawDataFrameReceived(YUVRawDataI420 *data)
 
         auto *hdr    = static_cast<ShmFrameHeader *>(target.shm.ptr);
         auto *pixels = static_cast<char *>(target.shm.ptr) + sizeof(ShmFrameHeader);
+        uint32_t seq = hdr->sequence + 1;
+        if ((seq & 1u) == 0) ++seq;
+        hdr->sequence = seq;
+        std::atomic_thread_fence(std::memory_order_release);
         hdr->width = w;
         hdr->height = h;
         hdr->y_len = static_cast<uint32_t>(y_len);
@@ -155,6 +173,8 @@ void ParticipantSubscription::onRawDataFrameReceived(YUVRawDataI420 *data)
         std::memcpy(pixels,                   data->GetYBuffer(), y_len);
         std::memcpy(pixels + y_len,           data->GetUBuffer(), y_len / 4);
         std::memcpy(pixels + y_len + y_len/4, data->GetVBuffer(), y_len / 4);
+        std::atomic_thread_fence(std::memory_order_release);
+        hdr->sequence = seq + 1;
 
         ++target.frame_count;
         if (target.frame_count == 1 || target.frame_count % 120 == 0) {
@@ -192,16 +212,33 @@ void ParticipantSubscription::onRendererBeDestroyed()
 
 void EngineVideo::subscribe(uint32_t participant_id,
                              const std::string &source_uuid,
-                             IpcFd e2p_fd)
+                             IpcFd e2p_fd,
+                             uint32_t resolution)
 {
     unsubscribe_locked(source_uuid);
 
     auto it = m_subs.find(participant_id);
+    if (it != m_subs.end() && it->second && resolution > it->second->resolution()) {
+        std::vector<std::pair<std::string, IpcFd>> existing_sources =
+            it->second->sources();
+        m_subs.erase(it);
+        it = m_subs.emplace(
+            participant_id,
+            std::make_unique<ParticipantSubscription>(
+                participant_id, source_uuid, e2p_fd, resolution)).first;
+        if (!it->second || it->second->empty()) {
+            m_subs.erase(it);
+            return;
+        }
+        for (const auto &entry : existing_sources) {
+            it->second->add_source(std::get<0>(entry), std::get<1>(entry));
+        }
+    }
     if (it == m_subs.end()) {
         it = m_subs.emplace(
             participant_id,
             std::make_unique<ParticipantSubscription>(
-                participant_id, source_uuid, e2p_fd)).first;
+                participant_id, source_uuid, e2p_fd, resolution)).first;
         if (!it->second || it->second->empty()) {
             m_subs.erase(it);
             return;
@@ -209,7 +246,7 @@ void EngineVideo::subscribe(uint32_t participant_id,
     } else {
         it->second->add_source(source_uuid, e2p_fd);
     }
-    m_source_participants[source_uuid] = participant_id;
+    m_source_participants[source_uuid] = {participant_id, resolution};
 }
 
 void EngineVideo::unsubscribe(const std::string &source_uuid)
@@ -222,7 +259,7 @@ void EngineVideo::unsubscribe_locked(const std::string &source_uuid)
     auto source_it = m_source_participants.find(source_uuid);
     if (source_it == m_source_participants.end()) return;
 
-    const uint32_t participant_id = source_it->second;
+    const uint32_t participant_id = source_it->second.participant_id;
     m_source_participants.erase(source_it);
 
     auto sub_it = m_subs.find(participant_id);
@@ -234,13 +271,14 @@ void EngineVideo::unsubscribe_locked(const std::string &source_uuid)
 
 void EngineVideo::resubscribe_all()
 {
-    std::vector<std::tuple<std::string, uint32_t, IpcFd>> current;
+    std::vector<std::tuple<std::string, uint32_t, IpcFd, uint32_t>> current;
     for (const auto &entry : m_subs) {
         if (entry.second) {
             for (const auto &source : entry.second->sources()) {
                 current.emplace_back(source.first,
                                      entry.second->participant_id(),
-                                     source.second);
+                                     source.second,
+                                     entry.second->resolution());
             }
         }
     }
@@ -248,8 +286,8 @@ void EngineVideo::resubscribe_all()
     m_subs.clear();
     m_source_participants.clear();
     for (const auto &entry : current) {
-        const auto &[source_uuid, participant_id, e2p_fd] = entry;
-        subscribe(participant_id, source_uuid, e2p_fd);
+        const auto &[source_uuid, participant_id, e2p_fd, resolution] = entry;
+        subscribe(participant_id, source_uuid, e2p_fd, resolution);
     }
 }
 

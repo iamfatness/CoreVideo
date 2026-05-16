@@ -24,8 +24,19 @@
 // Shared-memory name prefix (no leading slash — added per-platform below)
 #define IPC_SHM_PREFIX "ZoomObsPlugin_"
 
-struct ShmFrameHeader { uint32_t width, height, y_len; };
-struct ShmAudioHeader { uint32_t sample_rate; uint16_t channels; uint32_t byte_len; };
+struct ShmFrameHeader {
+    uint32_t sequence;
+    uint32_t width;
+    uint32_t height;
+    uint32_t y_len;
+};
+struct ShmAudioHeader {
+    uint32_t sequence;
+    uint32_t sample_rate;
+    uint16_t channels;
+    uint16_t reserved;
+    uint32_t byte_len;
+};
 
 // ── Platform-specific pipe / socket paths ─────────────────────────────────────
 #if defined(WIN32)

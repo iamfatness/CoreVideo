@@ -1,6 +1,7 @@
 build/
 build-*/
 build_*/
+install-local-release*/
 dist/
 .cache/
 .wrangler/

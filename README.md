@@ -121,6 +121,31 @@ CoreVideo integrates the Zoom Meeting SDK into OBS — no screen capture or virt
 
 4. **Configure credentials** — open OBS → **Tools → Zoom Plugin Settings** and enter your SDK Key and SDK Secret. CoreVideo generates a short-lived Meeting SDK JWT locally when joining. The JWT Token field is optional and overrides generated tokens when set. You may also set a control server token and custom ports.
 
+### Windows release packaging
+
+GitHub Actions can validate the Windows build without the restricted Zoom
+runtime, but public client releases must include `zoom-runtime\sdk.dll` and the
+other Zoom SDK runtime DLLs. If `ZOOM_SDK_WINDOWS_URL` is not configured as a
+GitHub repository secret, CI skips publishing a GitHub Release instead of
+shipping an incomplete package.
+
+For fast local releases from a machine that already has the Zoom runtime, use:
+
+```powershell
+.\scripts\release-local.ps1 -Version v0.1.6 -Upload
+```
+
+Useful options:
+
+```powershell
+.\scripts\release-local.ps1 -Version v0.1.6 -Install -ObsInstallPath "C:\Program Files\obs-studio"
+.\scripts\release-local.ps1 -Version v0.1.6 -BuildPath build-nmake -Upload
+```
+
+The script builds, installs into a staging folder, verifies
+`obs-zoom-plugin.dll`, `ZoomObsEngine.exe`, and `zoom-runtime\sdk.dll`, creates a
+ZIP under `dist/`, and optionally uploads it to the matching GitHub Release.
+
 5. **Set up OAuth (for Marketplace / external-account joins)** — in the Settings dialog, enter your OAuth Client ID, set the Redirect URI to `corevideo://oauth/callback`, click **Register corevideo:// URL Scheme**, then click **Authorize with Zoom**. See [`docs/ZOOM_MARKETPLACE_OAUTH.md`](docs/ZOOM_MARKETPLACE_OAUTH.md) for the full walkthrough.
 
 6. **Join once, then assign outputs** — use the CoreVideo dock or the TCP/OSC control APIs to join the meeting once per OBS session. Then add **Zoom Participant**, **Zoom Participant Audio**, **Zoom Share**, or **Zoom Interpretation Audio** sources and assign them to participants or dynamic roles.

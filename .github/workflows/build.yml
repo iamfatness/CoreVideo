@@ -18,6 +18,8 @@ jobs:
   build-windows:
     name: Windows x64
     runs-on: windows-2022
+    outputs:
+      has_zoom_runtime: ${{ steps.zoom_sdk.outputs.has_zoom_runtime }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -106,6 +108,7 @@ jobs:
           "QT_ROOT_DIR=C:\Qt\6.7.3\msvc2019_64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Download Zoom Windows SDK
+        id: zoom_sdk
         env:
           ZOOM_SDK_DOWNLOAD_URL: ${{ secrets.ZOOM_SDK_WINDOWS_URL }}
         shell: powershell
@@ -115,6 +118,12 @@ jobs:
               Expand-Archive zoom-sdk.zip third_party/zoom-sdk-extracted
               $inner = Get-ChildItem third_party/zoom-sdk-extracted -Directory | Select-Object -First 1
               Move-Item $inner.FullName third_party/zoom-sdk
+              "COREVIDEO_HAS_ZOOM_RUNTIME=true" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+              "has_zoom_runtime=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          } else {
+              "COREVIDEO_HAS_ZOOM_RUNTIME=false" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+              "has_zoom_runtime=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+              Write-Warning "ZOOM_SDK_WINDOWS_URL is not configured. Building Windows validation artifact without ZoomObsEngine runtime."
           }
 
       - name: Download FFmpeg (LGPL shared) for HW acceleration
@@ -157,9 +166,12 @@ jobs:
               $obsFe   = "C:\obs-runtime\cmake\obs-frontend-api"
           }
 
+          $buildEngine = if ($env:COREVIDEO_HAS_ZOOM_RUNTIME -eq "true") { "ON" } else { "OFF" }
+
           cmake -B build `
               -G "Visual Studio 17 2022" -A x64 `
               -DCMAKE_BUILD_TYPE=Release `
+              "-DCOREVIDEO_BUILD_ENGINE=$buildEngine" `
               -DZOOM_SDK_DIR=third_party/zoom-sdk `
               -DENABLE_FFMPEG_HW_ACCEL=ON `
               "-DFFMPEG_ROOT=C:/ffmpeg" `
@@ -178,8 +190,12 @@ jobs:
         shell: powershell
         run: |
           cmake --install build --config Release --prefix install
-          if (-not (Test-Path "install\obs-plugins\64bit\zoom-runtime\sdk.dll")) {
-              throw "Release package is missing zoom-runtime\sdk.dll; Zoom join would fail."
+          if ($env:COREVIDEO_HAS_ZOOM_RUNTIME -eq "true") {
+              if (-not (Test-Path "install\obs-plugins\64bit\zoom-runtime\sdk.dll")) {
+                  throw "Release package is missing zoom-runtime\sdk.dll; Zoom join would fail."
+              }
+          } else {
+              Write-Warning "Windows artifact is validation-only; it does not include zoom-runtime\sdk.dll."
           }
           Compress-Archive -Path install\* -DestinationPath CoreVideo-Windows-x64.zip
 
@@ -307,7 +323,7 @@ jobs:
     name: Create GitHub Release
     needs: [build-windows, build-macos]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.version != '')
+    if: (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.version != '')) && needs.build-windows.outputs.has_zoom_runtime == 'true'
     permissions:
       contents: write
     steps:

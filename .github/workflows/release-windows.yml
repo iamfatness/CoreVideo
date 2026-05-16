@@ -102,13 +102,17 @@ jobs:
           "OBS_SDK_DIR=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Download Zoom Windows SDK
+        id: zoom_sdk
         env:
           ZOOM_SDK_DOWNLOAD_URL: ${{ secrets.ZOOM_SDK_WINDOWS_URL }}
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
           if ([string]::IsNullOrWhiteSpace($env:ZOOM_SDK_DOWNLOAD_URL)) {
-            throw "Missing required repository secret: ZOOM_SDK_WINDOWS_URL"
+            "COREVIDEO_HAS_ZOOM_RUNTIME=false" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "has_zoom_runtime=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Warning "ZOOM_SDK_WINDOWS_URL is not configured. Building a validation-only package without ZoomObsEngine runtime."
+            exit 0
           }
           Invoke-WebRequest $env:ZOOM_SDK_DOWNLOAD_URL -OutFile zoom-sdk.zip
           Expand-Archive zoom-sdk.zip third_party/zoom-sdk-extracted -Force
@@ -120,14 +124,18 @@ jobs:
             Remove-Item third_party/zoom-sdk -Recurse -Force
           }
           Move-Item $inner.FullName third_party/zoom-sdk
+          "COREVIDEO_HAS_ZOOM_RUNTIME=true" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "has_zoom_runtime=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Configure
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
+          $buildEngine = if ($env:COREVIDEO_HAS_ZOOM_RUNTIME -eq "true") { "ON" } else { "OFF" }
           cmake -B build `
             -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_BUILD_TYPE=Release `
+            "-DCOREVIDEO_BUILD_ENGINE=$buildEngine" `
             -DZOOM_SDK_DIR=third_party/zoom-sdk `
             "-DCMAKE_PREFIX_PATH=$env:OBS_SDK_DIR;$env:QT_ROOT_DIR" `
             "-DLibObs_DIR=$env:OBS_SDK_DIR\cmake\LibObs" `
@@ -148,11 +156,15 @@ jobs:
           if (-not (Test-Path "install\obs-plugins\64bit\obs-zoom-plugin.dll")) {
             throw "Package is missing obs-zoom-plugin.dll"
           }
-          if (-not (Test-Path "install\obs-plugins\64bit\zoom-runtime\ZoomObsEngine.exe")) {
-            throw "Package is missing zoom-runtime\ZoomObsEngine.exe"
-          }
-          if (-not (Test-Path "install\obs-plugins\64bit\zoom-runtime\sdk.dll")) {
-            throw "Package is missing zoom-runtime\sdk.dll"
+          if ($env:COREVIDEO_HAS_ZOOM_RUNTIME -eq "true") {
+            if (-not (Test-Path "install\obs-plugins\64bit\zoom-runtime\ZoomObsEngine.exe")) {
+              throw "Package is missing zoom-runtime\ZoomObsEngine.exe"
+            }
+            if (-not (Test-Path "install\obs-plugins\64bit\zoom-runtime\sdk.dll")) {
+              throw "Package is missing zoom-runtime\sdk.dll"
+            }
+          } else {
+            Write-Warning "Package does not include ZoomObsEngine or sdk.dll because ZOOM_SDK_WINDOWS_URL is not configured."
           }
           Compress-Archive -Path install\* -DestinationPath CoreVideo-Windows-x64.zip -Force
 
@@ -180,6 +192,7 @@ jobs:
           fi
 
       - name: Publish GitHub Release
+        if: env.COREVIDEO_HAS_ZOOM_RUNTIME == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release.outputs.tag }}
@@ -188,3 +201,9 @@ jobs:
           prerelease: ${{ steps.release.outputs.prerelease }}
           generate_release_notes: true
           files: CoreVideo-Windows-x64.zip
+
+      - name: Skip GitHub Release
+        if: env.COREVIDEO_HAS_ZOOM_RUNTIME != 'true'
+        shell: powershell
+        run: |
+          Write-Warning "Skipping GitHub Release because ZOOM_SDK_WINDOWS_URL is not configured and the package is validation-only."

@@ -20,11 +20,11 @@
 <p>CoreVideo keeps all Zoom Meeting SDK access inside the lightweight <code>ZoomObsEngine</code> helper process. The OBS plugin starts the engine, joins the meeting, and sends subscription requests over JSON IPC. Video and audio payloads move through named shared memory so large frames are not copied through the IPC pipe.</p>
 <p>The plugin-side <code>ZoomSource</code> reads the shared memory frame, outputs it into OBS, and forwards the same copied buffer to optional plugin-side services such as ISO recording. This keeps the engine minimal and makes OBS/plugin features easier to test independently from the Zoom SDK.</p>
 <h2>What It Looks Like in OBS</h2>
-<p>The CoreVideo plugin is operated from inside OBS. These illustrations show the current core plugin UI after the OBS dock improvements: the Zoom Control dock, regular OBS scenes/sources, the Zoom Output Manager, and the Zoom Participant source properties. Exact styling can vary slightly by OBS theme and platform.</p>
+<p>The CoreVideo plugin is operated from inside OBS. These diagrams mirror the current core plugin controls: the Zoom Control dock, regular OBS scenes/sources, the inline output assignment table, the separate profile-oriented Zoom Output Manager, and the Zoom Participant source properties. Exact styling can vary by OBS theme and platform, but the controls and labels should match the current plugin.</p>
 <figure class="doc-image"><img src="images/corevideo-obs-workspace.svg" alt="CoreVideo OBS workspace with Zoom Control dock"></figure>
-<p>The Zoom Control dock joins and leaves meetings, starts and stops raw media, shows meeting state, lists participants, and shows output assignments without leaving OBS.</p>
+<p>The Zoom Control dock joins and leaves meetings, starts and stops raw media, shows meeting state, lists participants, and applies source assignments without leaving OBS.</p>
 <figure class="doc-image"><img src="images/corevideo-output-manager.svg" alt="CoreVideo Output Manager"></figure>
-<p>The Output Manager maps actual Zoom participant names to OBS sources and shows requested resolution, observed signal, frame rate, and audio routing.</p>
+<p>The dock's inline output table is the primary day-to-day assignment surface. The separate Zoom Output Manager remains available for profile save/load workflows and exposes the same requested resolution, observed signal, frame rate, and audio routing information.</p>
 <figure class="doc-image"><img src="images/corevideo-source-properties.svg" alt="CoreVideo Zoom Participant source properties"></figure>
 <p>Each Zoom Participant source can be configured independently for fixed participants, active speaker, spotlight slot, screen share, isolated audio, audience audio, resolution, video-loss behavior, and hardware conversion.</p>
 <h2>Joining Meetings</h2>

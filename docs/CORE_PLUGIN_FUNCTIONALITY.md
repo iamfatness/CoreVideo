@@ -21,21 +21,25 @@ test independently from the Zoom SDK.
 
 ## What It Looks Like in OBS
 
-The CoreVideo plugin is operated from inside OBS. These illustrations show the
-current core plugin UI after the OBS dock improvements: the Zoom Control dock,
-regular OBS scenes/sources, the Zoom Output Manager, and the Zoom Participant
-source properties. Exact styling can vary slightly by OBS theme and platform.
+The CoreVideo plugin is operated from inside OBS. These diagrams mirror the
+current core plugin controls: the Zoom Control dock, regular OBS scenes/sources,
+the inline output assignment table, the separate profile-oriented Zoom Output
+Manager, and the Zoom Participant source properties. Exact styling can vary by
+OBS theme and platform, but the controls and labels should match the current
+plugin.
 
 ![CoreVideo OBS workspace with Zoom Control dock](images/corevideo-obs-workspace.svg)
 
-The Zoom Control dock joins and leaves meetings, starts and stops raw media, shows
-meeting state, lists participants, and shows output assignments without leaving
-OBS.
+The Zoom Control dock joins and leaves meetings, starts and stops raw media,
+shows meeting state, lists participants, and applies source assignments without
+leaving OBS.
 
 ![CoreVideo Output Manager](images/corevideo-output-manager.svg)
 
-The Output Manager maps actual Zoom participant names to OBS sources and shows
-requested resolution, observed signal, frame rate, and audio routing.
+The dock's inline output table is the primary day-to-day assignment surface. The
+separate Zoom Output Manager remains available for profile save/load workflows
+and exposes the same requested resolution, observed signal, frame rate, and audio
+routing information.
 
 ![CoreVideo Zoom Participant source properties](images/corevideo-source-properties.svg)
 

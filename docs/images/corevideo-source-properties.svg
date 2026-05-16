@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1080" height="760" viewBox="0 0 1080 760" role="img" aria-labelledby="title desc">
   <title id="title">CoreVideo Zoom Participant source properties</title>
-  <desc id="desc">Screenshot-style illustration of OBS source properties for a CoreVideo Zoom Participant source.</desc>
+  <desc id="desc">Diagram of OBS source properties for a CoreVideo Zoom Participant source.</desc>
   <defs>
     <style>
       .bg{fill:#0b0d12}.window{fill:#151923;stroke:#343b4d}.header{fill:#1f2532}.panel{fill:#10141d;stroke:#2b3345}.field{fill:#202637;stroke:#3a4358}.text{fill:#f4f7ff;font-family:Segoe UI,Arial,sans-serif}.muted{fill:#94a0b8}.green{fill:#28d17c}.blue{fill:#2f81f7}.tiny{font-size:14px}.small{font-size:16px}.label{font-size:21px;font-weight:700}.button{fill:#242b3a;stroke:#3a4358}.primary{fill:#2f81f7}

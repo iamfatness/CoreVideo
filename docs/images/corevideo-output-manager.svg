@@ -1,54 +1,44 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760" role="img" aria-labelledby="title desc">
   <title id="title">CoreVideo Output Manager</title>
-  <desc id="desc">Screenshot-style illustration of the Zoom Output Manager with participants, source assignments, resolution, frame rate, and audio routing.</desc>
+  <desc id="desc">Diagram of the current Zoom Output Manager profile dialog with participant and output assignment tables.</desc>
   <defs>
     <style>
-      .bg{fill:#0b0d12}.window{fill:#151923;stroke:#343b4d}.panel{fill:#10141d;stroke:#2b3345}.header{fill:#1f2532}.row{fill:#171c28}.row2{fill:#121722}.text{fill:#f4f7ff;font-family:Segoe UI,Arial,sans-serif}.muted{fill:#94a0b8}.green{fill:#2fd17c}.blue{fill:#2f81f7}.red{fill:#ff5c67}.tiny{font-size:14px}.small{font-size:16px}.label{font-size:20px;font-weight:700}.button{fill:#242b3a;stroke:#3a4358}.primary{fill:#2f81f7}
+      .bg{fill:#0b0d12}.window{fill:#151923;stroke:#343b4d}.panel{fill:#10141d;stroke:#2b3345}.header{fill:#1f2532}.row{fill:#171c28}.row2{fill:#121722}.text{fill:#f4f7ff;font-family:Segoe UI,Arial,sans-serif}.muted{fill:#94a0b8}.green{fill:#2fd17c}.red{fill:#ff5c67}.tiny{font-size:14px}.small{font-size:16px}.label{font-size:20px;font-weight:700}.button{fill:#242b3a;stroke:#3a4358}.primary{fill:#2f81f7}.field{fill:#202637;stroke:#3a4358}.micro{font-size:12px}
     </style>
   </defs>
   <rect class="bg" width="1280" height="760"/>
-  <rect class="window" x="60" y="50" width="1160" height="660" rx="10"/>
-  <rect class="header" x="60" y="50" width="1160" height="58" rx="10"/>
-  <text class="text label" x="88" y="86">Zoom Output Manager</text>
-  <rect class="button" x="790" y="66" width="124" height="30" rx="6"/><text class="text tiny" x="819" y="86">Save Profile</text>
-  <rect class="button" x="928" y="66" width="124" height="30" rx="6"/><text class="text tiny" x="957" y="86">Load Profile</text>
-  <rect class="button" x="1066" y="66" width="124" height="30" rx="6"/><text class="text tiny" x="1090" y="86">Delete Profile</text>
+  <rect class="window" x="42" y="42" width="1196" height="676" rx="10"/>
+  <rect class="header" x="42" y="42" width="1196" height="58" rx="10"/>
+  <text class="text label" x="72" y="78">Zoom Output Manager</text>
+  <rect class="field" x="650" y="60" width="160" height="28" rx="5"/><text class="muted tiny" x="666" y="79">Profile name</text>
+  <rect class="button" x="824" y="60" width="112" height="28" rx="5"/><text class="text tiny" x="852" y="79">Save</text>
+  <rect class="button" x="948" y="60" width="112" height="28" rx="5"/><text class="text tiny" x="978" y="79">Load</text>
+  <rect class="button" x="1072" y="60" width="112" height="28" rx="5"/><text class="text tiny" x="1096" y="79">Delete</text>
 
-  <text class="text label" x="88" y="148">Participants</text>
-  <rect class="panel" x="88" y="168" width="476" height="236" rx="8"/>
-  <rect class="header" x="88" y="168" width="476" height="38" rx="8"/>
-  <text class="muted tiny" x="110" y="192">Participant</text><text class="muted tiny" x="294" y="192">ID</text><text class="muted tiny" x="380" y="192">Video</text><text class="muted tiny" x="458" y="192">Audio</text>
-  <rect class="row" x="102" y="222" width="448" height="38" rx="4"/><text class="text small" x="120" y="247">Alex Rivera</text><text class="muted tiny" x="294" y="247">1001</text><text class="green tiny" x="380" y="247">on</text><text class="green tiny" x="458" y="247">talking</text>
-  <rect class="row2" x="102" y="268" width="448" height="38" rx="4"/><text class="text small" x="120" y="293">Sam Chen</text><text class="muted tiny" x="294" y="293">1002</text><text class="green tiny" x="380" y="293">on</text><text class="muted tiny" x="458" y="293">muted</text>
-  <rect class="row" x="102" y="314" width="448" height="38" rx="4"/><text class="text small" x="120" y="339">Jordan Kim</text><text class="muted tiny" x="294" y="339">1003</text><text class="green tiny" x="380" y="339">on</text><text class="muted tiny" x="458" y="339">idle</text>
-  <rect class="row2" x="102" y="360" width="448" height="38" rx="4"/><text class="text small" x="120" y="385">Taylor Brooks</text><text class="muted tiny" x="294" y="385">1004</text><text class="green tiny" x="380" y="385">on</text><text class="muted tiny" x="458" y="385">idle</text>
+  <text class="text label" x="72" y="140">Participants</text>
+  <rect class="panel" x="72" y="160" width="1136" height="184" rx="8"/>
+  <rect class="header" x="72" y="160" width="1136" height="36" rx="8"/>
+  <text class="muted tiny" x="92" y="183">Name</text><text class="muted tiny" x="424" y="183">ID</text><text class="muted tiny" x="594" y="183">Video</text><text class="muted tiny" x="760" y="183">Audio</text><text class="muted tiny" x="926" y="183">Talking</text>
+  <rect class="row" x="88" y="212" width="1104" height="34" rx="4"/><text class="text small" x="104" y="235">Alex Rivera</text><text class="muted tiny" x="424" y="235">1001</text><text class="green tiny" x="594" y="235">on</text><text class="green tiny" x="760" y="235">audio</text><text class="green tiny" x="926" y="235">yes</text>
+  <rect class="row2" x="88" y="254" width="1104" height="34" rx="4"/><text class="text small" x="104" y="277">Sam Chen</text><text class="muted tiny" x="424" y="277">1002</text><text class="green tiny" x="594" y="277">on</text><text class="muted tiny" x="760" y="277">muted</text><text class="muted tiny" x="926" y="277">no</text>
+  <rect class="row" x="88" y="296" width="1104" height="34" rx="4"/><text class="text small" x="104" y="319">Jordan Kim</text><text class="muted tiny" x="424" y="319">1003</text><text class="green tiny" x="594" y="319">on</text><text class="muted tiny" x="760" y="319">audio</text><text class="muted tiny" x="926" y="319">no</text>
 
-  <text class="text label" x="604" y="148">Outputs</text>
-  <rect class="panel" x="604" y="168" width="586" height="430" rx="8"/>
-  <rect class="header" x="604" y="168" width="586" height="42" rx="8"/>
-  <text class="muted tiny" x="624" y="194">Preview</text><text class="muted tiny" x="760" y="194">Output</text><text class="muted tiny" x="924" y="194">Assignment</text><text class="muted tiny" x="1050" y="194">Signal</text><text class="muted tiny" x="1130" y="194">Audio</text>
+  <text class="text label" x="72" y="388">Outputs</text>
+  <rect class="panel" x="72" y="408" width="1136" height="220" rx="8"/>
+  <rect class="header" x="72" y="408" width="1136" height="40" rx="8"/>
+  <text class="muted micro" x="92" y="432">Preview</text><text class="muted micro" x="220" y="432">Output</text><text class="muted micro" x="430" y="432">Assignment</text><text class="muted micro" x="620" y="432">Requested</text><text class="muted micro" x="760" y="432">Signal</text><text class="muted micro" x="900" y="432">Audio</text><text class="muted micro" x="1032" y="432">Isolated audio</text>
 
-  <rect class="row" x="620" y="226" width="554" height="74" rx="5"/>
-  <rect x="636" y="238" width="96" height="54" rx="4" fill="#22283a" stroke="#2f81f7"/><circle cx="684" cy="265" r="17" fill="#2f81f7"/><text class="text tiny" x="674" y="270">AR</text>
-  <text class="text small" x="760" y="260">Zoom Participant 1</text><text class="muted tiny" x="760" y="282">Fixed participant</text>
-  <text class="text small" x="924" y="260">Alex Rivera</text><text class="green tiny" x="1050" y="260">1920x1080</text><text class="green tiny" x="1050" y="282">29.97 fps</text><text class="text tiny" x="1130" y="268">Isolated</text>
+  <rect class="row" x="88" y="464" width="1104" height="64" rx="4"/>
+  <rect x="104" y="470" width="96" height="54" rx="4" fill="#22283a" stroke="#2f81f7"/><circle cx="152" cy="497" r="17" fill="#2f81f7"/><text class="text tiny" x="142" y="502">AR</text>
+  <text class="text small" x="220" y="492">Zoom Participant 1</text><text class="muted tiny" x="220" y="514">Fixed participant</text>
+  <text class="text small" x="430" y="502">Alex Rivera</text><text class="text small" x="620" y="502">1080p</text><text class="green tiny" x="760" y="492">1920x1080</text><text class="green tiny" x="760" y="514">29.9 fps</text><text class="text tiny" x="900" y="502">Mono</text><text class="green tiny" x="1032" y="502">checked</text>
 
-  <rect class="row2" x="620" y="316" width="554" height="74" rx="5"/>
-  <rect x="636" y="328" width="96" height="54" rx="4" fill="#22283a" stroke="#2f81f7"/><circle cx="684" cy="355" r="17" fill="#29a35a"/><text class="text tiny" x="674" y="360">SC</text>
-  <text class="text small" x="760" y="350">Zoom Participant 2</text><text class="muted tiny" x="760" y="372">Active speaker</text>
-  <text class="text small" x="924" y="350">Sam Chen</text><text class="green tiny" x="1050" y="350">1920x1080</text><text class="green tiny" x="1050" y="372">30.00 fps</text><text class="text tiny" x="1130" y="358">Mixed</text>
+  <rect class="row2" x="88" y="540" width="1104" height="64" rx="4"/>
+  <rect x="104" y="546" width="96" height="54" rx="4" fill="#22283a" stroke="#2f81f7"/><circle cx="152" cy="573" r="17" fill="#29a35a"/><text class="text tiny" x="142" y="578">SC</text>
+  <text class="text small" x="220" y="568">Zoom Participant 2</text><text class="muted tiny" x="220" y="590">Active speaker</text>
+  <text class="text small" x="430" y="578">Active speaker</text><text class="text small" x="620" y="578">720p</text><text class="red tiny" x="760" y="578">Waiting</text><text class="text tiny" x="900" y="578">Stereo</text><text class="muted tiny" x="1032" y="578">unchecked</text>
 
-  <rect class="row" x="620" y="406" width="554" height="74" rx="5"/>
-  <rect x="636" y="418" width="96" height="54" rx="4" fill="#22283a" stroke="#5b6378"/><text class="muted tiny" x="662" y="450">No video</text>
-  <text class="text small" x="760" y="440">Zoom Participant 3</text><text class="muted tiny" x="760" y="462">Spotlight slot 1</text>
-  <text class="text small" x="924" y="440">Slot 1</text><text class="red tiny" x="1050" y="440">waiting</text><text class="muted tiny" x="1130" y="448">Audience</text>
-
-  <rect class="row2" x="620" y="496" width="554" height="74" rx="5"/>
-  <rect x="636" y="508" width="96" height="54" rx="4" fill="#17304a" stroke="#2f81f7"/><text class="text tiny" x="656" y="540">Share</text>
-  <text class="text small" x="760" y="530">Zoom Share</text><text class="muted tiny" x="760" y="552">Screen share</text>
-  <text class="text small" x="924" y="530">Active share</text><text class="green tiny" x="1050" y="530">1920x1080</text><text class="green tiny" x="1050" y="552">15.00 fps</text><text class="muted tiny" x="1130" y="538">none</text>
-
-  <rect class="primary" x="922" y="632" width="116" height="40" rx="8"/><text class="text small" x="958" y="657">Apply</text>
-  <rect class="button" x="1050" y="632" width="116" height="40" rx="8"/><text class="text small" x="1086" y="657">Close</text>
-  <text class="muted tiny" x="88" y="642">The manager maps live Zoom names to OBS sources and shows requested resolution, live signal, frame rate, and audio mode.</text>
+  <rect class="primary" x="962" y="658" width="104" height="38" rx="7"/><text class="text small" x="996" y="682">Apply</text>
+  <rect class="button" x="1084" y="658" width="104" height="38" rx="7"/><text class="text small" x="1118" y="682">Close</text>
+  <text class="muted tiny" x="72" y="682">The dock has the same output controls inline; this dialog is still useful for saving, loading, and deleting named output profiles.</text>
 </svg>

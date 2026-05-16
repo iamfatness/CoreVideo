@@ -1,20 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="860" viewBox="0 0 1440 860" role="img" aria-labelledby="title desc">
   <title id="title">CoreVideo OBS plugin workspace</title>
-  <desc id="desc">Screenshot-style illustration of OBS Studio with CoreVideo participant sources and the Zoom Control dock.</desc>
+  <desc id="desc">Diagram of OBS Studio with normal scenes/sources and the current CoreVideo Zoom Control dock.</desc>
   <defs>
-    <linearGradient id="panel" x1="0" x2="0" y1="0" y2="1">
-      <stop offset="0" stop-color="#202432"/>
-      <stop offset="1" stop-color="#11141d"/>
-    </linearGradient>
-    <linearGradient id="video" x1="0" x2="1" y1="0" y2="1">
-      <stop offset="0" stop-color="#263042"/>
-      <stop offset="1" stop-color="#171b27"/>
-    </linearGradient>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#000" flood-opacity=".35"/>
-    </filter>
     <style>
-      .bg{fill:#0b0d12}.chrome{fill:#171a23}.panel{fill:url(#panel);stroke:#333a4e}.dark{fill:#0f121a}.muted{fill:#8f98ad}.text{fill:#f4f7ff;font-family:Segoe UI,Arial,sans-serif}.small{font-size:16px}.label{font-size:18px;font-weight:600}.tiny{font-size:13px}.green{fill:#28d17c}.blue{fill:#2f81f7}.red{fill:#ff5c67}.line{stroke:#343b4c}.button{fill:#23283a;stroke:#3a4258}.primary{fill:#2f81f7}.video{fill:url(#video);stroke:#2d3447}.accent{stroke:#2f81f7;stroke-width:4}.table{fill:#121722;stroke:#2c3447}
+      .bg{fill:#0b0d12}.chrome{fill:#171a23}.panel{fill:#111722;stroke:#30384b}.dock{fill:#121827;stroke:#354057}.group{fill:#161d2b;stroke:#3a455d}.field{fill:#202737;stroke:#465169}.button{fill:#242c3e;stroke:#4b5670}.primary{fill:#2f81f7;stroke:#5da0ff}.danger{fill:#3a2027;stroke:#b34b57}.table{fill:#0f1420;stroke:#2d3548}.head{fill:#20283a}.row{fill:#151c2b}.row2{fill:#101724}.video{fill:#202637;stroke:#2f81f7}.text{fill:#f4f7ff;font-family:Segoe UI,Arial,sans-serif}.muted{fill:#9aa6bd}.green{fill:#28d17c}.red{fill:#ff5c67}.small{font-size:16px}.tiny{font-size:13px}.label{font-size:19px;font-weight:700}.micro{font-size:11px}
     </style>
   </defs>
   <rect class="bg" width="1440" height="860"/>
@@ -22,54 +11,58 @@
   <circle cx="22" cy="22" r="7" fill="#ff5c67"/><circle cx="44" cy="22" r="7" fill="#ffca4a"/><circle cx="66" cy="22" r="7" fill="#28d17c"/>
   <text class="text small" x="92" y="28">OBS Studio - CoreVideo production scene</text>
 
-  <rect class="panel" x="22" y="66" width="220" height="520" rx="8"/>
-  <text class="text label" x="42" y="102">Scenes</text>
-  <rect class="button" x="42" y="126" width="176" height="42" rx="6"/><text class="text small" x="58" y="153">CoreVideo Main</text>
-  <rect class="button" x="42" y="178" width="176" height="42" rx="6"/><text class="text small" x="58" y="205">Green Room</text>
-  <rect class="panel" x="42" y="260" width="176" height="286" rx="8"/>
-  <text class="text label" x="58" y="294">Sources</text>
-  <text class="text small" x="58" y="330">Zoom Participant 1</text>
-  <text class="text small" x="58" y="366">Zoom Participant 2</text>
-  <text class="text small" x="58" y="402">Zoom Share</text>
-  <text class="text small" x="58" y="438">Lower Third</text>
+  <rect class="panel" x="24" y="66" width="220" height="520" rx="8"/>
+  <text class="text label" x="44" y="102">Scenes</text>
+  <rect class="button" x="44" y="126" width="176" height="42" rx="6"/><text class="text small" x="60" y="153">CoreVideo Main</text>
+  <rect class="button" x="44" y="178" width="176" height="42" rx="6"/><text class="text small" x="60" y="205">Green Room</text>
+  <rect class="panel" x="44" y="260" width="176" height="286" rx="8"/>
+  <text class="text label" x="60" y="294">Sources</text>
+  <text class="text small" x="60" y="330">Zoom Participant 1</text>
+  <text class="text small" x="60" y="366">Zoom Participant 2</text>
+  <text class="text small" x="60" y="402">Zoom Share</text>
+  <text class="text small" x="60" y="438">Lower Third</text>
 
-  <rect class="panel" x="266" y="66" width="744" height="520" rx="8"/>
-  <text class="text label" x="292" y="102">Program canvas</text>
-  <rect x="302" y="126" width="672" height="378" rx="4" fill="#080a0f" stroke="#2b3244"/>
-  <rect class="video accent" x="332" y="158" width="288" height="162" rx="8"/>
-  <rect class="video" x="654" y="158" width="288" height="162" rx="8"/>
-  <rect class="video" x="332" y="342" width="288" height="162" rx="8"/>
-  <rect class="video" x="654" y="342" width="288" height="162" rx="8"/>
-  <circle cx="476" cy="222" r="42" fill="#2f81f7"/><text class="text" x="448" y="235" font-size="34" font-weight="700">AR</text>
-  <circle cx="798" cy="222" r="42" fill="#29a35a"/><text class="text" x="770" y="235" font-size="34" font-weight="700">SC</text>
-  <circle cx="476" cy="406" r="42" fill="#a855f7"/><text class="text" x="449" y="419" font-size="34" font-weight="700">JK</text>
-  <circle cx="798" cy="406" r="42" fill="#f97316"/><text class="text" x="771" y="419" font-size="34" font-weight="700">TB</text>
-  <rect x="332" y="474" width="288" height="30" fill="#05070b" opacity=".8"/><text class="text tiny" x="348" y="494">Alex Rivera - 1920x1080 29.9 fps</text>
-  <rect x="654" y="474" width="288" height="30" fill="#05070b" opacity=".8"/><text class="text tiny" x="670" y="494">Sam Chen - 1920x1080 30.0 fps</text>
+  <rect class="panel" x="268" y="66" width="592" height="520" rx="8"/>
+  <text class="text label" x="294" y="102">Program canvas</text>
+  <rect x="304" y="126" width="520" height="292" rx="4" fill="#080a0f" stroke="#2b3244"/>
+  <rect class="video" x="330" y="154" width="220" height="124" rx="6"/>
+  <rect class="video" x="578" y="154" width="220" height="124" rx="6"/>
+  <rect class="video" x="330" y="294" width="220" height="124" rx="6"/>
+  <rect class="video" x="578" y="294" width="220" height="124" rx="6"/>
+  <circle cx="440" cy="216" r="34" fill="#2f81f7"/><text class="text" x="418" y="228" font-size="30" font-weight="700">AR</text>
+  <circle cx="688" cy="216" r="34" fill="#29a35a"/><text class="text" x="666" y="228" font-size="30" font-weight="700">SC</text>
+  <circle cx="440" cy="356" r="34" fill="#a855f7"/><text class="text" x="419" y="368" font-size="30" font-weight="700">JK</text>
+  <circle cx="688" cy="356" r="34" fill="#f97316"/><text class="text" x="667" y="368" font-size="30" font-weight="700">TB</text>
+  <text class="muted tiny" x="294" y="548">CoreVideo sources render inside normal OBS scenes, filters, transitions, recordings, and streams.</text>
 
-  <rect class="panel" x="1034" y="66" width="384" height="754" rx="10" filter="url(#shadow)"/>
-  <text class="text label" x="1062" y="104">Zoom Control</text>
-  <circle cx="1068" cy="136" r="8" class="green"/><text class="text small" x="1086" y="142">In meeting</text>
-  <text class="muted tiny" x="1062" y="174">Active speaker</text><text class="text small" x="1180" y="174">Alex Rivera</text>
-  <rect class="table" x="1062" y="202" width="328" height="54" rx="6"/>
-  <text class="muted tiny" x="1080" y="225">Meeting ID or Zoom URL</text><text class="text small" x="1080" y="246">https://zoom.us/j/123...</text>
-  <rect class="button" x="1062" y="270" width="158" height="42" rx="8"/><text class="text small" x="1114" y="296">Leave</text>
-  <rect class="primary" x="1232" y="270" width="158" height="42" rx="8"/><text class="text small" x="1266" y="296">Start Engine</text>
-  <rect class="button" x="1062" y="326" width="158" height="42" rx="8"/><text class="text small" x="1095" y="352">Stop Engine</text>
-  <rect class="button" x="1232" y="326" width="158" height="42" rx="8"/><text class="text small" x="1275" y="352">Settings</text>
-  <text class="text label" x="1062" y="410">Participants</text>
-  <rect class="table" x="1062" y="428" width="328" height="174" rx="6"/>
-  <text class="text tiny" x="1080" y="458">Alex Rivera</text><text class="green tiny" x="1220" y="458">video</text><text class="muted tiny" x="1312" y="458">talking</text>
-  <line class="line" x1="1078" y1="474" x2="1374" y2="474"/>
-  <text class="text tiny" x="1080" y="504">Sam Chen</text><text class="green tiny" x="1220" y="504">video</text><text class="muted tiny" x="1312" y="504">muted</text>
-  <line class="line" x1="1078" y1="520" x2="1374" y2="520"/>
-  <text class="text tiny" x="1080" y="550">Jordan Kim</text><text class="green tiny" x="1220" y="550">video</text><text class="muted tiny" x="1312" y="550">idle</text>
-  <line class="line" x1="1078" y1="566" x2="1374" y2="566"/>
-  <text class="text tiny" x="1080" y="596">Taylor Brooks</text><text class="green tiny" x="1220" y="596">video</text><text class="muted tiny" x="1312" y="596">idle</text>
-  <text class="text label" x="1062" y="642">Outputs</text>
-  <rect class="table" x="1062" y="660" width="328" height="122" rx="6"/>
-  <text class="muted tiny" x="1080" y="684">Source</text><text class="muted tiny" x="1226" y="684">Assignment</text><text class="muted tiny" x="1320" y="684">Signal</text>
-  <text class="text tiny" x="1080" y="716">Zoom Participant 1</text><text class="text tiny" x="1226" y="716">Alex</text><text class="green tiny" x="1320" y="716">1080p</text>
-  <text class="text tiny" x="1080" y="750">Zoom Participant 2</text><text class="text tiny" x="1226" y="750">Active</text><text class="green tiny" x="1320" y="750">30 fps</text>
-  <text class="muted tiny" x="292" y="548">CoreVideo sources render inside normal OBS scenes, filters, transitions, recordings, and streams.</text>
+  <rect class="dock" x="884" y="66" width="532" height="754" rx="10"/>
+  <text class="text label" x="910" y="100">Zoom Control</text>
+  <circle cx="916" cy="132" r="8" class="green"/><text class="text small" x="934" y="138">In meeting</text>
+  <text class="muted small" x="910" y="170">Active speaker:</text><text class="text small" x="1038" y="170">Alex Rivera</text>
+
+  <rect class="group" x="910" y="196" width="480" height="224" rx="8"/>
+  <text class="text label" x="930" y="224">Join Meeting</text>
+  <rect class="field" x="930" y="244" width="440" height="32" rx="5"/><text class="muted tiny" x="946" y="265">Meeting ID or Zoom URL</text>
+  <rect class="field" x="930" y="284" width="216" height="32" rx="5"/><text class="muted tiny" x="946" y="305">Passcode optional</text>
+  <rect class="field" x="1154" y="284" width="216" height="32" rx="5"/><text class="text tiny" x="1170" y="305">OBS</text>
+  <rect class="field" x="930" y="324" width="440" height="32" rx="5"/><text class="text tiny" x="946" y="345">Auto Zoom sign-in / ZAK</text>
+  <rect class="field" x="930" y="364" width="440" height="32" rx="5"/><text class="muted tiny" x="946" y="385">Join as Webinar / Zoom Events</text>
+  <rect class="primary" x="930" y="432" width="210" height="38" rx="7"/><text class="text small" x="1018" y="456">Join</text>
+  <rect class="danger" x="1160" y="432" width="210" height="38" rx="7"/><text class="text small" x="1248" y="456">Leave</text>
+
+  <rect class="group" x="910" y="492" width="480" height="82" rx="8"/>
+  <text class="text label" x="930" y="520">Broadcast Engine</text>
+  <rect class="primary" x="930" y="536" width="210" height="34" rx="7"/><text class="text tiny" x="1002" y="557">Start Engine</text>
+  <rect class="danger" x="1160" y="536" width="210" height="34" rx="7"/><text class="text tiny" x="1234" y="557">Stop Engine</text>
+
+  <rect class="group" x="910" y="594" width="480" height="200" rx="8"/>
+  <text class="text label" x="930" y="622">Outputs</text>
+  <rect class="field" x="930" y="638" width="440" height="30" rx="5"/><text class="muted tiny" x="946" y="658">Filter participants...</text>
+  <rect class="table" x="930" y="676" width="440" height="48" rx="5"/>
+  <text class="text tiny" x="946" y="696">Alex Rivera - ID 1001 / video / audio / talking</text>
+  <text class="text tiny" x="946" y="716">Sam Chen - ID 1002 / video / muted</text>
+  <rect class="table" x="930" y="734" width="440" height="42" rx="5"/>
+  <rect class="head" x="930" y="734" width="440" height="18" rx="5"/>
+  <text class="muted micro" x="938" y="747">Preview</text><text class="muted micro" x="1008" y="747">Output</text><text class="muted micro" x="1118" y="747">Assignment</text><text class="muted micro" x="1218" y="747">Requested</text><text class="muted micro" x="1296" y="747">Signal</text>
+  <text class="text micro" x="938" y="768">AR</text><text class="text micro" x="1008" y="768">Zoom Participant 1</text><text class="text micro" x="1118" y="768">Alex Rivera</text><text class="text micro" x="1218" y="768">1080p</text><text class="green micro" x="1296" y="768">1920x1080</text>
 </svg>

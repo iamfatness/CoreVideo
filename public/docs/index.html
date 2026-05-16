@@ -1235,11 +1235,14 @@ sequenceDiagram
       <tr><td>Meeting ID field</td><td>Zoom meeting number; persisted from last session</td></tr>
       <tr><td>Passcode field</td><td>Optional meeting passcode</td></tr>
       <tr><td>Display Name field</td><td>Name shown inside the Zoom meeting; persisted from last session</td></tr>
-      <tr><td>Token type selector</td><td>Combo box to choose join auth method: JWT / OAuth ZAK / Manual token</td></tr>
+      <tr><td>Token type selector</td><td>Combo box to choose join auth method: Auto Zoom sign-in / ZAK, User ZAK, or App privilege token</td></tr>
       <tr><td>Webinar checkbox</td><td>Use Zoom Webinar SDK join API instead of regular meeting API; persisted</td></tr>
       <tr><td>Join button</td><td>Generates JWT or fetches OAuth ZAK and calls <code>ZoomEngineClient::join()</code></td></tr>
       <tr><td>Leave button</td><td>Calls <code>ZoomEngineClient::leave()</code> and clears reconnect session</td></tr>
+      <tr><td>Start Engine button</td><td>Starts raw media capture after the meeting is joined and sends Zoom video/audio to OBS outputs</td></tr>
+      <tr><td>Stop Engine button</td><td>Stops raw media capture while staying joined to the meeting</td></tr>
       <tr><td>Participant filter</td><td>Filter participant list by display name</td></tr>
+      <tr><td>Participant list</td><td>Shows Zoom display name, user ID, video/audio state, talking state, spotlight, and screen-share tags; participants can be dragged onto output rows</td></tr>
       <tr><td>Active speaker label</td><td>Shows current active speaker's display name</td></tr>
     </table>
 
@@ -1262,9 +1265,11 @@ sequenceDiagram
 
     <h3>Output Table</h3>
     <p>
-      The dock embeds an inline output table (replacing the separate Output Manager
-      modal for quick edits). Full output management is still available via
-      <strong>Tools → Zoom Output Manager</strong>.
+      The dock embeds the primary inline output table for quick edits. It shows
+      preview thumbnails, OBS output source names, assignment mode, requested
+      resolution, observed signal, audio mode, and isolated-audio state. The
+      separate <strong>Tools → Zoom Output Manager</strong> dialog remains available
+      for saving, loading, and deleting output profiles.
     </p>
   </section>
 
@@ -1334,6 +1339,8 @@ sequenceDiagram
 
     <h3>Output object</h3>
     <pre><code>{ "source": "Zoom Participant 1", "participant_id": 123, "active_speaker": false,
+  "assignment_mode": "participant", "video_resolution": "1080p",
+  "observed_width": 1920, "observed_height": 1080, "observed_fps": 29.97,
   "isolate_audio": true, "audio_channels": "stereo" }</code></pre>
 
     <h3>Meeting states</h3>
@@ -1403,7 +1410,7 @@ sequenceDiagram
 
     <div class="diagram-wrap">
       <img src="/core-plugin/images/corevideo-output-manager.svg" alt="CoreVideo Output Manager with participant and output mapping" style="max-width:100%;height:auto;">
-      <div class="diagram-caption">The Output Manager shows live participants, source assignments, observed resolution/frame rate, and audio routing for each output.</div>
+      <div class="diagram-caption">The Output Manager mirrors the dock assignment controls and remains useful for named profile save/load workflows.</div>
     </div>
 
     <h3>Profile JSON format</h3>

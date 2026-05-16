@@ -38,7 +38,8 @@ public:
                           bool active_speaker,
                           bool isolate_audio,
                           AudioChannelMode audio_mode,
-                          VideoResolution video_resolution = VideoResolution::P720);
+                          VideoResolution video_resolution = VideoResolution::P720,
+                          bool audience_audio = false);
     // Extended variant supporting ZoomISO-style assignment modes (spotlight,
     // screen share) plus failover. Returns true if the output was found.
     bool configure_output_ex(const std::string &source_name,
@@ -48,7 +49,8 @@ public:
                              uint32_t failover_participant_id,
                              bool isolate_audio,
                              AudioChannelMode audio_mode,
-                             VideoResolution video_resolution = VideoResolution::P720);
+                             VideoResolution video_resolution = VideoResolution::P720,
+                             bool audience_audio = false);
 
     // Re-send subscribe commands for all active sources after engine recovery.
     void resubscribe_all();

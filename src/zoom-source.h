@@ -53,7 +53,8 @@ struct ZoomSource {
                           bool new_active_speaker_mode,
                           bool new_isolate_audio,
                           AudioChannelMode new_audio_mode,
-                          VideoResolution new_resolution = VideoResolution::P720);
+                          VideoResolution new_resolution = VideoResolution::P720,
+                          bool new_audience_audio = false);
     // Extended variant accepting full ZoomISO-style assignment information.
     void configure_output_ex(AssignmentMode mode,
                              uint32_t new_participant_id,
@@ -61,7 +62,8 @@ struct ZoomSource {
                              uint32_t new_failover_participant_id,
                              bool new_isolate_audio,
                              AudioChannelMode new_audio_mode,
-                             VideoResolution new_resolution = VideoResolution::P720);
+                             VideoResolution new_resolution = VideoResolution::P720,
+                             bool new_audience_audio = false);
     void subscribe();
     void unsubscribe();
     void activate();

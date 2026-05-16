@@ -1,4 +1,5 @@
 #pragma once
+#include "audio-routing.h"
 #include "sidebar.h"
 #include "layout-template.h"
 #include "obs-client.h"
@@ -73,6 +74,7 @@ private slots:
     void onPhaseSelected(ShowPhase phase);
     void onSlotAssigned(int slotIndex, int participantId);
     void onSlotClicked(int slotIndex);
+    void onSlotRoutingCycle(int slotIndex);
     void onParticipantAssignClicked(int participantId);
     void onCreateLookRequested();
     void onSetBackgroundRequested();
@@ -183,6 +185,9 @@ private:
     QVector<Look>              m_customLooks;
     QStringList                m_outputSources;
     QHash<int, int>            m_lastSyncedSlotParticipants;
+    // Per-slot audio routing — driven by right-click on a slot in either
+    // canvas. Defaults to Mixed; persisted in memory only for now.
+    QHash<int, AudioRouting>   m_slotRouting;
     QStringList                m_lastScenes;
     SidecarControlServer      *m_controlServer  = nullptr;
     ZoomControlClient         *m_zoomClient     = nullptr;

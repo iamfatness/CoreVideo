@@ -21,7 +21,7 @@ jobs:
     outputs:
       has_zoom_runtime: ${{ steps.zoom_sdk.outputs.has_zoom_runtime }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
 
@@ -220,7 +220,7 @@ jobs:
     name: macOS Universal
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
 

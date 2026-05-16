@@ -16,7 +16,7 @@
 
 CoreVideo integrates the Zoom Meeting SDK into OBS — no screen capture or virtual camera required. The SDK runs in a dedicated `ZoomObsEngine` child process; the OBS plugin communicates with it through a `ZoomEngineClient` singleton over cross-platform IPC (named pipes on Windows, Unix sockets on macOS/Linux) with frame data delivered through named shared memory. A built-in dockable control panel manages joining, and a `ZoomReconnectManager` handles automatic recovery after crashes or disconnects. A companion **CoreVideo Sidecar** app provides a standalone layout-management UI that connects to OBS via obs-websocket.
 
-📖 **[Full Documentation & Architecture Diagrams →](https://iamfatness.github.io/CoreVideo/)**
+📖 **[Full Documentation & Architecture Diagrams →](https://corevideo.iamfatness.us/documentation/)**
 
 ---
 
@@ -291,7 +291,7 @@ CoreVideoOAuthCallback  (thin helper binary — ships beside the plugin)
              same forwarding behaviour
 ```
 
-See the **[full documentation](https://iamfatness.github.io/CoreVideo/)** for all architecture diagrams including the ZoomEngineClient deep-dive, OAuth PKCE flow, assignment mode flows, auto-reconnect, hardware video acceleration, TCP + OSC API references, output profile format, and full IPC protocol reference.
+See the **[full documentation](https://corevideo.iamfatness.us/documentation/)** for all architecture diagrams including the ZoomEngineClient deep-dive, OAuth PKCE flow, assignment mode flows, auto-reconnect, hardware video acceleration, TCP + OSC API references, output profile format, and full IPC protocol reference.
 
 ## Project Structure
 

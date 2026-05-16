@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OAuth Setup | CoreVideo</title>
+  <meta name="description" content="Zoom Marketplace OAuth setup for CoreVideo.">
+  <link rel="stylesheet" href="/assets/site.css">
+</head>
+<body class="document-page">
+  <header class="site-header">
+    <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span><span>CoreVideo</span></a>
+    <nav><a href="/">Home</a><a href="/documentation/">Documentation</a><a href="/oauth/">OAuth</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a><a href="https://github.com/iamfatness/CoreVideo">GitHub</a></nav>
+  </header>
+  <main class="content">
+    <h1>Zoom Marketplace OAuth setup</h1>
+<p>CoreVideo uses a Zoom Meeting SDK JWT to initialize the Meeting SDK helper and uses a user-level OAuth token to fetch a short-lived ZAK for attributed joins. This is needed for external-account meetings and Marketplace review.</p>
+<h2>Zoom Marketplace app</h2>
+<ol><li>Create a <strong>General</strong> app in the Zoom App Marketplace.</li><li>Enable <strong>User-managed</strong> OAuth.</li><li>Choose the OAuth client mode that matches the Marketplace app:</li></ol>
+<ul><li><strong>Confidential OAuth</strong>: use the app's OAuth Client ID and Client Secret.</li><li><strong>Public PKCE OAuth</strong>: use the Public Client ID with PKCE and no secret.</li></ul>
+<ol><li>Add this Redirect URL: <code>corevideo://oauth/callback</code></li><li>Add the same value to the OAuth allow list: <code>corevideo://oauth/callback</code></li><li>Add the minimum scopes needed for the first version: <code>user:read:zak</code> <code>user:read:user</code></li><li>Keep the Meeting SDK credentials configured for SDK authentication. OAuth credentials are separate from Meeting SDK credentials.</li></ol>
+<h2>Local OBS setup</h2>
+<ol><li>Build and install CoreVideo.</li><li>Open OBS, then open <strong>Tools &gt; Zoom Plugin Settings</strong>.</li><li>Enter the OAuth Client ID from the Zoom Marketplace app, or paste Zoom's test authorization URL into <strong>Authorization URL</strong>. If the URL contains <code>client_id</code>, CoreVideo can infer and store it.</li><li>If the Zoom app is configured as a confidential OAuth client, enable <strong>Use Client Secret for confidential OAuth</strong> and enter the OAuth Client Secret. If the app is configured as public PKCE, leave this disabled and use the Public Client ID.</li><li>Keep Redirect URI set to <code>corevideo://oauth/callback</code>.</li><li>Click <strong>Register corevideo:// URL Scheme</strong>. On Windows this registers: <code>HKCU\Software\Classes\corevideo\shell\open\command</code> to launch <code>CoreVideoOAuthCallback.exe</code>. On macOS this registers the bundled <code>CoreVideoOAuthCallback.app</code> with Launch Services.</li><li>Click <strong>Authorize with Zoom</strong> and approve the app in the browser.</li><li>Return to OBS. The callback helper forwards the URL to the plugin over <code>127.0.0.1:19870</code> using the <code>oauth_callback</code> command.</li></ol>
+<h2>Runtime flow</h2>
+<ol><li>CoreVideo generates a high-entropy <code>code_verifier</code>, derives an S256 <code>code_challenge</code>, starts from Zoom's configured authorization URL if one is present, and injects the PKCE parameters it must control.</li><li>Zoom redirects to <code>corevideo://oauth/callback?...</code>.</li><li><code>CoreVideoOAuthCallback.exe</code> forwards that callback to the running OBS plugin. On macOS, <code>CoreVideoOAuthCallback.app</code> performs the same forwarding. The helper reads the configured CoreVideo control-server port from the OBS global config and falls back to <code>19870</code>.</li><li>The plugin verifies <code>state</code>, exchanges the authorization code at <code>https://zoom.us/oauth/token</code>, and stores access/refresh tokens. For public PKCE apps, leave <strong>Use Client Secret for confidential OAuth</strong> unchecked so CoreVideo sends the public-client token request. For confidential OAuth apps, enable that checkbox, enter the OAuth Client Secret, and CoreVideo sends HTTP Basic auth as <code>base64(client_id:secret)</code>.</li><li>Before joining, the plugin refreshes the access token if needed and calls: <code>GET https://api.zoom.us/v2/users/me/zak</code></li><li>The returned ZAK is passed into the Meeting SDK <code>JoinParam4WithoutLogin</code> as <code>userZAK</code>.</li></ol>
+<h2>Security notes</h2>
+<ul><li>PKCE is used for the browser authorization flow in both supported OAuth modes.</li><li>Windows token storage uses DPAPI before writing tokens into OBS global config.</li><li>If the optional OAuth Client Secret is configured on Windows, it is also DPAPI-protected before writing to OBS global config.</li><li>For broad distribution, prefer a managed configuration path over asking every operator to choose OAuth mode manually. The published Marketplace app's OAuth mode should drive the shipped default.</li><li>Refresh tokens are rotated; always persist the latest refresh token Zoom returns.</li><li>Windows builds must ship Qt's TLS backend plugins, especially the Schannel backend under <code>obs-plugins/64bit/plugins/tls</code>, or OAuth HTTPS requests will fail before tokens or ZAKs can be fetched.</li><li>The URL callback command bypasses the local control-server token, but the OAuth <code>state</code> and one-time verifier are still required before any token exchange occurs.</li><li>Do not log access tokens, refresh tokens, ZAKs, authorization codes, or PKCE verifiers.</li></ul>
+<h2>Marketplace review checklist</h2>
+<ul><li>Explain that CoreVideo joins meetings as an OBS capture/ISO recording tool.</li><li>Request only the scopes used by the build.</li><li>Provide test credentials and a test meeting hosted outside the app account.</li><li>Document the visible in-product OAuth sign-in and uninstall/disconnect path.</li><li>Make sure the Marketplace listing explains when meeting audio/video is captured, where it is processed, and that raw media stays local unless OBS outputs it.</li></ul>
+  </main>
+  <footer class="site-footer">
+    <span>CoreVideo is an independent open-source project and is not affiliated with Zoom Video Communications, Inc.</span>
+  </footer>
+</body>
+</html>

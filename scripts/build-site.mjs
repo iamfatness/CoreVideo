@@ -37,6 +37,15 @@ const pages = [
   },
 ];
 
+const markdownPages = [
+  {
+    source: path.join(docsDir, "ZOOM_MARKETPLACE_OAUTH.md"),
+    title: "OAuth Setup",
+    description: "Zoom Marketplace OAuth setup for CoreVideo.",
+    output: "oauth/index.html",
+  },
+];
+
 const publicDocumentationUrl =
   process.env.COREVIDEO_SITE_URL?.replace(/\/$/, "") || "";
 
@@ -53,19 +62,28 @@ function escapeHtml(value) {
 }
 
 function inlineMarkdown(value) {
-  return escapeHtml(value)
+  const code = [];
+  const protectedValue = value.replace(/`([^`]+)`/g, (_match, raw) => {
+    const index = code.push(`<code>${escapeHtml(raw)}</code>`) - 1;
+    return `@@CODE${index}@@`;
+  });
+  return escapeHtml(protectedValue)
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/_([^_]+)_/g, "<em>$1</em>")
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label, href) => {
       const resolved = resolveHref(href);
       return `<a href="${escapeHtml(resolved)}">${label}</a>`;
-    });
+    })
+    .replace(/@@CODE(\d+)@@/g, (_match, index) => code[Number(index)] ?? "");
 }
 
 function resolveHref(href) {
   if (href.startsWith("https://iamfatness.github.io/CoreVideo/#"))
-    return `/documentation/${href.slice("https://iamfatness.github.io/CoreVideo/#".length)}`;
+    return `/documentation/#${href.slice("https://iamfatness.github.io/CoreVideo/#".length)}`;
+  if (href.startsWith("https://corevideo.iamfatness.us/documentation/#"))
+    return `/documentation/#${href.slice("https://corevideo.iamfatness.us/documentation/#".length)}`;
+  if (href === "https://corevideo.iamfatness.us/documentation/")
+    return "/documentation/";
   if (href === "https://iamfatness.github.io/CoreVideo/")
     return "/documentation/";
   if (href === "Privacy-Policy")
@@ -84,6 +102,7 @@ function normalizeText(value) {
     .replaceAll("â€¦", "...")
     .replaceAll("ðŸ“–", "")
     .replaceAll("behaviour", "behavior")
+    .replaceAll("https://corevideo.iamfatness.us/documentation/", "/documentation/")
     .replaceAll("https://iamfatness.github.io/CoreVideo/", "/documentation/")
     .replaceAll("https://iamfatness.github.io/CoreVideo", "/documentation");
 }
@@ -129,9 +148,10 @@ function renderTable(lines) {
 }
 
 function markdownToHtml(markdown) {
-  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+  const lines = markdown.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").split("\n");
   const html = [];
   let list = [];
+  let listTag = "ul";
   let paragraph = [];
   let quote = [];
   let table = [];
@@ -143,8 +163,9 @@ function markdownToHtml(markdown) {
   };
   const flushList = () => {
     if (!list.length) return;
-    html.push(`<ul>${list.map((item) => `<li>${inlineMarkdown(item)}</li>`).join("")}</ul>`);
+    html.push(`<${listTag}>${list.map((item) => `<li>${inlineMarkdown(item)}</li>`).join("")}</${listTag}>`);
     list = [];
+    listTag = "ul";
   };
   const flushQuote = () => {
     if (!quote.length) return;
@@ -165,27 +186,28 @@ function markdownToHtml(markdown) {
 
   for (const rawLine of lines) {
     const line = rawLine.trimEnd();
-    if (!line.trim()) {
+    const trimmed = line.trim();
+    if (!trimmed) {
       flushAll();
       continue;
     }
 
-    if (line.startsWith("|")) {
+    if (trimmed.startsWith("|")) {
       flushParagraph();
       flushList();
       flushQuote();
-      table.push(line);
+      table.push(trimmed);
       continue;
     }
     flushTable();
 
-    if (line === "---") {
+    if (trimmed === "---") {
       flushAll();
       html.push("<hr>");
       continue;
     }
 
-    const heading = /^(#{1,6})\s+(.+)$/.exec(line);
+    const heading = /^(#{1,6})\s+(.+)$/.exec(trimmed);
     if (heading) {
       flushAll();
       const level = heading[1].length;
@@ -193,28 +215,39 @@ function markdownToHtml(markdown) {
       continue;
     }
 
-    if (line.startsWith("- ")) {
+    const bullet = /^[-*]\s+(.+)$/.exec(trimmed);
+    if (bullet) {
       flushParagraph();
       flushQuote();
-      list.push(line.slice(2));
+      if (list.length && listTag !== "ul") flushList();
+      listTag = "ul";
+      list.push(bullet[1]);
       continue;
     }
 
-    if (/^\d+\.\s+/.test(line)) {
+    const ordered = /^\d+\.\s+(.+)$/.exec(trimmed);
+    if (ordered) {
       flushParagraph();
       flushQuote();
-      list.push(line.replace(/^\d+\.\s+/, ""));
+      if (list.length && listTag !== "ol") flushList();
+      listTag = "ol";
+      list.push(ordered[1]);
       continue;
     }
 
-    if (line.startsWith("> ")) {
+    if (list.length && /^\s+/.test(line)) {
+      list[list.length - 1] += ` ${trimmed}`;
+      continue;
+    }
+
+    if (trimmed.startsWith("> ")) {
       flushParagraph();
       flushList();
-      quote.push(line.slice(2));
+      quote.push(trimmed.slice(2));
       continue;
     }
 
-    paragraph.push(line.trim());
+    paragraph.push(trimmed);
   }
   flushAll();
   return html.join("\n");
@@ -224,6 +257,7 @@ function layout(page, content, options = {}) {
   const nav = [
     ["Home", "/"],
     ["Documentation", "/documentation/"],
+    ["OAuth", "/oauth/"],
     ["Terms", "/terms/"],
     ["Privacy", "/privacy/"],
     ["Support", "/support/"],
@@ -277,6 +311,12 @@ for (const page of pages) {
   }
 }
 
+for (const page of markdownPages) {
+  const markdown = normalizeText(fs.readFileSync(page.source, "utf8"));
+  const html = layout(page, markdownToHtml(markdown));
+  writeText(page.output, html);
+}
+
 const logoSource = path.join(siteAssetsDir, "corevideo-logo.jpg");
 if (fs.existsSync(logoSource)) {
   const logoTarget = path.join(outDir, "assets", "corevideo-logo.jpg");
@@ -288,7 +328,8 @@ const docsHtml = fs.readFileSync(path.join(docsDir, "index.html"), "utf8")
   .replaceAll("iamfatness.github.io/CoreVideo", publicDocumentationUrl
     ? new URL("/documentation", publicDocumentationUrl).host + "/documentation"
     : "CoreVideo documentation")
-  .replaceAll("https://iamfatness.github.io/CoreVideo/", "/documentation/");
+  .replaceAll("https://iamfatness.github.io/CoreVideo/", "/documentation/")
+  .replaceAll('href="ZOOM_MARKETPLACE_OAUTH.md"', 'href="/oauth/"');
 writeText("documentation/index.html", docsHtml);
 writeText("docs/index.html", docsHtml);
 
@@ -577,6 +618,8 @@ writeText("_redirects", `/terms-of-use /terms/ 301
 /Privacy-Policy /privacy/ 301
 /Support /support/ 301
 /docs /documentation/ 301
+/ZOOM_MARKETPLACE_OAUTH.md /oauth/ 301
+/docs/ZOOM_MARKETPLACE_OAUTH.md /oauth/ 301
 `);
 
 console.log(`Built CoreVideo site in ${path.relative(root, outDir)}`);

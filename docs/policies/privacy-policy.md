@@ -22,7 +22,7 @@ CoreVideo is **software**, not a cloud service. It runs entirely on the operator
 | Raw video frames | I420 YUV frames from participant cameras | Local machine memory / shared memory |
 | Raw audio PCM | 48 kHz PCM audio from participant microphones | Local machine memory / shared memory |
 | Screen share frames | I420 YUV frames from active screen share | Local machine memory / shared memory |
-| Interpretation audio | PCM audio from language interpretation channels | Local machine memory / shared memory |
+| Interpretation audio | PCM audio from existing Zoom interpretation audio channels | Local machine memory / shared memory |
 
 All media is delivered from the Zoom SDK to OBS in real time. CoreVideo does not write meeting media to disk except as part of OBS recording or streaming, which is configured and controlled exclusively by the operator.
 

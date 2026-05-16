@@ -51,10 +51,11 @@ CoreVideo uses the **Zoom Meeting SDK** to join and capture meeting content. Whe
 - [Zoom Privacy Policy](https://explore.zoom.us/en/privacy/)
 - [Zoom Marketplace Developer Agreement](https://marketplace.zoom.us/docs/api-reference/developer-agreement)
 
-### GitHub (Documentation)
+### Cloudflare and GitHub (Documentation)
 
-The documentation site at `iamfatness.github.io/CoreVideo` is hosted by GitHub Pages. GitHub's privacy policy applies to visits to that site:
+The documentation site at `corevideo.iamfatness.us` is served through Cloudflare and sourced from the public CoreVideo GitHub repository. Cloudflare's and GitHub's privacy policies apply to visits to that site:
 
+- [Cloudflare Privacy Policy](https://www.cloudflare.com/privacypolicy/)
 - [GitHub Privacy Statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement)
 
 ---

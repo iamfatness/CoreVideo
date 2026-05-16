@@ -4,20 +4,20 @@
 
 Before opening an issue, check the full documentation site — most configuration questions and architecture details are covered there:
 
-📖 **[https://iamfatness.github.io/CoreVideo/](https://iamfatness.github.io/CoreVideo/)**
+📖 **[https://corevideo.iamfatness.us/documentation/](https://corevideo.iamfatness.us/documentation/)**
 
 | Topic | Link |
 |---|---|
-| Installation & build | [Installation](https://iamfatness.github.io/CoreVideo/#installation) |
-| Configuration | [Configuration](https://iamfatness.github.io/CoreVideo/#configuration) |
-| Zoom Control Dock | [Zoom Control Dock](https://iamfatness.github.io/CoreVideo/#zoom-dock) |
-| Assignment modes (Spotlight, Active Speaker, Screen Share) | [Assignment Modes](https://iamfatness.github.io/CoreVideo/#assignment-modes) |
-| Active speaker debounce | [Active Speaker Mode](https://iamfatness.github.io/CoreVideo/#active-speaker) |
-| Auto-reconnect | [Auto-Reconnect](https://iamfatness.github.io/CoreVideo/#auto-reconnect) |
-| Hardware video acceleration | [Hardware Video Acceleration](https://iamfatness.github.io/CoreVideo/#hw-accel) |
-| TCP control API | [TCP Control API](https://iamfatness.github.io/CoreVideo/#control-api) |
-| OSC control API | [OSC Control API](https://iamfatness.github.io/CoreVideo/#osc-api) |
-| IPC protocol reference | [IPC Protocol](https://iamfatness.github.io/CoreVideo/#ipc-protocol) |
+| Installation & build | [Installation](https://corevideo.iamfatness.us/documentation/#installation) |
+| Configuration | [Configuration](https://corevideo.iamfatness.us/documentation/#configuration) |
+| Zoom Control Dock | [Zoom Control Dock](https://corevideo.iamfatness.us/documentation/#zoom-dock) |
+| Assignment modes (Spotlight, Active Speaker, Screen Share) | [Assignment Modes](https://corevideo.iamfatness.us/documentation/#assignment-modes) |
+| Active speaker debounce | [Active Speaker Mode](https://corevideo.iamfatness.us/documentation/#active-speaker) |
+| Auto-reconnect | [Auto-Reconnect](https://corevideo.iamfatness.us/documentation/#auto-reconnect) |
+| Hardware video acceleration | [Hardware Video Acceleration](https://corevideo.iamfatness.us/documentation/#hw-accel) |
+| TCP control API | [TCP Control API](https://corevideo.iamfatness.us/documentation/#control-api) |
+| OSC control API | [OSC Control API](https://corevideo.iamfatness.us/documentation/#osc-api) |
+| IPC protocol reference | [IPC Protocol](https://corevideo.iamfatness.us/documentation/#ipc-protocol) |
 
 ---
 

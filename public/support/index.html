@@ -10,7 +10,7 @@
 <body class="document-page">
   <header class="site-header">
     <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span><span>CoreVideo</span></a>
-    <nav><a href="/">Home</a><a href="/documentation/">Documentation</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a><a href="https://github.com/iamfatness/CoreVideo">GitHub</a></nav>
+    <nav><a href="/">Home</a><a href="/documentation/">Documentation</a><a href="/oauth/">OAuth</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a><a href="https://github.com/iamfatness/CoreVideo">GitHub</a></nav>
   </header>
   <main class="content">
     <h1>Support</h1>
@@ -32,26 +32,26 @@
 <h3>Engine fails to start / IPC connection timeout</h3>
 <p><strong>Cause:</strong> <code>ZoomObsEngine</code> could not be launched or located.</p>
 <p><strong>Fix:</strong></p>
-<ul><li>Confirm <code>ZoomObsEngine</code> (<code>.exe</code> on Windows) is in the same directory as the plugin.</li><li>On macOS, remove quarantine: <code>xattr -d com.apple.quarantine ZoomObsEngine</code></li><li>On Linux, ensure execute permission: <code>chmod +x ZoomObsEngine</code></li><li>Check the OBS log for <code>[obs-zoom-plugin]</code> launch failure messages.</li></ul>
+<ol><li>Confirm <code>ZoomObsEngine</code> (<code>.exe</code> on Windows) is in the same directory as the plugin.</li><li>On macOS, remove quarantine: <code>xattr -d com.apple.quarantine ZoomObsEngine</code></li><li>On Linux, ensure execute permission: <code>chmod +x ZoomObsEngine</code></li><li>Check the OBS log for <code>[obs-zoom-plugin]</code> launch failure messages.</li></ol>
 <hr>
 <h3>Blank / black video from a participant</h3>
 <p><strong>Cause:</strong> Participant camera is off, or the subscription was dropped.</p>
 <p><strong>Fix:</strong></p>
-<ul><li>Confirm the participant has their camera enabled in Zoom.</li><li>Set <strong>On video loss</strong> → <strong>Hold last frame</strong> in source properties to avoid going black on brief drops.</li><li>Click <strong>Refresh</strong> in the participant list and re-subscribe.</li></ul>
+<ol><li>Confirm the participant has their camera enabled in Zoom.</li><li>Set <strong>On video loss</strong> → <strong>Hold last frame</strong> in source properties to avoid going black on brief drops.</li><li>Click <strong>Refresh</strong> in the participant list and re-subscribe.</li></ol>
 <hr>
 <h3>No audio from a participant</h3>
 <p><strong>Cause:</strong> Incorrect audio mode or participant is muted.</p>
 <p><strong>Fix:</strong></p>
-<ul><li>Set <strong>Audio Channels</strong> to <strong>Mono</strong> or <strong>Stereo</strong> (not None) in source properties.</li><li>Confirm the participant is unmuted in Zoom.</li><li>If using <strong>Isolate Audio</strong>, confirm the correct participant ID is selected.</li><li>Check the OBS audio mixer — the track may be muted or set to Monitor Only.</li></ul>
+<ol><li>Set <strong>Audio Channels</strong> to <strong>Mono</strong> or <strong>Stereo</strong> (not None) in source properties.</li><li>Confirm the participant is unmuted in Zoom.</li><li>If using <strong>Isolate Audio</strong>, confirm the correct participant ID is selected.</li><li>Check the OBS audio mixer — the track may be muted or set to Monitor Only.</li></ol>
 <hr>
 <h3>Auto-reconnect triggers but never succeeds</h3>
 <p><strong>Cause:</strong> The underlying error (auth failure, license issue, network) is permanent.</p>
 <p><strong>Fix:</strong></p>
-<ul><li>Check the OBS log for the <code>RecoveryReason</code> and error codes.</li><li>If the reason is <code>LicenseError</code>, see the raw-data permission issue above.</li><li>If the reason is <code>AuthFailure</code>, check your SDK key/secret in <strong>Tools → Zoom Plugin Settings</strong>.</li><li>Click <strong>Cancel Recovery</strong> in the Zoom Control dock, resolve the root cause, then re-join manually.</li></ul>
+<ol><li>Check the OBS log for the <code>RecoveryReason</code> and error codes.</li><li>If the reason is <code>LicenseError</code>, see the raw-data permission issue above.</li><li>If the reason is <code>AuthFailure</code>, check your SDK key/secret in <strong>Tools → Zoom Plugin Settings</strong>.</li><li>Click <strong>Cancel Recovery</strong> in the Zoom Control dock, resolve the root cause, then re-join manually.</li></ol>
 <hr>
 <h3>TCP or OSC control API not responding</h3>
 <p><strong>Fix:</strong></p>
-<ul><li>Confirm port numbers in <strong>Tools → Zoom Plugin Settings</strong> match your client (defaults: TCP 19870, OSC 19871).</li><li>Both servers bind to <code>127.0.0.1</code> (loopback) — external connections are not supported by default.</li><li>Check for <code>TCP control server unavailable</code> or <code>OSC server unavailable</code> in the OBS log — another process may own the port.</li></ul>
+<ol><li>Confirm port numbers in <strong>Tools → Zoom Plugin Settings</strong> match your client (defaults: TCP 19870, OSC 19871).</li><li>Both servers bind to <code>127.0.0.1</code> (loopback) — external connections are not supported by default.</li><li>Check for <code>TCP control server unavailable</code> or <code>OSC server unavailable</code> in the OBS log — another process may own the port.</li></ol>
 <hr>
 <h2>Feature Requests</h2>
 <p>Feature requests are welcome as GitHub issues. Search existing issues first. Label your request <code>enhancement</code>.</p>

@@ -10,7 +10,7 @@ const aliases = new Map([
   ["/docs", "/documentation/"],
 ]);
 
-const htmlPaths = new Set(["/", "/terms/", "/privacy/", "/support/", "/documentation/"]);
+const htmlPaths = new Set(["/", "/terms/", "/privacy/", "/support/", "/documentation/", "/oauth/"]);
 
 function normalizePath(pathname) {
   if (aliases.has(pathname))
@@ -23,6 +23,8 @@ function normalizePath(pathname) {
     return { redirect: "/support/" };
   if (pathname === "/documentation")
     return { redirect: "/documentation/" };
+  if (pathname === "/oauth")
+    return { redirect: "/oauth/" };
   if (pathname === "/assets/site.css")
     return { asset: "/assets/site.css", type: "text/css; charset=utf-8" };
   if (pathname === "/assets/corevideo-logo.jpg")

@@ -897,7 +897,7 @@ sequenceDiagram
       <tr><th>Property</th><th>Implementation</th></tr>
       <tr><td>PKCE method</td><td>S256 — SHA-256 of a 32-byte random verifier, base64url-encoded</td></tr>
       <tr><td>State parameter</td><td>16-byte random base64url value; verified on callback to prevent CSRF</td></tr>
-      <tr><td>Client secret</td><td>Optional — leave blank for public PKCE (preferred for desktop plugins); set for confidential/test apps</td></tr>
+      <tr><td>Client secret</td><td>Optional. Enable <strong>Use Client Secret for confidential OAuth</strong> when the published Zoom app is configured as a confidential OAuth client; leave disabled for public PKCE apps.</td></tr>
       <tr><td>Token storage (Windows)</td><td>Access and refresh tokens encrypted with DPAPI before writing to OBS global config</td></tr>
       <tr><td>No secret logging</td><td>Access tokens, refresh tokens, ZAKs, codes, and verifiers are never written to logs or IPC messages</td></tr>
       <tr><td>Refresh rotation</td><td>Always persist the latest refresh token Zoom returns; stale tokens are discarded</td></tr>
@@ -1506,7 +1506,7 @@ sequenceDiagram
     <table>
       <tr><th>Field</th><th>Default</th><th>Description</th></tr>
       <tr><td>OAuth Client ID</td><td>—</td><td>Client ID from Zoom Marketplace General app</td></tr>
-      <tr><td>OAuth Client Secret</td><td>—</td><td>Optional; leave blank for public PKCE (recommended for desktop)</td></tr>
+      <tr><td>OAuth Client Secret</td><td>&mdash;</td><td>Used only when <strong>Use Client Secret for confidential OAuth</strong> is enabled; required for confidential OAuth apps.</td></tr>
       <tr><td>Authorization URL</td><td>—</td><td>Optional custom auth URL (e.g. Zoom test URL); if contains <code>client_id</code>, CoreVideo infers and stores the client ID</td></tr>
       <tr><td>Redirect URI</td><td><code>corevideo://oauth/callback</code></td><td>Must match the Zoom app configuration</td></tr>
       <tr><td>Scopes</td><td><code>user:read:zak user:read:user</code></td><td>OAuth scopes requested during authorization</td></tr>

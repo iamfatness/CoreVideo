@@ -6,6 +6,9 @@
 #include "macro.h"
 #include "participant-panel.h"
 #include "sidecar-control-server.h"
+#include "look.h"
+#include "me-bus.h"
+#include "preview-canvas.h"
 #include <QMainWindow>
 #include <optional>
 
@@ -44,6 +47,8 @@ private slots:
     void onTemplateSelected(const LayoutTemplate &tmpl);
     void onThemeSelected(const ShowTheme &theme);
     void onApplyLayout();
+    void onTake();
+    void onSwapBuses();
     void onEngineToggle();
     void onObsConnect();
     void onObsState(OBSClient::State s);
@@ -67,6 +72,7 @@ private:
     void buildRightPanel(QWidget *parent);
     void buildLogDock();
     void loadMockParticipants();
+    QVector<PreviewCanvas::Participant> participantsForLook(const Look &look) const;
 
     // Top bar
     QWidget     *m_topBar         = nullptr;
@@ -85,10 +91,14 @@ private:
 
     // Toolbar buttons (kept for state updates)
     QPushButton *m_vcamBtn = nullptr;
+    QPushButton *m_takeBtn = nullptr;
+    QPushButton *m_swapBtn = nullptr;
 
-    // Center
+    // Center — m_liveCanvas renders PGM (on-air), m_sceneCanvas renders PVW.
     PreviewCanvas *m_liveCanvas   = nullptr;
     PreviewCanvas *m_sceneCanvas  = nullptr;
+    QLabel        *m_pgmLabel     = nullptr;
+    QLabel        *m_pvwLabel     = nullptr;
 
     // Right panel — stacked pages
     QStackedWidget   *m_rightStack       = nullptr;
@@ -111,7 +121,9 @@ private:
     QPlainTextEdit *m_logView = nullptr;
 
     // State
-    LayoutTemplate             m_currentTemplate;
+    LayoutTemplate             m_currentTemplate;   // mirrors m_working.tmpl for legacy callers
+    Look                       m_working;           // in-progress staged Look (mutated by panels)
+    MEBus                     *m_bus            = nullptr;
     OBSClient                 *m_obsClient      = nullptr;
     OBSClient::Config          m_obsConfig;
     Sidebar                   *m_sidebar        = nullptr;

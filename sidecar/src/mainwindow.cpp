@@ -77,13 +77,19 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
         return btn;
     };
 
-    auto *applyBtn  = makeBtn("⊞  Apply Template", true);
+    m_swapBtn       = makeBtn("⇄  SWAP");
+    m_takeBtn       = makeBtn("⏵  TAKE", true);
     auto *spotBtn   = makeBtn("◉  Spotlight");
     auto *lowerBtn  = makeBtn("▼  Lower Thirds");
     m_vcamBtn       = makeBtn("⏺  V-Cam OFF");
     auto *streamBtn = makeBtn("⏩  Stream");
 
-    tbRow->addWidget(applyBtn);
+    m_takeBtn->setFixedWidth(110);
+    m_swapBtn->setFixedWidth(90);
+
+    tbRow->addWidget(m_swapBtn);
+    tbRow->addWidget(m_takeBtn);
+    tbRow->addSpacing(12);
     tbRow->addWidget(spotBtn);
     tbRow->addWidget(lowerBtn);
     tbRow->addStretch(1);
@@ -116,12 +122,35 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
     if (startup.portOverride)     m_obsConfig.port     = *startup.portOverride;
     if (startup.passwordOverride) m_obsConfig.password = *startup.passwordOverride;
 
+    // ── M/E bus ──────────────────────────────────────────────────────────────
+    m_bus = new MEBus(this);
+    connect(m_bus, &MEBus::previewChanged, this, [this](const Look &l) {
+        m_sceneCanvas->setTemplate(l.tmpl);
+        m_sceneCanvas->setParticipants(participantsForLook(l));
+    });
+    connect(m_bus, &MEBus::programChanged, this, [this](const Look &l) {
+        m_liveCanvas->setTemplate(l.tmpl);
+        m_liveCanvas->setParticipants(participantsForLook(l));
+    });
+    // TAKE is the only path that pushes to OBS.
+    connect(m_bus, &MEBus::tookProgram, this, [this](const Look &l) {
+        m_currentTemplate = l.tmpl;
+        m_controlServer->notifyTemplateChanged(l.tmpl.id, l.tmpl.name);
+        onApplyLayout();
+    });
+
     // ── Connections ───────────────────────────────────────────────────────────
     connect(m_sidebar, &Sidebar::pageSelected, this, &MainWindow::onPageSelected);
-    connect(applyBtn,  &QPushButton::clicked,  this, &MainWindow::onApplyLayout);
+    connect(m_takeBtn, &QPushButton::clicked,  this, &MainWindow::onTake);
+    connect(m_swapBtn, &QPushButton::clicked,  this, &MainWindow::onSwapBuses);
     connect(m_engineBtn, &QPushButton::clicked, this, &MainWindow::onEngineToggle);
     connect(m_obsBtn,  &QPushButton::clicked,  this, &MainWindow::onObsConnect);
     connect(m_vcamBtn, &QPushButton::clicked,  this, &MainWindow::onVirtualCamToggle);
+
+    // Spacebar = TAKE
+    auto *takeShortcut = new QShortcut(QKeySequence(Qt::Key_Space), this);
+    takeShortcut->setContext(Qt::ApplicationShortcut);
+    connect(takeShortcut, &QShortcut::activated, this, &MainWindow::onTake);
 
     m_obsClient = new OBSClient(this);
     connect(m_obsClient, &OBSClient::stateChanged,       this, &MainWindow::onObsState);
@@ -155,12 +184,13 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
         else if (phase == "post_show") onPhaseSelected(ShowPhase::PostShow);
         else                           onPhaseSelected(ShowPhase::PreShow);
     });
+    // Companion / remote "apply template" = stage on PVW + immediate TAKE.
     connect(m_controlServer, &SidecarControlServer::templateApplyRequested,
             this, [this](const QString &id) {
         auto &tm = TemplateManager::instance();
         if (const auto *t = tm.findById(id)) {
             onTemplateSelected(*t);
-            onApplyLayout();
+            onTake();
         }
     });
     connect(m_controlServer, &SidecarControlServer::sceneChangeRequested,
@@ -200,13 +230,21 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
     auto &tm = TemplateManager::instance();
     tm.loadBuiltIn();
     m_templatePanel->loadTemplates(tm.templates());
-    if (const auto *grid4 = tm.findById("4-up-grid")) onTemplateSelected(*grid4);
+    if (const auto *grid4 = tm.findById("4-up-grid")) {
+        // Stage the default template on PVW first; participants get staged
+        // next (loadMockParticipants), then we TAKE so PGM mirrors PVW at
+        // startup — gives the operator a sane starting state on both buses.
+        onTemplateSelected(*grid4);
+    }
 
     // Themes
     m_themePanel->loadThemes(ShowTheme::builtIns());
 
-    // Mock data
+    // Mock data — also stages slot assignments onto PVW.
     loadMockParticipants();
+
+    // Commit the staged default to PGM so first paint matches PVW.
+    m_bus->take();
 
     // Initial UI state
     onObsState(OBSClient::State::Disconnected);
@@ -300,23 +338,42 @@ void MainWindow::buildCenterArea(QWidget *parent)
     row->setSpacing(12);
 
     auto buildPane = [&](const QString &label, const QString &color,
-                         PreviewCanvas *&out) {
+                         PreviewCanvas *&out, QLabel *&outLbl) {
         auto *wrap = new QWidget(m_canvasArea);
         auto *v = new QVBoxLayout(wrap);
         v->setContentsMargins(0, 0, 0, 0);
         v->setSpacing(4);
-        auto *lbl = new QLabel(label, wrap);
-        lbl->setStyleSheet(QString("color: %1; font-size: 10px; font-weight: 800; "
-                                   "letter-spacing: 0.1em; background: transparent;")
-                               .arg(color));
+        outLbl = new QLabel(label, wrap);
+        outLbl->setStyleSheet(QString("color: %1; font-size: 10px; font-weight: 800; "
+                                      "letter-spacing: 0.1em; background: transparent;")
+                                  .arg(color));
         out = new PreviewCanvas(wrap);
-        v->addWidget(lbl);
+        v->addWidget(outLbl);
         v->addWidget(out, 1);
         return wrap;
     };
 
-    row->addWidget(buildPane("LIVE",          "#ff4040", m_liveCanvas),  1);
-    row->addWidget(buildPane("SCENE PREVIEW", "#5080ff", m_sceneCanvas), 1);
+    // PVW on the left (where you build), PGM on the right (what's on air) —
+    // matches the visual flow "stage → take → on air."
+    row->addWidget(buildPane("PVW  ◉  PREVIEW", "#20c460", m_sceneCanvas, m_pvwLabel), 1);
+    row->addWidget(buildPane("PGM  ●  ON AIR",  "#ff4040", m_liveCanvas,  m_pgmLabel), 1);
+}
+
+QVector<PreviewCanvas::Participant>
+MainWindow::participantsForLook(const Look &look) const
+{
+    const int nSlots = look.tmpl.slotList.size();
+    QVector<PreviewCanvas::Participant> cp(nSlots);
+    for (const auto &s : look.slots) {
+        if (s.slotIndex < 0 || s.slotIndex >= nSlots) continue;
+        for (const auto &p : m_participants) {
+            if (p.id == s.participantId) {
+                cp[s.slotIndex] = {p.name, p.initials, p.color, p.isTalking, p.hasVideo};
+                break;
+            }
+        }
+    }
+    return cp;
 }
 
 // ── Right panel ───────────────────────────────────────────────────────────────
@@ -403,11 +460,14 @@ void MainWindow::loadMockParticipants()
     };
     m_participantPanel->setParticipants(m_participants);
 
-    QVector<PreviewCanvas::Participant> cp;
-    for (const auto &p : m_participants)
-        cp.append({p.name, p.initials, p.color, p.isTalking, p.hasVideo});
-    m_liveCanvas->setParticipants(cp);
-    m_sceneCanvas->setParticipants(cp);
+    // Seed the working Look's slot assignments from each participant's
+    // default slotAssign so first-paint shows people in slots.
+    m_working.slots.clear();
+    for (const auto &p : m_participants) {
+        if (p.slotAssign >= 0)
+            m_working.slots.append({p.slotAssign, p.id});
+    }
+    if (m_bus) m_bus->stageLook(m_working);
 }
 
 // ── Slots ─────────────────────────────────────────────────────────────────────
@@ -433,10 +493,13 @@ void MainWindow::onPageSelected(Sidebar::Page p)
 
 void MainWindow::onTemplateSelected(const LayoutTemplate &tmpl)
 {
-    m_currentTemplate = tmpl;
-    m_controlServer->notifyTemplateChanged(tmpl.id, tmpl.name);
-    m_liveCanvas->setTemplate(tmpl);
-    m_sceneCanvas->setTemplate(tmpl);
+    // Selecting a template stages it on PVW. It does NOT go on air until
+    // the operator takes — that's the whole point of the M/E model.
+    m_working.tmpl = tmpl;
+    m_working.id   = tmpl.id;
+    m_working.name = tmpl.name;
+    m_bus->stageLook(m_working);
+    onObsLog(QStringLiteral("Staged on PVW: %1 — press TAKE to go on air.").arg(tmpl.name));
 }
 
 void MainWindow::onThemeSelected(const ShowTheme &theme)
@@ -445,9 +508,22 @@ void MainWindow::onThemeSelected(const ShowTheme &theme)
     onObsLog(QStringLiteral("Theme applied: %1.").arg(theme.name));
 }
 
+void MainWindow::onTake()
+{
+    if (!m_working.isValid()) { onObsLog("Nothing staged on PVW."); return; }
+    m_bus->take();
+    onObsLog(QStringLiteral("TAKE → %1 on air.").arg(m_bus->program().name));
+}
+
+void MainWindow::onSwapBuses()
+{
+    m_bus->swap();
+    onObsLog("Swapped PGM ⇄ PVW (off-air only).");
+}
+
 void MainWindow::onApplyLayout()
 {
-    if (!m_currentTemplate.isValid()) { onObsLog("No template selected."); return; }
+    if (!m_currentTemplate.isValid()) { onObsLog("No template on PGM."); return; }
     if (!m_obsClient->isConnected())  { onObsLog("Not connected — preview only."); return; }
 
     const QString scene   = m_settingsPage->targetScene();
@@ -617,15 +693,17 @@ void MainWindow::onSlotAssigned(int slotIndex, int participantId)
             p.slotAssign = slotIndex;
     }
 
-    // Rebuild ordered participant list for canvas (slot index → position)
-    const int nSlots = m_currentTemplate.slotList.size();
-    QVector<PreviewCanvas::Participant> cp(nSlots);
-    for (const auto &p : m_participants) {
-        if (p.slotAssign >= 0 && p.slotAssign < nSlots)
-            cp[p.slotAssign] = {p.name, p.initials, p.color, p.isTalking, p.hasVideo};
-    }
-    m_liveCanvas->setParticipants(cp);
-    m_sceneCanvas->setParticipants(cp);
+    // Update the staged Look's slot assignments and re-stage on PVW. PGM
+    // is unchanged until the operator takes.
+    m_working.slots.erase(
+        std::remove_if(m_working.slots.begin(), m_working.slots.end(),
+                       [slotIndex, participantId](const SlotAssignment &s) {
+                           return s.slotIndex == slotIndex
+                               || s.participantId == participantId;
+                       }),
+        m_working.slots.end());
+    m_working.slots.append({slotIndex, participantId});
+    m_bus->stageLook(m_working);
 
     // Refresh panel to show updated slot labels
     m_participantPanel->setParticipants(m_participants);
@@ -641,7 +719,7 @@ void MainWindow::onSlotAssigned(int slotIndex, int participantId)
 
 void MainWindow::onSlotClicked(int slotIndex)
 {
-    if (slotIndex < 0 || slotIndex >= m_currentTemplate.slotList.size()) return;
+    if (slotIndex < 0 || slotIndex >= m_working.tmpl.slotList.size()) return;
 
     // Context-sensitive right panel: clicking a slot focuses the Templates
     // page (which hosts the participants list) and arms click-to-assign so
@@ -702,7 +780,11 @@ void MainWindow::populateCommandPalette()
     cp->addCommand(m_obsClient->isVirtualCamActive() ? "Stop Virtual Camera"
                                                     : "Start Virtual Camera",
                    "OBS", [this]() { onVirtualCamToggle(); });
-    cp->addCommand("Apply current template", "OBS",
+    cp->addCommand("TAKE (commit PVW → PGM)", "Switcher",
+                   [this]() { onTake(); });
+    cp->addCommand("SWAP buses (PGM ⇄ PVW)", "Switcher",
+                   [this]() { onSwapBuses(); });
+    cp->addCommand("Re-apply current PGM to OBS", "OBS",
                    [this]() { onApplyLayout(); });
 
     // Phase
@@ -724,21 +806,21 @@ void MainWindow::populateCommandPalette()
     for (const auto &t : TemplateManager::instance().templates()) {
         const QString id = t.id;
         const QString name = t.name;
-        cp->addCommand(QString("Select template: %1").arg(name), "Template",
+        cp->addCommand(QString("Stage on PVW: %1").arg(name), "Template",
                        [this, id]() {
             if (const auto *tt = TemplateManager::instance().findById(id))
                 onTemplateSelected(*tt);
         });
     }
-    // Apply template directly
+    // Stage + TAKE in one step
     for (const auto &t : TemplateManager::instance().templates()) {
         const QString id = t.id;
         const QString name = t.name;
-        cp->addCommand(QString("Apply template: %1").arg(name), "Template",
+        cp->addCommand(QString("Take to PGM: %1").arg(name), "Template",
                        [this, id]() {
             if (const auto *tt = TemplateManager::instance().findById(id)) {
                 onTemplateSelected(*tt);
-                onApplyLayout();
+                onTake();
             }
         });
     }
@@ -758,7 +840,7 @@ void MainWindow::populateCommandPalette()
                        "Participant", [this, pid]() {
             int slot = m_assignTargetSlot;
             if (slot < 0) slot = 0;
-            if (slot < m_currentTemplate.slotList.size())
+            if (slot < m_working.tmpl.slotList.size())
                 onSlotAssigned(slot, pid);
         });
     }

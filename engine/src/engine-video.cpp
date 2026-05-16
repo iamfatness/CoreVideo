@@ -44,39 +44,58 @@ ParticipantSubscription::ParticipantSubscription(uint32_t participant_id,
                                                  IpcFd e2p_fd,
                                                  uint32_t resolution)
     : m_participant_id(participant_id)
-    , m_resolution(resolution)
 {
-    ZOOMSDK::SDKError err = ZOOMSDK::createRenderer(&m_renderer, this);
-    if (err != ZOOMSDK::SDKERR_SUCCESS || !m_renderer) {
+    if (resolution > 2) resolution = 1;
+
+    std::vector<uint32_t> attempts;
+    for (int candidate = static_cast<int>(resolution); candidate >= 0; --candidate)
+        attempts.push_back(static_cast<uint32_t>(candidate));
+
+    for (const uint32_t candidate_resolution : attempts) {
+        ZOOMSDK::SDKError err = ZOOMSDK::createRenderer(&m_renderer, this);
+        if (err != ZOOMSDK::SDKERR_SUCCESS || !m_renderer) {
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"create_renderer_failed","source_uuid":")" +
+                initial_source_uuid + R"(","participant_id":)" +
+                std::to_string(m_participant_id) + R"(,"code":)" +
+                std::to_string(static_cast<int>(err)) + R"(,"resolution":)" +
+                std::to_string(candidate_resolution) + "}");
+            continue;
+        }
+
+        m_resolution = candidate_resolution;
+        const ZOOMSDK::SDKError res_err =
+            m_renderer->setRawDataResolution(sdk_resolution(m_resolution));
         EngineIpc::write(
-            R"({"cmd":"debug","stage":"create_renderer_failed","source_uuid":")" +
+            R"({"cmd":"debug","stage":"set_resolution","source_uuid":")" +
             initial_source_uuid + R"(","participant_id":)" +
             std::to_string(m_participant_id) + R"(,"code":)" +
-            std::to_string(static_cast<int>(err)) + "}");
-        return;
-    }
+            std::to_string(static_cast<int>(res_err)) + R"(,"resolution":)" +
+            std::to_string(m_resolution) + "}");
 
-    const ZOOMSDK::SDKError res_err =
-        m_renderer->setRawDataResolution(sdk_resolution(m_resolution));
-    EngineIpc::write(
-        R"({"cmd":"debug","stage":"set_resolution","source_uuid":")" +
-        initial_source_uuid + R"(","participant_id":)" +
-        std::to_string(m_participant_id) + R"(,"code":)" +
-        std::to_string(static_cast<int>(res_err)) + R"(,"resolution":)" +
-        std::to_string(m_resolution) + "}");
-    err = m_renderer->subscribe(participant_id, ZOOMSDK::RAW_DATA_TYPE_VIDEO);
-    EngineIpc::write(
-        R"({"cmd":"debug","stage":"video_subscribe","source_uuid":")" +
-        initial_source_uuid + R"(","participant_id":)" +
-        std::to_string(m_participant_id) + R"(,"code":)" +
-        std::to_string(static_cast<int>(err)) + R"(,"resolution":)" +
-        std::to_string(m_resolution) + "}");
-    if (err != ZOOMSDK::SDKERR_SUCCESS) {
+        err = m_renderer->subscribe(participant_id, ZOOMSDK::RAW_DATA_TYPE_VIDEO);
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"video_subscribe","source_uuid":")" +
+            initial_source_uuid + R"(","participant_id":)" +
+            std::to_string(m_participant_id) + R"(,"code":)" +
+            std::to_string(static_cast<int>(err)) + R"(,"resolution":)" +
+            std::to_string(m_resolution) + "}");
+        if (err == ZOOMSDK::SDKERR_SUCCESS) {
+            add_source(initial_source_uuid, e2p_fd);
+            if (m_resolution != resolution) {
+                EngineIpc::write(
+                    R"({"cmd":"debug","stage":"video_resolution_downgraded","source_uuid":")" +
+                    initial_source_uuid + R"(","participant_id":)" +
+                    std::to_string(m_participant_id) + R"(,"requested":)" +
+                    std::to_string(resolution) + R"(,"actual":)" +
+                    std::to_string(m_resolution) + "}");
+            }
+            return;
+        }
+
         ZOOMSDK::destroyRenderer(m_renderer);
         m_renderer = nullptr;
-        return;
     }
-    add_source(initial_source_uuid, e2p_fd);
 }
 
 ParticipantSubscription::~ParticipantSubscription()
@@ -223,6 +242,14 @@ void EngineVideo::subscribe(uint32_t participant_id,
                              IpcFd e2p_fd,
                              uint32_t resolution)
 {
+    if (participant_id == 0) {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"video_subscribe_skipped","source_uuid":")" +
+            source_uuid + R"(","participant_id":0,"reason":"missing_participant"})");
+        unsubscribe_locked(source_uuid);
+        return;
+    }
+
     unsubscribe_locked(source_uuid);
 
     auto it = m_subs.find(participant_id);

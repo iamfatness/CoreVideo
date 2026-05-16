@@ -76,6 +76,35 @@ static QString participant_label(const ParticipantInfo &p)
     return label;
 }
 
+static QString signal_text(const ZoomOutputInfo &output)
+{
+    if (output.observed_width == 0 || output.observed_height == 0)
+        return QStringLiteral("No signal");
+    const QString prefix = output_signal_below_requested(output)
+        ? QStringLiteral("! ")
+        : QString();
+    return QString("%1%2x%3\n%4 fps")
+        .arg(prefix)
+        .arg(output.observed_width)
+        .arg(output.observed_height)
+        .arg(output.observed_fps, 0, 'f', 1);
+}
+
+static QString signal_tooltip(const ZoomOutputInfo &output)
+{
+    if (output.observed_width == 0 || output.observed_height == 0)
+        return QStringLiteral("No live video frame has been received.");
+    QString text = QString("Requested %1x%2. Receiving %3x%4 at %5 fps.")
+        .arg(video_resolution_width(output.video_resolution))
+        .arg(video_resolution_height(output.video_resolution))
+        .arg(output.observed_width)
+        .arg(output.observed_height)
+        .arg(output.observed_fps, 0, 'f', 2);
+    if (output_signal_below_requested(output))
+        text += QStringLiteral(" CoreVideo is using the best available Zoom feed.");
+    return text;
+}
+
 ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     : QDialog(parent)
 {
@@ -256,12 +285,10 @@ void ZoomOutputDialog::refresh()
 
         auto *signal = new QLabel(m_table);
         signal->setAlignment(Qt::AlignCenter);
-        signal->setText(output.observed_width > 0 && output.observed_height > 0
-            ? QString("%1x%2\n%3 fps")
-                .arg(output.observed_width)
-                .arg(output.observed_height)
-                .arg(output.observed_fps, 0, 'f', 1)
-            : QString("No signal"));
+        signal->setText(signal_text(output));
+        signal->setToolTip(signal_tooltip(output));
+        if (output_signal_below_requested(output))
+            signal->setStyleSheet("color: #f0b429; font-weight: 700;");
         m_table->setCellWidget(row, ColumnSignal, signal);
 
         m_table->setCellWidget(row, ColumnAudio, audio);

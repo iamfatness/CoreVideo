@@ -13,6 +13,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QColor>
 #include <QDateTime>
 #include <QDrag>
 #include <QDragEnterEvent>
@@ -234,13 +235,37 @@ static QString signal_label(const ZoomOutputInfo &output)
 {
     if (output.observed_width == 0 || output.observed_height == 0)
         return QStringLiteral("Waiting");
+    const QString prefix = output_signal_below_requested(output)
+        ? QStringLiteral("! ")
+        : QString();
     if (output.observed_fps > 0.01) {
-        return QString("%1x%2\n%3 fps")
+        return QString("%1%2x%3\n%4 fps")
+            .arg(prefix)
             .arg(output.observed_width)
             .arg(output.observed_height)
             .arg(output.observed_fps, 0, 'f', 1);
     }
-    return QString("%1x%2").arg(output.observed_width).arg(output.observed_height);
+    return QString("%1%2x%3")
+        .arg(prefix)
+        .arg(output.observed_width)
+        .arg(output.observed_height);
+}
+
+static QString signal_tooltip(const ZoomOutputInfo &output)
+{
+    if (output.observed_width == 0 || output.observed_height == 0)
+        return QStringLiteral("No video frame has been received for this output yet.");
+
+    QString text = QString("Live signal: %1x%2 at %3 fps. Requested: %4x%5.")
+        .arg(output.observed_width)
+        .arg(output.observed_height)
+        .arg(output.observed_fps, 0, 'f', 2)
+        .arg(video_resolution_width(output.video_resolution))
+        .arg(video_resolution_height(output.video_resolution));
+    if (output_signal_below_requested(output)) {
+        text += QStringLiteral(" Zoom delivered a lower feed, so CoreVideo is using the best available live feed.");
+    }
+    return text;
 }
 
 // ── Constructor ───────────────────────────────────────────────────────────────
@@ -835,13 +860,9 @@ void ZoomDock::refresh_outputs()
         auto *signal_item = new QTableWidgetItem(signal_label(output));
         signal_item->setFlags(signal_item->flags() & ~Qt::ItemIsEditable);
         signal_item->setTextAlignment(Qt::AlignCenter);
-        signal_item->setToolTip(
-            output.observed_width == 0
-                ? QStringLiteral("No video frame has been received for this output yet.")
-                : QString("Live signal: %1x%2 at %3 fps")
-                    .arg(output.observed_width)
-                    .arg(output.observed_height)
-                    .arg(output.observed_fps, 0, 'f', 2));
+        signal_item->setToolTip(signal_tooltip(output));
+        if (output_signal_below_requested(output))
+            signal_item->setForeground(QColor("#f0b429"));
         m_output_table->setItem(row, DColSignal, signal_item);
 
         auto *audio = new QComboBox(m_output_table);
@@ -890,13 +911,10 @@ void ZoomDock::refresh_output_signal_cells()
         if (it == by_source.end()) continue;
 
         signal_item->setText(signal_label(it->second));
-        signal_item->setToolTip(
-            it->second.observed_width == 0
-                ? QStringLiteral("No video frame has been received for this output yet.")
-                : QString("Live signal: %1x%2 at %3 fps")
-                    .arg(it->second.observed_width)
-                    .arg(it->second.observed_height)
-                    .arg(it->second.observed_fps, 0, 'f', 2));
+        signal_item->setToolTip(signal_tooltip(it->second));
+        signal_item->setForeground(output_signal_below_requested(it->second)
+            ? QColor("#f0b429")
+            : QColor());
     }
 }
 

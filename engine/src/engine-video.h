@@ -27,6 +27,7 @@ public:
 
     uint32_t participant_id() const { return m_participant_id; }
     uint32_t resolution() const { return m_resolution; }
+    bool active() const { return m_renderer != nullptr; }
     void add_source(const std::string &source_uuid, IpcFd e2p_fd);
     void remove_source(const std::string &source_uuid);
     bool empty() const;

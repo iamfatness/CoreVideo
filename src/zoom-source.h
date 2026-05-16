@@ -94,6 +94,7 @@ private:
     ShmRegion m_audio_shm;
     std::vector<uint8_t> m_placeholder_buf;
     std::vector<uint8_t> m_video_buf;
+    std::vector<uint8_t> m_scaled_video_buf;
     std::vector<uint8_t> m_audio_buf;
     std::atomic<uint32_t> m_width{0};
     std::atomic<uint32_t> m_height{0};

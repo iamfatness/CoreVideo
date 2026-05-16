@@ -115,6 +115,77 @@ static uint8_t clamp_u8(int value)
     return static_cast<uint8_t>(std::max(0, std::min(255, value)));
 }
 
+static void scale_plane_nearest(const uint8_t *src, uint32_t src_w, uint32_t src_h,
+                                uint32_t src_stride, uint8_t *dst,
+                                uint32_t dst_w, uint32_t dst_h,
+                                uint32_t dst_stride)
+{
+    if (!src || !dst || src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0)
+        return;
+
+    for (uint32_t y = 0; y < dst_h; ++y) {
+        const uint32_t sy = std::min<uint32_t>(
+            static_cast<uint32_t>((static_cast<uint64_t>(y) * src_h) / dst_h),
+            src_h - 1);
+        const uint8_t *src_row = src + sy * src_stride;
+        uint8_t *dst_row = dst + y * dst_stride;
+        for (uint32_t x = 0; x < dst_w; ++x) {
+            const uint32_t sx = std::min<uint32_t>(
+                static_cast<uint32_t>((static_cast<uint64_t>(x) * src_w) / dst_w),
+                src_w - 1);
+            dst_row[x] = src_row[sx];
+        }
+    }
+}
+
+static void scale_i420_letterbox(const uint8_t *src_y,
+                                 const uint8_t *src_u,
+                                 const uint8_t *src_v,
+                                 uint32_t src_w,
+                                 uint32_t src_h,
+                                 uint8_t *dst,
+                                 uint32_t dst_w,
+                                 uint32_t dst_h)
+{
+    const size_t dst_y_size = static_cast<size_t>(dst_w) * dst_h;
+    const size_t dst_uv_size = dst_y_size / 4;
+    uint8_t *dst_y = dst;
+    uint8_t *dst_u = dst_y + dst_y_size;
+    uint8_t *dst_v = dst_u + dst_uv_size;
+
+    std::memset(dst_y, 16, dst_y_size);
+    std::memset(dst_u, 128, dst_uv_size);
+    std::memset(dst_v, 128, dst_uv_size);
+
+    if (!src_y || !src_u || !src_v || src_w == 0 || src_h == 0 ||
+        dst_w == 0 || dst_h == 0)
+        return;
+
+    uint32_t fit_w = dst_w;
+    uint32_t fit_h = static_cast<uint32_t>(
+        (static_cast<uint64_t>(dst_w) * src_h) / src_w);
+    if (fit_h > dst_h) {
+        fit_h = dst_h;
+        fit_w = static_cast<uint32_t>(
+            (static_cast<uint64_t>(dst_h) * src_w) / src_h);
+    }
+
+    fit_w = std::max<uint32_t>(2, fit_w & ~1u);
+    fit_h = std::max<uint32_t>(2, fit_h & ~1u);
+    const uint32_t off_x = ((dst_w - fit_w) / 2) & ~1u;
+    const uint32_t off_y = ((dst_h - fit_h) / 2) & ~1u;
+
+    scale_plane_nearest(src_y, src_w, src_h, src_w,
+                        dst_y + off_y * dst_w + off_x,
+                        fit_w, fit_h, dst_w);
+    scale_plane_nearest(src_u, src_w / 2, src_h / 2, src_w / 2,
+                        dst_u + (off_y / 2) * (dst_w / 2) + off_x / 2,
+                        fit_w / 2, fit_h / 2, dst_w / 2);
+    scale_plane_nearest(src_v, src_w / 2, src_h / 2, src_w / 2,
+                        dst_v + (off_y / 2) * (dst_w / 2) + off_x / 2,
+                        fit_w / 2, fit_h / 2, dst_w / 2);
+}
+
 static void rgb_to_i420_values(uint8_t r, uint8_t g, uint8_t b,
                                uint8_t &y, uint8_t &u, uint8_t &v)
 {
@@ -537,6 +608,37 @@ void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height,
     const auto *y_ptr = m_video_buf.data();
     const auto *u_ptr = y_ptr + y_len;
     const auto *v_ptr = u_ptr + y_len / 4;
+    const uint32_t observed_w = w;
+    const uint32_t observed_h = h;
+    const uint8_t *obs_y_ptr = y_ptr;
+    const uint8_t *obs_u_ptr = u_ptr;
+    const uint8_t *obs_v_ptr = v_ptr;
+    uint32_t obs_w = w;
+    uint32_t obs_h = h;
+    uint32_t obs_stride_y = w;
+    uint32_t obs_stride_uv = w / 2;
+
+    uint32_t canvas_w = width_for_resolution(resolution);
+    uint32_t canvas_h = height_for_resolution(resolution);
+    if (canvas_w == 0 || canvas_h == 0) {
+        canvas_w = kDefaultWidth;
+        canvas_h = kDefaultHeight;
+    }
+    if (canvas_w != w || canvas_h != h) {
+        const size_t scaled_size =
+            static_cast<size_t>(canvas_w) * canvas_h * 3 / 2;
+        if (m_scaled_video_buf.size() < scaled_size)
+            m_scaled_video_buf.resize(scaled_size);
+        scale_i420_letterbox(y_ptr, u_ptr, v_ptr, w, h,
+                             m_scaled_video_buf.data(), canvas_w, canvas_h);
+        obs_y_ptr = m_scaled_video_buf.data();
+        obs_u_ptr = obs_y_ptr + static_cast<size_t>(canvas_w) * canvas_h;
+        obs_v_ptr = obs_u_ptr + static_cast<size_t>(canvas_w) * canvas_h / 4;
+        obs_w = canvas_w;
+        obs_h = canvas_h;
+        obs_stride_y = canvas_w;
+        obs_stride_uv = canvas_w / 2;
+    }
     const uint64_t ts = os_gettime_ns();
 
     // Try hardware-accelerated I420→NV12 conversion; fall back to CPU I420 path.
@@ -545,24 +647,26 @@ void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height,
 
     bool hw_ok = false;
 #ifdef COREVIDEO_HW_ACCEL
-    if (m_hw_pipeline.active_mode() != HwAccelMode::None) {
-        hw_ok = m_hw_pipeline.process(y_ptr, u_ptr, v_ptr,
-                                      static_cast<int>(w), static_cast<int>(h),
-                                      static_cast<int>(w), static_cast<int>(w / 2),
-                                      static_cast<int>(w / 2), frame);
+    if (m_hw_pipeline.active_mode() != HwAccelMode::None &&
+        obs_w == w && obs_h == h) {
+        hw_ok = m_hw_pipeline.process(obs_y_ptr, obs_u_ptr, obs_v_ptr,
+                                      static_cast<int>(obs_w), static_cast<int>(obs_h),
+                                      static_cast<int>(obs_stride_y),
+                                      static_cast<int>(obs_stride_uv),
+                                      static_cast<int>(obs_stride_uv), frame);
     }
 #endif
 
     if (!hw_ok) {
         frame.format     = VIDEO_FORMAT_I420;
-        frame.width      = w;
-        frame.height     = h;
-        frame.data[0]    = const_cast<uint8_t *>(y_ptr);
-        frame.data[1]    = const_cast<uint8_t *>(u_ptr);
-        frame.data[2]    = const_cast<uint8_t *>(v_ptr);
-        frame.linesize[0] = w;
-        frame.linesize[1] = w / 2;
-        frame.linesize[2] = w / 2;
+        frame.width      = obs_w;
+        frame.height     = obs_h;
+        frame.data[0]    = const_cast<uint8_t *>(obs_y_ptr);
+        frame.data[1]    = const_cast<uint8_t *>(obs_u_ptr);
+        frame.data[2]    = const_cast<uint8_t *>(obs_v_ptr);
+        frame.linesize[0] = obs_stride_y;
+        frame.linesize[1] = obs_stride_uv;
+        frame.linesize[2] = obs_stride_uv;
     }
     set_yuv_frame_color_info(frame);
 
@@ -589,13 +693,14 @@ void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height,
         blog(LOG_INFO,
              "[obs-zoom-plugin] Output Zoom video frame: source=%s uuid=%s count=%llu w=%u h=%u fmt=%d y_center=%u y_tl=%u",
              output_name().c_str(), source_uuid.c_str(),
-             static_cast<unsigned long long>(m_frame_count), w, h,
+             static_cast<unsigned long long>(m_frame_count), obs_w, obs_h,
              static_cast<int>(frame.format),
-             static_cast<unsigned>(sample_center_luma(y_ptr, w, h, w)),
-             static_cast<unsigned>(y_ptr ? y_ptr[0] : 0));
+             static_cast<unsigned>(sample_center_luma(obs_y_ptr, obs_w, obs_h,
+                                                      obs_stride_y)),
+             static_cast<unsigned>(obs_y_ptr ? obs_y_ptr[0] : 0));
     }
-    m_width.store(w, std::memory_order_relaxed);
-    m_height.store(h, std::memory_order_relaxed);
+    m_width.store(observed_w, std::memory_order_relaxed);
+    m_height.store(observed_h, std::memory_order_relaxed);
 
     const uint64_t now_ns = os_gettime_ns();
     if (m_preview_cb && now_ns - m_preview_last_ns >= kPreviewIntervalNs) {
@@ -694,16 +799,12 @@ void ZoomSource::on_engine_audio(uint32_t event_byte_len,
 
 uint32_t ZoomSource::width() const
 {
-    const uint32_t w = m_width.load(std::memory_order_relaxed);
-    if (w != 0) return w;
     const uint32_t configured = width_for_resolution(resolution);
     return configured != 0 ? configured : kDefaultWidth;
 }
 
 uint32_t ZoomSource::height() const
 {
-    const uint32_t h = m_height.load(std::memory_order_relaxed);
-    if (h != 0) return h;
     const uint32_t configured = height_for_resolution(resolution);
     return configured != 0 ? configured : kDefaultHeight;
 }

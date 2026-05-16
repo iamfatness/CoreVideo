@@ -26,6 +26,34 @@ struct ZoomOutputInfo {
     uint32_t         failover_participant_id = 0; // 0 = none
 };
 
+inline uint32_t video_resolution_width(VideoResolution resolution)
+{
+    switch (resolution) {
+    case VideoResolution::P360: return 640;
+    case VideoResolution::P1080: return 1920;
+    case VideoResolution::P720:
+    default: return 1280;
+    }
+}
+
+inline uint32_t video_resolution_height(VideoResolution resolution)
+{
+    switch (resolution) {
+    case VideoResolution::P360: return 360;
+    case VideoResolution::P1080: return 1080;
+    case VideoResolution::P720:
+    default: return 720;
+    }
+}
+
+inline bool output_signal_below_requested(const ZoomOutputInfo &output)
+{
+    if (output.observed_width == 0 || output.observed_height == 0)
+        return false;
+    return output.observed_width + 8 < video_resolution_width(output.video_resolution) ||
+           output.observed_height + 8 < video_resolution_height(output.video_resolution);
+}
+
 class ZoomOutputManager {
 public:
     static ZoomOutputManager &instance();

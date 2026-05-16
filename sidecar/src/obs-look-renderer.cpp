@@ -5,6 +5,7 @@
 OBSLookRenderer::OBSLookRenderer(OBSClient *client, Config config)
     : m_client(client), m_config(std::move(config))
 {
+    m_config.normalizeBroadcastCanvas();
 }
 
 QStringList OBSLookRenderer::sourceNamesForSlots(int slotCount) const

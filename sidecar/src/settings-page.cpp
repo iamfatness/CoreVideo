@@ -13,6 +13,8 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <utility>
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -183,8 +185,14 @@ void SettingsPage::loadSettings()
 
     m_scene->setText(s.value("scene/target", "CoreVideo Main").toString());
     m_sourcePattern->setText(s.value("scene/sourcePattern", "Zoom Participant %1").toString());
-    m_canvasW->setValue(s.value("scene/canvasW", 1920).toInt());
-    m_canvasH->setValue(s.value("scene/canvasH", 1080).toInt());
+    int canvasW = s.value("scene/canvasW", 1920).toInt();
+    int canvasH = s.value("scene/canvasH", 1080).toInt();
+    if (canvasW <= 0) canvasW = 1920;
+    if (canvasH <= 0) canvasH = 1080;
+    if (canvasH > canvasW)
+        std::swap(canvasW, canvasH);
+    m_canvasW->setValue(canvasW);
+    m_canvasH->setValue(canvasH);
 }
 
 // ---------------------------------------------------------------------------
@@ -202,8 +210,15 @@ void SettingsPage::saveSettings()
 
     s.setValue("scene/target",        m_scene->text());
     s.setValue("scene/sourcePattern", m_sourcePattern->text());
-    s.setValue("scene/canvasW",       m_canvasW->value());
-    s.setValue("scene/canvasH",       m_canvasH->value());
+    int canvasW = m_canvasW->value();
+    int canvasH = m_canvasH->value();
+    if (canvasH > canvasW) {
+        std::swap(canvasW, canvasH);
+        m_canvasW->setValue(canvasW);
+        m_canvasH->setValue(canvasH);
+    }
+    s.setValue("scene/canvasW",       canvasW);
+    s.setValue("scene/canvasH",       canvasH);
 }
 
 // ---------------------------------------------------------------------------

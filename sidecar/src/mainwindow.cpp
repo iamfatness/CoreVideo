@@ -559,6 +559,7 @@ OBSLookRenderer::Config MainWindow::obsRendererConfig() const
         config.canvasWidth = m_settingsPage->canvasWidth();
         config.canvasHeight = m_settingsPage->canvasHeight();
     }
+    config.normalizeBroadcastCanvas();
     return config;
 }
 

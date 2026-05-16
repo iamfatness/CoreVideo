@@ -74,8 +74,16 @@ if(BUILD_TESTING)
     target_include_directories(CoreVideoSidecarCatalogTest PRIVATE src)
     target_link_libraries(CoreVideoSidecarCatalogTest PRIVATE Qt6::Core Qt6::Gui)
 
+    add_executable(CoreVideoSidecarRendererConfigTest
+        tests/renderer-config-test.cpp
+    )
+    target_include_directories(CoreVideoSidecarRendererConfigTest PRIVATE src)
+    target_link_libraries(CoreVideoSidecarRendererConfigTest PRIVATE Qt6::Core Qt6::Gui)
+
     add_test(NAME CoreVideoSidecarCatalog
         COMMAND CoreVideoSidecarCatalogTest "${CMAKE_CURRENT_SOURCE_DIR}/data")
+    add_test(NAME CoreVideoSidecarRendererConfig
+        COMMAND CoreVideoSidecarRendererConfigTest)
     if(WIN32 AND _qt_runtime_dir)
         set_tests_properties(CoreVideoSidecarVersion PROPERTIES
             ENVIRONMENT_MODIFICATION
@@ -83,6 +91,9 @@ if(BUILD_TESTING)
         set_tests_properties(CoreVideoSidecarCatalog PROPERTIES
             ENVIRONMENT_MODIFICATION
                 "PATH=path_list_prepend:$<TARGET_FILE_DIR:CoreVideoSidecarCatalogTest>;PATH=path_list_prepend:${_qt_runtime_dir}")
+        set_tests_properties(CoreVideoSidecarRendererConfig PROPERTIES
+            ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:CoreVideoSidecarRendererConfigTest>;PATH=path_list_prepend:${_qt_runtime_dir}")
     endif()
 endif()
 

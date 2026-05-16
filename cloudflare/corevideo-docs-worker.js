@@ -1,5 +1,5 @@
-const ORIGIN = "https://raw.githubusercontent.com/iamfatness/CoreVideo/68fda1b/public";
-const VERSION = "d43b519";
+const ORIGIN = "https://raw.githubusercontent.com/iamfatness/CoreVideo/4d0a776/public";
+const VERSION = "4d0a776";
 
 const aliases = new Map([
   ["/terms-of-use", "/terms/"],
@@ -36,7 +36,7 @@ function normalizePath(pathname) {
 
 async function fetchAsset(asset) {
   const response = await fetch(`${ORIGIN}${asset}?v=${VERSION}`, {
-    cf: { cacheTtl: 300, cacheEverything: true },
+    cf: { cacheTtl: 0, cacheEverything: false },
   });
   if (!response.ok)
     return new Response("Not found", { status: 404 });
@@ -46,7 +46,7 @@ async function fetchAsset(asset) {
 function siteHeaders(type) {
   return new Headers({
     "content-type": type,
-    "cache-control": "public, max-age=300",
+    "cache-control": "no-cache",
     "x-content-type-options": "nosniff",
     "referrer-policy": "strict-origin-when-cross-origin",
     "content-security-policy":

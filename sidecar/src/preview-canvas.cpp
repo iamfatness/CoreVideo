@@ -74,6 +74,12 @@ void PreviewCanvas::setOpacity(float opacity)
     update();
 }
 
+void PreviewCanvas::setSlotRouting(const QHash<int, AudioRouting> &routing)
+{
+    m_slotRouting = routing;
+    update();
+}
+
 // ── Drag-and-drop ─────────────────────────────────────────────────────────────
 
 int PreviewCanvas::slotAtPoint(QPoint pt) const
@@ -123,6 +129,13 @@ void PreviewCanvas::dropEvent(QDropEvent *e)
 
 void PreviewCanvas::mousePressEvent(QMouseEvent *e)
 {
+    if (e->button() == Qt::RightButton) {
+        const int slot = slotAtPoint(e->pos());
+        if (slot >= 0) {
+            emit slotRoutingCycleRequested(slot);
+            return;
+        }
+    }
     if (e->button() != Qt::LeftButton) { QWidget::mousePressEvent(e); return; }
     m_pressedSlot = slotAtPoint(e->pos());
     m_pressPos    = e->pos();
@@ -461,6 +474,33 @@ void PreviewCanvas::drawSlot(QPainter &p, const QRectF &rect, int idx) const
         p.setPen(QColor(0x80, 0x80, 0xa8));
         p.drawText(strip.adjusted(8, 0, -8, -4), Qt::AlignLeft | Qt::AlignBottom,
                    "Resize  ⤢");
+    }
+
+    // Audio routing badge — small pill in the slot's top-right corner.
+    // Mixed is implicit so we only paint a badge for Iso / Aud to keep the
+    // composition clean. Right-click cycles the routing.
+    const AudioRouting routing = m_slotRouting.value(idx, AudioRouting::Mixed);
+    if (routing != AudioRouting::Mixed) {
+        const QString label = audioRoutingLabel(routing);
+        const QColor fill = (routing == AudioRouting::Isolated)
+            ? QColor(0xff, 0x60, 0x40)    // iso = warm red, matches "iso" mental model
+            : QColor(0x20, 0xc4, 0x60);   // audience = green
+        QFont f = p.font();
+        f.setPointSizeF(9);
+        f.setWeight(QFont::Black);
+        f.setLetterSpacing(QFont::AbsoluteSpacing, 0.5);
+        p.setFont(f);
+        const QFontMetricsF fm(f);
+        const double w = fm.horizontalAdvance(label) + 12;
+        const double h = 18;
+        const QRectF pill(rect.right() - w - 6, rect.top() + 6, w, h);
+        QPainterPath pillPath;
+        pillPath.addRoundedRect(pill, h * 0.5, h * 0.5);
+        p.fillPath(pillPath, fill);
+        p.setPen(QPen(QColor(0, 0, 0, 80), 1));
+        p.drawPath(pillPath);
+        p.setPen(Qt::white);
+        p.drawText(pill, Qt::AlignCenter, label);
     }
 }
 

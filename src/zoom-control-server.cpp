@@ -441,6 +441,7 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
         if (spotlight_slot < 1) spotlight_slot = 1;
 
         const bool isolate = req.value("isolate_audio").toBool(false);
+        const bool audience = req.value("audience_audio").toBool(false);
         const AudioChannelMode amode =
             req.value("audio_channels").toString() == "stereo"
             ? AudioChannelMode::Stereo : AudioChannelMode::Mono;
@@ -448,7 +449,7 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
 
         const bool ok = ZoomOutputManager::instance().configure_output_ex(
             source.toStdString(), mode, participant_id, spotlight_slot, failover_id,
-            isolate, amode, vres);
+            isolate, amode, vres, audience);
         write_response(socket, ok
             ? QJsonObject{{"ok", true}}
             : QJsonObject{{"ok", false}, {"error", "unknown_output"}});

@@ -1,7 +1,9 @@
 #pragma once
+#include "audio-routing.h"
 #include "layout-template.h"
 #include "look.h"
 #include "overlay.h"
+#include <QHash>
 #include <QWidget>
 #include <QVector>
 #include <QColor>
@@ -33,10 +35,16 @@ public:
     void setAccent(const QColor &c);
     // 1.0 = fully visible, 0.0 = black. Used by MEBus for AUTO / FTB.
     void setOpacity(float opacity);
+    // Per-slot audio routing badge. Slots missing from the map render as
+    // Mixed. Only the PVW/PGM canvas in MainWindow shows these — the badge
+    // is purely an operator affordance and does not affect rendering.
+    void setSlotRouting(const QHash<int, AudioRouting> &routing);
 
 signals:
     void slotAssigned(int slotIndex, int participantId);
     void slotClicked(int slotIndex);
+    // Right-click on a slot — used to cycle the slot's audio routing.
+    void slotRoutingCycleRequested(int slotIndex);
 
 protected:
     void paintEvent(QPaintEvent *) override;
@@ -56,6 +64,7 @@ private:
     TileStyle            m_tileStyle;
     QColor               m_accent = QColor(0x29, 0x79, 0xff);
     float                m_opacity = 1.0f;
+    QHash<int, AudioRouting> m_slotRouting;
     int                  m_hoveredSlot = -1;
     int                  m_pressedSlot = -1;
     QPoint               m_pressPos;

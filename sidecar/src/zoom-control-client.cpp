@@ -65,7 +65,7 @@ void ZoomControlClient::refreshOutputs()
 
 void ZoomControlClient::assignOutput(const QString &sourceName,
                                      int participantId,
-                                     bool isolateAudio,
+                                     AudioRouting routing,
                                      const QString &audioChannels)
 {
     sendRequest(QJsonObject{
@@ -73,7 +73,8 @@ void ZoomControlClient::assignOutput(const QString &sourceName,
                     {"source", sourceName},
                     {"mode", "participant"},
                     {"participant_id", participantId},
-                    {"isolate_audio", isolateAudio},
+                    {"isolate_audio",  routing == AudioRouting::Isolated},
+                    {"audience_audio", routing == AudioRouting::Audience},
                     {"audio_channels", audioChannels},
                     {"video_resolution", "1080p"},
                 },

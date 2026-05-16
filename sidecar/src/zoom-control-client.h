@@ -1,5 +1,6 @@
 #pragma once
 
+#include "audio-routing.h"
 #include "participant-panel.h"
 #include <QColor>
 #include <QJsonObject>
@@ -20,7 +21,7 @@ public:
     void refreshOutputs();
     void assignOutput(const QString &sourceName,
                       int participantId,
-                      bool isolateAudio = false,
+                      AudioRouting routing = AudioRouting::Mixed,
                       const QString &audioChannels = QStringLiteral("mono"));
 
 signals:

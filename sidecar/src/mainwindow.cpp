@@ -328,6 +328,12 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
     connect(m_liveCanvas,  &PreviewCanvas::slotClicked, this, &MainWindow::onSlotClicked);
     connect(m_sceneCanvas, &PreviewCanvas::slotClicked, this, &MainWindow::onSlotClicked);
 
+    // Right-click on a slot cycles its audio routing (Mix → Iso → Aud → Mix).
+    connect(m_liveCanvas,  &PreviewCanvas::slotRoutingCycleRequested,
+            this, &MainWindow::onSlotRoutingCycle);
+    connect(m_sceneCanvas, &PreviewCanvas::slotRoutingCycleRequested,
+            this, &MainWindow::onSlotRoutingCycle);
+
     // Participant card click — consumed only while assign mode is armed
     connect(m_participantPanel, &ParticipantPanel::assignRequested, this,
             [this](int pid, int slot) { onSlotAssigned(slot, pid); });
@@ -951,8 +957,11 @@ void MainWindow::syncZoomOutputAssignments()
         if (m_lastSyncedSlotParticipants.value(it.key(), -1) == it.value())
             continue;
         const QString sourceName = sources.value(it.key());
-        if (!sourceName.isEmpty())
-            m_zoomClient->assignOutput(sourceName, it.value(), false, "mono");
+        if (!sourceName.isEmpty()) {
+            const AudioRouting routing =
+                m_slotRouting.value(it.key(), AudioRouting::Mixed);
+            m_zoomClient->assignOutput(sourceName, it.value(), routing, "mono");
+        }
     }
 
     for (auto it = m_lastSyncedSlotParticipants.constBegin();
@@ -961,7 +970,7 @@ void MainWindow::syncZoomOutputAssignments()
             continue;
         const QString sourceName = sources.value(it.key());
         if (!sourceName.isEmpty())
-            m_zoomClient->assignOutput(sourceName, 0, false, "mono");
+            m_zoomClient->assignOutput(sourceName, 0, AudioRouting::Mixed, "mono");
     }
 
     m_lastSyncedSlotParticipants = current;
@@ -1747,6 +1756,30 @@ void MainWindow::onSlotClicked(int slotIndex)
     m_participantPanel->setAssignTarget(slotIndex);
     onObsLog(QString("Selected Slot %1 — click a participant to assign.")
                  .arg(slotIndex + 1));
+}
+
+void MainWindow::onSlotRoutingCycle(int slotIndex)
+{
+    if (slotIndex < 0 || slotIndex >= 8) return;
+    const AudioRouting next =
+        nextAudioRouting(m_slotRouting.value(slotIndex, AudioRouting::Mixed));
+    if (next == AudioRouting::Mixed)
+        m_slotRouting.remove(slotIndex);
+    else
+        m_slotRouting.insert(slotIndex, next);
+
+    // Repaint both canvases so the badge updates.
+    if (m_liveCanvas)  m_liveCanvas->setSlotRouting(m_slotRouting);
+    if (m_sceneCanvas) m_sceneCanvas->setSlotRouting(m_slotRouting);
+
+    // Push the new routing to the plugin. Drop the slot from the sync cache
+    // so the next call re-emits assignOutput even when the participant id
+    // hasn't changed — without this the cache would short-circuit the resend.
+    m_lastSyncedSlotParticipants.remove(slotIndex);
+    syncZoomOutputAssignments();
+
+    onObsLog(QString("Slot %1 audio routing → %2")
+                 .arg(slotIndex + 1).arg(audioRoutingLabel(next)));
 }
 
 void MainWindow::onParticipantAssignClicked(int participantId)

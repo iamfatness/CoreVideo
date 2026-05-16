@@ -273,8 +273,11 @@ void ZoomSource::configure_output(uint32_t new_participant_id,
                                   bool new_active_speaker_mode,
                                   bool new_isolate_audio,
                                   AudioChannelMode new_audio_mode,
-                                  VideoResolution new_resolution)
+                                  VideoResolution new_resolution,
+                                  bool new_audience_audio)
 {
+    // isolate wins if both somehow got requested — mirrors apply_settings().
+    if (new_isolate_audio) new_audience_audio = false;
     if (source) {
         obs_data_t *settings = obs_source_get_settings(source);
         const AssignmentMode mode = new_active_speaker_mode
@@ -284,6 +287,7 @@ void ZoomSource::configure_output(uint32_t new_participant_id,
         obs_data_set_int(settings, PROP_PARTICIPANT_ID, new_participant_id);
         obs_data_set_bool(settings, PROP_ACTIVE_SPEAKER, new_active_speaker_mode);
         obs_data_set_bool(settings, PROP_ISOLATE_AUDIO, new_isolate_audio);
+        obs_data_set_bool(settings, PROP_AUDIENCE_AUDIO, new_audience_audio);
         obs_data_set_int(settings, PROP_AUDIO_CHANNELS,
                          new_audio_mode == AudioChannelMode::Stereo
                          ? AUDIO_CH_STEREO : AUDIO_CH_MONO);
@@ -301,6 +305,7 @@ void ZoomSource::configure_output(uint32_t new_participant_id,
     participant_id = new_participant_id;
     active_speaker_mode = new_active_speaker_mode;
     isolate_audio = new_isolate_audio;
+    audience_audio = new_audience_audio;
     audio_mode = new_audio_mode;
     resolution = new_resolution;
     if (m_subscribed) subscribe();
@@ -312,8 +317,10 @@ void ZoomSource::configure_output_ex(AssignmentMode mode,
                                      uint32_t new_failover_participant_id,
                                      bool new_isolate_audio,
                                      AudioChannelMode new_audio_mode,
-                                     VideoResolution new_resolution)
+                                     VideoResolution new_resolution,
+                                     bool new_audience_audio)
 {
+    if (new_isolate_audio) new_audience_audio = false;
     const bool active_speaker = (mode == AssignmentMode::ActiveSpeaker);
     if (source) {
         obs_data_t *settings = obs_source_get_settings(source);
@@ -323,6 +330,7 @@ void ZoomSource::configure_output_ex(AssignmentMode mode,
         obs_data_set_int(settings, PROP_SPOTLIGHT_SLOT, new_spotlight_slot);
         obs_data_set_int(settings, PROP_FAILOVER_PARTICIPANT, new_failover_participant_id);
         obs_data_set_bool(settings, PROP_ISOLATE_AUDIO, new_isolate_audio);
+        obs_data_set_bool(settings, PROP_AUDIENCE_AUDIO, new_audience_audio);
         obs_data_set_int(settings, PROP_AUDIO_CHANNELS,
                          new_audio_mode == AudioChannelMode::Stereo
                          ? AUDIO_CH_STEREO : AUDIO_CH_MONO);
@@ -339,6 +347,7 @@ void ZoomSource::configure_output_ex(AssignmentMode mode,
     spotlight_slot.store(new_spotlight_slot, std::memory_order_release);
     failover_participant_id.store(new_failover_participant_id, std::memory_order_release);
     isolate_audio = new_isolate_audio;
+    audience_audio = new_audience_audio;
     audio_mode = new_audio_mode;
     resolution = new_resolution;
     if (m_subscribed) subscribe();

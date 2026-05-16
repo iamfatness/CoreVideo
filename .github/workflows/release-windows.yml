@@ -1,0 +1,190 @@
+name: Release Windows
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag to publish, for example v0.1.5"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows x64 package
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          ref: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref }}"
+
+      - name: Set up MSVC tools
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Qt 6
+        shell: powershell
+        run: |
+          python -m pip install --upgrade pip
+          pip install aqtinstall
+          aqt install-qt windows desktop 6.7.3 win64_msvc2019_64 --outputdir C:\Qt
+          "QT_ROOT_DIR=C:\Qt\6.7.3\msvc2019_64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Prepare OBS SDK
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ver = "30.2.2"
+          $obs = "C:\obs-runtime"
+          $sdk = "C:\obs-sdk"
+
+          Invoke-WebRequest `
+            "https://github.com/obsproject/obs-studio/releases/download/$ver/OBS-Studio-$ver-Windows.zip" `
+            -OutFile obs.zip
+          Expand-Archive obs.zip $obs -Force
+
+          git clone --depth 1 --branch $ver --filter=blob:none --sparse `
+            https://github.com/obsproject/obs-studio.git C:\obs-source
+          Push-Location C:\obs-source
+          git sparse-checkout set libobs UI/obs-frontend-api
+          Pop-Location
+
+          New-Item -Force -ItemType Directory "$sdk\include\obs" | Out-Null
+          Copy-Item "C:\obs-source\libobs\*.h" "$sdk\include\obs\"
+          Copy-Item "C:\obs-source\UI\obs-frontend-api\obs-frontend-api.h" "$sdk\include\obs\"
+
+          New-Item -Force -ItemType Directory "$sdk\lib" | Out-Null
+          foreach ($name in @("obs", "obs-frontend-api")) {
+            $dll = "$obs\bin\64bit\$name.dll"
+            if (-not (Test-Path $dll)) {
+              throw "Missing OBS runtime DLL: $dll"
+            }
+
+            $def = "$sdk\lib\$name.def"
+            $lib = "$sdk\lib\$name.lib"
+            $exports = @("EXPORTS")
+            (dumpbin /nologo /exports $dll) | ForEach-Object {
+              if ($_ -match "^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)\s*$") {
+                $exports += "  $($Matches[1])"
+              }
+            }
+            $exports | Set-Content $def -Encoding ASCII
+            lib /nologo /def:$def /out:$lib /machine:x64
+          }
+
+          $sdkFwd = $sdk -replace '\\', '/'
+          $obsFwd = $obs -replace '\\', '/'
+          foreach ($pkg in @(
+            @{ name = "LibObs"; target = "OBS::libobs"; dll = "obs" },
+            @{ name = "obs-frontend-api"; target = "OBS::obs-frontend-api"; dll = "obs-frontend-api" }
+          )) {
+            $dir = "$sdk\cmake\$($pkg.name)"
+            New-Item -Force -ItemType Directory $dir | Out-Null
+            @(
+              "add_library($($pkg.target) SHARED IMPORTED GLOBAL)",
+              "set_target_properties($($pkg.target) PROPERTIES",
+              "  IMPORTED_IMPLIB `"$sdkFwd/lib/$($pkg.dll).lib`"",
+              "  IMPORTED_LOCATION `"$obsFwd/bin/64bit/$($pkg.dll).dll`"",
+              "  INTERFACE_INCLUDE_DIRECTORIES `"$sdkFwd/include`"",
+              ")",
+              "set($($pkg.name)_FOUND TRUE)"
+            ) | Set-Content -Path "$dir\$($pkg.name)Config.cmake" -Encoding UTF8
+          }
+
+          "OBS_SDK_DIR=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Download Zoom Windows SDK
+        env:
+          ZOOM_SDK_DOWNLOAD_URL: ${{ secrets.ZOOM_SDK_WINDOWS_URL }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:ZOOM_SDK_DOWNLOAD_URL)) {
+            throw "Missing required repository secret: ZOOM_SDK_WINDOWS_URL"
+          }
+          Invoke-WebRequest $env:ZOOM_SDK_DOWNLOAD_URL -OutFile zoom-sdk.zip
+          Expand-Archive zoom-sdk.zip third_party/zoom-sdk-extracted -Force
+          $inner = Get-ChildItem third_party/zoom-sdk-extracted -Directory | Select-Object -First 1
+          if (-not $inner) {
+            throw "Zoom SDK archive did not contain an extracted SDK directory."
+          }
+          if (Test-Path third_party/zoom-sdk) {
+            Remove-Item third_party/zoom-sdk -Recurse -Force
+          }
+          Move-Item $inner.FullName third_party/zoom-sdk
+
+      - name: Configure
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          cmake -B build `
+            -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DZOOM_SDK_DIR=third_party/zoom-sdk `
+            "-DCMAKE_PREFIX_PATH=$env:OBS_SDK_DIR;$env:QT_ROOT_DIR" `
+            "-DLibObs_DIR=$env:OBS_SDK_DIR\cmake\LibObs" `
+            "-Dobs-frontend-api_DIR=$env:OBS_SDK_DIR\cmake\obs-frontend-api" `
+            "-DZOOM_EMBED_SDK_KEY=${{ secrets.ZOOM_EMBED_SDK_KEY }}" `
+            "-DZOOM_EMBED_SDK_SECRET=${{ secrets.ZOOM_EMBED_SDK_SECRET }}" `
+            "-DZOOM_EMBED_JWT_TOKEN=${{ secrets.ZOOM_EMBED_JWT_TOKEN }}" `
+            "-DZOOM_EMBED_OAUTH_CLIENT_ID=${{ secrets.ZOOM_EMBED_OAUTH_CLIENT_ID }}"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Package
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          cmake --install build --config Release --prefix install
+          if (-not (Test-Path "install\obs-plugins\64bit\obs-zoom-plugin.dll")) {
+            throw "Package is missing obs-zoom-plugin.dll"
+          }
+          if (-not (Test-Path "install\obs-plugins\64bit\zoom-runtime\ZoomObsEngine.exe")) {
+            throw "Package is missing zoom-runtime\ZoomObsEngine.exe"
+          }
+          if (-not (Test-Path "install\obs-plugins\64bit\zoom-runtime\sdk.dll")) {
+            throw "Package is missing zoom-runtime\sdk.dll"
+          }
+          Compress-Archive -Path install\* -DestinationPath CoreVideo-Windows-x64.zip -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CoreVideo-Windows-x64
+          path: CoreVideo-Windows-x64.zip
+
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ github.event.inputs.version }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "name=CoreVideo $tag" >> "$GITHUB_OUTPUT"
+          if [[ "$tag" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release.outputs.tag }}
+          name: ${{ steps.release.outputs.name }}
+          draft: false
+          prerelease: ${{ steps.release.outputs.prerelease }}
+          generate_release_notes: true
+          files: CoreVideo-Windows-x64.zip

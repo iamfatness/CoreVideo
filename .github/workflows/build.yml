@@ -162,6 +162,9 @@ set($($pkg.name)_FOUND TRUE)
         shell: powershell
         run: |
           cmake --install build --config Release --prefix install
+          if (-not (Test-Path "install\obs-plugins\64bit\zoom-runtime\sdk.dll")) {
+              throw "Release package is missing zoom-runtime\sdk.dll; Zoom join would fail."
+          }
           Compress-Archive -Path install\* -DestinationPath CoreVideo-Windows-x64.zip
 
       - name: Upload artifact

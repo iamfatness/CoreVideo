@@ -89,8 +89,8 @@ endif()
 
 # Decide whether we have everything we need to build the engine binary.
 # Build-time check: only headers + import lib are required to compile/link.
-# Runtime check (bin/sdk.dll): only needed to package and run; if absent,
-# the engine still builds but sdk.dll must be placed alongside it manually.
+# Runtime check (bin/sdk.dll): required for any install/package that includes
+# ZoomObsEngine. A package without it loads the plugin but cannot join Zoom.
 set(BUILD_ZOOM_ENGINE OFF)
 if(NOT COREVIDEO_BUILD_ENGINE)
     message(STATUS "ZoomObsEngine build disabled by COREVIDEO_BUILD_ENGINE=OFF")
@@ -106,8 +106,8 @@ elseif(WIN32)
     if(BUILD_ZOOM_ENGINE AND "${ZOOM_SDK_RUNTIME_DIR}" STREQUAL "")
         message(WARNING
             "Zoom SDK runtime DLLs not found (expected bin/sdk.dll under '${ZOOM_SDK_DIR}'). "
-            "ZoomObsEngine.exe will be built but sdk.dll will not be packaged automatically — "
-            "place the Zoom SDK bin/ DLLs alongside ZoomObsEngine.exe before running.")
+            "ZoomObsEngine.exe can be built for developer checks, but install/package will fail "
+            "until the Zoom SDK bin/ runtime DLLs are available.")
     endif()
 elseif(APPLE)
     if(EXISTS "${ZOOM_SDK_DIR}/ZoomSDK.framework")
@@ -236,6 +236,13 @@ if(BUILD_ZOOM_ENGINE)
             install(DIRECTORY "${ZOOM_SDK_RUNTIME_DIR}/"
                 DESTINATION "obs-plugins/64bit/zoom-runtime"
             )
+        else()
+            install(CODE [[
+                message(FATAL_ERROR
+                    "Zoom SDK runtime DLLs are missing. A CoreVideo package that includes "
+                    "ZoomObsEngine must also include sdk.dll and the Zoom SDK bin/ runtime files. "
+                    "Set ZOOM_SDK_DIR to the Zoom Meeting SDK architecture directory that contains bin/sdk.dll.")
+            ]])
         endif()
         install(TARGETS ZoomObsEngine
             RUNTIME DESTINATION "obs-plugins/64bit/zoom-runtime"

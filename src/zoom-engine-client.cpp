@@ -47,8 +47,10 @@ static std::string zoom_error_message(const QJsonObject &obj)
 
     if (msg == "meeting_failed") {
         if (code == 63) {
-            return "Zoom rejected the join: external meetings require a published "
-                   "Meeting SDK app or Zoom approval. (63 "
+            return "Zoom rejected the join: the signed-in Zoom user/ZAK was "
+                   "sent, but this external meeting still requires the "
+                   "Meeting SDK app/client ID to be published or approved by "
+                   "Zoom for that host account. (63 "
                    "MEETING_FAIL_UNABLE_TO_JOIN_EXTERNAL_MEETING)";
         }
         if (code == 505) {

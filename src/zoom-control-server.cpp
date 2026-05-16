@@ -375,6 +375,37 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
         tokens.app_privilege_token = req.value("app_privilege_token").toString(
             QString::fromStdString(parsed.app_privilege_token)).toStdString();
         ZoomPluginSettings settings = ZoomPluginSettings::load();
+        const bool needs_oauth_zak =
+            tokens.user_zak.empty() &&
+            tokens.on_behalf_token.empty();
+        if (needs_oauth_zak) {
+            if (settings.oauth_access_token.empty() &&
+                settings.oauth_refresh_token.empty()) {
+                write_response(socket, {
+                    {"ok", false},
+                    {"error", "zoom_auth_required"},
+                    {"message", "Sign in with Zoom before joining meetings that require owner/host context."},
+                });
+                return;
+            }
+
+            std::string zak;
+            QString zak_error;
+            if (!ZoomOAuthManager::instance().fetch_zak_blocking(zak, parsed.meeting_id, &zak_error)) {
+                blog(LOG_WARNING, "[obs-zoom-plugin] Control join OAuth ZAK fetch failed: %s",
+                     zak_error.toUtf8().constData());
+                write_response(socket, {
+                    {"ok", false},
+                    {"error", "zoom_zak_unavailable"},
+                    {"message", zak_error.isEmpty()
+                        ? QStringLiteral("Could not fetch Zoom ZAK.")
+                        : zak_error},
+                });
+                return;
+            }
+            tokens.user_zak = zak;
+            blog(LOG_INFO, "[obs-zoom-plugin] Control join fetched OAuth ZAK for Meeting SDK join");
+        }
 
         const bool ok =
             ZoomEngineClient::instance().start(settings.resolved_jwt_token()) &&

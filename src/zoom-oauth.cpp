@@ -386,8 +386,12 @@ bool ZoomOAuthManager::refresh_access_token_blocking(QString *error)
     return parse_token_response(result.response, error);
 }
 
-bool ZoomOAuthManager::fetch_zak_blocking(std::string &zak, QString *error)
+bool ZoomOAuthManager::fetch_zak_blocking(std::string &zak,
+                                          const std::string &meeting_id,
+                                          QString *error)
 {
+    Q_UNUSED(meeting_id);
+
     ZoomPluginSettings s = ZoomPluginSettings::load();
     if (s.oauth_access_token.empty() || s.oauth_client_id.empty())
         return false;
@@ -409,10 +413,10 @@ bool ZoomOAuthManager::fetch_zak_blocking(std::string &zak, QString *error)
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
     loop.exec();
 
-    const QByteArray response = reply->readAll();
-    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-    const QNetworkReply::NetworkError net_error = reply->error();
-    const QString net_error_string = reply->errorString();
+    QByteArray response = reply->readAll();
+    int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    QNetworkReply::NetworkError net_error = reply->error();
+    QString net_error_string = reply->errorString();
     reply->deleteLater();
 
     if (net_error != QNetworkReply::NoError || status < 200 || status >= 300) {

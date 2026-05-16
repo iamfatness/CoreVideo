@@ -678,6 +678,51 @@ public:
 #endif
     }
 
+    void set_host_start_fallback(uint64_t meeting_number,
+                                 const std::string &display_name,
+                                 const std::string &user_zak)
+    {
+        m_host_start_attempted = false;
+        m_host_start_meeting_number = meeting_number;
+        m_host_start_name = to_zstr(display_name);
+        m_host_start_zak = to_zstr(user_zak);
+    }
+
+    void clear_host_start_fallback()
+    {
+        m_host_start_attempted = false;
+        m_host_start_meeting_number = 0;
+        m_host_start_name.clear();
+        m_host_start_zak.clear();
+    }
+
+    bool try_host_start_after_external_join_failure()
+    {
+        if (m_host_start_attempted || m_host_start_meeting_number == 0 ||
+            m_host_start_zak.empty() || !m_meeting_svc || !*m_meeting_svc) {
+            return false;
+        }
+        m_host_start_attempted = true;
+
+        ZOOMSDK::StartParam sp;
+        sp.userType = ZOOMSDK::SDK_UT_WITHOUT_LOGIN;
+        ZOOMSDK::StartParam4WithoutLogin &p = sp.param.withoutloginStart;
+        p.meetingNumber = m_host_start_meeting_number;
+        p.userZAK = m_host_start_zak.c_str();
+        p.userName = m_host_start_name.empty() ? nullptr : m_host_start_name.c_str();
+        p.zoomuserType = ZOOMSDK::ZoomUserType_APIUSER;
+        p.isVideoOff = true;
+        p.isAudioOff = false;
+        p.isMyVoiceInMix = true;
+        p.eAudioRawdataSamplingRate = ZOOMSDK::AudioRawdataSamplingRate_48K;
+        p.eVideoRawdataColorspace = ZOOMSDK::VideoRawdataColorspace_BT709_F;
+
+        const ZOOMSDK::SDKError err = (*m_meeting_svc)->Start(sp);
+        EngineIpc::write(R"({"cmd":"debug","stage":"host_start_after_external_join_failure","code":)" +
+                         std::to_string(static_cast<int>(err)) + "}");
+        return err == ZOOMSDK::SDKERR_SUCCESS;
+    }
+
     void stop_raw_media(const char *reason)
     {
         m_raw_media_requested = false;
@@ -800,6 +845,12 @@ public:
             EngineIpc::write( R"({"cmd":"left"})");
             break;
         case ZOOMSDK::MEETING_STATUS_FAILED:
+            if (iResult == ZOOMSDK::MEETING_FAIL_UNABLE_TO_JOIN_EXTERNAL_MEETING &&
+                try_host_start_after_external_join_failure()) {
+                EngineIpc::write(
+                    R"({"cmd":"debug","stage":"external_join_failed_retrying_host_start"})");
+                break;
+            }
             EngineAudio::instance().reset_subscription("meeting_failed");
             if (m_participants) m_participants->detach();
             EngineIpc::write( R"({"cmd":"error","msg":"meeting_failed","code":)" +
@@ -929,6 +980,10 @@ private:
     EngineVideo *m_video_engine = nullptr;
     bool m_raw_media_requested = false;
     bool m_raw_media_active = false;
+    bool m_host_start_attempted = false;
+    uint64_t m_host_start_meeting_number = 0;
+    std::basic_string<zchar_t> m_host_start_name;
+    std::basic_string<zchar_t> m_host_start_zak;
 };
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -1064,6 +1119,10 @@ int main()
                     EngineIpc::write( R"({"cmd":"error","msg":"invalid_meeting_id"})");
                     continue;
                 }
+                if (!user_zak.empty())
+                    meeting_event.set_host_start_fallback(meeting_number, display_name, user_zak);
+                else
+                    meeting_event.clear_host_start_fallback();
 
                 ZOOMSDK::JoinParam jp;
                 jp.userType = ZOOMSDK::SDK_UT_WITHOUT_LOGIN;

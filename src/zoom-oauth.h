@@ -16,7 +16,9 @@ public:
     bool handle_redirect_url(const QString &url, QString *error = nullptr);
     bool register_url_scheme(QString *error = nullptr);
     bool refresh_access_token_blocking(QString *error = nullptr);
-    bool fetch_zak_blocking(std::string &zak, QString *error = nullptr);
+    bool fetch_zak_blocking(std::string &zak,
+                            const std::string &meeting_id = {},
+                            QString *error = nullptr);
 
 private:
     explicit ZoomOAuthManager(QObject *parent = nullptr);

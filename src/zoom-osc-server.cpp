@@ -268,8 +268,7 @@ void ZoomOscServer::dispatch(const QString &address,
         tokens.app_privilege_token = parsed.app_privilege_token;
         const bool needs_oauth_zak =
             tokens.user_zak.empty() &&
-            tokens.on_behalf_token.empty() &&
-            tokens.app_privilege_token.empty();
+            tokens.on_behalf_token.empty();
         const ZoomPluginSettings settings = ZoomPluginSettings::load();
         if (needs_oauth_zak &&
             settings.oauth_access_token.empty() &&
@@ -281,7 +280,7 @@ void ZoomOscServer::dispatch(const QString &address,
         if (needs_oauth_zak) {
             std::string zak;
             QString zak_error;
-            if (ZoomOAuthManager::instance().fetch_zak_blocking(zak, &zak_error))
+            if (ZoomOAuthManager::instance().fetch_zak_blocking(zak, parsed.meeting_id, &zak_error))
                 tokens.user_zak = zak;
             else {
                 if (zak_error.isEmpty())

@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="520" viewBox="0 0 1120 520" role="img" aria-labelledby="title desc">
+  <title id="title">CoreVideo plugin media pipeline</title>
+  <desc id="desc">Diagram showing OBS plugin control, ZoomObsEngine SDK process, shared memory frames, OBS sources, and control APIs.</desc>
+  <defs>
+    <style>
+      .bg{fill:#07101c}.panel{fill:#111827;stroke:#2dd4bf;stroke-width:2;rx:14}.sub{fill:#0b1220;stroke:#334155;stroke-width:1.5;rx:10}.text{font-family:Segoe UI,Arial,sans-serif;fill:#f8fafc}.muted{fill:#94a3b8}.accent{fill:#67e8f9}.arrow{stroke:#67e8f9;stroke-width:3;fill:none;marker-end:url(#arrow)}
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#67e8f9"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="1120" height="520"/>
+  <rect class="panel" x="40" y="70" width="300" height="360"/>
+  <text class="text" x="70" y="115" font-size="26" font-weight="700">OBS Plugin</text>
+  <rect class="sub" x="70" y="145" width="240" height="56"/>
+  <text class="text" x="92" y="180" font-size="18">Zoom Control Dock</text>
+  <rect class="sub" x="70" y="220" width="240" height="56"/>
+  <text class="text" x="92" y="255" font-size="18">ZoomEngineClient</text>
+  <rect class="sub" x="70" y="295" width="240" height="56"/>
+  <text class="text" x="92" y="330" font-size="18">Zoom Participant Sources</text>
+  <rect class="sub" x="70" y="370" width="240" height="36"/>
+  <text class="muted" x="92" y="394" font-size="14">TCP JSON + OSC control APIs</text>
+  <rect class="panel" x="430" y="70" width="300" height="360"/>
+  <text class="text" x="462" y="115" font-size="26" font-weight="700">ZoomObsEngine</text>
+  <text class="muted" x="462" y="142" font-size="15">child process, Zoom SDK only</text>
+  <rect class="sub" x="462" y="170" width="236" height="56"/>
+  <text class="text" x="484" y="205" font-size="18">Meeting SDK Join</text>
+  <rect class="sub" x="462" y="245" width="236" height="56"/>
+  <text class="text" x="484" y="280" font-size="18">Raw Video Renderers</text>
+  <rect class="sub" x="462" y="320" width="236" height="56"/>
+  <text class="text" x="484" y="355" font-size="18">Raw Audio Delegate</text>
+  <rect class="panel" x="820" y="70" width="260" height="360"/>
+  <text class="text" x="850" y="115" font-size="26" font-weight="700">OBS Outputs</text>
+  <rect class="sub" x="850" y="155" width="200" height="56"/>
+  <text class="text" x="872" y="190" font-size="18">Scene Sources</text>
+  <rect class="sub" x="850" y="235" width="200" height="56"/>
+  <text class="text" x="872" y="270" font-size="18">Audio Mixer</text>
+  <rect class="sub" x="850" y="315" width="200" height="56"/>
+  <text class="text" x="872" y="350" font-size="18">Program Recording</text>
+  <path class="arrow" d="M340 250 C380 250 390 250 430 250"/>
+  <text class="accent" x="354" y="235" font-size="14">JSON IPC</text>
+  <path class="arrow" d="M730 260 C770 260 780 210 820 210"/>
+  <text class="accent" x="742" y="230" font-size="14">I420 shared memory</text>
+  <path class="arrow" d="M730 345 C770 345 780 270 820 270"/>
+  <text class="accent" x="742" y="326" font-size="14">PCM shared memory</text>
+  <path class="arrow" d="M190 430 C190 470 950 470 950 430"/>
+  <text class="muted" x="450" y="492" font-size="15">control stays plugin-side; Zoom SDK stays engine-side</text>
+</svg>

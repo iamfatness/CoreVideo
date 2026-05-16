@@ -44,6 +44,12 @@ const markdownPages = [
     description: "Zoom Marketplace OAuth setup for CoreVideo.",
     output: "oauth/index.html",
   },
+  {
+    source: path.join(docsDir, "CORE_PLUGIN_FUNCTIONALITY.md"),
+    title: "Core Plugin Functionality",
+    description: "CoreVideo OBS plugin workflows, control examples, and ISO recording.",
+    output: "core-plugin/index.html",
+  },
 ];
 
 const publicDocumentationUrl =
@@ -75,6 +81,10 @@ function inlineMarkdown(value) {
       return `<a href="${escapeHtml(resolved)}">${label}</a>`;
     })
     .replace(/@@CODE(\d+)@@/g, (_match, index) => code[Number(index)] ?? "");
+}
+
+function renderImage(alt, src) {
+  return `<figure class="doc-image"><img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}"></figure>`;
 }
 
 function resolveHref(href) {
@@ -118,12 +128,14 @@ function homeContent() {
     <p class="lede">CoreVideo provides raw participant media routing for broadcast, recording, and ISO-style production workflows while keeping processing local to the operator machine.</p>
     <div class="hero-actions">
       <a class="button primary" href="/documentation/">Read documentation</a>
+      <a class="button" href="/core-plugin/">Core plugin guide</a>
       <a class="button" href="https://github.com/iamfatness/CoreVideo">View source</a>
     </div>
   </div>
 </section>
 <section class="link-grid" aria-label="CoreVideo resources">
   <a href="/documentation/"><strong>Documentation</strong><span>Architecture, setup, control APIs, and operating notes.</span></a>
+  <a href="/core-plugin/"><strong>Core Plugin Guide</strong><span>OBS workflows, participant routing, isolated audio, and ISO recording.</span></a>
   <a href="/terms/"><strong>Terms of Use</strong><span>Marketplace-ready usage terms and license requirements.</span></a>
   <a href="/privacy/"><strong>Privacy Policy</strong><span>Data processing, local storage, and third-party service details.</span></a>
   <a href="/support/"><strong>Support</strong><span>Issue reporting, troubleshooting, and common fixes.</span></a>
@@ -155,6 +167,7 @@ function markdownToHtml(markdown) {
   let paragraph = [];
   let quote = [];
   let table = [];
+  let codeBlock = null;
 
   const flushParagraph = () => {
     if (!paragraph.length) return;
@@ -187,6 +200,25 @@ function markdownToHtml(markdown) {
   for (const rawLine of lines) {
     const line = rawLine.trimEnd();
     const trimmed = line.trim();
+
+    const fence = /^```([A-Za-z0-9_-]*)\s*$/.exec(trimmed);
+    if (fence) {
+      if (codeBlock) {
+        const languageClass = codeBlock.language ? ` class="language-${escapeHtml(codeBlock.language)}"` : "";
+        html.push(`<pre><code${languageClass}>${escapeHtml(codeBlock.lines.join("\n"))}</code></pre>`);
+        codeBlock = null;
+      } else {
+        flushAll();
+        codeBlock = { language: fence[1], lines: [] };
+      }
+      continue;
+    }
+
+    if (codeBlock) {
+      codeBlock.lines.push(line);
+      continue;
+    }
+
     if (!trimmed) {
       flushAll();
       continue;
@@ -247,7 +279,18 @@ function markdownToHtml(markdown) {
       continue;
     }
 
+    const image = /^!\[([^\]]*)\]\(([^)]+)\)$/.exec(trimmed);
+    if (image) {
+      flushAll();
+      html.push(renderImage(image[1], image[2]));
+      continue;
+    }
+
     paragraph.push(trimmed);
+  }
+  if (codeBlock) {
+    const languageClass = codeBlock.language ? ` class="language-${escapeHtml(codeBlock.language)}"` : "";
+    html.push(`<pre><code${languageClass}>${escapeHtml(codeBlock.lines.join("\n"))}</code></pre>`);
   }
   flushAll();
   return html.join("\n");
@@ -257,6 +300,7 @@ function layout(page, content, options = {}) {
   const nav = [
     ["Home", "/"],
     ["Documentation", "/documentation/"],
+    ["Core Plugin", "/core-plugin/"],
     ["OAuth", "/oauth/"],
     ["Terms", "/terms/"],
     ["Privacy", "/privacy/"],
@@ -322,6 +366,13 @@ if (fs.existsSync(logoSource)) {
   const logoTarget = path.join(outDir, "assets", "corevideo-logo.jpg");
   ensureDir(logoTarget);
   fs.copyFileSync(logoSource, logoTarget);
+}
+
+const docsImagesSource = path.join(docsDir, "images");
+if (fs.existsSync(docsImagesSource)) {
+  fs.cpSync(docsImagesSource, path.join(outDir, "core-plugin", "images"), {
+    recursive: true,
+  });
 }
 
 const docsHtml = fs.readFileSync(path.join(docsDir, "index.html"), "utf8")
@@ -566,6 +617,33 @@ code {
   padding: 0.1em 0.35em;
   font-size: 0.92em;
   color: #bafcff;
+}
+pre {
+  overflow-x: auto;
+  background: #08111f;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px;
+  margin: 0 0 18px;
+}
+pre code {
+  display: block;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: #dcecff;
+}
+.doc-image {
+  margin: 0 0 22px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #08111f;
+  padding: 12px;
+}
+.doc-image img {
+  display: block;
+  width: 100%;
+  height: auto;
 }
 table {
   width: 100%;

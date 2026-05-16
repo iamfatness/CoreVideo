@@ -156,8 +156,8 @@
   <a href="#auto-reconnect">Auto-Reconnect</a>
   <a href="#zoom-dock">Zoom Control Dock</a>
   <a href="#hw-accel">Hardware Video Acceleration</a>
-  <div class="nav-section">Sidecar &amp; UI</div>
-  <a href="#sidecar">CoreVideo Sidecar</a>
+  <a href="#iso-recording">Auto ISO Recording</a>
+  <div class="nav-section">Plugin UI</div>
   <a href="#ui-modern">Modern UI</a>
   <div class="nav-section">Reference</div>
   <a href="#control-api">TCP Control API</a>
@@ -232,9 +232,8 @@
       intercepts the <code>corevideo://oauth/callback</code> redirect via a bundled
       helper binary, exchanges the authorization code for tokens, and fetches a
       short-lived <strong>ZAK</strong> from the Zoom API before each join.
-      A companion <strong>CoreVideo Sidecar</strong> application connects to OBS
-      via obs-websocket v5 and provides a visual layout-management UI with a
-      template picker and participant slot assignment.
+      The plugin also exposes TCP and OSC control APIs for external production
+      automation, including source assignment, meeting control, and ISO recording.
     </p>
   </section>
 
@@ -282,8 +281,8 @@
         <p>OAuth 2.0 with S256 PKCE for attributed joins and Marketplace compliance. ZAK fetched via <code>/v2/users/me/zak</code>. Custom URL scheme with platform callback helpers.</p></div>
       <div class="card"><div class="card-icon">🎨</div><h4>Modern UI</h4>
         <p>CoreVideo dark stylesheet with animated <code>CvStatusDot</code>, <code>CvBanner</code> first-run notices, and button role variants (primary / danger).</p></div>
-      <div class="card"><div class="card-icon">🖥️</div><h4>CoreVideo Sidecar</h4>
-        <p>Standalone Qt6 app with obs-websocket v5 client, visual layout-template picker (1-up, PiP, SbS, 4-up Grid, Talk-Show), and participant slot assignment.</p></div>
+      <div class="card"><div class="card-icon">ISO</div><h4>Auto ISO Recording</h4>
+        <p>Record assigned participant video/audio tracks to separate files while optionally recording the main OBS program output.</p></div>
       <div class="card"><div class="card-icon">💻</div><h4>Multi-Platform</h4>
         <p>Windows (x64/arm64), macOS (universal arm64+x86_64), Linux. SDK 5.17.x and 7.x header layouts supported.</p></div>
     </div>
@@ -296,12 +295,12 @@
       <tr><th>Dependency</th><th>Version</th><th>Notes</th></tr>
       <tr><td>OBS Studio</td><td>30+</td><td><code>libobs</code> + <code>obs-frontend-api</code></td></tr>
       <tr><td>CMake</td><td>3.16+</td><td>Build system</td></tr>
-      <tr><td>Qt</td><td>6.x</td><td>Core + Network + Widgets (+ WebSockets for Sidecar)</td></tr>
+      <tr><td>Qt</td><td>6.x</td><td>Core + Network + Widgets</td></tr>
       <tr><td>Zoom Meeting SDK</td><td><strong>5.17.x or 7.x</strong></td><td>Place at <code>third_party/zoom-sdk/</code>. CMake detects flat (5.x) and subfolder (7.x) header layouts automatically.</td></tr>
       <tr><td>C++ Compiler</td><td>C++17</td><td>MSVC 2022 / Clang 14+ / GCC 11+</td></tr>
       <tr><td>Zoom Developer Account</td><td>—</td><td>SDK key + secret required. OAuth Client ID required for Marketplace / external-account joins. CoreVideo generates Meeting SDK JWT locally.</td></tr>
       <tr><td>Zoom Enhanced Media License</td><td>—</td><td><strong>Required</strong> on the Zoom account joining the meeting. Without it the SDK returns raw-data permission errors.</td></tr>
-      <tr><td>FFmpeg (optional)</td><td>—</td><td>Required only when building with <code>-DCOREVIDEO_HW_ACCEL=ON</code> for hardware-accelerated I420→NV12 conversion.</td></tr>
+      <tr><td>FFmpeg</td><td>—</td><td>Required at runtime for ISO recording. Also used when building with <code>-DCOREVIDEO_HW_ACCEL=ON</code> for hardware-accelerated I420→NV12 conversion.</td></tr>
       <tr><td>Qt TLS backend (Windows)</td><td>—</td><td>Required for OAuth HTTPS. Ship Schannel TLS plugins to <code>obs-plugins/64bit/plugins/tls/</code>.</td></tr>
     </table>
   </section>
@@ -354,12 +353,6 @@ graph TB
         ZOAuth -->|"ZAK token"| ZEC
       end
 
-      subgraph Sidecar["CoreVideo Sidecar  (standalone Qt6 app)"]
-        OBSCli["OBSClient\n(obs-websocket v5)"]
-        TmplMgr["TemplateManager\n(1-up · PiP · SbS · Grid · Talk-Show)"]
-        TmplMgr --> OBSCli
-      end
-
       subgraph Engine["ZoomObsEngine  (ALL SDK access)"]
         ELoop["IPC Loop"]
         EVid["EngineVideo\n(SHM write)"]
@@ -384,16 +377,13 @@ graph TB
     EVid & EAud -->|"Named Shared Memory\nI420 frames · PCM audio"| ZS
     SDK <-->|HTTPS/WSS| Mtg
     Ctrl <-->|"TCP :19870\nUDP OSC :19871"| ZCS & ZOSC
-    OBSCli <-->|"obs-websocket v5\n:4455"| OBS
-
     style OBS fill:#0d2137,stroke:#2f81f7,color:#e6edf3
     style Plugin fill:#1a2332,stroke:#388bfd,color:#e6edf3
     style Engine fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
     style ZoomCloud fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
     style External fill:#2d2000,stroke:#d29922,color:#e6edf3
-    style Sidecar fill:#1a1a3d,stroke:#6e40c9,color:#e6edf3
       </div>
-      <div class="diagram-caption">Fig 1 — All SDK access is in ZoomObsEngine. ZoomOAuthManager handles OAuth PKCE and ZAK fetching. The CoreVideo Sidecar connects to OBS via obs-websocket for layout management.</div>
+      <div class="diagram-caption">Fig 1 — All SDK access is in ZoomObsEngine. ZoomOAuthManager handles OAuth PKCE and ZAK fetching. TCP and OSC provide external control without linking the Zoom SDK into OBS.</div>
     </div>
   </section>
 
@@ -1583,21 +1573,6 @@ sequenceDiagram
 │   ├── index.html
 │   ├── ZOOM_MARKETPLACE_OAUTH.md             # OAuth PKCE setup guide
 │   └── policies/                             # Security &amp; privacy policy documents
-├── sidecar/                                  # CoreVideo Sidecar (standalone Qt6 app)
-│   ├── CMakeLists.txt
-│   ├── data/templates/                       # Built-in layout template JSON files
-│   └── src/
-│       ├── main.cpp
-│       ├── mainwindow.*                      # Main window: top bar, canvas, panels, log dock
-│       ├── obs-client.*                      # obs-websocket v5 client (auto-reconnect, transforms)
-│       ├── obs-connect-dialog.*              # Host/port/password connection dialog
-│       ├── layout-template.*                 # LayoutTemplate + TemplateSlot data types
-│       ├── template-manager.*                # Loads templates from disk + built-ins
-│       ├── template-panel.*                  # Visual thumbnail picker (TemplateThumbnail widgets)
-│       ├── participant-panel.*               # Slot → participant assignment UI
-│       ├── preview-canvas.*                  # Live/scene preview rendering widget
-│       ├── sidebar.*                         # Page-navigation sidebar
-│       └── sidecar-style.h                   # Sidecar Qt stylesheet
 ├── engine/src/                               # ZoomObsEngine process (owns ALL SDK access)
 │   ├── main.cpp                              # IPC loop, SDK auth/join, roster/spotlight tracking
 │   ├── engine-video.cpp/h                    # IZoomSDKRenderer → named shared memory (I420)
@@ -1654,145 +1629,57 @@ sequenceDiagram
     </div>
   </section>
 
-  <!-- ══ COREVIDEO SIDECAR ════════════════════════════════════════ -->
+  <!-- ══ AUTO ISO RECORDING ══════════════════════════════════════ -->
 
-  <section id="sidecar">
-    <h2>CoreVideo Sidecar</h2>
+  <section id="iso-recording">
+    <h2>Auto ISO Recording</h2>
     <p>
-      The <strong>CoreVideo Sidecar</strong> is a standalone Qt6 application that
-      connects to OBS via obs-websocket v5 and provides a visual layout-management
-      interface for CoreVideo sources. It runs independently — no OBS plugin required
-      on the Sidecar machine.
+      CoreVideo can record assigned participant media as separate ISO files while
+      optionally starting the main OBS program recording. ISO recording is owned
+      by the OBS plugin process: the engine remains minimal and only publishes raw
+      I420 video and PCM audio through the existing IPC and shared-memory path.
     </p>
 
-    <h3>OBSClient</h3>
-    <p>
-      <code>OBSClient</code> is a full obs-websocket v5 client with auto-reconnect,
-      scene item ID resolution (cached per-scene), and transform application.
-    </p>
     <div class="diagram-wrap">
-      <div class="mermaid">
-classDiagram
-    class OBSClient {
-        &lt;&lt;obs-websocket v5&gt;&gt;
-        +connectToOBS(cfg: Config)
-        +disconnectFromOBS()
-        +requestSceneList()
-        +requestSceneItems(sceneName)
-        +setCurrentScene(name)
-        +setSceneItemTransform(scene, itemId, transform)
-        +applyLayout(scene, tmpl, sourceNames, canvasW, canvasH)
-        +applyTemplate(templateJson) bool
-        +state() State
-        -m_itemCache: scene→(source→itemId)
-        -m_reconnectTimer: QTimer
-    }
-    class LayoutTemplate {
-        +id: QString
-        +name: QString
-        +description: QString
-        +columns, rows: int
-        +slots: QVector~TemplateSlot~
-        +fromJson(obj) LayoutTemplate$
-        +toJson() QJsonObject
-    }
-    class TemplateSlot {
-        +index: int
-        +x, y, width, height: double
-        +label: QString
-        +isMain: bool
-    }
-    class TemplateManager {
-        +loadAll() QVector~LayoutTemplate~
-    }
-    class TemplatePanel {
-        +loadTemplates(templates)
-        +selectedId() QString
-        -m_thumbs: QVector~TemplateThumbnail*~
-    }
-    class ParticipantPanel {
-        +setSlots(n)
-        +assignments() QStringList
-    }
-    class MainWindow {
-        +onApplyLayout()
-        +onObsConnect()
-        -m_obsClient: OBSClient*
-        -m_liveCanvas: PreviewCanvas*
-        -m_sceneCanvas: PreviewCanvas*
-    }
-
-    LayoutTemplate "1" *-- "N" TemplateSlot
-    TemplateManager --> LayoutTemplate : loads
-    TemplatePanel --> LayoutTemplate : displays
-    MainWindow --> OBSClient
-    MainWindow --> TemplatePanel
-    MainWindow --> ParticipantPanel
-    MainWindow ..> TemplateManager : loadAll()
-    OBSClient --> LayoutTemplate : applyLayout()
-      </div>
-      <div class="diagram-caption">Sidecar class diagram: OBSClient owns the WebSocket connection; MainWindow orchestrates template selection, participant assignment, and apply.</div>
+      <img src="/core-plugin/images/iso-recording-flow.svg" alt="CoreVideo ISO recording flow" style="max-width:100%;height:auto;">
+      <div class="diagram-caption">Assignments resolve the participant IDs. Each assigned Zoom source can feed an FFmpeg writer for video/audio ISO files while OBS continues to own the program output.</div>
     </div>
 
-    <h3>Built-in Layout Templates</h3>
+    <h3>Start Recording</h3>
+    <pre><code>{
+  "cmd": "iso_recording_start",
+  "output_dir": "C:/Recordings/CoreVideo",
+  "ffmpeg_path": "ffmpeg",
+  "record_program": true
+}</code></pre>
+
+    <h3>Check Status</h3>
+    <pre><code>{ "cmd": "iso_recording_status" }</code></pre>
+
+    <h3>Stop Recording</h3>
+    <pre><code>{ "cmd": "iso_recording_stop" }</code></pre>
+
+    <h3>OSC Controls</h3>
     <table>
-      <tr><th>Template ID</th><th>Name</th><th>Description</th><th>Slots</th></tr>
-      <tr><td><code>1-up</code></td><td>1-up</td><td>Full-screen single source</td><td>1</td></tr>
-      <tr><td><code>2-up-pip</code></td><td>2-up PiP</td><td>Large main + 32% picture-in-picture at bottom-right</td><td>2</td></tr>
-      <tr><td><code>2-up-sbs</code></td><td>2-up SbS</td><td>Two equal sources side by side</td><td>2</td></tr>
-      <tr><td><code>4-up-grid</code></td><td>4-up Grid</td><td>2×2 equal grid</td><td>4</td></tr>
-      <tr><td><code>talk-show</code></td><td>Talk-Show</td><td>Large presenter + smaller remote guest</td><td>2</td></tr>
+      <tr><th>Address</th><th>Arguments</th><th>Action</th></tr>
+      <tr><td><code>/zoom/iso/start</code></td><td><code>output_dir</code>, optional <code>record_program</code></td><td>Starts ISO recording</td></tr>
+      <tr><td><code>/zoom/iso/stop</code></td><td>none</td><td>Stops ISO recording</td></tr>
     </table>
 
-    <h3>Template JSON Format</h3>
-    <pre><code>{
-  "id": "2-up-pip",
-  "name": "2-up PiP",
-  "description": "Large main with picture-in-picture",
-  "columns": 1, "rows": 1,
-  "slots": [
-    { "index": 0, "x": 0.0,  "y": 0.0,  "width": 1.0,  "height": 1.0,  "label": "Main",   "isMain": true  },
-    { "index": 1, "x": 0.65, "y": 0.65, "width": 0.32, "height": 0.32, "label": "Insert", "isMain": false }
-  ]
-}</code></pre>
-    <p>
-      Slot geometry uses normalised coordinates (0..1) relative to the canvas width and height.
-      <code>applyLayout()</code> scales these to absolute pixel coordinates and calls
-      <code>SetSceneItemTransform</code> via obs-websocket for each slot.
-    </p>
+    <div class="callout tip">
+      <div class="callout-title">Source assignment triggers the ISOs</div>
+      ISO files are created for participants that are assigned through fixed,
+      active-speaker, spotlight, or screen-share workflows. If the active speaker
+      changes, the recorder follows the resolved assignment and keeps participant
+      file naming stable by participant ID and display name.
+    </div>
 
-    <h3>Applied Template JSON (pre-computed)</h3>
-    <pre><code>{
-  "name": "4-up-grid",
-  "scene": "CoreVideo Main",
-  "items": [
-    { "source": "Zoom Participant 1", "x": 0, "y": 0, "scaleX": 0.5, "scaleY": 0.5 },
-    { "source": "Zoom Participant 2", "x": 960, "y": 0, "scaleX": 0.5, "scaleY": 0.5 }
-  ]
-}</code></pre>
     <p>
-      <code>applyTemplate(json)</code> accepts a pre-computed applied-template object
-      (with absolute coordinates and full transform specs) and applies it directly
-      without needing canvas dimensions.
-    </p>
-
-    <h3>Building the Sidecar</h3>
-    <pre><code>cmake -B build-sidecar sidecar/ \
-  -DCMAKE_PREFIX_PATH="/path/to/Qt6"
-cmake --build build-sidecar --config Release</code></pre>
-    <p>Requires Qt6 Core, Widgets, WebSockets. No Zoom SDK dependency.</p>
-
-    <h3>Connecting to OBS</h3>
-    <p>
-      Launch the Sidecar and click the OBS connect button. Enter the obs-websocket
-      host (default <code>localhost</code>), port (default <code>4455</code>), and
-      password if configured. The Sidecar auto-reconnects with exponential back-off
-      on disconnect.
+      See the <a href="/core-plugin/">Core Plugin Functionality guide</a> for
+      complete TCP examples, OSC examples, troubleshooting notes, and the plugin
+      media pipeline diagrams.
     </p>
   </section>
-
-  <!-- ══ MODERN UI ═════════════════════════════════════════════════ -->
-
   <section id="ui-modern">
     <h2>Modern UI (Phase 1)</h2>
     <p>

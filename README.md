@@ -14,9 +14,10 @@
 
 **OBS Studio plugin for live Zoom meeting video, audio, screen share, and Zoom interpretation audio channel capture.**
 
-CoreVideo integrates the Zoom Meeting SDK into OBS — no screen capture or virtual camera required. The SDK runs in a dedicated `ZoomObsEngine` child process; the OBS plugin communicates with it through a `ZoomEngineClient` singleton over cross-platform IPC (named pipes on Windows, Unix sockets on macOS/Linux) with frame data delivered through named shared memory. A built-in dockable control panel manages joining, and a `ZoomReconnectManager` handles automatic recovery after crashes or disconnects. A companion **CoreVideo Sidecar** app provides a standalone layout-management UI that connects to OBS via obs-websocket.
+CoreVideo integrates the Zoom Meeting SDK into OBS — no screen capture or virtual camera required. The SDK runs in a dedicated `ZoomObsEngine` child process; the OBS plugin communicates with it through a `ZoomEngineClient` singleton over cross-platform IPC (named pipes on Windows, Unix sockets on macOS/Linux) with frame data delivered through named shared memory. A built-in dockable control panel manages joining, and a `ZoomReconnectManager` handles automatic recovery after crashes or disconnects.
 
 📖 **[Full Documentation & Architecture Diagrams →](https://corevideo.iamfatness.us/documentation/)**
+🎛️ **[Core Plugin Guide & Examples →](https://corevideo.iamfatness.us/core-plugin/)**
 
 ---
 
@@ -26,6 +27,7 @@ CoreVideo integrates the Zoom Meeting SDK into OBS — no screen capture or virt
 - **Hardware-accelerated video** — optional FFmpeg I420→NV12 conversion via CUDA, VAAPI, VideoToolbox, or QSV (`-DCOREVIDEO_HW_ACCEL=ON`)
 - **Video loss mode** — hold last frame or show black when a feed drops; shows color-bar placeholder before first frame
 - **Raw audio capture** — 48 kHz PCM, mono or stereo, with per-participant audio isolation and mixer routing
+- **Auto ISO recording** — record assigned participant/active-speaker/spotlight outputs to separate FFmpeg-encoded MP4 files with matching PCM WAV audio, plus optional main OBS program recording
 - **Assignment modes** — each source independently follows: a fixed participant, the active speaker, a ZoomISO-style spotlight slot (1…N), or the active screen share
 - **Failover participant** — configure a secondary participant that activates automatically when the primary leaves
 - **Active speaker mode** — configurable sensitivity + hold-time debounce, liveness guard, supersede logic
@@ -48,7 +50,6 @@ CoreVideo integrates the Zoom Meeting SDK into OBS — no screen capture or virt
 - **Hardened security** — constant-time token comparison, validated IPC input, sanitised participant IDs, SIGPIPE handling
 - **Modern UI** — CoreVideo stylesheet with dark theme, animated `CvStatusDot`, `CvBanner` first-run notices, and button role variants (primary / danger)
 - **Multi-platform** — Windows (x64/arm64), macOS (universal arm64 + x86_64), Linux
-- **CoreVideo Sidecar** — companion standalone Qt6 app with obs-websocket v5 client, visual layout-template picker (1-up, 2-up PiP, 2-up SbS, 4-up Grid, Talk-Show), participant slot assignment, and live/scene preview canvases
 
 ## Requirements
 
@@ -56,7 +57,8 @@ CoreVideo integrates the Zoom Meeting SDK into OBS — no screen capture or virt
 |---|---|---|
 | OBS Studio | 30+ | `libobs` + `obs-frontend-api` |
 | CMake | 3.16+ | Build system |
-| Qt | 6.x | Core + Network + Widgets + WebSockets (Sidecar) |
+| Qt | 6.x | Core + Network + Widgets |
+| FFmpeg | Runtime executable | Required for auto ISO recording. Must be on `PATH` or supplied via `ffmpeg_path`. |
 | Zoom Meeting SDK | **5.17.x / 7.x** | Place in `third_party/zoom-sdk/`. Windows builds support the older flat header layout and the newer 7.x subfolder header layout. |
 | C++ compiler | C++17 | MSVC 2022 / Clang 14+ / GCC 11+ |
 | Zoom Developer Account | — | Meeting SDK key + secret. OAuth Client ID required for Marketplace / external-account joins. |
@@ -156,7 +158,22 @@ echo '{"cmd":"assign_output","source":"Zoom Participant 1","participant_id":123,
 echo '{"cmd":"oauth_callback","url":"corevideo://oauth/callback?code=...&state=..."}' | nc 127.0.0.1 19870
 ```
 
-Commands: `help`, `status`, `list_participants`, `list_outputs`, `assign_output`, `join`, `leave`, `oauth_callback`.
+Commands: `help`, `status`, `list_participants`, `list_outputs`, `assign_output`, `assign_output_ex`, `join`, `leave`, `oauth_callback`, `iso_recording_start`, `iso_recording_stop`, `iso_recording_status`.
+
+### Auto ISO Recording
+
+```sh
+# Start ISO recording. record_program=true also starts OBS program recording.
+echo '{"cmd":"iso_recording_start","output_dir":"C:/Recordings/CoreVideo","ffmpeg_path":"ffmpeg","record_program":true}' | nc 127.0.0.1 19870
+
+# Inspect active ISO sessions and output file paths.
+echo '{"cmd":"iso_recording_status"}' | nc 127.0.0.1 19870
+
+# Stop ISO recording.
+echo '{"cmd":"iso_recording_stop"}' | nc 127.0.0.1 19870
+```
+
+Each active source segment writes one `*.mp4` video file and one matching `*.wav` PCM audio file. A new segment starts when the resolved participant or source resolution changes.
 
 ### UDP OSC (port 19871)
 
@@ -170,31 +187,8 @@ Commands: `help`, `status`, `list_participants`, `list_outputs`, `assign_output`
 | `/zoom/assign_output` | `,si[i]` | source, participant_id, [active_speaker] |
 | `/zoom/assign_output/active_speaker` | `,s` | source |
 | `/zoom/isolate_audio` | `,si` | source, 0\|1 |
-
-## CoreVideo Sidecar
-
-The **CoreVideo Sidecar** is a standalone Qt6 application that connects to OBS via obs-websocket v5 and provides a visual layout-management interface for CoreVideo sources.
-
-### Features
-- **obs-websocket v5 client** (`OBSClient`) — auto-reconnect, scene item ID resolution, transform application
-- **Layout templates** — five built-in templates selectable from a visual thumbnail picker:
-  - **1-up** — full-screen single source
-  - **2-up PiP** — large main with picture-in-picture insert
-  - **2-up SbS** — two equal sources side by side
-  - **4-up Grid** — 2×2 equal grid
-  - **Talk-Show** — large presenter with smaller remote guest
-- **`applyLayout()`** — maps template slots to OBS source names and applies `SetSceneItemTransform` calls via websocket
-- **`applyTemplate()`** — applies a pre-computed applied-template JSON directly (supports full transform spec: position, scale, rotation, crop, bounds)
-- **ParticipantPanel** — assign meeting participants to layout slots
-- **PreviewCanvas** — live and scene preview canvases
-- **Log dock** — real-time obs-websocket event log
-
-### Build
-```sh
-cmake -B build-sidecar sidecar/ \
-  -DCMAKE_PREFIX_PATH="/path/to/Qt6"
-cmake --build build-sidecar --config Release
-```
+| `/zoom/iso/start` | `[,s]` | optional output directory |
+| `/zoom/iso/stop` | — | Stop ISO recording |
 
 ## Active Speaker Mode
 
@@ -235,15 +229,6 @@ Use **OBS → Tools → Zoom Output Manager** to save, load, and delete profiles
 ## Architecture Overview
 
 ```
-CoreVideo Sidecar  (standalone Qt6 app)
-├── OBSClient          — obs-websocket v5 client: connect/auth/reconnect,
-│                        SetSceneItemTransform, applyLayout, applyTemplate
-├── LayoutTemplate     — slot geometry (x/y/w/h normalised 0..1), JSON serialisation
-├── TemplateManager    — loads built-in + user templates from disk
-├── TemplatePanel      — visual thumbnail picker (painted TemplateThumbnail widgets)
-├── ParticipantPanel   — slot→participant assignment UI
-└── PreviewCanvas      — live + scene preview rendering
-
 OBS Studio
 └── obs-zoom-plugin  (no Zoom SDK dependency)
     ├── ZoomDock              — dockable Qt panel: animated CvStatusDot, join/leave,
@@ -308,21 +293,6 @@ CoreVideo/
 │   ├── index.html
 │   ├── ZOOM_MARKETPLACE_OAUTH.md             # OAuth setup guide
 │   └── policies/                             # Security & privacy policy documents
-├── sidecar/                                  # CoreVideo Sidecar (standalone Qt6 app)
-│   ├── CMakeLists.txt
-│   ├── data/templates/                       # Built-in layout template JSON files
-│   └── src/
-│       ├── main.cpp
-│       ├── mainwindow.*                      # Main window: top bar, canvas, right panel, log dock
-│       ├── obs-client.*                      # obs-websocket v5 client with auto-reconnect
-│       ├── obs-connect-dialog.*              # Host/port/password connection dialog
-│       ├── layout-template.*                 # LayoutTemplate + TemplateSlot data types
-│       ├── template-manager.*                # Loads templates from disk + built-ins
-│       ├── template-panel.*                  # Visual thumbnail picker UI
-│       ├── participant-panel.*               # Slot→participant assignment UI
-│       ├── preview-canvas.*                  # Live/scene preview rendering widget
-│       ├── sidebar.*                         # Page-navigation sidebar
-│       └── sidecar-style.h                   # Sidecar stylesheet
 ├── engine/src/                               # ZoomObsEngine (owns ALL SDK access)
 │   ├── main.cpp                              # IPC loop, SDK auth/join/webinar, spotlight tracking
 │   ├── engine-video.cpp/h                    # IZoomSDKRenderer → named shared memory (I420)

@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Core Plugin Functionality | CoreVideo</title>
+  <meta name="description" content="CoreVideo OBS plugin workflows, control examples, and ISO recording.">
+  <link rel="stylesheet" href="/assets/site.css">
+</head>
+<body class="document-page">
+  <header class="site-header">
+    <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span><span>CoreVideo</span></a>
+    <nav><a href="/">Home</a><a href="/documentation/">Documentation</a><a href="/core-plugin/">Core Plugin</a><a href="/oauth/">OAuth</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a><a href="https://github.com/iamfatness/CoreVideo">GitHub</a></nav>
+  </header>
+  <main class="content">
+    <h1>Core Plugin Functionality</h1>
+<p>This guide covers the main CoreVideo OBS plugin workflows. It intentionally focuses on the OBS plugin, <code>ZoomObsEngine</code>, Zoom source assignment, control APIs, audio routing, and ISO recording.</p>
+<h2>Media Architecture</h2>
+<figure class="doc-image"><img src="images/core-plugin-pipeline.svg" alt="CoreVideo plugin media pipeline"></figure>
+<p>CoreVideo keeps all Zoom Meeting SDK access inside the lightweight <code>ZoomObsEngine</code> helper process. The OBS plugin starts the engine, joins the meeting, and sends subscription requests over JSON IPC. Video and audio payloads move through named shared memory so large frames are not copied through the IPC pipe.</p>
+<p>The plugin-side <code>ZoomSource</code> reads the shared memory frame, outputs it into OBS, and forwards the same copied buffer to optional plugin-side services such as ISO recording. This keeps the engine minimal and makes OBS/plugin features easier to test independently from the Zoom SDK.</p>
+<h2>Joining Meetings</h2>
+<ol><li>Open OBS.</li><li>Open <strong>Tools &gt; Zoom Control</strong>.</li><li>Enter a Zoom meeting ID or full Zoom join URL.</li><li>Enter a display name.</li><li>Use <strong>Auto Zoom sign-in / ZAK</strong> unless Zoom support gives you a specific ZAK.</li><li>Click <strong>Join</strong>.</li><li>Click <strong>Start Engine</strong> after joining to request raw media from Zoom.</li></ol>
+<p>For external-account meetings, configure OAuth in <strong>Tools &gt; Zoom Plugin Settings</strong>. CoreVideo uses the OAuth login to fetch a short-lived ZAK from <code>/v2/users/me/zak</code> and passes that ZAK to the Meeting SDK join parameters.</p>
+<h2>Source Assignment</h2>
+<p>Add one or more <strong>Zoom Participant</strong> sources in OBS. Each source can follow a different assignment mode:</p>
+<table><thead><tr><th>Mode</th><th>Behavior</th><th>Common Use</th></tr></thead><tbody><tr><td>Participant</td><td>Fixed Zoom participant ID</td><td>Dedicated guest ISO</td></tr><tr><td>Active Speaker</td><td>Follows the current active speaker</td><td>Host/speaker-follow shot</td></tr><tr><td>Spotlight Slot</td><td>Follows Zoom spotlight position 1..N</td><td>ZoomISO-style production</td></tr><tr><td>Screen Share</td><td>Follows active screen share</td><td>Slides/demo capture</td></tr></tbody></table>
+<p>Each output reports observed resolution and frame rate through the output manager and TCP <code>list_outputs</code> command.</p>
+<h2>Audio Routing</h2>
+<p>CoreVideo supports three audio modes for participant outputs:</p>
+<table><thead><tr><th>Routing</th><th>Behavior</th></tr></thead><tbody><tr><td>Mixed</td><td>Full meeting mix</td></tr><tr><td>Isolated</td><td>Only the assigned participant's one-way audio</td></tr><tr><td>Audience</td><td>Residual one-way audio for participants not assigned to isolated outputs</td></tr></tbody></table>
+<p>Use <strong>Isolated</strong> when you need the assigned participant only. Use <strong>Audience</strong> for a remaining-room or overflow mic channel after dedicated isolated sources have claimed named participants.</p>
+<h2>Auto ISO Recording</h2>
+<figure class="doc-image"><img src="images/iso-recording-flow.svg" alt="CoreVideo ISO recording flow"></figure>
+<p>ISO recording is controlled by the OBS plugin, not the engine. When enabled, CoreVideo records one video file and one PCM WAV audio file per active source segment. A new segment starts when the resolved participant or source resolution changes.</p>
+<p>Requirements:</p>
+<ul><li><code>ffmpeg</code> must be available on <code>PATH</code>, or pass an explicit <code>ffmpeg_path</code>.</li><li>Raw media must be active.</li><li>Sources must be assigned to participant, active speaker, or spotlight modes.</li></ul>
+<p>TCP start example:</p>
+<pre><code class="language-json">{&quot;cmd&quot;:&quot;iso_recording_start&quot;,&quot;output_dir&quot;:&quot;C:/Recordings/CoreVideo&quot;,&quot;ffmpeg_path&quot;:&quot;ffmpeg&quot;,&quot;record_program&quot;:true}</code></pre>
+<p>TCP status example:</p>
+<pre><code class="language-json">{&quot;cmd&quot;:&quot;iso_recording_status&quot;}</code></pre>
+<p>TCP stop example:</p>
+<pre><code class="language-json">{&quot;cmd&quot;:&quot;iso_recording_stop&quot;}</code></pre>
+<p>OSC equivalents:</p>
+<table><thead><tr><th>Address</th><th>Type tags</th><th>Action</th></tr></thead><tbody><tr><td><code>/zoom/iso/start</code></td><td>optional <code>,s</code></td><td>Start ISO recording, optional output directory</td></tr><tr><td><code>/zoom/iso/stop</code></td><td>none</td><td>Stop ISO recording</td></tr></tbody></table>
+<p>Output files are written as:</p>
+<ul><li><code>*.mp4</code> for encoded I420 video through FFmpeg/libx264</li><li><code>*.wav</code> for matching PCM audio</li></ul>
+<p>When <code>record_program</code> is true, CoreVideo also starts the normal OBS program recording and stops it when ISO recording stops, but only if CoreVideo started that OBS recording session.</p>
+<h2>TCP Control Examples</h2>
+<p>All TCP commands are newline-delimited JSON sent to <code>127.0.0.1:19870</code>.</p>
+<p>List participants:</p>
+<pre><code class="language-json">{&quot;cmd&quot;:&quot;list_participants&quot;}</code></pre>
+<p>List outputs:</p>
+<pre><code class="language-json">{&quot;cmd&quot;:&quot;list_outputs&quot;}</code></pre>
+<p>Assign a source to a fixed participant with isolated mono audio:</p>
+<pre><code class="language-json">{&quot;cmd&quot;:&quot;assign_output_ex&quot;,&quot;source&quot;:&quot;Zoom Participant 1&quot;,&quot;mode&quot;:&quot;participant&quot;,&quot;participant_id&quot;:123456,&quot;isolate_audio&quot;:true,&quot;audio_channels&quot;:&quot;mono&quot;,&quot;video_resolution&quot;:&quot;1080p&quot;}</code></pre>
+<p>Assign a source to active speaker:</p>
+<pre><code class="language-json">{&quot;cmd&quot;:&quot;assign_output_ex&quot;,&quot;source&quot;:&quot;Zoom Participant 2&quot;,&quot;mode&quot;:&quot;active_speaker&quot;,&quot;audio_channels&quot;:&quot;mono&quot;,&quot;video_resolution&quot;:&quot;1080p&quot;}</code></pre>
+<p>Assign a source to spotlight slot 1:</p>
+<pre><code class="language-json">{&quot;cmd&quot;:&quot;assign_output_ex&quot;,&quot;source&quot;:&quot;Zoom Participant 3&quot;,&quot;mode&quot;:&quot;spotlight&quot;,&quot;spotlight_slot&quot;:1,&quot;audio_channels&quot;:&quot;mono&quot;,&quot;video_resolution&quot;:&quot;1080p&quot;}</code></pre>
+<h2>OSC Control Examples</h2>
+<p>List participants and outputs:</p>
+<pre><code class="language-text">/zoom/list_participants
+/zoom/list_outputs</code></pre>
+<p>Assign a source:</p>
+<pre><code class="language-text">/zoom/output/assign_ex &quot;Zoom Participant 1&quot; &quot;participant&quot; 123456 1</code></pre>
+<p>Assign active speaker:</p>
+<pre><code class="language-text">/zoom/assign_output/active_speaker &quot;Zoom Participant 1&quot;</code></pre>
+<p>Set isolated audio:</p>
+<pre><code class="language-text">/zoom/isolate_audio &quot;Zoom Participant 1&quot; 1</code></pre>
+<p>Start and stop ISO recording:</p>
+<pre><code class="language-text">/zoom/iso/start &quot;C:/Recordings/CoreVideo&quot;
+/zoom/iso/stop</code></pre>
+<h2>Troubleshooting</h2>
+<table><thead><tr><th>Symptom</th><th>Check</th></tr></thead><tbody><tr><td>Color bars only</td><td>Confirm the meeting is joined, raw media is started, and the source has a participant/role assignment.</td></tr><tr><td>No isolated audio</td><td>Confirm the source is assigned to a real participant and <code>isolate_audio</code> is true.</td></tr><tr><td>ISO recording does not start</td><td>Confirm <code>ffmpeg</code> is on PATH or provide <code>ffmpeg_path</code>.</td></tr><tr><td>External meeting rejected</td><td>Confirm the Meeting SDK app/client ID is approved or published for external meeting joins.</td></tr><tr><td>Plugin cannot launch engine</td><td>Confirm <code>ZoomObsEngine.exe</code> and Zoom SDK runtime DLLs are installed under <code>obs-plugins/64bit/zoom-runtime</code>.</td></tr></tbody></table>
+  </main>
+  <footer class="site-footer">
+    <span>CoreVideo is an independent open-source project and is not affiliated with Zoom Video Communications, Inc.</span>
+  </footer>
+</body>
+</html>

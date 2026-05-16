@@ -21,6 +21,7 @@ public:
     QStringList sourceNamesForLook(const Look &look) const;
     QString sceneNameForLook(const Look &look) const;
     QStringList sceneNamesForLooks(const QVector<Look> &looks) const;
+    QStringList designLayerSourceNames(const Look &look) const;
 
     void provisionPlaceholders(int slotCount = 8) const;
     void provisionLooks(const QVector<Look> &looks) const;

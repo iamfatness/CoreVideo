@@ -255,8 +255,10 @@ void OBSClient::onTextMessageReceived(const QString &msg)
                                  status["comment"].toString());
         }
         if (failed > 0) {
-            emit log(QStringLiteral("Batch response: %1/%2 failed (%3).")
-                         .arg(failed).arg(results.size()).arg(failures.join("; ")));
+            const QString summary = QStringLiteral("Batch response: %1/%2 failed (%3).")
+                .arg(failed).arg(results.size()).arg(failures.join("; "));
+            emit log(summary);
+            emit requestFailed(summary);
         } else {
             emit log(QStringLiteral("Batch response received (%1 results).")
                          .arg(results.size()));
@@ -325,7 +327,9 @@ void OBSClient::handleResponse(const QJsonObject &d)
         if (type == "GetSceneItemList")
             m_pendingSceneItemLists.remove(id);
         const QString comment = status["comment"].toString();
-        emit log(QStringLiteral("%1 failed: %2").arg(type, comment));
+        const QString summary = QStringLiteral("%1 failed: %2").arg(type, comment);
+        emit log(summary);
+        emit requestFailed(summary);
         return;
     }
 
@@ -479,6 +483,17 @@ void OBSClient::setCurrentPreviewScene(const QString &name)
 {
     if (m_state == State::Connected)
         sendRequest("SetCurrentPreviewScene", {{"sceneName", name}});
+}
+
+QStringList OBSClient::sceneItemSourceNames(const QString &sceneName) const
+{
+    QStringList names;
+    for (const SceneItem &item : m_sceneItems.value(sceneName)) {
+        if (!item.sourceName.trimmed().isEmpty())
+            names << item.sourceName;
+    }
+    names.removeDuplicates();
+    return names;
 }
 
 int OBSClient::resolveItemId(const QString &scene, const QString &source) const
@@ -1203,8 +1218,10 @@ void OBSClient::applyBackgroundImage(const QString &sceneName,
                     {"sceneItemEnabled", true},
                 }},
             });
-            QTimer::singleShot(650, this, [this, sceneName, sourceName, canvasW, canvasH]() {
+            QTimer::singleShot(500, this, [this, sceneName]() {
                 requestSceneItems(sceneName);
+            });
+            QTimer::singleShot(1100, this, [this, sceneName, sourceName, canvasW, canvasH]() {
                 const int refreshedId = resolveItemId(sceneName, sourceName);
                 if (refreshedId < 0)
                     return;
@@ -1289,7 +1306,8 @@ void OBSClient::applyBackgroundImage(const QString &sceneName,
 
 void OBSClient::applyCanvasColor(const QString &sceneName,
                                  const TileStyle &tileStyle,
-                                 double canvasW, double canvasH)
+                                 double canvasW, double canvasH,
+                                 bool retryAfterCreate)
 {
     if (m_state != State::Connected || sceneName.isEmpty())
         return;
@@ -1327,7 +1345,7 @@ void OBSClient::applyCanvasColor(const QString &sceneName,
         m_sceneItems.remove(sceneName);
     }
 
-    QTimer::singleShot(700, this, [this, sceneName, sourceName, canvasW, canvasH]() {
+    QTimer::singleShot(700, this, [this, sceneName, sourceName, tileStyle, canvasW, canvasH, retryAfterCreate]() {
         if (!m_itemCache.contains(sceneName)) {
             requestSceneItems(sceneName);
             return;
@@ -1345,6 +1363,14 @@ void OBSClient::applyCanvasColor(const QString &sceneName,
                     {"sceneItemEnabled", true},
                 }},
             });
+            if (retryAfterCreate) {
+                QTimer::singleShot(450, this, [this, sceneName]() {
+                    requestSceneItems(sceneName);
+                });
+                QTimer::singleShot(950, this, [this, sceneName, tileStyle, canvasW, canvasH]() {
+                    applyCanvasColor(sceneName, tileStyle, canvasW, canvasH, false);
+                });
+            }
         } else {
             requests.append(QJsonObject{
                 {"requestType", "SetSceneItemIndex"},
@@ -1386,7 +1412,8 @@ void OBSClient::applyTileDecorations(const QString &sceneName,
                                      const LayoutTemplate &tmpl,
                                      const TileStyle &tileStyle,
                                      const QStringList &slotLabels,
-                                     double canvasW, double canvasH)
+                                     double canvasW, double canvasH,
+                                     bool retryAfterCreate)
 {
     if (m_state != State::Connected || sceneName.isEmpty() || !tmpl.isValid())
         return;
@@ -1460,6 +1487,14 @@ void OBSClient::applyTileDecorations(const QString &sceneName,
         });
         m_itemCache.remove(sceneName);
         m_sceneItems.remove(sceneName);
+        if (retryAfterCreate) {
+            QTimer::singleShot(650, this, [this, sceneName]() {
+                requestSceneItems(sceneName);
+            });
+            QTimer::singleShot(1250, this, [this, sceneName, tmpl, tileStyle, slotLabels, canvasW, canvasH]() {
+                applyTileDecorations(sceneName, tmpl, tileStyle, slotLabels, canvasW, canvasH, false);
+            });
+        }
     }
 
     QTimer::singleShot(850, this, [this, sceneName, tmpl, tileStyle, slotLabels, canvasW, canvasH, showBorder, showShadow, showDim]() {

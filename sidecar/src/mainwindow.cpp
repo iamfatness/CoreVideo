@@ -256,6 +256,15 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
             [this](const QString &name, int n) {
                 onObsLog(QStringLiteral("✓ Applied '%1' (%2 items).").arg(name).arg(n));
             });
+    connect(m_obsClient, &OBSClient::requestFailed, this, [this](const QString &summary) {
+        if (!m_sceneSyncStatusLabel)
+            return;
+        m_obsSyncState = ObsSyncState::Error;
+        m_lastSyncError = summary;
+        m_sceneSyncStatusLabel->setText(QStringLiteral("Sync error"));
+        m_sceneSyncStatusLabel->setToolTip(summary);
+        m_sceneSyncStatusLabel->setStyleSheet("color: #e04040; font-size: 11px; background: transparent;");
+    });
     connect(m_obsClient, &OBSClient::inventoryReady, this, [this]() {
         provisionLookScenes();
         updateSceneSyncStatus();
@@ -863,7 +872,27 @@ void MainWindow::renderLookToOBS(const Look &look, bool makeProgram)
     }
 
     const QString scene = obsSceneNameForLook(look);
+    m_obsSyncState = ObsSyncState::Applying;
+    m_lastSyncError.clear();
+    m_lastRenderedLookName = look.name;
+    m_lastRenderedSceneName = scene;
+    m_lastExpectedDesignLayers = obsRenderer().designLayerSourceNames(look);
+    if (m_sceneSyncStatusLabel) {
+        m_sceneSyncStatusLabel->setText(QStringLiteral("Applying %1").arg(look.name.left(24)));
+        m_sceneSyncStatusLabel->setToolTip(QStringLiteral("Rendering Look '%1' into OBS scene '%2'.")
+                                           .arg(look.name, scene));
+        m_sceneSyncStatusLabel->setStyleSheet("color: #e0a020; font-size: 11px; background: transparent;");
+    }
     obsRenderer().renderLook(look, makeProgram, slotLabelsForLook(look));
+    QTimer::singleShot(3300, this, [this, scene]() {
+        if (m_obsClient && m_obsClient->isConnected())
+            m_obsClient->requestSceneItems(scene);
+    });
+    QTimer::singleShot(3800, this, [this]() {
+        if (m_obsSyncState == ObsSyncState::Applying)
+            m_obsSyncState = ObsSyncState::Dirty;
+        updateSceneSyncStatus();
+    });
     onObsLog(QStringLiteral("Rendered Look '%1' to OBS scene '%2'.")
                  .arg(look.name, scene));
 }
@@ -1498,20 +1527,53 @@ void MainWindow::updateSceneSyncStatus()
         return;
 
     if (!m_obsClient->isConnected()) {
+        m_obsSyncState = ObsSyncState::Offline;
         m_sceneSyncStatusLabel->setText("Sync offline");
         m_sceneSyncStatusLabel->setToolTip("OBS is not connected.");
         m_sceneSyncStatusLabel->setStyleSheet("color: #8080a0; font-size: 11px; background: transparent;");
         return;
     }
 
+    if (m_obsSyncState == ObsSyncState::Error) {
+        m_sceneSyncStatusLabel->setText(QStringLiteral("Sync error"));
+        m_sceneSyncStatusLabel->setToolTip(m_lastSyncError.isEmpty()
+            ? QStringLiteral("OBS reported a request failure.")
+            : m_lastSyncError);
+        m_sceneSyncStatusLabel->setStyleSheet("color: #e04040; font-size: 11px; background: transparent;");
+        return;
+    }
+
+    if (m_obsSyncState == ObsSyncState::Applying) {
+        m_sceneSyncStatusLabel->setText(QStringLiteral("Applying %1").arg(m_lastRenderedLookName.left(24)));
+        m_sceneSyncStatusLabel->setToolTip(QStringLiteral("Rendering Look '%1' into OBS scene '%2'.")
+                                           .arg(m_lastRenderedLookName, m_lastRenderedSceneName));
+        m_sceneSyncStatusLabel->setStyleSheet("color: #e0a020; font-size: 11px; background: transparent;");
+        return;
+    }
+
     const auto status = m_obsClient->coreVideoSyncStatus(sourceNamesForSlots(8), lookSceneNames());
+    QStringList missingDesignLayers;
+    if (!m_lastRenderedSceneName.isEmpty() && !m_lastExpectedDesignLayers.isEmpty()) {
+        QSet<QString> present;
+        for (const QString &source : m_obsClient->sceneItemSourceNames(m_lastRenderedSceneName))
+            present.insert(source);
+        for (const QString &source : m_lastExpectedDesignLayers) {
+            if (!present.contains(source))
+                missingDesignLayers << source;
+        }
+    }
     const bool complete = status.inventoryReady
         && status.presentParticipantSources == status.expectedParticipantSources
         && status.presentSlotScenes == status.expectedSlotScenes
         && status.presentLookScenes == status.expectedLookScenes
-        && !status.missingScenes.contains(QStringLiteral("CoreVideo Sources"));
+        && !status.missingScenes.contains(QStringLiteral("CoreVideo Sources"))
+        && missingDesignLayers.isEmpty();
 
-    m_sceneSyncStatusLabel->setText(QStringLiteral("Sync %1/%2 src  %3/%4 slots  %5/%6 looks")
+    m_obsSyncState = complete ? ObsSyncState::Synced : ObsSyncState::Dirty;
+    const QString stateLabel = complete ? QStringLiteral("Synced") : QStringLiteral("Dirty");
+
+    m_sceneSyncStatusLabel->setText(QStringLiteral("%1  %2/%3 src  %4/%5 slots  %6/%7 looks")
+        .arg(stateLabel)
         .arg(status.presentParticipantSources)
         .arg(status.expectedParticipantSources)
         .arg(status.presentSlotScenes)
@@ -1530,8 +1592,13 @@ void MainWindow::updateSceneSyncStatus()
         detail << QStringLiteral("Missing inputs: %1").arg(status.missingInputs.join(", "));
     if (!status.missingScenes.isEmpty())
         detail << QStringLiteral("Missing scenes: %1").arg(status.missingScenes.join(", "));
+    if (!missingDesignLayers.isEmpty())
+        detail << QStringLiteral("Missing design layers: %1").arg(missingDesignLayers.join(", "));
     if (detail.isEmpty())
         detail << QStringLiteral("CoreVideo OBS scene graph is synced.");
+    if (!m_lastRenderedLookName.isEmpty())
+        detail.prepend(QStringLiteral("Last rendered Look: %1 (%2)")
+                           .arg(m_lastRenderedLookName, m_lastRenderedSceneName));
     m_sceneSyncStatusLabel->setToolTip(detail.join("\n"));
 }
 

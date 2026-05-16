@@ -84,6 +84,7 @@ public:
     void refreshInventory();
     void setCurrentScene(const QString &name);
     void setCurrentPreviewScene(const QString &name);
+    QStringList sceneItemSourceNames(const QString &sceneName) const;
     CoreVideoSyncStatus coreVideoSyncStatus(const QStringList &participantSources,
                                             const QStringList &lookScenes) const;
 
@@ -129,12 +130,14 @@ public:
                               double canvasW, double canvasH);
     void applyCanvasColor(const QString &sceneName,
                           const TileStyle &tileStyle,
-                          double canvasW, double canvasH);
+                          double canvasW, double canvasH,
+                          bool retryAfterCreate = true);
     void applyTileDecorations(const QString &sceneName,
                               const LayoutTemplate &tmpl,
                               const TileStyle &tileStyle,
                               const QStringList &slotLabels,
-                              double canvasW, double canvasH);
+                              double canvasW, double canvasH,
+                              bool retryAfterCreate = true);
 
     // Apply a flat applied-template JSON in the format:
     //   { "name": "...", "scene": "...", "items": [
@@ -161,6 +164,7 @@ signals:
     void templateApplied(const QString &name, int itemCount);
     void virtualCamStateChanged(bool active);
     void log(const QString &msg);
+    void requestFailed(const QString &summary);
 
 private slots:
     void onConnected();

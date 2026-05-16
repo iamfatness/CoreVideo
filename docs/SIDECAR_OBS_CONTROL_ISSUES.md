@@ -34,10 +34,9 @@ Progress:
 
 Remaining:
 - True rounded-corner masking still needs an OBS-side matte/filter strategy.
-- Layer creation needs one more read-back pass so newly created design items are transformed immediately on first render instead of the next sync cycle.
 
 ## Issue 3 - Add OBS read-back sync status
-Status: Pending
+Status: In progress
 
 After applying a Look, query OBS and show whether the sidecar model matches the OBS scene graph.
 
@@ -45,6 +44,15 @@ Acceptance criteria:
 - Each rendered Look has `Synced`, `Dirty`, `Applying`, or `Error` state.
 - Missing scenes/sources/items are surfaced in the UI.
 - Failed OBS websocket requests are visible without opening logs.
+
+Progress:
+- Rendering a Look now puts the top-bar sync indicator into `Applying`.
+- The normal inventory read-back refresh restores aggregate sync counts after OBS has processed the render.
+- Single request and batch request failures now emit a sidecar signal and surface as `Sync error` in the top bar tooltip.
+- The top-bar sync indicator now tracks explicit `Offline`, `Applying`, `Synced`, `Dirty`, and `Error` states.
+- The sync tooltip records the last rendered Look and OBS scene.
+- The sync check now compares expected design layers for the last rendered Look against cached OBS scene items.
+- Missing canvas/background/shadow/border/dim/name sources are surfaced in the sync tooltip as missing design layers.
 
 ## Issue 4 - Make the Look Designer a first-class workspace
 Status: Pending

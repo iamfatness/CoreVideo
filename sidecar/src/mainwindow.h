@@ -82,6 +82,8 @@ private slots:
     void populateCommandPalette();
 
 private:
+    enum class ObsSyncState { Offline, Synced, Dirty, Applying, Error };
+
     void buildTopBar(QWidget *parent);
     void buildCenterArea(QWidget *parent);
     void buildRightPanel(QWidget *parent);
@@ -170,6 +172,11 @@ private:
     Look                       m_working;           // in-progress staged Look (mutated by panels)
     MEBus                     *m_bus            = nullptr;
     OBSClient                 *m_obsClient      = nullptr;
+    ObsSyncState               m_obsSyncState   = ObsSyncState::Offline;
+    QString                    m_lastRenderedLookName;
+    QString                    m_lastRenderedSceneName;
+    QStringList                m_lastExpectedDesignLayers;
+    QString                    m_lastSyncError;
     OBSClient::Config          m_obsConfig;
     Sidebar                   *m_sidebar        = nullptr;
     QVector<ParticipantInfo>   m_participants;

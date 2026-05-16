@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(obs-zoom-plugin VERSION 0.1.2)
+project(obs-zoom-plugin VERSION 0.1.3)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

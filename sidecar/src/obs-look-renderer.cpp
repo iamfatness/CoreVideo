@@ -50,6 +50,51 @@ QStringList OBSLookRenderer::sceneNamesForLooks(const QVector<Look> &looks) cons
     return scenes;
 }
 
+static QString safeDesignSceneName(const QString &sceneName, int maxLen)
+{
+    QString safe = sceneName;
+    safe.replace(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|]")), QStringLiteral("-"));
+    safe.replace(QRegularExpression(QStringLiteral("\\s+")), QStringLiteral(" "));
+    return safe.left(maxLen);
+}
+
+QStringList OBSLookRenderer::designLayerSourceNames(const Look &look) const
+{
+    const QString scene = sceneNameForLook(look);
+    QStringList names;
+    names << QStringLiteral("CoreVideo Canvas - %1").arg(safeDesignSceneName(scene, 72));
+    if (!look.backgroundImagePath.trimmed().isEmpty())
+        names << QStringLiteral("CoreVideo Background - %1").arg(safeDesignSceneName(scene, 72));
+
+    const bool showBorder = look.tileStyle.borderWidth > 0.0;
+    const bool showShadow = look.tileStyle.dropShadow;
+    const bool showDim = look.tileStyle.opacity < 0.99;
+    for (const auto &slot : look.tmpl.slotList) {
+        if (showShadow) {
+            names << QStringLiteral("CoreVideo Shadow - %1 - Slot %2")
+                         .arg(safeDesignSceneName(scene, 58))
+                         .arg(slot.index + 1);
+        }
+        if (showBorder) {
+            names << QStringLiteral("CoreVideo Border - %1 - Slot %2")
+                         .arg(safeDesignSceneName(scene, 58))
+                         .arg(slot.index + 1);
+        }
+        if (showDim) {
+            names << QStringLiteral("CoreVideo Dim - %1 - Slot %2")
+                         .arg(safeDesignSceneName(scene, 61))
+                         .arg(slot.index + 1);
+        }
+        if (look.tileStyle.showNameTag) {
+            names << QStringLiteral("CoreVideo Name - %1 - Slot %2")
+                         .arg(safeDesignSceneName(scene, 60))
+                         .arg(slot.index + 1);
+        }
+    }
+    names.removeDuplicates();
+    return names;
+}
+
 void OBSLookRenderer::provisionPlaceholders(int slotCount) const
 {
     if (!m_client || !m_client->isConnected())

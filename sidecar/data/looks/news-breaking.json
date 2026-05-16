@@ -1,0 +1,8 @@
+{
+  "id": "news-breaking",
+  "name": "Breaking News",
+  "category": "News",
+  "description": "Full-frame host, crimson urgency",
+  "template": "1-up",
+  "theme": "crimson"
+}

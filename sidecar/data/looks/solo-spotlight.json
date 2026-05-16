@@ -1,0 +1,8 @@
+{
+  "id": "solo-spotlight",
+  "name": "Solo Spotlight",
+  "category": "Solo",
+  "description": "Single guest, violet stage",
+  "template": "1-up",
+  "theme": "violet"
+}

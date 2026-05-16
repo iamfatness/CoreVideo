@@ -21,6 +21,8 @@ set(SOURCES
     src/settings-page.cpp
     src/layout-template.cpp
     src/template-manager.cpp
+    src/look-library.cpp
+    src/look-panel.cpp
     src/obs-client.cpp
     src/obs-connect-dialog.cpp
     src/sidecar-control-server.cpp

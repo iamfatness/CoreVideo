@@ -1,0 +1,8 @@
+{
+  "id": "podcast-pip",
+  "name": "Podcast PiP",
+  "category": "Podcast",
+  "description": "Main host with guest picture-in-picture",
+  "template": "2-up-pip",
+  "theme": "violet"
+}

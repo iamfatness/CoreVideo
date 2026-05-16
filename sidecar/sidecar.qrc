@@ -9,4 +9,14 @@
     <qresource prefix="/applied">
         <file>data/applied/4-up-grid.applied.json</file>
     </qresource>
+    <qresource prefix="/looks">
+        <file>data/looks/news-breaking.json</file>
+        <file>data/looks/news-desk.json</file>
+        <file>data/looks/talk-show-classic.json</file>
+        <file>data/looks/talk-show-warm.json</file>
+        <file>data/looks/podcast-duo.json</file>
+        <file>data/looks/podcast-pip.json</file>
+        <file>data/looks/panel-discussion.json</file>
+        <file>data/looks/solo-spotlight.json</file>
+    </qresource>
 </RCC>

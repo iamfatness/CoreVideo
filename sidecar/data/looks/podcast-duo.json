@@ -1,0 +1,8 @@
+{
+  "id": "podcast-duo",
+  "name": "Podcast Duo",
+  "category": "Podcast",
+  "description": "Two hosts side-by-side",
+  "template": "2-up-sbs",
+  "theme": "violet"
+}

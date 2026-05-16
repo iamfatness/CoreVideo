@@ -60,7 +60,7 @@ Sidebar::Sidebar(QWidget *parent) : QWidget(parent)
     // ── Nav items ─────────────────────────────────────────────────────────────
     m_items = {
         {"  ⊞", "Scenes",            Page::Scenes},
-        {"  ⊟", "Layout Templates",  Page::Templates},
+        {"  ⊟", "Looks",             Page::Templates},
         {"  ◉", "Show Themes",       Page::Themes},
         {"  ◎", "Participants",      Page::Participants},
         {"  ⚡", "Macros",           Page::Macros},

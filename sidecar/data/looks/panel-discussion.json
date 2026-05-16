@@ -1,0 +1,8 @@
+{
+  "id": "panel-discussion",
+  "name": "Panel Discussion",
+  "category": "Roundtable",
+  "description": "Four-up grid, balanced layout",
+  "template": "4-up-grid",
+  "theme": "forest"
+}

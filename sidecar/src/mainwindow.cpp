@@ -1,6 +1,8 @@
 #include "mainwindow.h"
 #include "preview-canvas.h"
 #include "template-panel.h"
+#include "look-panel.h"
+#include "look-library.h"
 #include "theme-panel.h"
 #include "participant-panel.h"
 #include "scenes-panel.h"
@@ -226,19 +228,27 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
     connect(paletteShortcutK, &QShortcut::activated,
             this, &MainWindow::openCommandPalette);
 
-    // Templates
+    // Templates (used by command palette + LookLibrary resolution)
     auto &tm = TemplateManager::instance();
     tm.loadBuiltIn();
     m_templatePanel->loadTemplates(tm.templates());
-    if (const auto *grid4 = tm.findById("4-up-grid")) {
-        // Stage the default template on PVW first; participants get staged
-        // next (loadMockParticipants), then we TAKE so PGM mirrors PVW at
-        // startup — gives the operator a sane starting state on both buses.
-        onTemplateSelected(*grid4);
-    }
+
+    // Broadcast-ready Looks library — load after templates so each Look's
+    // templateId can be resolved into an in-memory LayoutTemplate.
+    auto &ll = LookLibrary::instance();
+    ll.loadBuiltIn();
+    m_lookPanel->loadLooks(ll.looks());
 
     // Themes
     m_themePanel->loadThemes(ShowTheme::builtIns());
+
+    // Stage a sensible default on PVW. Prefer the first preset Look; if
+    // the library is empty, fall back to the bare 4-up template.
+    if (!ll.looks().isEmpty()) {
+        onLookSelected(ll.looks().first());
+    } else if (const auto *grid4 = tm.findById("4-up-grid")) {
+        onTemplateSelected(*grid4);
+    }
 
     // Mock data — also stages slot assignments onto PVW.
     loadMockParticipants();
@@ -385,15 +395,15 @@ void MainWindow::buildRightPanel(QWidget *parent)
 
     m_rightStack = new QStackedWidget(parent);
 
-    // Page 0: Templates + Participants (combined scroll)
+    // Page 0: Looks gallery + Participants (combined scroll)
     auto *tmplPage = new QWidget;
     auto *tmplV = new QVBoxLayout(tmplPage);
     tmplV->setContentsMargins(0, 0, 0, 0);
     tmplV->setSpacing(0);
-    m_templatePanel = new TemplatePanel(tmplPage);
-    connect(m_templatePanel, &TemplatePanel::templateSelected,
-            this, &MainWindow::onTemplateSelected);
-    tmplV->addWidget(m_templatePanel);
+    m_lookPanel = new LookPanel(tmplPage);
+    connect(m_lookPanel, &LookPanel::lookSelected,
+            this, &MainWindow::onLookSelected);
+    tmplV->addWidget(m_lookPanel, 1);
     auto *div = new QFrame(tmplPage);
     div->setFrameShape(QFrame::HLine);
     div->setStyleSheet("color: #1e1e2e;");
@@ -401,6 +411,14 @@ void MainWindow::buildRightPanel(QWidget *parent)
     m_participantPanel = new ParticipantPanel(tmplPage);
     tmplV->addWidget(m_participantPanel, 1);
     m_pageTemplates = m_rightStack->addWidget(tmplPage);
+
+    // TemplatePanel still constructed (off-screen) so the command-palette
+    // path that references TemplateManager can stage raw layouts. Kept for
+    // back-compat; not visible in the right panel.
+    m_templatePanel = new TemplatePanel;
+    m_templatePanel->hide();
+    connect(m_templatePanel, &TemplatePanel::templateSelected,
+            this, &MainWindow::onTemplateSelected);
 
     // Page 1: Themes
     m_themePanel = new ThemePanel;
@@ -498,8 +516,32 @@ void MainWindow::onTemplateSelected(const LayoutTemplate &tmpl)
     m_working.tmpl = tmpl;
     m_working.id   = tmpl.id;
     m_working.name = tmpl.name;
+    m_working.templateId = tmpl.id;
     m_bus->stageLook(m_working);
     onObsLog(QStringLiteral("Staged on PVW: %1 — press TAKE to go on air.").arg(tmpl.name));
+}
+
+void MainWindow::onLookSelected(const Look &look)
+{
+    // Stage the full Look on PVW: layout + identity + (until overlays land
+    // in a later slice) apply the Look's theme app-wide. Existing slot
+    // assignments are carried over so swapping a Look doesn't blank the
+    // participants the operator already placed.
+    Look staged          = look;
+    staged.slots         = m_working.slots;
+    m_working            = staged;
+    m_working.templateId = look.tmpl.id.isEmpty() ? look.templateId
+                                                  : look.tmpl.id;
+    m_bus->stageLook(m_working);
+
+    if (!look.themeId.isEmpty()) {
+        for (const auto &t : ShowTheme::builtIns()) {
+            if (t.id == look.themeId) { onThemeSelected(t); break; }
+        }
+    }
+
+    onObsLog(QStringLiteral("Staged Look on PVW: %1 — press TAKE to go on air.")
+                 .arg(look.name));
 }
 
 void MainWindow::onThemeSelected(const ShowTheme &theme)
@@ -800,6 +842,28 @@ void MainWindow::populateCommandPalette()
         const QString sc = s;
         cp->addCommand(QString("Switch to scene: %1").arg(sc), "Scene",
                        [this, sc]() { onSceneActivated(sc); });
+    }
+
+    // Looks (broadcast-ready presets) — stage or take in one keystroke
+    for (const auto &lk : LookLibrary::instance().looks()) {
+        const QString id   = lk.id;
+        const QString name = lk.name;
+        cp->addCommand(QString("Stage Look on PVW: %1").arg(name), "Look",
+                       [this, id]() {
+            if (const auto *l = LookLibrary::instance().findById(id))
+                onLookSelected(*l);
+        });
+    }
+    for (const auto &lk : LookLibrary::instance().looks()) {
+        const QString id   = lk.id;
+        const QString name = lk.name;
+        cp->addCommand(QString("Take Look to PGM: %1").arg(name), "Look",
+                       [this, id]() {
+            if (const auto *l = LookLibrary::instance().findById(id)) {
+                onLookSelected(*l);
+                onTake();
+            }
+        });
     }
 
     // Templates

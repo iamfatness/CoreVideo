@@ -2,6 +2,8 @@
 #include "layout-template.h"
 #include <QString>
 #include <QVector>
+#include <QJsonObject>
+#include <QJsonArray>
 
 // A SlotAssignment binds a participant to a slot in the active template.
 // Participant id < 0 means "empty / unfilled."
@@ -16,6 +18,10 @@ struct SlotAssignment {
 struct Look {
     QString               id;
     QString               name;
+    QString               category;     // e.g. "News", "Talk Show", "Podcast"
+    QString               description;
+    QString               templateId;   // resolves via TemplateManager
+    QString               themeId;      // resolves via ShowTheme::builtIns (optional)
     LayoutTemplate        tmpl;
     QVector<SlotAssignment> slots;
 
@@ -28,4 +34,25 @@ struct Look {
             if (s.slotIndex == slotIndex) return s.participantId;
         return -1;
     }
+
+    // Parse the disk format. Caller is responsible for resolving templateId
+    // → LayoutTemplate (LookLibrary does this during load).
+    static Look fromJson(const QJsonObject &obj)
+    {
+        Look l;
+        l.id          = obj.value("id").toString();
+        l.name        = obj.value("name").toString();
+        l.category    = obj.value("category").toString();
+        l.description = obj.value("description").toString();
+        l.templateId  = obj.value("template").toString();
+        l.themeId     = obj.value("theme").toString();
+        const auto arr = obj.value("slots").toArray();
+        for (const auto &v : arr) {
+            const auto o = v.toObject();
+            l.slots.append({ o.value("slotIndex").toInt(-1),
+                             o.value("participantId").toInt(-1) });
+        }
+        return l;
+    }
 };
+

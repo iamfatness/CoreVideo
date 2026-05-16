@@ -1,0 +1,8 @@
+{
+  "id": "talk-show-warm",
+  "name": "Talk Show — Warm",
+  "category": "Talk Show",
+  "description": "Gold-trim variant for evening shows",
+  "template": "talk-show",
+  "theme": "gold"
+}

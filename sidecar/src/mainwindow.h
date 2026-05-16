@@ -14,6 +14,7 @@
 
 class PreviewCanvas;
 class TemplatePanel;
+class LookPanel;
 class ParticipantPanel;
 class ThemePanel;
 class ScenesPanel;
@@ -45,6 +46,7 @@ public:
 private slots:
     void onPageSelected(Sidebar::Page p);
     void onTemplateSelected(const LayoutTemplate &tmpl);
+    void onLookSelected(const Look &look);
     void onThemeSelected(const ShowTheme &theme);
     void onApplyLayout();
     void onTake();
@@ -103,6 +105,7 @@ private:
     // Right panel — stacked pages
     QStackedWidget   *m_rightStack       = nullptr;
     TemplatePanel    *m_templatePanel    = nullptr;
+    LookPanel        *m_lookPanel        = nullptr;
     ParticipantPanel *m_participantPanel = nullptr;
     ThemePanel       *m_themePanel       = nullptr;
     ScenesPanel      *m_scenesPanel      = nullptr;

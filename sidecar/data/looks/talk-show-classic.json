@@ -1,0 +1,8 @@
+{
+  "id": "talk-show-classic",
+  "name": "Talk Show — Classic",
+  "category": "Talk Show",
+  "description": "Host with three-guest strip",
+  "template": "talk-show",
+  "theme": "midnight"
+}

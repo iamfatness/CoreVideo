@@ -66,6 +66,17 @@ static QString coreVideoDimSourceName(const QString &sceneName, int slotIndex)
         .arg(slotIndex + 1);
 }
 
+static bool isCoreVideoDesignLayerName(const QString &sourceName)
+{
+    return sourceName.startsWith(QStringLiteral("CoreVideo Canvas - "))
+        || sourceName.startsWith(QStringLiteral("CoreVideo Background - "))
+        || sourceName.startsWith(QStringLiteral("CoreVideo Shadow - "))
+        || sourceName.startsWith(QStringLiteral("CoreVideo Border - "))
+        || sourceName.startsWith(QStringLiteral("CoreVideo Dim - "))
+        || sourceName.startsWith(QStringLiteral("CoreVideo Name - "))
+        || sourceName.startsWith(QStringLiteral("CoreVideo Overlay - "));
+}
+
 static double obsColor(const QColor &color)
 {
     const QColor c = color.isValid() ? color : QColor("#101018");
@@ -545,6 +556,112 @@ OBSClient::coreVideoSyncStatus(const QStringList &participantSources,
     }
 
     return status;
+}
+
+OBSClient::CoreVideoSceneAudit
+OBSClient::coreVideoSceneAudit(const QStringList &participantSources,
+                               const QVector<LookRenderPlan> &plans) const
+{
+    CoreVideoSceneAudit audit;
+    audit.inventoryReady = m_receivedSceneList && m_receivedInputList;
+
+    QSet<QString> expectedScenes;
+    QSet<QString> expectedInputs;
+    QHash<QString, QSet<QString>> expectedSceneItems;
+
+    expectedScenes.insert(kCoreVideoSourcesScene);
+    for (int i = 0; i < participantSources.size(); ++i) {
+        const QString source = participantSources.value(i).trimmed();
+        if (source.isEmpty())
+            continue;
+        expectedInputs.insert(source);
+        expectedScenes.insert(coreVideoSlotSceneName(i));
+        expectedSceneItems[kCoreVideoSourcesScene].insert(source);
+        expectedSceneItems[coreVideoSlotSceneName(i)].insert(coreVideoSlotPlaceholderName(i));
+        expectedSceneItems[coreVideoSlotSceneName(i)].insert(source);
+    }
+
+    for (const LookRenderPlan &plan : plans) {
+        if (!plan.valid || plan.sceneName.trimmed().isEmpty())
+            continue;
+
+        expectedScenes.insert(plan.sceneName);
+        for (const QString &layer : plan.designLayerNames) {
+            if (!layer.trimmed().isEmpty())
+                expectedInputs.insert(layer.trimmed());
+        }
+
+        QSet<QString> &items = expectedSceneItems[plan.sceneName];
+        for (const TemplateSlot &slot : plan.tmpl.slotList) {
+            if (slot.index < 0 || slot.index >= plan.sourceNames.size())
+                continue;
+            items.insert(coreVideoSlotSceneName(slot.index));
+        }
+        for (const QString &layer : plan.designLayerNames)
+            items.insert(layer.trimmed());
+        for (int i = 0; i < plan.overlays.size(); ++i) {
+            const QString overlay = overlaySourceName(plan.sceneName, i);
+            expectedInputs.insert(overlay);
+            items.insert(overlay);
+        }
+    }
+
+    audit.expectedScenes = expectedScenes.size();
+    audit.expectedInputs = expectedInputs.size();
+    for (auto it = expectedSceneItems.constBegin(); it != expectedSceneItems.constEnd(); ++it)
+        audit.expectedSceneItems += it.value().size();
+
+    for (const QString &scene : expectedScenes) {
+        if (m_knownScenes.contains(scene))
+            ++audit.presentScenes;
+        else
+            audit.missingScenes << scene;
+    }
+
+    for (const QString &input : expectedInputs) {
+        if (m_knownInputs.contains(input))
+            ++audit.presentInputs;
+        else
+            audit.missingInputs << input;
+    }
+
+    for (auto it = expectedSceneItems.constBegin(); it != expectedSceneItems.constEnd(); ++it) {
+        const QString scene = it.key();
+        QSet<QString> present;
+        for (const SceneItem &item : m_sceneItems.value(scene)) {
+            if (!item.sourceName.trimmed().isEmpty())
+                present.insert(item.sourceName);
+        }
+
+        for (const QString &source : it.value()) {
+            const QString name = source.trimmed();
+            if (name.isEmpty())
+                continue;
+            if (present.contains(name))
+                ++audit.presentSceneItems;
+            else
+                audit.missingSceneItems << QStringLiteral("%1 -> %2").arg(scene, name);
+        }
+
+        if (!scene.startsWith(QStringLiteral("CoreVideo - ")))
+            continue;
+
+        const QSet<QString> expected = it.value();
+        for (const QString &source : present) {
+            if (isCoreVideoDesignLayerName(source) && !expected.contains(source))
+                audit.staleDesignLayers << QStringLiteral("%1 -> %2").arg(scene, source);
+        }
+    }
+
+    audit.missingScenes.removeDuplicates();
+    audit.missingInputs.removeDuplicates();
+    audit.missingSceneItems.removeDuplicates();
+    audit.staleDesignLayers.removeDuplicates();
+    audit.missingScenes.sort();
+    audit.missingInputs.sort();
+    audit.missingSceneItems.sort();
+    audit.staleDesignLayers.sort();
+    return audit;
 }
 
 void OBSClient::enqueueCreateSceneIfMissing(QJsonArray &requests, const QString &sceneName)
@@ -1136,6 +1253,58 @@ void OBSClient::removeStaleCoreVideoDuplicates(const QStringList &participantSou
         {"requests",      requests},
     });
     emit log(QStringLiteral("Repair: removing %1 stale CoreVideo duplicate(s).")
+                 .arg(requests.size()));
+    QTimer::singleShot(800, this, [this]() { refreshInventory(); });
+}
+
+void OBSClient::hideStaleCoreVideoDesignLayers(const QVector<LookRenderPlan> &plans)
+{
+    if (m_state != State::Connected)
+        return;
+
+    QHash<QString, QSet<QString>> expectedByScene;
+    for (const LookRenderPlan &plan : plans) {
+        if (!plan.valid || plan.sceneName.trimmed().isEmpty())
+            continue;
+        QSet<QString> &expected = expectedByScene[plan.sceneName];
+        for (const QString &layer : plan.designLayerNames) {
+            if (!layer.trimmed().isEmpty())
+                expected.insert(layer.trimmed());
+        }
+        for (int i = 0; i < plan.overlays.size(); ++i)
+            expected.insert(overlaySourceName(plan.sceneName, i));
+    }
+
+    QJsonArray requests;
+    for (auto it = expectedByScene.constBegin(); it != expectedByScene.constEnd(); ++it) {
+        const QString scene = it.key();
+        const QSet<QString> expected = it.value();
+        for (const SceneItem &item : m_sceneItems.value(scene)) {
+            if (!isCoreVideoDesignLayerName(item.sourceName) || expected.contains(item.sourceName))
+                continue;
+            requests.append(QJsonObject{
+                {"requestType", "SetSceneItemEnabled"},
+                {"requestId",   nextId()},
+                {"requestData", QJsonObject{
+                    {"sceneName",        scene},
+                    {"sceneItemId",      item.sceneItemId},
+                    {"sceneItemEnabled", false},
+                }},
+            });
+        }
+    }
+
+    if (requests.isEmpty()) {
+        emit log("Repair: no stale CoreVideo design layers found.");
+        return;
+    }
+
+    sendOp(8, QJsonObject{
+        {"requestId",     nextId()},
+        {"haltOnFailure", false},
+        {"requests",      requests},
+    });
+    emit log(QStringLiteral("Repair: hiding %1 stale CoreVideo design layer(s).")
                  .arg(requests.size()));
     QTimer::singleShot(800, this, [this]() { refreshInventory(); });
 }

@@ -1,6 +1,7 @@
 #pragma once
 #include "look.h"
 #include "layout-template.h"
+#include "look-render-plan.h"
 #include "macro.h"
 #include "overlay.h"
 #include <QObject>
@@ -54,6 +55,29 @@ public:
         QStringList missingScenes;
     };
 
+    struct CoreVideoSceneAudit {
+        bool inventoryReady = false;
+        int expectedScenes = 0;
+        int presentScenes = 0;
+        int expectedInputs = 0;
+        int presentInputs = 0;
+        int expectedSceneItems = 0;
+        int presentSceneItems = 0;
+        QStringList missingScenes;
+        QStringList missingInputs;
+        QStringList missingSceneItems;
+        QStringList staleDesignLayers;
+
+        bool isClean() const
+        {
+            return inventoryReady
+                && expectedScenes == presentScenes
+                && expectedInputs == presentInputs
+                && expectedSceneItems == presentSceneItems
+                && staleDesignLayers.isEmpty();
+        }
+    };
+
     // Full transform spec for SetSceneItemTransform.
     // All fields optional — only set what you want to change.
     struct Transform {
@@ -87,6 +111,8 @@ public:
     QStringList sceneItemSourceNames(const QString &sceneName) const;
     CoreVideoSyncStatus coreVideoSyncStatus(const QStringList &participantSources,
                                             const QStringList &lookScenes) const;
+    CoreVideoSceneAudit coreVideoSceneAudit(const QStringList &participantSources,
+                                            const QVector<LookRenderPlan> &plans) const;
 
     // ── Virtual camera ───────────────────────────────────────────────────────
     void requestVirtualCamStatus();
@@ -122,6 +148,7 @@ public:
                                 const QStringList &sourceNames);
     void removeStaleCoreVideoDuplicates(const QStringList &participantSources,
                                         const QStringList &lookScenes);
+    void hideStaleCoreVideoDesignLayers(const QVector<LookRenderPlan> &plans);
     void applyOverlays(const QString &sceneName,
                        const QVector<Overlay> &overlays,
                        double canvasW, double canvasH);

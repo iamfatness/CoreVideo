@@ -670,6 +670,18 @@ QString MainWindow::obsSceneNameForLook(const Look &look) const
     return obsRenderer().sceneNameForLook(look);
 }
 
+QVector<LookRenderPlan> MainWindow::lookRenderPlans() const
+{
+    QVector<LookRenderPlan> plans;
+    const OBSLookRenderer renderer = obsRenderer();
+    for (const Look &look : allLooks()) {
+        const LookRenderPlan plan = renderer.renderPlanForLook(look, false, slotLabelsForLook(look));
+        if (plan.valid)
+            plans.append(plan);
+    }
+    return plans;
+}
+
 const Look *MainWindow::lookForObsSceneName(const QString &sceneName) const
 {
     const QString normalized = sceneName.trimmed();
@@ -868,6 +880,20 @@ void MainWindow::repairCoreVideoDuplicates()
         return;
     }
     m_obsClient->removeStaleCoreVideoDuplicates(sourceNamesForSlots(8), lookSceneNames());
+    m_obsClient->hideStaleCoreVideoDesignLayers(lookRenderPlans());
+}
+
+void MainWindow::refreshObsAuditInventory()
+{
+    if (!m_obsClient || !m_obsClient->isConnected())
+        return;
+
+    m_obsClient->refreshInventory();
+    m_obsClient->requestSceneItems(QStringLiteral("CoreVideo Sources"));
+    for (int i = 0; i < 8; ++i)
+        m_obsClient->requestSceneItems(QStringLiteral("CoreVideo Slot %1").arg(i + 1));
+    for (const QString &scene : lookSceneNames())
+        m_obsClient->requestSceneItems(scene);
 }
 
 void MainWindow::renderLookToOBS(const Look &look, bool makeProgram)
@@ -1020,10 +1046,25 @@ void MainWindow::openParticipantMappingWindow()
         const QString obs = (m_obsClient && m_obsClient->isConnected())
             ? QStringLiteral("connected")
             : QStringLiteral("not connected");
-        status->setText(QStringLiteral("OBS %1. Zoom video participants: %2. Known CoreVideo sources: %3.")
-                            .arg(obs)
-                            .arg(m_participants.size())
-                            .arg(m_outputSources.size()));
+        QString text = QStringLiteral("OBS %1. Zoom video participants: %2. Known CoreVideo sources: %3.")
+                           .arg(obs)
+                           .arg(m_participants.size())
+                           .arg(m_outputSources.size());
+        if (m_obsClient && m_obsClient->isConnected()) {
+            const auto audit = m_obsClient->coreVideoSceneAudit(sourceNamesForSlots(8), lookRenderPlans());
+            text += QStringLiteral("\nScene graph: %1/%2 scenes, %3/%4 inputs, %5/%6 scene items.")
+                        .arg(audit.presentScenes)
+                        .arg(audit.expectedScenes)
+                        .arg(audit.presentInputs)
+                        .arg(audit.expectedInputs)
+                        .arg(audit.presentSceneItems)
+                        .arg(audit.expectedSceneItems);
+            if (!audit.missingSceneItems.isEmpty())
+                text += QStringLiteral("\nMissing scene items: %1").arg(audit.missingSceneItems.mid(0, 6).join(", "));
+            if (!audit.staleDesignLayers.isEmpty())
+                text += QStringLiteral("\nStale design layers: %1").arg(audit.staleDesignLayers.mid(0, 6).join(", "));
+        }
+        status->setText(text);
     };
     refreshStatus();
 
@@ -1031,11 +1072,13 @@ void MainWindow::openParticipantMappingWindow()
     auto *refreshBtn = new QPushButton("Refresh Zoom/OBS", dlg);
     auto *sourceBtn = new QPushButton("Create Source Scene", dlg);
     auto *looksBtn = new QPushButton("Create Sources + Looks", dlg);
+    auto *auditRepairBtn = new QPushButton("Audit + Repair", dlg);
     auto *repairBtn = new QPushButton("Repair Duplicates", dlg);
     auto *openSourcesBtn = new QPushButton("Open Source Scene", dlg);
     actions->addWidget(refreshBtn);
     actions->addWidget(sourceBtn);
     actions->addWidget(looksBtn);
+    actions->addWidget(auditRepairBtn);
     actions->addWidget(repairBtn);
     actions->addWidget(openSourcesBtn);
     actions->addStretch(1);
@@ -1099,8 +1142,7 @@ void MainWindow::openParticipantMappingWindow()
             m_zoomClient->refreshParticipants();
             m_zoomClient->refreshOutputs();
         }
-        if (m_obsClient && m_obsClient->isConnected())
-            m_obsClient->refreshInventory();
+        refreshObsAuditInventory();
         refreshStatus();
     });
     connect(sourceBtn, &QPushButton::clicked, dlg, [this, refreshStatus]() {
@@ -1111,6 +1153,16 @@ void MainWindow::openParticipantMappingWindow()
     connect(looksBtn, &QPushButton::clicked, dlg, [this, refreshStatus]() {
         provisionLookScenes();
         refreshStatus();
+    });
+    connect(auditRepairBtn, &QPushButton::clicked, dlg, [this, refreshStatus]() {
+        provisionLookScenes();
+        repairCoreVideoDuplicates();
+        onObsLog("Audit repair requested: re-provisioning CoreVideo sources, Look scenes, and duplicate cleanup.");
+        QTimer::singleShot(4200, this, [this, refreshStatus]() {
+            refreshObsAuditInventory();
+            updateSceneSyncStatus();
+            refreshStatus();
+        });
     });
     connect(repairBtn, &QPushButton::clicked, dlg, [this, refreshStatus]() {
         repairCoreVideoDuplicates();
@@ -1588,49 +1640,36 @@ void MainWindow::updateSceneSyncStatus()
         return;
     }
 
-    const auto status = m_obsClient->coreVideoSyncStatus(sourceNamesForSlots(8), lookSceneNames());
-    QStringList missingDesignLayers;
-    if (!m_lastRenderedSceneName.isEmpty() && !m_lastExpectedDesignLayers.isEmpty()) {
-        QSet<QString> present;
-        for (const QString &source : m_obsClient->sceneItemSourceNames(m_lastRenderedSceneName))
-            present.insert(source);
-        for (const QString &source : m_lastExpectedDesignLayers) {
-            if (!present.contains(source))
-                missingDesignLayers << source;
-        }
-    }
-    const bool complete = status.inventoryReady
-        && status.presentParticipantSources == status.expectedParticipantSources
-        && status.presentSlotScenes == status.expectedSlotScenes
-        && status.presentLookScenes == status.expectedLookScenes
-        && !status.missingScenes.contains(QStringLiteral("CoreVideo Sources"))
-        && missingDesignLayers.isEmpty();
+    const auto audit = m_obsClient->coreVideoSceneAudit(sourceNamesForSlots(8), lookRenderPlans());
+    const bool complete = audit.isClean();
 
     m_obsSyncState = complete ? ObsSyncState::Synced : ObsSyncState::Dirty;
     const QString stateLabel = complete ? QStringLiteral("Synced") : QStringLiteral("Dirty");
 
-    m_sceneSyncStatusLabel->setText(QStringLiteral("%1  %2/%3 src  %4/%5 slots  %6/%7 looks")
+    m_sceneSyncStatusLabel->setText(QStringLiteral("%1  %2/%3 scenes  %4/%5 inputs  %6/%7 items")
         .arg(stateLabel)
-        .arg(status.presentParticipantSources)
-        .arg(status.expectedParticipantSources)
-        .arg(status.presentSlotScenes)
-        .arg(status.expectedSlotScenes)
-        .arg(status.presentLookScenes)
-        .arg(status.expectedLookScenes));
+        .arg(audit.presentScenes)
+        .arg(audit.expectedScenes)
+        .arg(audit.presentInputs)
+        .arg(audit.expectedInputs)
+        .arg(audit.presentSceneItems)
+        .arg(audit.expectedSceneItems));
 
     m_sceneSyncStatusLabel->setStyleSheet(
         QStringLiteral("color: %1; font-size: 11px; background: transparent;")
             .arg(complete ? QStringLiteral("#20c460") : QStringLiteral("#e0a020")));
 
     QStringList detail;
-    if (!status.inventoryReady)
+    if (!audit.inventoryReady)
         detail << QStringLiteral("OBS inventory is still loading.");
-    if (!status.missingInputs.isEmpty())
-        detail << QStringLiteral("Missing inputs: %1").arg(status.missingInputs.join(", "));
-    if (!status.missingScenes.isEmpty())
-        detail << QStringLiteral("Missing scenes: %1").arg(status.missingScenes.join(", "));
-    if (!missingDesignLayers.isEmpty())
-        detail << QStringLiteral("Missing design layers: %1").arg(missingDesignLayers.join(", "));
+    if (!audit.missingScenes.isEmpty())
+        detail << QStringLiteral("Missing scenes: %1").arg(audit.missingScenes.mid(0, 8).join(", "));
+    if (!audit.missingInputs.isEmpty())
+        detail << QStringLiteral("Missing inputs: %1").arg(audit.missingInputs.mid(0, 8).join(", "));
+    if (!audit.missingSceneItems.isEmpty())
+        detail << QStringLiteral("Missing scene items: %1").arg(audit.missingSceneItems.mid(0, 8).join(", "));
+    if (!audit.staleDesignLayers.isEmpty())
+        detail << QStringLiteral("Stale design layers: %1").arg(audit.staleDesignLayers.mid(0, 8).join(", "));
     if (detail.isEmpty())
         detail << QStringLiteral("CoreVideo OBS scene graph is synced.");
     if (!m_lastRenderedLookName.isEmpty())

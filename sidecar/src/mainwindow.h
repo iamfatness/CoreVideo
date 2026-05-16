@@ -96,6 +96,7 @@ private:
     void provisionPlaceholderSources();
     void provisionLookScenes();
     void repairCoreVideoDuplicates();
+    void refreshObsAuditInventory();
     void renderLookToOBS(const Look &look, bool makeProgram);
     void reconcileParticipantSlots(const QVector<ParticipantInfo> &participants);
     void syncZoomOutputAssignments();
@@ -116,6 +117,7 @@ private:
     QStringList sourceNamesForLook(const Look &look) const;
     QStringList lookSceneNames() const;
     QString obsSceneNameForLook(const Look &look) const;
+    QVector<LookRenderPlan> lookRenderPlans() const;
 
     // Top bar
     QWidget     *m_topBar         = nullptr;

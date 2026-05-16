@@ -178,6 +178,7 @@ bool ZoomEngineClient::start(const std::string &jwt_token)
     m_last_jwt = jwt_token;
     m_user_leaving.store(false, std::memory_order_release);
     m_authenticated.store(false, std::memory_order_release);
+    m_media_active.store(false, std::memory_order_release);
 
     // Join threads from any previous session (e.g. after a crash).
     if (m_reader.joinable())  m_reader.join();
@@ -230,6 +231,7 @@ void ZoomEngineClient::stop_for_reconnect()
     if (m_reader.joinable())  m_reader.join();
     if (m_monitor.joinable()) m_monitor.join(); // also reaps the child process
     m_authenticated.store(false, std::memory_order_release);
+    m_media_active.store(false, std::memory_order_release);
     m_state.store(MeetingState::Idle, std::memory_order_release);
 }
 
@@ -334,6 +336,19 @@ void ZoomEngineClient::leave()
         m_join_pending = false;
     }
     write_json(R"({"cmd":"leave"})");
+}
+
+void ZoomEngineClient::start_media()
+{
+    if (!m_running.load(std::memory_order_acquire)) return;
+    write_json(R"({"cmd":"start_media"})");
+}
+
+void ZoomEngineClient::stop_media()
+{
+    if (!m_running.load(std::memory_order_acquire)) return;
+    write_json(R"({"cmd":"stop_media"})");
+    m_media_active.store(false, std::memory_order_release);
 }
 
 void ZoomEngineClient::subscribe(const std::string &source_uuid,
@@ -509,6 +524,11 @@ void ZoomEngineClient::handle_event(const std::string &line)
     }
     if (cmd == "debug") {
         blog(LOG_INFO, "[obs-zoom-plugin] Zoom engine debug: %s", line.c_str());
+        const QString stage = obj.value("stage").toString();
+        if (stage == "raw_media_ready")
+            m_media_active.store(true, std::memory_order_release);
+        else if (stage == "raw_media_stopped")
+            m_media_active.store(false, std::memory_order_release);
         return;
     }
     if (cmd == "joined") {
@@ -517,6 +537,7 @@ void ZoomEngineClient::handle_event(const std::string &line)
         return;
     }
     if (cmd == "left") {
+        m_media_active.store(false, std::memory_order_release);
         bool keep_failed = false;
         {
             std::lock_guard<std::mutex> lk(m_mtx);

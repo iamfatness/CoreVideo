@@ -252,3 +252,9 @@ void EngineVideo::resubscribe_all()
         subscribe(participant_id, source_uuid, e2p_fd);
     }
 }
+
+void EngineVideo::unsubscribe_all()
+{
+    m_subs.clear();
+    m_source_participants.clear();
+}

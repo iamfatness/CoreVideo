@@ -59,6 +59,7 @@ public:
                    IpcFd e2p_fd);
     void unsubscribe(const std::string &source_uuid);
     void resubscribe_all();
+    void unsubscribe_all();
 
 private:
     void unsubscribe_locked(const std::string &source_uuid);

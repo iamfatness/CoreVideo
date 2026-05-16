@@ -178,7 +178,7 @@ static QString participant_label(const ParticipantInfo &p)
 ZoomDock::ZoomDock(QWidget *parent)
     : QWidget(parent)
 {
-    setMinimumWidth(340);
+    setMinimumWidth(520);
 
     auto *vLayout = new QVBoxLayout(this);
     vLayout->setContentsMargins(8, 8, 8, 8);
@@ -363,6 +363,22 @@ ZoomDock::ZoomDock(QWidget *parent)
     join_layout->addLayout(join_btn_row);
     vLayout->addWidget(join_group);
 
+    auto *engine_group  = new QGroupBox("Broadcast Engine", this);
+    auto *engine_layout = new QHBoxLayout(engine_group);
+    engine_layout->setSpacing(6);
+    m_start_engine_btn = new QPushButton("Start Engine", engine_group);
+    m_stop_engine_btn = new QPushButton("Stop Engine", engine_group);
+    m_start_engine_btn->setProperty("role", "primary");
+    m_stop_engine_btn->setProperty("role", "danger");
+    m_start_engine_btn->setToolTip(
+        "Start Zoom raw media capture and send participant video/audio to OBS outputs.");
+    m_stop_engine_btn->setToolTip(
+        "Stop Zoom raw media capture while staying joined to the meeting.");
+    m_stop_engine_btn->setEnabled(false);
+    engine_layout->addWidget(m_start_engine_btn);
+    engine_layout->addWidget(m_stop_engine_btn);
+    vLayout->addWidget(engine_group);
+
     // Pre-populate join fields from the last successful join, if any.
     {
         const ZoomPluginSettings prefill = ZoomPluginSettings::load();
@@ -377,6 +393,10 @@ ZoomDock::ZoomDock(QWidget *parent)
 
     connect(m_join_btn,  &QPushButton::clicked, this, [this]() { on_join_clicked(); });
     connect(m_leave_btn, &QPushButton::clicked, this, [this]() { on_leave_clicked(); });
+    connect(m_start_engine_btn, &QPushButton::clicked,
+            this, [this]() { on_start_engine_clicked(); });
+    connect(m_stop_engine_btn, &QPushButton::clicked,
+            this, [this]() { on_stop_engine_clicked(); });
     m_pending_oauth_join_timer = new QTimer(this);
     m_pending_oauth_join_timer->setInterval(500);
     connect(m_pending_oauth_join_timer, &QTimer::timeout, this, [this]() {
@@ -437,7 +457,8 @@ ZoomDock::ZoomDock(QWidget *parent)
 
     // Draggable participant list (drop on output rows to assign)
     m_participant_list = new CvParticipantList(output_group);
-    m_participant_list->setMaximumHeight(90);
+    m_participant_list->setMinimumHeight(120);
+    m_participant_list->setMaximumHeight(160);
     m_participant_list->setToolTip("Drag a participant onto an output row to assign them.");
     output_layout->addWidget(m_participant_list);
 
@@ -454,6 +475,7 @@ ZoomDock::ZoomDock(QWidget *parent)
     m_output_table->setSelectionMode(QAbstractItemView::NoSelection);
     m_output_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_output_table->setAlternatingRowColors(true);
+    m_output_table->setMinimumHeight(220);
 
     m_apply_btn = new QPushButton("Apply", output_group);
     m_apply_btn->setProperty("role", "primary");
@@ -604,9 +626,17 @@ void ZoomDock::update_state_indicator()
     const bool join_task     = m_join_in_progress.load(std::memory_order_acquire);
     const bool transitioning = join_task || s == MeetingState::Joining ||
                                s == MeetingState::Leaving;
+    const bool media_active = ZoomEngineClient::instance().is_media_active();
+    if (media_active && !m_last_media_active)
+        ZoomOutputManager::instance().resubscribe_all();
+    m_last_media_active = media_active;
     m_join_btn->setEnabled(!in_meeting && !transitioning && !recovering);
     m_leave_btn->setEnabled(in_meeting || transitioning || recovering);
     m_leave_btn->setText(in_meeting ? "Leave" : "Cancel");
+    if (m_start_engine_btn && m_stop_engine_btn) {
+        m_start_engine_btn->setEnabled(in_meeting && !media_active && !transitioning && !recovering);
+        m_stop_engine_btn->setEnabled(in_meeting && media_active && !transitioning);
+    }
 
     update_recovery_panel();
 
@@ -1019,6 +1049,23 @@ void ZoomDock::on_leave_clicked()
     m_join_timeout_reported = false;
     m_join_generation.fetch_add(1, std::memory_order_acq_rel);
     ZoomEngineClient::instance().leave();
+    update_state_indicator();
+}
+
+void ZoomDock::on_start_engine_clicked()
+{
+    if (ZoomEngineClient::instance().state() != MeetingState::InMeeting) {
+        QMessageBox::information(this, "Broadcast Engine",
+            "Join the Zoom meeting before starting the broadcast engine.");
+        return;
+    }
+    ZoomEngineClient::instance().start_media();
+    update_state_indicator();
+}
+
+void ZoomDock::on_stop_engine_clicked()
+{
+    ZoomEngineClient::instance().stop_media();
     update_state_indicator();
 }
 

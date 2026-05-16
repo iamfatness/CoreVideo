@@ -9,6 +9,8 @@
 #define IPC_CMD_LEAVE       "leave"
 #define IPC_CMD_SUBSCRIBE   "subscribe"
 #define IPC_CMD_UNSUBSCRIBE "unsubscribe"
+#define IPC_CMD_START_MEDIA "start_media"
+#define IPC_CMD_STOP_MEDIA  "stop_media"
 #define IPC_CMD_QUIT        "quit"
 #define IPC_EVT_READY       "ready"
 #define IPC_EVT_AUTH_OK     "auth_ok"

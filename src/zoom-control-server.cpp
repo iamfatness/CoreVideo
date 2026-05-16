@@ -262,7 +262,8 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
         QJsonArray commands;
         for (const char *c : {"help", "status", "list_participants", "list_outputs",
                               "assign_output", "assign_output_ex",
-                              "join", "leave", "oauth_callback",
+                              "join", "leave", "start_engine", "stop_engine",
+                              "oauth_callback",
                               "subscribe_events", "recovery_cancel"})
             commands.append(c);
         write_response(socket, {{"ok", true}, {"commands", commands}});
@@ -279,6 +280,7 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
         write_response(socket, {
             {"ok", true},
             {"meeting_state", meeting_state_to_string(ZoomEngineClient::instance().state())},
+            {"media_active", ZoomEngineClient::instance().is_media_active()},
             {"last_error", QString::fromStdString(
                 ZoomEngineClient::instance().last_error())},
             {"active_speaker_id", static_cast<double>(
@@ -402,6 +404,26 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
 
     if (cmd == "leave") {
         ZoomEngineClient::instance().leave();
+        write_response(socket, {{"ok", true}});
+        return;
+    }
+
+    if (cmd == "start_engine") {
+        if (ZoomEngineClient::instance().state() != MeetingState::InMeeting) {
+            write_response(socket, {
+                {"ok", false},
+                {"error", "not_in_meeting"},
+                {"message", "Join the meeting before starting the CoreVideo engine."},
+            });
+            return;
+        }
+        ZoomEngineClient::instance().start_media();
+        write_response(socket, {{"ok", true}});
+        return;
+    }
+
+    if (cmd == "stop_engine") {
+        ZoomEngineClient::instance().stop_media();
         write_response(socket, {{"ok", true}});
         return;
     }

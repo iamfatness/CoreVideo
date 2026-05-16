@@ -30,6 +30,8 @@ public:
               MeetingKind kind = MeetingKind::Meeting,
               const ZoomJoinAuthTokens &tokens = {});
     void leave();
+    void start_media();
+    void stop_media();
 
     // Subscribe a source to a "spotlight slot" (1-based) instead of a fixed
     // participant. The engine resolves which participant owns that slot.
@@ -46,6 +48,7 @@ public:
 
     MeetingState state() const { return m_state.load(std::memory_order_acquire); }
     bool is_authenticated() const { return m_authenticated.load(std::memory_order_acquire); }
+    bool is_media_active() const { return m_media_active.load(std::memory_order_acquire); }
     std::string last_error() const;
     void clear_last_error();
     uint32_t active_speaker_id() const;
@@ -81,6 +84,7 @@ private:
     std::thread m_monitor;
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_authenticated{false};
+    std::atomic<bool> m_media_active{false};
     std::atomic<MeetingState> m_state{MeetingState::Idle};
     uint32_t m_active_speaker_id = 0;
     std::vector<ParticipantInfo> m_roster;

@@ -31,6 +31,8 @@ private:
 
     void on_join_clicked();
     void on_leave_clicked();
+    void on_start_engine_clicked();
+    void on_stop_engine_clicked();
     void on_cancel_recovery_clicked();
     void update_state_indicator();
     void update_recovery_panel();
@@ -57,6 +59,8 @@ private:
     QLineEdit   *m_join_token   = nullptr;
     QPushButton *m_join_btn     = nullptr;
     QPushButton *m_leave_btn    = nullptr;
+    QPushButton *m_start_engine_btn = nullptr;
+    QPushButton *m_stop_engine_btn  = nullptr;
     QCheckBox   *m_webinar_cb   = nullptr;
     QLineEdit   *m_participant_filter = nullptr;
     QListWidget *m_participant_list   = nullptr;
@@ -74,6 +78,7 @@ private:
     std::atomic<bool>     m_join_in_progress{false};
     std::atomic<uint64_t> m_join_generation{0};
     QTimer      *m_pending_oauth_join_timer = nullptr;
+    bool         m_last_media_active = false;
 
     // Output assignment table
     QTableWidget *m_output_table = nullptr;

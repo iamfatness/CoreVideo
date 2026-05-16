@@ -1,5 +1,6 @@
 #pragma once
 
+#include "look-render-plan.h"
 #include "look.h"
 #include "obs-client.h"
 #include <QString>
@@ -9,6 +10,8 @@
 
 class OBSLookRenderer {
 public:
+    using RenderPlan = LookRenderPlan;
+
     struct Config {
         QString sourcePattern;
         QString fallbackSceneName;
@@ -33,6 +36,10 @@ public:
     QString sceneNameForLook(const Look &look) const;
     QStringList sceneNamesForLooks(const QVector<Look> &looks) const;
     QStringList designLayerSourceNames(const Look &look) const;
+    QStringList slotLabelsForLook(const Look &look, const QStringList &slotLabels = {}) const;
+    RenderPlan renderPlanForLook(const Look &look,
+                                 bool makeProgram,
+                                 const QStringList &slotLabels = {}) const;
 
     void provisionPlaceholders(int slotCount = 8) const;
     void provisionLooks(const QVector<Look> &looks) const;

@@ -1,6 +1,16 @@
 #include "obs-look-renderer.h"
-#include <QRegularExpression>
 #include <utility>
+
+static LookRenderConfig toRenderConfig(const OBSLookRenderer::Config &config)
+{
+    LookRenderConfig c;
+    c.sourcePattern = config.sourcePattern;
+    c.fallbackSceneName = config.fallbackSceneName;
+    c.canvasWidth = config.canvasWidth;
+    c.canvasHeight = config.canvasHeight;
+    c.normalizeBroadcastCanvas();
+    return c;
+}
 
 OBSLookRenderer::OBSLookRenderer(OBSClient *client, Config config)
     : m_client(client), m_config(std::move(config))
@@ -10,33 +20,17 @@ OBSLookRenderer::OBSLookRenderer(OBSClient *client, Config config)
 
 QStringList OBSLookRenderer::sourceNamesForSlots(int slotCount) const
 {
-    QStringList sources;
-    for (int i = 0; i < slotCount; ++i)
-        sources << m_config.sourcePattern.arg(i + 1);
-    return sources;
+    return ::sourceNamesForSlots(toRenderConfig(m_config), slotCount);
 }
 
 QStringList OBSLookRenderer::sourceNamesForLook(const Look &look) const
 {
-    if (look.templateId == QStringLiteral("speaker-screenshare")
-        || look.tmpl.id == QStringLiteral("speaker-screenshare")) {
-        return {
-            m_config.sourcePattern.arg(1),
-            QStringLiteral("Zoom Screen Share"),
-        };
-    }
-
-    return sourceNamesForSlots(look.tmpl.slotList.size());
+    return ::sourceNamesForLook(toRenderConfig(m_config), look);
 }
 
 QString OBSLookRenderer::sceneNameForLook(const Look &look) const
 {
-    QString base = look.name.trimmed();
-    if (base.isEmpty()) base = look.tmpl.name.trimmed();
-    if (base.isEmpty()) base = m_config.fallbackSceneName.trimmed();
-    base.replace(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|]")), QStringLiteral("-"));
-    base.replace(QRegularExpression(QStringLiteral("\\s+")), QStringLiteral(" "));
-    return QStringLiteral("CoreVideo - %1").arg(base.left(64));
+    return ::sceneNameForLook(toRenderConfig(m_config), look);
 }
 
 QStringList OBSLookRenderer::sceneNamesForLooks(const QVector<Look> &looks) const
@@ -51,49 +45,21 @@ QStringList OBSLookRenderer::sceneNamesForLooks(const QVector<Look> &looks) cons
     return scenes;
 }
 
-static QString safeDesignSceneName(const QString &sceneName, int maxLen)
-{
-    QString safe = sceneName;
-    safe.replace(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|]")), QStringLiteral("-"));
-    safe.replace(QRegularExpression(QStringLiteral("\\s+")), QStringLiteral(" "));
-    return safe.left(maxLen);
-}
-
 QStringList OBSLookRenderer::designLayerSourceNames(const Look &look) const
 {
-    const QString scene = sceneNameForLook(look);
-    QStringList names;
-    names << QStringLiteral("CoreVideo Canvas - %1").arg(safeDesignSceneName(scene, 72));
-    if (!look.backgroundImagePath.trimmed().isEmpty())
-        names << QStringLiteral("CoreVideo Background - %1").arg(safeDesignSceneName(scene, 72));
+    return ::designLayerSourceNames(toRenderConfig(m_config), look);
+}
 
-    const bool showBorder = look.tileStyle.borderWidth > 0.0;
-    const bool showShadow = look.tileStyle.dropShadow;
-    const bool showDim = look.tileStyle.opacity < 0.99;
-    for (const auto &slot : look.tmpl.slotList) {
-        if (showShadow) {
-            names << QStringLiteral("CoreVideo Shadow - %1 - Slot %2")
-                         .arg(safeDesignSceneName(scene, 58))
-                         .arg(slot.index + 1);
-        }
-        if (showBorder) {
-            names << QStringLiteral("CoreVideo Border - %1 - Slot %2")
-                         .arg(safeDesignSceneName(scene, 58))
-                         .arg(slot.index + 1);
-        }
-        if (showDim) {
-            names << QStringLiteral("CoreVideo Dim - %1 - Slot %2")
-                         .arg(safeDesignSceneName(scene, 61))
-                         .arg(slot.index + 1);
-        }
-        if (look.tileStyle.showNameTag) {
-            names << QStringLiteral("CoreVideo Name - %1 - Slot %2")
-                         .arg(safeDesignSceneName(scene, 60))
-                         .arg(slot.index + 1);
-        }
-    }
-    names.removeDuplicates();
-    return names;
+QStringList OBSLookRenderer::slotLabelsForLook(const Look &look, const QStringList &slotLabels) const
+{
+    return ::slotLabelsForLook(look, slotLabels);
+}
+
+OBSLookRenderer::RenderPlan OBSLookRenderer::renderPlanForLook(const Look &look,
+                                                               bool makeProgram,
+                                                               const QStringList &slotLabels) const
+{
+    return ::renderPlanForLook(toRenderConfig(m_config), look, makeProgram, slotLabels);
 }
 
 void OBSLookRenderer::provisionPlaceholders(int slotCount) const
@@ -111,17 +77,18 @@ void OBSLookRenderer::provisionLooks(const QVector<Look> &looks) const
 
     provisionPlaceholders(8);
     for (const auto &look : looks) {
-        if (!look.tmpl.isValid())
+        const RenderPlan plan = renderPlanForLook(look, false);
+        if (!plan.valid)
             continue;
-        m_client->loadSceneTemplate(sceneNameForLook(look),
-                                    look.tmpl,
-                                    sourceNamesForLook(look),
-                                    m_config.canvasWidth,
-                                    m_config.canvasHeight,
-                                    look.overlays,
-                                    look.backgroundImagePath,
-                                    look.tileStyle,
-                                    {},
+        m_client->loadSceneTemplate(plan.sceneName,
+                                    plan.tmpl,
+                                    plan.sourceNames,
+                                    plan.canvasWidth,
+                                    plan.canvasHeight,
+                                    plan.overlays,
+                                    plan.backgroundImagePath,
+                                    plan.tileStyle,
+                                    plan.slotLabels,
                                     false);
     }
 }
@@ -133,16 +100,20 @@ void OBSLookRenderer::renderLook(const Look &look,
     if (!m_client || !m_client->isConnected() || !look.tmpl.isValid())
         return;
 
-    m_client->loadSceneTemplate(sceneNameForLook(look),
-                                look.tmpl,
-                                sourceNamesForLook(look),
-                                m_config.canvasWidth,
-                                m_config.canvasHeight,
-                                look.overlays,
-                                look.backgroundImagePath,
-                                look.tileStyle,
-                                slotLabels,
-                                makeProgram);
+    const RenderPlan plan = renderPlanForLook(look, makeProgram, slotLabels);
+    if (!plan.valid)
+        return;
+
+    m_client->loadSceneTemplate(plan.sceneName,
+                                plan.tmpl,
+                                plan.sourceNames,
+                                plan.canvasWidth,
+                                plan.canvasHeight,
+                                plan.overlays,
+                                plan.backgroundImagePath,
+                                plan.tileStyle,
+                                plan.slotLabels,
+                                plan.makeProgram);
     if (!makeProgram)
-        m_client->setCurrentPreviewScene(sceneNameForLook(look));
+        m_client->setCurrentPreviewScene(plan.sceneName);
 }

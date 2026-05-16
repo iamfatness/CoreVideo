@@ -22,6 +22,7 @@ set(SOURCES
     src/layout-template.cpp
     src/template-manager.cpp
     src/look-library.cpp
+    src/look-render-plan.cpp
     src/look-panel.cpp
     src/lower-third-controller.cpp
     src/me-bus.cpp
@@ -77,6 +78,7 @@ if(BUILD_TESTING)
 
     add_executable(CoreVideoSidecarRendererConfigTest
         tests/renderer-config-test.cpp
+        src/look-render-plan.cpp
     )
     target_include_directories(CoreVideoSidecarRendererConfigTest PRIVATE src)
     target_link_libraries(CoreVideoSidecarRendererConfigTest PRIVATE Qt6::Core Qt6::Gui)

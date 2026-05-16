@@ -196,6 +196,8 @@ bool obs_module_load(void)
             if (event == OBS_FRONTEND_EVENT_EXIT) {
                 if (g_dock)
                     g_dock->prepare_shutdown();
+                if (g_iso_panel)
+                    g_iso_panel->prepare_shutdown();
                 ZoomEngineClient::instance().stop();
             }
         }, nullptr);

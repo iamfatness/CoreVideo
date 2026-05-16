@@ -573,6 +573,8 @@ ZoomDock::~ZoomDock()
 
 void ZoomDock::prepare_shutdown()
 {
+    ZoomEngineClient::instance().remove_roster_callback(this);
+    ZoomEngineClient::instance().remove_error_callback(this);
     m_alive->store(false, std::memory_order_release);
     stop_pending_oauth_join();
     if (m_countdown_timer)

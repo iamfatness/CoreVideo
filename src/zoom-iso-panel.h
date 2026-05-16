@@ -14,6 +14,7 @@ class ZoomIsoPanel : public QWidget {
 public:
     explicit ZoomIsoPanel(QWidget *parent = nullptr);
     ~ZoomIsoPanel() override;
+    void prepare_shutdown();
 
 private:
     void browse_output_dir();
@@ -36,4 +37,5 @@ private:
     QLabel *m_error = nullptr;
     QTableWidget *m_sessions = nullptr;
     QTimer *m_refresh_timer = nullptr;
+    bool m_shutting_down = false;
 };

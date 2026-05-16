@@ -167,7 +167,15 @@ ZoomIsoPanel::ZoomIsoPanel(QWidget *parent)
 
 ZoomIsoPanel::~ZoomIsoPanel()
 {
-    persist_settings();
+    if (!m_shutting_down)
+        persist_settings();
+}
+
+void ZoomIsoPanel::prepare_shutdown()
+{
+    m_shutting_down = true;
+    if (m_refresh_timer)
+        m_refresh_timer->stop();
 }
 
 void ZoomIsoPanel::browse_output_dir()
@@ -273,6 +281,8 @@ void ZoomIsoPanel::refresh_status()
 
 void ZoomIsoPanel::persist_settings() const
 {
+    if (m_shutting_down)
+        return;
     ZoomPluginSettings settings = ZoomPluginSettings::load();
     settings.iso_output_dir = m_output_dir->text().trimmed().toStdString();
     settings.iso_ffmpeg_path = m_ffmpeg_path->text().trimmed().toStdString();

@@ -12,7 +12,13 @@ OBSClient::OBSClient(QObject *parent) : QObject(parent)
     connect(m_ws, &QWebSocket::disconnected, this, &OBSClient::onDisconnected);
     connect(m_ws, &QWebSocket::textMessageReceived,
             this, &OBSClient::onTextMessageReceived);
-    connect(m_ws, &QWebSocket::errorOccurred, this, [this](auto) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+    constexpr auto wsErrorSignal = &QWebSocket::errorOccurred;
+#else
+    constexpr auto wsErrorSignal =
+        QOverload<QAbstractSocket::SocketError>::of(&QWebSocket::error);
+#endif
+    connect(m_ws, wsErrorSignal, this, [this](auto) {
         const QString err = m_ws->errorString();
         qWarning() << "[obs-ws]" << err;
         emit errorOccurred(err);
@@ -362,8 +368,8 @@ void OBSClient::applyLayout(const QString        &sceneName,
 
     QJsonArray requests;
     int matched = 0;
-    for (int i = 0; i < tmpl.slots.size() && i < sourceNames.size(); ++i) {
-        const TemplateSlot &slot = tmpl.slots[i];
+    for (int i = 0; i < tmpl.slotList.size() && i < sourceNames.size(); ++i) {
+        const TemplateSlot &slot = tmpl.slotList[i];
         const int itemId = resolveItemId(sceneName, sourceNames[i]);
         if (itemId < 0) {
             emit log(QStringLiteral("Skip '%1' — not in scene '%2'.")

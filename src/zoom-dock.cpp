@@ -29,8 +29,14 @@
 #include <QMetaObject>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QDir>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QPointer>
+#include <QProcess>
 #include <QPushButton>
+#include <QSettings>
+#include <QStandardPaths>
 #include <QTableWidget>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -203,6 +209,89 @@ ZoomDock::ZoomDock(QWidget *parent)
     speaker_row->addWidget(new QLabel("Active speaker:", this));
     speaker_row->addWidget(m_speaker_label, 1);
     vLayout->addLayout(speaker_row);
+
+    // ── Launch Sidecar (companion control surface) ────────────────────────────
+    auto *launch_row = new QHBoxLayout;
+    launch_row->setSpacing(6);
+    auto *launch_btn = new QPushButton("Launch Sidecar", this);
+    launch_btn->setToolTip(
+        "Open the CoreVideo Sidecar broadcast control surface and connect it "
+        "to this OBS instance automatically.");
+    launch_btn->setProperty("role", "secondary");
+    launch_row->addStretch(1);
+    launch_row->addWidget(launch_btn);
+    vLayout->addLayout(launch_row);
+
+    connect(launch_btn, &QPushButton::clicked, this, [this, launch_btn]() {
+        // Discover the sidecar binary. Order:
+        //   1. COREVIDEO_SIDECAR_BIN env var
+        //   2. QSettings key "sidecar/binPath" (remembered last choice)
+        //   3. Same directory as the running OBS executable
+        //   4. PATH lookup ("CoreVideoSidecar" / ".app/Contents/MacOS/...")
+        //   5. Prompt the user to locate it, then remember.
+        const QStringList candidateNames = {
+#if defined(Q_OS_WIN)
+            "CoreVideoSidecar.exe",
+#elif defined(Q_OS_MAC)
+            "CoreVideo Sidecar.app/Contents/MacOS/CoreVideoSidecar",
+            "CoreVideoSidecar.app/Contents/MacOS/CoreVideoSidecar",
+#endif
+            "CoreVideoSidecar",
+        };
+
+        auto fileExists = [](const QString &p) {
+            return !p.isEmpty() && QFileInfo(p).isFile();
+        };
+
+        QString path = qEnvironmentVariable("COREVIDEO_SIDECAR_BIN");
+        if (!fileExists(path)) {
+            QSettings s;
+            path = s.value("sidecar/binPath").toString();
+        }
+        if (!fileExists(path)) {
+            const QString appDir = QCoreApplication::applicationDirPath();
+            for (const QString &name : candidateNames) {
+                const QString p = QDir(appDir).filePath(name);
+                if (fileExists(p)) { path = p; break; }
+            }
+        }
+        if (!fileExists(path)) {
+            for (const QString &name : candidateNames) {
+                const QString p = QStandardPaths::findExecutable(name);
+                if (fileExists(p)) { path = p; break; }
+            }
+        }
+        if (!fileExists(path)) {
+            const QString picked = QFileDialog::getOpenFileName(
+                this, "Locate CoreVideo Sidecar",
+                QCoreApplication::applicationDirPath(),
+                "Executables (*)");
+            if (picked.isEmpty()) return;
+            path = picked;
+            QSettings s;
+            s.setValue("sidecar/binPath", path);
+        }
+
+        QStringList args;
+        args << "--obs-host"        << "localhost"
+             << "--obs-port"        << "4455"
+             << "--obs-autoconnect";
+
+        qint64 pid = 0;
+        const bool ok = QProcess::startDetached(path, args, QString(), &pid);
+        if (!ok) {
+            QMessageBox::warning(this, "Launch Sidecar",
+                QString("Failed to launch sidecar at:\n%1").arg(path));
+            return;
+        }
+        launch_btn->setText("Sidecar launched");
+        launch_btn->setEnabled(false);
+        QTimer::singleShot(2500, launch_btn, [launch_btn]() {
+            if (!launch_btn) return;
+            launch_btn->setText("Launch Sidecar");
+            launch_btn->setEnabled(true);
+        });
+    });
 
     // ── Credentials notice (hidden once credentials are set) ──────────────────
     m_credentials_banner = new CvBanner(

@@ -19,9 +19,9 @@ struct LayoutTemplate {
     QString              description;
     int                  columns = 1;
     int                  rows    = 1;
-    QVector<TemplateSlot> slots;
+    QVector<TemplateSlot> slotList;
 
-    bool isValid() const { return !id.isEmpty() && !slots.isEmpty(); }
+    bool isValid() const { return !id.isEmpty() && !slotList.isEmpty(); }
 
     static LayoutTemplate fromJson(const QJsonObject &obj);
     QJsonObject toJson() const;

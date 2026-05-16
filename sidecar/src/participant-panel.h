@@ -25,13 +25,23 @@ public:
 
     void setParticipants(const QVector<ParticipantInfo> &participants);
 
+    // Drives the "Click a participant to assign to Slot N" banner. Pass -1
+    // to clear it (default browse mode).
+    void setAssignTarget(int slotIndex);
+
 signals:
     void assignRequested(int participantId, int slotIndex);
+    // Emitted whenever a participant card is clicked, regardless of mode.
+    // MainWindow decides whether to consume it as a slot assignment.
+    void participantClicked(int participantId);
 
 private:
-    QWidget      *m_listArea   = nullptr;
-    QVBoxLayout  *m_listLayout = nullptr;
-    QLabel       *m_countLabel = nullptr;
+    QWidget      *m_listArea    = nullptr;
+    QVBoxLayout  *m_listLayout  = nullptr;
+    QLabel       *m_countLabel  = nullptr;
+    QWidget      *m_assignBanner = nullptr;
+    QLabel       *m_assignLabel  = nullptr;
+    int           m_assignTarget = -1;
     QVector<ParticipantCard *> m_cards;
 };
 

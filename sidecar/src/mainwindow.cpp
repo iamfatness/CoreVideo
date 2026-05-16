@@ -8,7 +8,11 @@
 #include "template-manager.h"
 #include "settings-page.h"
 #include "obs-connect-dialog.h"
+#include "command-palette.h"
 #include "sidecar-style.h"
+#include <QShortcut>
+#include <QKeySequence>
+#include <QTimer>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QLabel>
@@ -22,8 +26,10 @@
 #include <QSettings>
 #include <QDateTime>
 #include <QApplication>
+#include <QStyle>
 
-MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
+MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
+    : QMainWindow(parent)
 {
     setWindowTitle("CoreVideo Sidecar");
     setMinimumSize(1200, 720);
@@ -104,6 +110,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     m_obsConfig.password      = cfg.value("obs/password", "").toString();
     m_obsConfig.autoReconnect = cfg.value("obs/autoReconnect", true).toBool();
 
+    // CLI / launch-time overrides — typically supplied by the parent OBS
+    // plugin so "Launch Sidecar" delivers a one-click connected session.
+    if (startup.hostOverride)     m_obsConfig.host     = *startup.hostOverride;
+    if (startup.portOverride)     m_obsConfig.port     = *startup.portOverride;
+    if (startup.passwordOverride) m_obsConfig.password = *startup.passwordOverride;
+
     // ── Connections ───────────────────────────────────────────────────────────
     connect(m_sidebar, &Sidebar::pageSelected, this, &MainWindow::onPageSelected);
     connect(applyBtn,  &QPushButton::clicked,  this, &MainWindow::onApplyLayout);
@@ -160,6 +172,30 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     connect(m_liveCanvas,  &PreviewCanvas::slotAssigned, this, &MainWindow::onSlotAssigned);
     connect(m_sceneCanvas, &PreviewCanvas::slotAssigned, this, &MainWindow::onSlotAssigned);
 
+    // Click-to-assign — selecting a slot focuses the Templates page and arms
+    // the participant panel so the next card click fills that slot.
+    connect(m_liveCanvas,  &PreviewCanvas::slotClicked, this, &MainWindow::onSlotClicked);
+    connect(m_sceneCanvas, &PreviewCanvas::slotClicked, this, &MainWindow::onSlotClicked);
+
+    // Participant card click — consumed only while assign mode is armed
+    connect(m_participantPanel, &ParticipantPanel::assignRequested, this,
+            [this](int pid, int slot) { onSlotAssigned(slot, pid); });
+    connect(m_participantPanel, &ParticipantPanel::participantClicked,
+            this, &MainWindow::onParticipantAssignClicked);
+
+    // Command palette (Ctrl+K / Cmd+K)
+    m_commandPalette = new CommandPalette(this);
+    auto *paletteShortcut = new QShortcut(
+        QKeySequence(QKeySequence::Find), this);
+    paletteShortcut->setContext(Qt::ApplicationShortcut);
+    connect(paletteShortcut, &QShortcut::activated,
+            this, &MainWindow::openCommandPalette);
+    auto *paletteShortcutK = new QShortcut(
+        QKeySequence(Qt::CTRL | Qt::Key_K), this);
+    paletteShortcutK->setContext(Qt::ApplicationShortcut);
+    connect(paletteShortcutK, &QShortcut::activated,
+            this, &MainWindow::openCommandPalette);
+
     // Templates
     auto &tm = TemplateManager::instance();
     tm.loadBuiltIn();
@@ -174,7 +210,22 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 
     // Initial UI state
     onObsState(OBSClient::State::Disconnected);
-    onObsLog("Sidecar ready. Click 'OBS' to connect.");
+    onObsLog("Sidecar ready. Click 'OBS' to connect, or press Ctrl+K for the command palette.");
+
+    // Auto-connect on launch if the parent process asked for it (e.g. when
+    // launched from the OBS plugin's "Launch Sidecar" button).
+    if (startup.autoConnect) {
+        QSettings s;
+        s.setValue("obs/host",     m_obsConfig.host);
+        s.setValue("obs/port",     m_obsConfig.port);
+        s.setValue("obs/password", m_obsConfig.password);
+        // Defer one tick so the window paints first
+        QTimer::singleShot(0, this, [this]() {
+            onObsLog(QStringLiteral("Auto-connecting to %1:%2 …")
+                         .arg(m_obsConfig.host).arg(m_obsConfig.port));
+            m_obsClient->connectToOBS(m_obsConfig);
+        });
+    }
 }
 
 // ── Top bar ───────────────────────────────────────────────────────────────────
@@ -415,7 +466,7 @@ void MainWindow::onApplyLayout()
 
     // Fall back to normalized layout
     QStringList sources;
-    for (int i = 0; i < m_currentTemplate.slots.size(); ++i)
+    for (int i = 0; i < m_currentTemplate.slotList.size(); ++i)
         sources << pattern.arg(i + 1);
     m_obsClient->applyLayout(scene, m_currentTemplate, sources, canvasW, canvasH);
 }
@@ -484,6 +535,7 @@ void MainWindow::onObsLog(const QString &msg)
 
 void MainWindow::onScenesReceived(const QStringList &scenes)
 {
+    m_lastScenes = scenes;
     m_scenesPanel->setScenes(scenes);
 
     const QString target = m_settingsPage->targetScene();
@@ -549,8 +601,8 @@ void MainWindow::onPhaseSelected(ShowPhase phase)
     m_topBar->setStyleSheet(
         QString("#topBar { background: #0d0d12; border-bottom: 2px solid %1; }").arg(border));
 
-    const QStringList labels = {"PRE-SHOW", "LIVE", "POST-SHOW"};
-    onObsLog(QString("Show phase → %1").arg(labels[int(phase)]));
+    const QStringList humanLabels = {"PRE-SHOW", "LIVE", "POST-SHOW"};
+    onObsLog(QString("Show phase → %1").arg(humanLabels[int(phase)]));
 }
 
 void MainWindow::onSlotAssigned(int slotIndex, int participantId)
@@ -566,7 +618,7 @@ void MainWindow::onSlotAssigned(int slotIndex, int participantId)
     }
 
     // Rebuild ordered participant list for canvas (slot index → position)
-    const int nSlots = m_currentTemplate.slots.size();
+    const int nSlots = m_currentTemplate.slotList.size();
     QVector<PreviewCanvas::Participant> cp(nSlots);
     for (const auto &p : m_participants) {
         if (p.slotAssign >= 0 && p.slotAssign < nSlots)
@@ -585,4 +637,129 @@ void MainWindow::onSlotAssigned(int slotIndex, int participantId)
                      if (p.id == participantId) return p.name;
                  return QString::number(participantId);
              }()));
+}
+
+void MainWindow::onSlotClicked(int slotIndex)
+{
+    if (slotIndex < 0 || slotIndex >= m_currentTemplate.slotList.size()) return;
+
+    // Context-sensitive right panel: clicking a slot focuses the Templates
+    // page (which hosts the participants list) and arms click-to-assign so
+    // the user can pick a participant without dragging.
+    m_assignTargetSlot = slotIndex;
+    m_sidebar->setActivePage(Sidebar::Page::Templates);
+    m_rightStack->setCurrentIndex(m_pageTemplates);
+    m_participantPanel->setAssignTarget(slotIndex);
+    onObsLog(QString("Selected Slot %1 — click a participant to assign.")
+                 .arg(slotIndex + 1));
+}
+
+void MainWindow::onParticipantAssignClicked(int participantId)
+{
+    // assignRequested already handles the assign-mode path. This slot is
+    // a hook for any future "select participant first" flow.
+    Q_UNUSED(participantId);
+}
+
+void MainWindow::openCommandPalette()
+{
+    populateCommandPalette();
+    m_commandPalette->run();
+}
+
+void MainWindow::populateCommandPalette()
+{
+    auto *cp = m_commandPalette;
+    cp->clearCommands();
+
+    // Navigation
+    cp->addCommand("Go to Templates", "Navigate", [this]() {
+        m_sidebar->setActivePage(Sidebar::Page::Templates);
+        m_rightStack->setCurrentIndex(m_pageTemplates);
+    });
+    cp->addCommand("Go to Themes", "Navigate", [this]() {
+        m_sidebar->setActivePage(Sidebar::Page::Themes);
+        m_rightStack->setCurrentIndex(m_pageThemes);
+    });
+    cp->addCommand("Go to Scenes", "Navigate", [this]() {
+        m_sidebar->setActivePage(Sidebar::Page::Scenes);
+        m_rightStack->setCurrentIndex(m_pageScenes);
+        m_obsClient->requestSceneList();
+    });
+    cp->addCommand("Go to Macros", "Navigate", [this]() {
+        m_sidebar->setActivePage(Sidebar::Page::Macros);
+        m_rightStack->setCurrentIndex(m_pageMacros);
+    });
+    cp->addCommand("Go to Settings", "Navigate", [this]() {
+        m_sidebar->setActivePage(Sidebar::Page::Settings);
+        m_rightStack->setCurrentIndex(m_pageSettings);
+    });
+
+    // Connection / toggles
+    cp->addCommand(m_obsClient->isConnected() ? "Disconnect from OBS"
+                                              : "Connect to OBS",
+                   "OBS", [this]() { onObsConnect(); });
+    cp->addCommand(m_obsClient->isVirtualCamActive() ? "Stop Virtual Camera"
+                                                    : "Start Virtual Camera",
+                   "OBS", [this]() { onVirtualCamToggle(); });
+    cp->addCommand("Apply current template", "OBS",
+                   [this]() { onApplyLayout(); });
+
+    // Phase
+    cp->addCommand("Phase: Pre-show", "Phase",
+                   [this]() { onPhaseSelected(ShowPhase::PreShow); });
+    cp->addCommand("Phase: Live", "Phase",
+                   [this]() { onPhaseSelected(ShowPhase::Live); });
+    cp->addCommand("Phase: Post-show", "Phase",
+                   [this]() { onPhaseSelected(ShowPhase::PostShow); });
+
+    // Scenes (from last OBS sync)
+    for (const QString &s : m_lastScenes) {
+        const QString sc = s;
+        cp->addCommand(QString("Switch to scene: %1").arg(sc), "Scene",
+                       [this, sc]() { onSceneActivated(sc); });
+    }
+
+    // Templates
+    for (const auto &t : TemplateManager::instance().templates()) {
+        const QString id = t.id;
+        const QString name = t.name;
+        cp->addCommand(QString("Select template: %1").arg(name), "Template",
+                       [this, id]() {
+            if (const auto *tt = TemplateManager::instance().findById(id))
+                onTemplateSelected(*tt);
+        });
+    }
+    // Apply template directly
+    for (const auto &t : TemplateManager::instance().templates()) {
+        const QString id = t.id;
+        const QString name = t.name;
+        cp->addCommand(QString("Apply template: %1").arg(name), "Template",
+                       [this, id]() {
+            if (const auto *tt = TemplateManager::instance().findById(id)) {
+                onTemplateSelected(*tt);
+                onApplyLayout();
+            }
+        });
+    }
+
+    // Themes
+    for (const auto &t : ShowTheme::builtIns()) {
+        const ShowTheme theme = t;
+        cp->addCommand(QString("Theme: %1").arg(theme.name), "Theme",
+                       [this, theme]() { onThemeSelected(theme); });
+    }
+
+    // Participants — assign to currently selected slot (or slot 1 fallback)
+    for (const auto &p : m_participants) {
+        const int pid = p.id;
+        const QString name = p.name;
+        cp->addCommand(QString("Assign %1 to current slot").arg(name),
+                       "Participant", [this, pid]() {
+            int slot = m_assignTargetSlot;
+            if (slot < 0) slot = 0;
+            if (slot < m_currentTemplate.slotList.size())
+                onSlotAssigned(slot, pid);
+        });
+    }
 }

@@ -3,6 +3,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QToolButton>
 #include <QPainter>
 #include <QPainterPath>
 #include <QScrollArea>
@@ -157,6 +158,36 @@ ParticipantPanel::ParticipantPanel(QWidget *parent) : QWidget(parent)
 
     vl->addWidget(header);
 
+    // Assign-mode banner — hidden unless setAssignTarget() activates it
+    m_assignBanner = new QWidget(this);
+    m_assignBanner->setObjectName("assignBanner");
+    m_assignBanner->setStyleSheet(
+        "#assignBanner { background: #1a2a4a; border: 1px solid #2979ff; "
+        "border-radius: 6px; }");
+    auto *bl = new QHBoxLayout(m_assignBanner);
+    bl->setContentsMargins(10, 6, 6, 6);
+    bl->setSpacing(6);
+    m_assignLabel = new QLabel("", m_assignBanner);
+    m_assignLabel->setStyleSheet(
+        "color: #cfe0ff; font-size: 12px; font-weight: 600; background: transparent;");
+    auto *cancel = new QToolButton(m_assignBanner);
+    cancel->setText("✕");
+    cancel->setToolTip("Cancel assignment");
+    cancel->setStyleSheet(
+        "QToolButton { color: #cfe0ff; background: transparent; border: none; "
+        "font-size: 13px; padding: 2px 6px; }"
+        "QToolButton:hover { color: #ffffff; }");
+    connect(cancel, &QToolButton::clicked, this, [this]() { setAssignTarget(-1); });
+    bl->addWidget(m_assignLabel, 1);
+    bl->addWidget(cancel);
+    m_assignBanner->hide();
+
+    auto *bannerWrap = new QWidget(this);
+    auto *bwl = new QHBoxLayout(bannerWrap);
+    bwl->setContentsMargins(8, 0, 8, 6);
+    bwl->addWidget(m_assignBanner);
+    vl->addWidget(bannerWrap);
+
     // Scrollable list
     auto *scroll = new QScrollArea(this);
     scroll->setFrameShape(QFrame::NoFrame);
@@ -192,9 +223,25 @@ void ParticipantPanel::setParticipants(const QVector<ParticipantInfo> &participa
         m_cards.append(card);
         m_listLayout->insertWidget(m_listLayout->count() - 1, card);
         connect(card, &ParticipantCard::assignClicked, this, [this](int pid) {
-            emit assignRequested(pid, 0);
+            emit participantClicked(pid);
+            if (m_assignTarget >= 0) {
+                emit assignRequested(pid, m_assignTarget);
+                setAssignTarget(-1);
+            }
         });
     }
 
     m_countLabel->setText(QString::number(participants.size()));
+}
+
+void ParticipantPanel::setAssignTarget(int slotIndex)
+{
+    m_assignTarget = slotIndex;
+    if (slotIndex < 0) {
+        m_assignBanner->hide();
+        return;
+    }
+    m_assignLabel->setText(
+        QString("Click a participant to assign to Slot %1").arg(slotIndex + 1));
+    m_assignBanner->show();
 }

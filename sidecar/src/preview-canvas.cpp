@@ -7,6 +7,8 @@
 #include <QDragLeaveEvent>
 #include <QDropEvent>
 #include <QMimeData>
+#include <QMouseEvent>
+#include <QApplication>
 #include <cmath>
 
 static const QColor kSlotBg   {0x22, 0x22, 0x30};
@@ -38,8 +40,8 @@ void PreviewCanvas::setParticipants(const QVector<Participant> &participants)
 
 int PreviewCanvas::slotAtPoint(QPoint pt) const
 {
-    for (int i = 0; i < m_tmpl.slots.size(); ++i) {
-        if (slotRect(m_tmpl.slots[i]).contains(pt))
+    for (int i = 0; i < m_tmpl.slotList.size(); ++i) {
+        if (slotRect(m_tmpl.slotList[i]).contains(pt))
             return i;
     }
     return -1;
@@ -81,6 +83,28 @@ void PreviewCanvas::dropEvent(QDropEvent *e)
     e->acceptProposedAction();
 }
 
+void PreviewCanvas::mousePressEvent(QMouseEvent *e)
+{
+    if (e->button() != Qt::LeftButton) { QWidget::mousePressEvent(e); return; }
+    m_pressedSlot = slotAtPoint(e->pos());
+    m_pressPos    = e->pos();
+    QWidget::mousePressEvent(e);
+}
+
+void PreviewCanvas::mouseReleaseEvent(QMouseEvent *e)
+{
+    if (e->button() == Qt::LeftButton && m_pressedSlot >= 0) {
+        const int slotNow = slotAtPoint(e->pos());
+        const int dist    = (e->pos() - m_pressPos).manhattanLength();
+        // Treat as a click only if release lands on the same slot and the
+        // pointer barely moved — anything larger is a drag/resize gesture.
+        if (slotNow == m_pressedSlot && dist < QApplication::startDragDistance())
+            emit slotClicked(m_pressedSlot);
+    }
+    m_pressedSlot = -1;
+    QWidget::mouseReleaseEvent(e);
+}
+
 QRectF PreviewCanvas::slotRect(const TemplateSlot &s) const
 {
     const float W = width()  - kGap;
@@ -105,8 +129,8 @@ void PreviewCanvas::paintEvent(QPaintEvent *)
         return;
     }
 
-    for (int i = 0; i < m_tmpl.slots.size(); ++i)
-        drawSlot(p, slotRect(m_tmpl.slots[i]), i);
+    for (int i = 0; i < m_tmpl.slotList.size(); ++i)
+        drawSlot(p, slotRect(m_tmpl.slotList[i]), i);
 }
 
 void PreviewCanvas::drawSlot(QPainter &p, const QRectF &rect, int idx) const

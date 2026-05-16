@@ -7,6 +7,7 @@
 #include "participant-panel.h"
 #include "sidecar-control-server.h"
 #include <QMainWindow>
+#include <optional>
 
 class PreviewCanvas;
 class TemplatePanel;
@@ -20,13 +21,23 @@ class QPushButton;
 class QPlainTextEdit;
 class QDockWidget;
 class QStackedWidget;
+class CommandPalette;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     enum class ShowPhase { PreShow, Live, PostShow };
 
-    explicit MainWindow(QWidget *parent = nullptr);
+    // Optional launch-time overrides — typically supplied by the parent
+    // OBS plugin via CLI flags so the user gets a one-click connected sidecar.
+    struct StartupConfig {
+        std::optional<QString> hostOverride;
+        std::optional<int>     portOverride;
+        std::optional<QString> passwordOverride;
+        bool                   autoConnect = false;
+    };
+
+    explicit MainWindow(const StartupConfig &startup, QWidget *parent = nullptr);
 
 private slots:
     void onPageSelected(Sidebar::Page p);
@@ -45,6 +56,10 @@ private slots:
     void onMacroTriggered(const Macro &macro);
     void onPhaseSelected(ShowPhase phase);
     void onSlotAssigned(int slotIndex, int participantId);
+    void onSlotClicked(int slotIndex);
+    void onParticipantAssignClicked(int participantId);
+    void openCommandPalette();
+    void populateCommandPalette();
 
 private:
     void buildTopBar(QWidget *parent);
@@ -101,5 +116,12 @@ private:
     OBSClient::Config          m_obsConfig;
     Sidebar                   *m_sidebar        = nullptr;
     QVector<ParticipantInfo>   m_participants;
+    QStringList                m_lastScenes;
     SidecarControlServer      *m_controlServer  = nullptr;
+
+    // Click-to-assign mode: when ≥ 0, the next participant card click is
+    // routed to this slot index instead of starting a drag flow.
+    int                        m_assignTargetSlot = -1;
+
+    CommandPalette            *m_commandPalette = nullptr;
 };

@@ -20,7 +20,7 @@ LayoutTemplate LayoutTemplate::fromJson(const QJsonObject &obj)
         slot.height  = s["height"].toDouble(1.0);
         slot.label   = s["label"].toString();
         slot.isMain  = s["isMain"].toBool(false);
-        t.slots.append(slot);
+        t.slotList.append(slot);
     }
     return t;
 }
@@ -28,7 +28,7 @@ LayoutTemplate LayoutTemplate::fromJson(const QJsonObject &obj)
 QJsonObject LayoutTemplate::toJson() const
 {
     QJsonArray slotArr;
-    for (const auto &s : slots) {
+    for (const auto &s : slotList) {
         slotArr.append(QJsonObject{
             {"index",  s.index},
             {"x",      s.x},

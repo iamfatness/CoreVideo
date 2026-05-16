@@ -9,6 +9,7 @@
 struct ZoomSource;
 
 struct ZoomOutputInfo {
+    std::string source_uuid;
     std::string source_name;
     std::string display_name; // user-editable label; falls back to source_name if empty
     uint32_t participant_id = 0;

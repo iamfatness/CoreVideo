@@ -69,8 +69,10 @@ struct ZoomSource {
     void activate();
     void deactivate();
     void on_roster_changed();
-    void on_engine_frame(uint32_t width, uint32_t height);
-    void on_engine_audio(uint32_t byte_len);
+    void on_engine_frame(uint32_t width, uint32_t height,
+                         uint32_t resolved_participant_id);
+    void on_engine_audio(uint32_t byte_len,
+                         uint32_t resolved_participant_id);
 
     uint32_t width() const;
     uint32_t height() const;

@@ -1,6 +1,7 @@
 #include "zoom-osc-server.h"
 #include "obs-utils.h"
 #include "zoom-engine-client.h"
+#include "zoom-iso-recorder.h"
 #include "zoom-output-manager.h"
 #include "zoom-reconnect.h"
 #include "zoom-settings.h"
@@ -468,6 +469,28 @@ void ZoomOscServer::dispatch(const QString &address,
     // /zoom/recovery/cancel
     if (address == "/zoom/recovery/cancel") {
         ZoomReconnectManager::instance().cancel();
+        return;
+    }
+
+    // /zoom/iso/start [,s output_dir]
+    if (address == "/zoom/iso/start") {
+        ZoomIsoRecordConfig cfg;
+        if (!args.empty() && args[0].type == OscArg::String)
+            cfg.output_dir = args[0].s;
+        std::string error;
+        if (!ZoomIsoRecorder::instance().start(cfg, &error)) {
+            blog(LOG_WARNING, "[obs-zoom-plugin] OSC /zoom/iso/start failed: %s",
+                 error.c_str());
+            return;
+        }
+        for (const auto &o : ZoomOutputManager::instance().outputs())
+            ZoomIsoRecorder::instance().on_output_updated(o);
+        return;
+    }
+
+    // /zoom/iso/stop
+    if (address == "/zoom/iso/stop") {
+        ZoomIsoRecorder::instance().stop();
         return;
     }
 

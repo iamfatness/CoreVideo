@@ -183,7 +183,8 @@ void EngineAudio::output_audio_frame(AudioTarget &target,
 
     EngineIpc::write(
         R"({"cmd":"audio","source_uuid":")" + source_uuid +
-        R"(","byte_len":)" + std::to_string(byte_len) + "}");
+        R"(","participant_id":)" + std::to_string(target.participant_id) +
+        R"(,"byte_len":)" + std::to_string(byte_len) + "}");
 }
 
 void EngineAudio::onMixedAudioRawDataReceived(AudioRawData *data)

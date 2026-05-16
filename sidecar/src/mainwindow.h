@@ -9,6 +9,8 @@
 #include "participant-panel.h"
 #include "sidecar-control-server.h"
 #include "look.h"
+#include "lower-third-controller.h"
+#include "director-automation.h"
 #include "me-bus.h"
 #include "preview-canvas.h"
 #include "zoom-control-client.h"
@@ -97,6 +99,7 @@ private:
     void renderLookToOBS(const Look &look, bool makeProgram);
     void reconcileParticipantSlots(const QVector<ParticipantInfo> &participants);
     void syncZoomOutputAssignments();
+    void updateParticipantSyncedLowerThirds();
     void loadCustomLooks();
     void saveCustomLooks() const;
     QVector<Look> allLooks() const;
@@ -183,6 +186,9 @@ private:
     Sidebar                   *m_sidebar        = nullptr;
     QVector<ParticipantInfo>   m_participants;
     QVector<Look>              m_customLooks;
+    LowerThirdController       m_lowerThirds;
+    DirectorAutomationSettings m_directorAutomation;
+    DirectorAutomationState    m_directorState;
     QStringList                m_outputSources;
     QHash<int, int>            m_lastSyncedSlotParticipants;
     // Per-slot audio routing — driven by right-click on a slot in either

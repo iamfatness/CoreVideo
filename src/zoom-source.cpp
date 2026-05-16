@@ -1,5 +1,6 @@
 #include "zoom-source.h"
 #include "zoom-engine-client.h"
+#include "zoom-iso-recorder.h"
 #include "zoom-settings.h"
 #include <media-io/audio-io.h>
 #include <media-io/video-io.h>
@@ -239,6 +240,8 @@ void ZoomSource::apply_settings(obs_data_t *settings)
         if (effective != HwAccelMode::None)
             m_hw_pipeline.init(effective);
     }
+
+    ZoomIsoRecorder::instance().on_output_updated(output_info());
 }
 
 std::string ZoomSource::output_name() const
@@ -250,6 +253,7 @@ std::string ZoomSource::output_name() const
 ZoomOutputInfo ZoomSource::output_info() const
 {
     ZoomOutputInfo info;
+    info.source_uuid = source_uuid;
     info.source_name = output_name();
     info.display_name = output_display_name;
     info.participant_id = participant_id;
@@ -464,7 +468,8 @@ void ZoomSource::on_roster_changed()
     if (want != m_current_subscription_id) subscribe();
 }
 
-void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height)
+void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height,
+                                 uint32_t resolved_participant_id)
 {
     std::lock_guard<std::mutex> lk(m_mtx);
     const std::string shm_name = IPC_SHM_PREFIX + source_uuid;
@@ -562,6 +567,9 @@ void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height)
     set_yuv_frame_color_info(frame);
 
     obs_source_output_video(source, &frame);
+    ZoomIsoRecorder::instance().record_video_frame(
+        output_info(), resolved_participant_id, w, h, y_ptr, u_ptr, v_ptr,
+        w, w / 2, ts);
     ++m_frame_count;
     if (m_fps_window_start_ns == 0) {
         m_fps_window_start_ns = ts;
@@ -596,7 +604,8 @@ void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height)
     }
 }
 
-void ZoomSource::on_engine_audio(uint32_t event_byte_len)
+void ZoomSource::on_engine_audio(uint32_t event_byte_len,
+                                 uint32_t resolved_participant_id)
 {
     std::lock_guard<std::mutex> lk(m_mtx);
     const std::string shm_name = IPC_SHM_PREFIX + source_uuid + "_audio";
@@ -640,10 +649,11 @@ void ZoomSource::on_engine_audio(uint32_t event_byte_len)
     }
     if (!copied) return;
     const auto *pcm = reinterpret_cast<const int16_t *>(m_audio_buf.data());
+    const uint64_t ts = os_gettime_ns();
 
     obs_source_audio audio = {};
     audio.samples_per_sec = sample_rate;
-    audio.timestamp = os_gettime_ns();
+    audio.timestamp = ts;
 
     if (audio_mode == AudioChannelMode::Stereo && channels == 1) {
         const uint32_t mono_frames = byte_len / kZoomBytesPerSample;
@@ -665,6 +675,9 @@ void ZoomSource::on_engine_audio(uint32_t event_byte_len)
         audio.speakers = channels == 2 ? SPEAKERS_STEREO : SPEAKERS_MONO;
     }
     obs_source_output_audio(source, &audio);
+    ZoomIsoRecorder::instance().record_audio_frame(
+        output_info(), resolved_participant_id, m_audio_buf.data(), byte_len,
+        sample_rate, channels, ts);
     ++m_audio_frame_count;
     if (m_audio_frame_count == 1 || m_audio_frame_count % 250 == 0) {
         int peak = 0;
@@ -800,8 +813,12 @@ static void *zoom_source_create(obs_data_t *settings, obs_source_t *source)
     ctx->apply_settings(settings);
 
     ZoomEngineClient::instance().register_source(ctx->source_uuid, {
-        [ctx](uint32_t w, uint32_t h) { ctx->on_engine_frame(w, h); },
-        [ctx](uint32_t byte_len) { ctx->on_engine_audio(byte_len); }
+        [ctx](uint32_t w, uint32_t h, uint32_t participant_id) {
+            ctx->on_engine_frame(w, h, participant_id);
+        },
+        [ctx](uint32_t byte_len, uint32_t participant_id) {
+            ctx->on_engine_audio(byte_len, participant_id);
+        }
     });
     ZoomEngineClient::instance().add_roster_callback(ctx,
         [ctx]() { ctx->on_roster_changed(); });
@@ -849,6 +866,7 @@ static void zoom_source_destroy(void *data)
     if (ctx->m_hk_active_on_id  != OBS_INVALID_HOTKEY_ID) obs_hotkey_unregister(ctx->m_hk_active_on_id);
     if (ctx->m_hk_active_off_id != OBS_INVALID_HOTKEY_ID) obs_hotkey_unregister(ctx->m_hk_active_off_id);
     ZoomOutputManager::instance().unregister_source(ctx);
+    ZoomIsoRecorder::instance().on_output_removed(ctx->source_uuid);
     ctx->unsubscribe();
     ZoomEngineClient::instance().remove_roster_callback(ctx);
     ZoomEngineClient::instance().unregister_source(ctx->source_uuid);

@@ -665,10 +665,14 @@ void ZoomEngineClient::handle_event(const std::string &line)
                  obj.value("w").toInt(), obj.value("h").toInt());
         }
         callbacks.on_frame(static_cast<uint32_t>(obj.value("w").toInt()),
-                           static_cast<uint32_t>(obj.value("h").toInt()));
+                           static_cast<uint32_t>(obj.value("h").toInt()),
+                           static_cast<uint32_t>(
+                               obj.value("participant_id").toInt()));
     }
     if (cmd == "audio" && callbacks.on_audio) {
-        callbacks.on_audio(static_cast<uint32_t>(obj.value("byte_len").toInt()));
+        callbacks.on_audio(static_cast<uint32_t>(obj.value("byte_len").toInt()),
+                           static_cast<uint32_t>(
+                               obj.value("participant_id").toInt()));
     }
 }
 

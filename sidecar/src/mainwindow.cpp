@@ -308,6 +308,7 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
     connect(m_zoomClient, &ZoomControlClient::participantsUpdated,
             this, [this](const QVector<ParticipantInfo> &participants) {
         reconcileParticipantSlots(participants);
+        updateParticipantSyncedLowerThirds();
         m_participantPanel->setParticipants(m_participants);
         if (m_sceneCanvas) m_sceneCanvas->setParticipants(participantsForLook(m_working));
         if (m_liveCanvas && m_bus) m_liveCanvas->setParticipants(participantsForLook(m_bus->program()));
@@ -936,8 +937,32 @@ void MainWindow::reconcileParticipantSlots(const QVector<ParticipantInfo> &parti
 
     m_participants = merged;
     m_working = lookWithCurrentAssignments(m_working);
+    updateParticipantSyncedLowerThirds();
     if (m_bus)
         m_bus->stageLook(m_working);
+}
+
+void MainWindow::updateParticipantSyncedLowerThirds()
+{
+    if (!m_working.tmpl.isValid())
+        return;
+
+    m_working.overlays.erase(
+        std::remove_if(m_working.overlays.begin(), m_working.overlays.end(),
+                       [](const Overlay &ov) {
+                           return LowerThirdController::isAutoLowerThird(ov);
+                       }),
+        m_working.overlays.end());
+
+    const QVector<Overlay> generated =
+        m_lowerThirds.participantSyncedOverlays(m_working, m_participants);
+    for (const Overlay &ov : generated)
+        m_working.overlays.append(ov);
+
+    if (m_bus)
+        m_bus->stageLook(m_working);
+    if (m_overlayPanel)
+        m_overlayPanel->setActiveOverlays(m_working.overlays);
 }
 
 void MainWindow::syncZoomOutputAssignments()
@@ -1724,6 +1749,7 @@ void MainWindow::onSlotAssigned(int slotIndex, int participantId)
                        }),
         m_working.slotAssignments.end());
     m_working.slotAssignments.append({slotIndex, participantId});
+    updateParticipantSyncedLowerThirds();
     m_bus->stageLook(m_working);
 
     m_lastSyncedSlotParticipants.remove(slotIndex);

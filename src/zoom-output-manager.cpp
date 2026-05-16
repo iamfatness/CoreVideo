@@ -1,4 +1,5 @@
 #include "zoom-output-manager.h"
+#include "zoom-iso-recorder.h"
 #include "zoom-source.h"
 #include <algorithm>
 #include <obs-module.h>
@@ -36,7 +37,8 @@ std::vector<ZoomOutputInfo> ZoomOutputManager::outputs() const
     out.reserve(sources.size());
     for (auto *source : sources) {
         if (!source) continue;
-        out.push_back(source->output_info());
+        ZoomOutputInfo info = source->output_info();
+        out.push_back(info);
     }
     return out;
 }
@@ -82,6 +84,7 @@ bool ZoomOutputManager::configure_output_ex(const std::string &source_name,
                                     failover_participant_id, isolate_audio,
                                     audio_mode, video_resolution,
                                     audience_audio);
+        ZoomIsoRecorder::instance().on_output_updated(source->output_info());
         return true;
     }
     return false;
@@ -118,6 +121,7 @@ bool ZoomOutputManager::configure_output(const std::string &source_name,
         source->configure_output(participant_id, active_speaker,
                                  isolate_audio, audio_mode, video_resolution,
                                  audience_audio);
+        ZoomIsoRecorder::instance().on_output_updated(source->output_info());
         return true;
     }
     return false;

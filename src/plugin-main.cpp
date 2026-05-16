@@ -8,6 +8,7 @@
 #include "zoom-settings-dialog.h"
 #include "zoom-output-dialog.h"
 #include "zoom-dock.h"
+#include "zoom-iso-recorder.h"
 #include "zoom-control-server.h"
 #include "zoom-osc-server.h"
 #include <QCoreApplication>
@@ -156,5 +157,6 @@ void obs_module_unload(void)
     blog(LOG_INFO, "[obs-zoom-plugin] Unloading plugin");
     ZoomControlServer::instance().stop();
     ZoomOscServer::instance().stop();
+    ZoomIsoRecorder::instance().stop();
     ZoomEngineClient::instance().stop();
 }

@@ -195,7 +195,8 @@ void ParticipantSubscription::onRawDataFrameReceived(YUVRawDataI420 *data)
 
         EngineIpc::write(
             R"({"cmd":"frame","source_uuid":")" + source_uuid +
-            R"(","w":)" + std::to_string(w) + R"(,"h":)" + std::to_string(h) + "}");
+            R"(","participant_id":)" + std::to_string(m_participant_id) +
+            R"(,"w":)" + std::to_string(w) + R"(,"h":)" + std::to_string(h) + "}");
     }
 }
 

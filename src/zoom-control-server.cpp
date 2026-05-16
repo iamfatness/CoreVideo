@@ -1,6 +1,7 @@
 #include "zoom-control-server.h"
 #include "obs-utils.h"
 #include "zoom-engine-client.h"
+#include "zoom-iso-recorder.h"
 #include "zoom-oauth.h"
 #include "zoom-output-manager.h"
 #include "zoom-reconnect.h"
@@ -180,6 +181,7 @@ void ZoomControlServer::on_new_connection()
 static QJsonObject output_to_json(const ZoomOutputInfo &o)
 {
     QJsonObject obj;
+    obj["source_uuid"]    = QString::fromStdString(o.source_uuid);
     obj["source"]         = QString::fromStdString(o.source_name);
     obj["display_name"]   = o.display_name.empty()
                             ? QString::fromStdString(o.source_name)
@@ -327,6 +329,36 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
         for (const auto &o : ZoomOutputManager::instance().outputs())
             outputs.append(output_to_json(o));
         write_response(socket, {{"ok", true}, {"outputs", outputs}});
+        return;
+    }
+
+    if (cmd == "iso_recording_start") {
+        ZoomIsoRecordConfig cfg;
+        cfg.output_dir = req.value("output_dir").toString().toStdString();
+        cfg.ffmpeg_path = req.value("ffmpeg_path").toString("ffmpeg").toStdString();
+        cfg.record_program = req.value("record_program").toBool(true);
+        std::string error;
+        const bool ok = ZoomIsoRecorder::instance().start(cfg, &error);
+        for (const auto &o : ZoomOutputManager::instance().outputs())
+            ZoomIsoRecorder::instance().on_output_updated(o);
+        write_response(socket, ok
+            ? QJsonObject{{"ok", true}, {"sessions", ZoomIsoRecorder::instance().status_json()}}
+            : QJsonObject{{"ok", false}, {"error", QString::fromStdString(error)}});
+        return;
+    }
+
+    if (cmd == "iso_recording_stop") {
+        ZoomIsoRecorder::instance().stop();
+        write_response(socket, {{"ok", true}});
+        return;
+    }
+
+    if (cmd == "iso_recording_status") {
+        write_response(socket, {
+            {"ok", true},
+            {"active", ZoomIsoRecorder::instance().active()},
+            {"sessions", ZoomIsoRecorder::instance().status_json()},
+        });
         return;
     }
 

@@ -13,8 +13,10 @@
 class ZoomEngineClient {
 public:
     struct SourceCallbacks {
-        std::function<void(uint32_t width, uint32_t height)> on_frame;
-        std::function<void(uint32_t byte_len)> on_audio;
+        std::function<void(uint32_t width, uint32_t height,
+                           uint32_t participant_id)> on_frame;
+        std::function<void(uint32_t byte_len,
+                           uint32_t participant_id)> on_audio;
     };
 
     static ZoomEngineClient &instance();

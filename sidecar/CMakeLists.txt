@@ -23,6 +23,7 @@ set(SOURCES
     src/template-manager.cpp
     src/look-library.cpp
     src/look-panel.cpp
+    src/lower-third-controller.cpp
     src/me-bus.cpp
     src/overlay-panel.cpp
     src/obs-client.cpp
@@ -84,6 +85,15 @@ if(BUILD_TESTING)
         COMMAND CoreVideoSidecarCatalogTest "${CMAKE_CURRENT_SOURCE_DIR}/data")
     add_test(NAME CoreVideoSidecarRendererConfig
         COMMAND CoreVideoSidecarRendererConfigTest)
+    add_executable(CoreVideoSidecarLowerThirdTest
+        tests/lower-third-test.cpp
+        src/lower-third-controller.cpp
+        src/layout-template.cpp
+    )
+    target_include_directories(CoreVideoSidecarLowerThirdTest PRIVATE src)
+    target_link_libraries(CoreVideoSidecarLowerThirdTest PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets)
+    add_test(NAME CoreVideoSidecarLowerThirds
+        COMMAND CoreVideoSidecarLowerThirdTest)
     if(WIN32 AND _qt_runtime_dir)
         set_tests_properties(CoreVideoSidecarVersion PROPERTIES
             ENVIRONMENT_MODIFICATION
@@ -94,6 +104,9 @@ if(BUILD_TESTING)
         set_tests_properties(CoreVideoSidecarRendererConfig PROPERTIES
             ENVIRONMENT_MODIFICATION
                 "PATH=path_list_prepend:$<TARGET_FILE_DIR:CoreVideoSidecarRendererConfigTest>;PATH=path_list_prepend:${_qt_runtime_dir}")
+        set_tests_properties(CoreVideoSidecarLowerThirds PROPERTIES
+            ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:CoreVideoSidecarLowerThirdTest>;PATH=path_list_prepend:${_qt_runtime_dir}")
     endif()
 endif()
 

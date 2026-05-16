@@ -1222,6 +1222,11 @@ sequenceDiagram
       position in OBS. It is the primary UI for meeting management.
     </p>
 
+    <div class="diagram-wrap">
+      <img src="/core-plugin/images/corevideo-obs-workspace.svg" alt="CoreVideo OBS workspace with Zoom Control dock" style="max-width:100%;height:auto;">
+      <div class="diagram-caption">CoreVideo runs as normal OBS UI: the Zoom Control dock manages meeting state and raw media while Zoom Participant sources render inside OBS scenes.</div>
+    </div>
+
     <h3>Meeting Control Bar</h3>
     <table>
       <tr><th>Control</th><th>Description</th></tr>
@@ -1396,6 +1401,11 @@ sequenceDiagram
       <tr><td><code>ZoomOutputProfile::remove(name)</code></td><td>Deletes profile JSON file</td></tr>
     </table>
 
+    <div class="diagram-wrap">
+      <img src="/core-plugin/images/corevideo-output-manager.svg" alt="CoreVideo Output Manager with participant and output mapping" style="max-width:100%;height:auto;">
+      <div class="diagram-caption">The Output Manager shows live participants, source assignments, observed resolution/frame rate, and audio routing for each output.</div>
+    </div>
+
     <h3>Profile JSON format</h3>
     <pre><code>[
   {
@@ -1524,6 +1534,10 @@ sequenceDiagram
     </table>
 
     <h3>Zoom Participant Source Properties</h3>
+    <div class="diagram-wrap">
+      <img src="/core-plugin/images/corevideo-source-properties.svg" alt="CoreVideo Zoom Participant source properties" style="max-width:100%;height:auto;">
+      <div class="diagram-caption">Each Zoom Participant source keeps its own assignment mode, audio routing, requested resolution, and failover behavior.</div>
+    </div>
     <table>
       <tr><th>Property</th><th>Default</th><th>Description</th></tr>
       <tr><td>Output Label</td><td>—</td><td>Label shown in the OBS Output Manager</td></tr>

@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="760" viewBox="0 0 1080 760" role="img" aria-labelledby="title desc">
+  <title id="title">CoreVideo Zoom Participant source properties</title>
+  <desc id="desc">Screenshot-style illustration of OBS source properties for a CoreVideo Zoom Participant source.</desc>
+  <defs>
+    <style>
+      .bg{fill:#0b0d12}.window{fill:#151923;stroke:#343b4d}.header{fill:#1f2532}.panel{fill:#10141d;stroke:#2b3345}.field{fill:#202637;stroke:#3a4358}.text{fill:#f4f7ff;font-family:Segoe UI,Arial,sans-serif}.muted{fill:#94a0b8}.green{fill:#28d17c}.blue{fill:#2f81f7}.tiny{font-size:14px}.small{font-size:16px}.label{font-size:21px;font-weight:700}.button{fill:#242b3a;stroke:#3a4358}.primary{fill:#2f81f7}
+    </style>
+  </defs>
+  <rect class="bg" width="1080" height="760"/>
+  <rect class="window" x="120" y="48" width="840" height="664" rx="10"/>
+  <rect class="header" x="120" y="48" width="840" height="58" rx="10"/>
+  <text class="text label" x="150" y="84">Properties for "Zoom Participant 1"</text>
+  <rect class="panel" x="150" y="132" width="780" height="472" rx="8"/>
+
+  <text class="muted small" x="180" y="174">Connection status</text>
+  <rect class="field" x="380" y="150" width="510" height="38" rx="6"/><circle cx="404" cy="169" r="7" class="green"/><text class="text small" x="422" y="175">In meeting - receiving video</text>
+
+  <text class="muted small" x="180" y="226">Output label</text>
+  <rect class="field" x="380" y="202" width="510" height="38" rx="6"/><text class="text small" x="398" y="227">Guest ISO 1</text>
+
+  <text class="muted small" x="180" y="278">Participant</text>
+  <rect class="field" x="380" y="254" width="510" height="38" rx="6"/><text class="text small" x="398" y="279">Alex Rivera [video]</text>
+
+  <text class="muted small" x="180" y="330">Assignment mode</text>
+  <rect class="field" x="380" y="306" width="510" height="38" rx="6"/><text class="text small" x="398" y="331">Participant / Active Speaker / Spotlight Slot / Screen Share</text>
+
+  <text class="muted small" x="180" y="382">Spotlight slot</text>
+  <rect class="field" x="380" y="358" width="160" height="38" rx="6"/><text class="text small" x="450" y="383">1</text>
+  <text class="muted small" x="586" y="382">Failover participant</text>
+  <rect class="field" x="736" y="358" width="154" height="38" rx="6"/><text class="text small" x="758" y="383">Sam Chen</text>
+
+  <text class="muted small" x="180" y="434">Audio routing</text>
+  <rect class="field" x="380" y="410" width="148" height="38" rx="6"/><text class="text small" x="412" y="435">Isolated</text>
+  <rect class="field" x="544" y="410" width="148" height="38" rx="6"/><text class="text small" x="590" y="435">Mono</text>
+  <rect class="field" x="708" y="410" width="182" height="38" rx="6"/><text class="text small" x="746" y="435">Audience off</text>
+
+  <text class="muted small" x="180" y="486">Requested video</text>
+  <rect class="field" x="380" y="462" width="160" height="38" rx="6"/><text class="text small" x="430" y="487">1080p</text>
+  <text class="muted small" x="586" y="486">Video loss</text>
+  <rect class="field" x="736" y="462" width="154" height="38" rx="6"/><text class="text small" x="768" y="487">Color bars</text>
+
+  <text class="muted small" x="180" y="538">Hardware accel</text>
+  <rect class="field" x="380" y="514" width="510" height="38" rx="6"/><text class="text small" x="398" y="539">Auto - FFmpeg I420 to NV12 when available</text>
+
+  <rect class="button" x="150" y="628" width="132" height="42" rx="8"/><text class="text small" x="178" y="654">Refresh</text>
+  <rect class="primary" x="646" y="628" width="132" height="42" rx="8"/><text class="text small" x="692" y="654">OK</text>
+  <rect class="button" x="798" y="628" width="132" height="42" rx="8"/><text class="text small" x="836" y="654">Cancel</text>
+  <text class="muted tiny" x="150" y="704">Each Zoom Participant source can be fixed, active-speaker, spotlight, or screen-share driven while keeping its own audio and resolution settings.</text>
+</svg>

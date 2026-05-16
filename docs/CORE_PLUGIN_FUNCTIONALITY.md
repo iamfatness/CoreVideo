@@ -19,6 +19,29 @@ and forwards the same copied buffer to optional plugin-side services such as ISO
 recording. This keeps the engine minimal and makes OBS/plugin features easier to
 test independently from the Zoom SDK.
 
+## What It Looks Like in OBS
+
+The CoreVideo plugin is operated from inside OBS. The main pieces operators see
+are the Zoom Control dock, regular OBS scenes/sources, the Zoom Output Manager,
+and the Zoom Participant source properties.
+
+![CoreVideo OBS workspace with Zoom Control dock](images/corevideo-obs-workspace.svg)
+
+The Zoom Control dock joins and leaves meetings, starts and stops raw media, shows
+meeting state, lists participants, and shows output assignments without leaving
+OBS.
+
+![CoreVideo Output Manager](images/corevideo-output-manager.svg)
+
+The Output Manager maps actual Zoom participant names to OBS sources and shows
+requested resolution, observed signal, frame rate, and audio routing.
+
+![CoreVideo Zoom Participant source properties](images/corevideo-source-properties.svg)
+
+Each Zoom Participant source can be configured independently for fixed
+participants, active speaker, spotlight slot, screen share, isolated audio,
+audience audio, resolution, video-loss behavior, and hardware conversion.
+
 ## Joining Meetings
 
 1. Open OBS.

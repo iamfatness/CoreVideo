@@ -50,6 +50,14 @@ void PreviewCanvas::setAccent(const QColor &c)
     }
 }
 
+void PreviewCanvas::setOpacity(float opacity)
+{
+    const float clamped = std::clamp(opacity, 0.0f, 1.0f);
+    if (qFuzzyCompare(clamped, m_opacity)) return;
+    m_opacity = clamped;
+    update();
+}
+
 // ── Drag-and-drop ─────────────────────────────────────────────────────────────
 
 int PreviewCanvas::slotAtPoint(QPoint pt) const
@@ -151,6 +159,13 @@ void PreviewCanvas::paintEvent(QPaintEvent *)
     const QRectF canvas(0, 0, width(), height());
     for (const auto &ov : m_overlays)
         drawOverlay(p, ov, canvas);
+
+    // Dim layer for AUTO / FTB. Painted last so it sits above everything.
+    if (m_opacity < 1.0f) {
+        const int alpha = int(std::clamp((1.0f - m_opacity) * 255.0f,
+                                         0.0f, 255.0f));
+        p.fillRect(rect(), QColor(0, 0, 0, alpha));
+    }
 }
 
 void PreviewCanvas::drawOverlay(QPainter &p, const Overlay &ov,

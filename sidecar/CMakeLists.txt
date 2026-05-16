@@ -23,6 +23,7 @@ set(SOURCES
     src/template-manager.cpp
     src/look-library.cpp
     src/look-panel.cpp
+    src/me-bus.cpp
     src/overlay-panel.cpp
     src/obs-client.cpp
     src/obs-connect-dialog.cpp

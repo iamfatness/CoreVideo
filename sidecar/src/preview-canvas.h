@@ -28,6 +28,8 @@ public:
     // Accent color used when an overlay doesn't specify one — usually the
     // active theme accent. Defaults to a neutral blue.
     void setAccent(const QColor &c);
+    // 1.0 = fully visible, 0.0 = black. Used by MEBus for AUTO / FTB.
+    void setOpacity(float opacity);
 
 signals:
     void slotAssigned(int slotIndex, int participantId);
@@ -47,6 +49,7 @@ private:
     QVector<Participant> m_parts;
     QVector<Overlay>     m_overlays;
     QColor               m_accent = QColor(0x29, 0x79, 0xff);
+    float                m_opacity = 1.0f;
     int                  m_hoveredSlot = -1;
     int                  m_pressedSlot = -1;
     QPoint               m_pressPos;

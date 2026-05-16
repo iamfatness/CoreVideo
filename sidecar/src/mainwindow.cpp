@@ -20,6 +20,7 @@
 #include <QVBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QComboBox>
 #include <QFrame>
 #include <QPlainTextEdit>
 #include <QDockWidget>
@@ -82,19 +83,32 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
 
     m_swapBtn       = makeBtn("⇄  SWAP");
     m_takeBtn       = makeBtn("⏵  TAKE", true);
-    auto *spotBtn   = makeBtn("◉  Spotlight");
-    auto *lowerBtn  = makeBtn("▼  Lower Thirds");
-    m_vcamBtn       = makeBtn("⏺  V-Cam OFF");
+    m_autoBtn       = makeBtn("⏬  AUTO");
+    m_ftbBtn        = makeBtn("■  FTB");
     auto *streamBtn = makeBtn("⏩  Stream");
+    m_vcamBtn       = makeBtn("⏺  V-Cam OFF");
 
     m_takeBtn->setFixedWidth(110);
+    m_autoBtn->setFixedWidth(100);
+    m_ftbBtn->setFixedWidth(80);
     m_swapBtn->setFixedWidth(90);
+
+    // AUTO duration picker — common broadcast values 0.5s..5s.
+    m_autoDurationCombo = new QComboBox(toolbar);
+    m_autoDurationCombo->setFixedHeight(30);
+    m_autoDurationCombo->setFixedWidth(76);
+    m_autoDurationCombo->addItem("0.5s",  500);
+    m_autoDurationCombo->addItem("1.0s", 1000);
+    m_autoDurationCombo->addItem("1.5s", 1500);
+    m_autoDurationCombo->addItem("2.0s", 2000);
+    m_autoDurationCombo->addItem("5.0s", 5000);
+    m_autoDurationCombo->setCurrentIndex(2); // 1.5s default
 
     tbRow->addWidget(m_swapBtn);
     tbRow->addWidget(m_takeBtn);
-    tbRow->addSpacing(12);
-    tbRow->addWidget(spotBtn);
-    tbRow->addWidget(lowerBtn);
+    tbRow->addWidget(m_autoBtn);
+    tbRow->addWidget(m_autoDurationCombo);
+    tbRow->addWidget(m_ftbBtn);
     tbRow->addStretch(1);
     tbRow->addWidget(m_vcamBtn);
     tbRow->addWidget(streamBtn);
@@ -148,15 +162,55 @@ MainWindow::MainWindow(const StartupConfig &startup, QWidget *parent)
     // ── Connections ───────────────────────────────────────────────────────────
     connect(m_sidebar, &Sidebar::pageSelected, this, &MainWindow::onPageSelected);
     connect(m_takeBtn, &QPushButton::clicked,  this, &MainWindow::onTake);
+    connect(m_autoBtn, &QPushButton::clicked,  this, &MainWindow::onAuto);
+    connect(m_ftbBtn,  &QPushButton::clicked,  this, &MainWindow::onFTB);
     connect(m_swapBtn, &QPushButton::clicked,  this, &MainWindow::onSwapBuses);
     connect(m_engineBtn, &QPushButton::clicked, this, &MainWindow::onEngineToggle);
     connect(m_obsBtn,  &QPushButton::clicked,  this, &MainWindow::onObsConnect);
     connect(m_vcamBtn, &QPushButton::clicked,  this, &MainWindow::onVirtualCamToggle);
 
-    // Spacebar = TAKE
+    // Spacebar = TAKE, Enter = AUTO, F12 = FTB
     auto *takeShortcut = new QShortcut(QKeySequence(Qt::Key_Space), this);
     takeShortcut->setContext(Qt::ApplicationShortcut);
     connect(takeShortcut, &QShortcut::activated, this, &MainWindow::onTake);
+
+    auto *autoShortcut = new QShortcut(QKeySequence(Qt::Key_Return), this);
+    autoShortcut->setContext(Qt::ApplicationShortcut);
+    connect(autoShortcut, &QShortcut::activated, this, &MainWindow::onAuto);
+
+    auto *autoShortcut2 = new QShortcut(QKeySequence(Qt::Key_Enter), this);
+    autoShortcut2->setContext(Qt::ApplicationShortcut);
+    connect(autoShortcut2, &QShortcut::activated, this, &MainWindow::onAuto);
+
+    auto *ftbShortcut = new QShortcut(QKeySequence(Qt::Key_F12), this);
+    ftbShortcut->setContext(Qt::ApplicationShortcut);
+    connect(ftbShortcut, &QShortcut::activated, this, &MainWindow::onFTB);
+
+    // Bus drives PGM canvas opacity during AUTO / FTB.
+    connect(m_bus, &MEBus::pgmOpacityChanged, this, [this](float o) {
+        if (m_liveCanvas) m_liveCanvas->setOpacity(o);
+    });
+    // Disable transition buttons while a transition is in flight to keep
+    // the gesture atomic — no overlapping AUTOs.
+    connect(m_bus, &MEBus::transitionStarted, this,
+            [this](MEBus::TransitionKind k, int) {
+        m_takeBtn->setEnabled(false);
+        m_autoBtn->setEnabled(false);
+        m_swapBtn->setEnabled(false);
+        // FTB stays enabled only when itself is the active transition, so
+        // the operator can interrupt — but for slice 4 just lock it out.
+        m_ftbBtn->setEnabled(false);
+        if (k == MEBus::FTBOn || k == MEBus::FTBOff) {
+            m_ftbBtn->setText((k == MEBus::FTBOn) ? "■  …→BLK" : "■  BLK→…");
+        }
+    });
+    connect(m_bus, &MEBus::transitionEnded, this, [this]() {
+        m_takeBtn->setEnabled(true);
+        m_autoBtn->setEnabled(true);
+        m_swapBtn->setEnabled(true);
+        m_ftbBtn->setEnabled(true);
+        m_ftbBtn->setText(m_bus->isFTBActive() ? "■  FTB ON" : "■  FTB");
+    });
 
     m_obsClient = new OBSClient(this);
     connect(m_obsClient, &OBSClient::stateChanged,       this, &MainWindow::onObsState);
@@ -590,6 +644,25 @@ void MainWindow::onTake()
     onObsLog(QStringLiteral("TAKE → %1 on air.").arg(m_bus->program().name));
 }
 
+void MainWindow::onAuto()
+{
+    if (!m_working.isValid()) { onObsLog("Nothing staged on PVW."); return; }
+    const int ms = m_autoDurationCombo
+        ? m_autoDurationCombo->currentData().toInt()
+        : 1500;
+    m_bus->autoTake(ms);
+    onObsLog(QStringLiteral("AUTO %1ms → %2 on air.")
+                 .arg(ms).arg(m_bus->preview().name));
+}
+
+void MainWindow::onFTB()
+{
+    const bool wasActive = m_bus->isFTBActive();
+    m_bus->ftbToggle(500);
+    onObsLog(wasActive ? "FTB OFF — restoring program."
+                       : "FTB ON — fading to black.");
+}
+
 void MainWindow::onSwapBuses()
 {
     m_bus->swap();
@@ -857,6 +930,19 @@ void MainWindow::populateCommandPalette()
                    "OBS", [this]() { onVirtualCamToggle(); });
     cp->addCommand("TAKE (commit PVW → PGM)", "Switcher",
                    [this]() { onTake(); });
+    cp->addCommand("AUTO transition (current duration)", "Switcher",
+                   [this]() { onAuto(); });
+    cp->addCommand("AUTO 0.5s", "Switcher",
+                   [this]() { m_bus->autoTake(500); });
+    cp->addCommand("AUTO 1.0s", "Switcher",
+                   [this]() { m_bus->autoTake(1000); });
+    cp->addCommand("AUTO 2.0s", "Switcher",
+                   [this]() { m_bus->autoTake(2000); });
+    cp->addCommand("AUTO 5.0s", "Switcher",
+                   [this]() { m_bus->autoTake(5000); });
+    cp->addCommand(m_bus->isFTBActive() ? "FTB OFF — restore program"
+                                        : "FTB ON — fade to black",
+                   "Switcher", [this]() { onFTB(); });
     cp->addCommand("SWAP buses (PGM ⇄ PVW)", "Switcher",
                    [this]() { onSwapBuses(); });
 

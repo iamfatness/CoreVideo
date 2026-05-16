@@ -23,6 +23,7 @@ class SettingsPage;
 class OverlayPanel;
 class QLabel;
 class QPushButton;
+class QComboBox;
 class QPlainTextEdit;
 class QDockWidget;
 class QStackedWidget;
@@ -51,6 +52,8 @@ private slots:
     void onThemeSelected(const ShowTheme &theme);
     void onApplyLayout();
     void onTake();
+    void onAuto();
+    void onFTB();
     void onSwapBuses();
     void onEngineToggle();
     void onObsConnect();
@@ -95,7 +98,10 @@ private:
     // Toolbar buttons (kept for state updates)
     QPushButton *m_vcamBtn = nullptr;
     QPushButton *m_takeBtn = nullptr;
+    QPushButton *m_autoBtn = nullptr;
+    QPushButton *m_ftbBtn  = nullptr;
     QPushButton *m_swapBtn = nullptr;
+    QComboBox   *m_autoDurationCombo = nullptr;
 
     // Center — m_liveCanvas renders PGM (on-air), m_sceneCanvas renders PVW.
     PreviewCanvas *m_liveCanvas   = nullptr;

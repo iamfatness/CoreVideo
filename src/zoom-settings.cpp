@@ -154,6 +154,19 @@ ZoomPluginSettings ZoomPluginSettings::load()
         s.iso_record_program =
             config_get_int(cfg, SECTION, "IsoRecordProgram") != 0;
 
+    const int speaker_sensitivity =
+        config_get_int(cfg, SECTION, "SpeakerSensitivityMs");
+    if (config_has_user_value(cfg, SECTION, "SpeakerSensitivityMs") &&
+        speaker_sensitivity >= 0)
+        s.speaker_sensitivity_ms = static_cast<uint32_t>(speaker_sensitivity);
+    const int speaker_hold = config_get_int(cfg, SECTION, "SpeakerHoldMs");
+    if (config_has_user_value(cfg, SECTION, "SpeakerHoldMs") &&
+        speaker_hold >= 0)
+        s.speaker_hold_ms = static_cast<uint32_t>(speaker_hold);
+    if (config_has_user_value(cfg, SECTION, "SpeakerRequireVideo"))
+        s.speaker_require_video =
+            config_get_int(cfg, SECTION, "SpeakerRequireVideo") != 0;
+
     return s;
 }
 
@@ -227,5 +240,11 @@ void ZoomPluginSettings::save() const
     config_set_string(cfg, SECTION, "IsoOutputDir",           iso_output_dir.c_str());
     config_set_string(cfg, SECTION, "IsoFfmpegPath",          iso_ffmpeg_path.c_str());
     config_set_int   (cfg, SECTION, "IsoRecordProgram",       iso_record_program ? 1 : 0);
+    config_set_int   (cfg, SECTION, "SpeakerSensitivityMs",
+                      static_cast<int>(speaker_sensitivity_ms));
+    config_set_int   (cfg, SECTION, "SpeakerHoldMs",
+                      static_cast<int>(speaker_hold_ms));
+    config_set_int   (cfg, SECTION, "SpeakerRequireVideo",
+                      speaker_require_video ? 1 : 0);
     config_save_safe(cfg, "tmp", nullptr);
 }

@@ -19,7 +19,9 @@ void zoom_source_register();
 struct ZoomSource {
     obs_source_t *source = nullptr;
     std::string source_uuid;
+    std::string m_director_preview_uuid;
     std::string output_display_name;
+    bool dedicated_active_speaker_source = false;
     // These scalars are written from the OBS UI thread (apply_settings,
     // configure_output) and read from the IPC reader thread
     // (on_engine_audio, on_roster_changed). Make them atomic so the
@@ -71,6 +73,8 @@ struct ZoomSource {
     void on_roster_changed();
     void on_engine_frame(uint32_t width, uint32_t height,
                          uint32_t resolved_participant_id);
+    void on_director_preview_frame(uint32_t width, uint32_t height,
+                                   uint32_t resolved_participant_id);
     void on_engine_audio(uint32_t byte_len,
                          uint32_t resolved_participant_id);
 
@@ -88,13 +92,25 @@ struct ZoomSource {
 
 private:
     void output_placeholder_frame(bool color_bars);
+    void maybe_update_director_subscription();
+    bool output_video_from_shared_memory(const std::string &uuid,
+                                         ShmRegion &video_shm,
+                                         std::vector<uint8_t> &video_buf,
+                                         std::vector<uint8_t> &scaled_video_buf,
+                                         uint32_t event_width,
+                                         uint32_t event_height,
+                                         uint32_t resolved_participant_id,
+                                         bool commit_director_cut);
 
     mutable std::mutex m_mtx;
     ShmRegion m_video_shm;
+    ShmRegion m_director_preview_shm;
     ShmRegion m_audio_shm;
     std::vector<uint8_t> m_placeholder_buf;
     std::vector<uint8_t> m_video_buf;
     std::vector<uint8_t> m_scaled_video_buf;
+    std::vector<uint8_t> m_director_preview_buf;
+    std::vector<uint8_t> m_director_preview_scaled_buf;
     std::vector<uint8_t> m_audio_buf;
     std::atomic<uint32_t> m_width{0};
     std::atomic<uint32_t> m_height{0};
@@ -109,4 +125,5 @@ private:
     std::atomic<bool> m_subscribed{false};
     std::atomic<bool> m_active{false};
     std::atomic<uint32_t> m_current_subscription_id{0};
+    std::atomic<uint32_t> m_director_preview_subscription_id{0};
 };

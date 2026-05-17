@@ -14,6 +14,7 @@ class QPushButton;
 class QTableWidget;
 class QComboBox;
 class QCheckBox;
+class QSpinBox;
 class QTimer;
 class CvStatusDot;
 class CvBanner;
@@ -30,6 +31,7 @@ private:
     void refresh_outputs();
     void refresh_output_signal_cells();
     void apply_outputs();
+    void open_output_manager();
 
     void on_join_clicked();
     void on_leave_clicked();
@@ -50,6 +52,15 @@ private:
 
     // Active speaker
     QLabel      *m_speaker_label = nullptr;
+    QLabel      *m_director_speaker_label = nullptr;
+    QLabel      *m_raw_speaker_label = nullptr;
+    QLabel      *m_candidate_speaker_label = nullptr;
+    QLabel      *m_last_speaker_label = nullptr;
+    QSpinBox    *m_speaker_sensitivity_spin = nullptr;
+    QSpinBox    *m_speaker_hold_spin = nullptr;
+    QComboBox   *m_speaker_override_combo = nullptr;
+    QPushButton *m_speaker_take_btn = nullptr;
+    QPushButton *m_speaker_release_btn = nullptr;
 
     // First-run credentials notice
     CvBanner    *m_credentials_banner = nullptr;
@@ -65,6 +76,7 @@ private:
     QPushButton *m_start_engine_btn = nullptr;
     QPushButton *m_stop_engine_btn  = nullptr;
     QPushButton *m_launch_sidecar_btn = nullptr;
+    QPushButton *m_output_manager_btn = nullptr;
     QCheckBox   *m_webinar_cb   = nullptr;
     QLineEdit   *m_participant_filter = nullptr;
     QListWidget *m_participant_list   = nullptr;
@@ -84,7 +96,7 @@ private:
     QTimer      *m_pending_oauth_join_timer = nullptr;
     bool         m_last_media_active = false;
 
-    // Output assignment table
+    // Legacy output helpers are kept inert; routing now lives in Output Manager.
     QTableWidget *m_output_table = nullptr;
     QPushButton  *m_apply_btn   = nullptr;
 

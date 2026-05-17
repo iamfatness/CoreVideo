@@ -31,6 +31,11 @@ struct ZoomPluginSettings {
     std::string         iso_ffmpeg_path = "ffmpeg";
     bool                iso_record_program = true;
 
+    // Active speaker director defaults.
+    uint32_t            speaker_sensitivity_ms = 500;
+    uint32_t            speaker_hold_ms = 2000;
+    bool                speaker_require_video = true;
+
     static ZoomPluginSettings load();
     std::string resolved_jwt_token() const;
     void save() const;

@@ -39,11 +39,11 @@ Please include:
 
 ## Common Issues
 
-### Raw-data permission error at runtime
+### Raw-data permission or stream-count error at runtime
 
-**Cause:** The Zoom account joining the meeting does not have a Zoom Enhanced Media License.
+**Cause:** Raw data access is available through Zoom Meeting SDK apps, but the signed-in account and app entitlements still determine negotiated quality, bandwidth, and stream count. Standard accounts are typically limited to a 30 Mbps incoming video budget; Enhanced Media / HBM can raise that envelope to roughly 100 Mbps. Developers may also need an app-level entitlement flag to test more than a small number of concurrent raw streams.
 
-**Fix:** Contact your Zoom account representative to verify your Enhanced Media License entitlement. This is a Zoom account requirement — not a plugin bug.
+**Fix:** Verify the Meeting SDK app is approved or beta-enabled for the account joining the meeting, then confirm the expected bandwidth and developer/app entitlements with Zoom. Treat Enhanced Media / HBM as a production quality and bandwidth tier, not as a hard prerequisite for raw data.
 
 ---
 
@@ -84,11 +84,11 @@ Please include:
 
 ### Auto-reconnect triggers but never succeeds
 
-**Cause:** The underlying error (auth failure, license issue, network) is permanent.
+**Cause:** The underlying error (auth failure, app entitlement issue, network) is permanent.
 
 **Fix:**
 1. Check the OBS log for the `RecoveryReason` and error codes.
-2. If the reason is `LicenseError`, see the raw-data permission issue above.
+2. If the reason is `LicenseError`, see the raw-data permission or stream-count issue above.
 3. If the reason is `AuthFailure`, check your SDK key/secret in **Tools → Zoom Plugin Settings**.
 4. Click **Cancel Recovery** in the Zoom Control dock, resolve the root cause, then re-join manually.
 
@@ -109,13 +109,15 @@ Feature requests are welcome as GitHub issues. Search existing issues first. Lab
 
 ---
 
-## Zoom Enhanced Media License
+## Zoom Bandwidth and Enhanced Media / HBM
 
-CoreVideo requires a **Zoom Enhanced Media License** on the Zoom account used to join meetings.
+CoreVideo does not require Enhanced Media / HBM simply to access Meeting SDK raw data. Quality and concurrency are still bounded by Zoom account and app entitlements:
 
-- Contact your Zoom account representative
-- Visit [Zoom Plans](https://zoom.us/pricing)
-- Review the [Zoom Marketplace Developer Agreement](https://marketplace.zoom.us/docs/api-reference/developer-agreement)
+- Standard accounts commonly operate within a 30 Mbps incoming video envelope.
+- Enhanced Media / HBM can raise the incoming video envelope to roughly 100 Mbps.
+- Standard 1080p feeds are typically about 4-6 Mbps each.
+- 100 Mbps can support roughly 16 standard 1080p feeds, or about 8 high-bitrate / 60 fps feeds.
+- Developers may need a separate app entitlement flag for testing more than a small number of raw streams; end users should not need that developer flag.
 
 ---
 

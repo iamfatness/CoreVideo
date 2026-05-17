@@ -1,4 +1,5 @@
 #include "zoom-source.h"
+#include "speaker-director.h"
 #include "zoom-engine-client.h"
 #include "zoom-iso-recorder.h"
 #include "zoom-settings.h"
@@ -260,6 +261,8 @@ void ZoomSource::apply_settings(obs_data_t *settings)
         if (mode_int == 1) mode = AssignmentMode::ActiveSpeaker;
         else if (mode_int == 2) mode = AssignmentMode::SpotlightIndex;
         else if (mode_int == 3) mode = AssignmentMode::ScreenShare;
+        if (dedicated_active_speaker_source)
+            mode = AssignmentMode::ActiveSpeaker;
         // Back-compat: the older bool PROP_ACTIVE_SPEAKER promotes plain
         // participant mode to ActiveSpeaker. After this point assignment mode
         // is the source of truth for overlapping source/output-manager state.
@@ -395,6 +398,12 @@ void ZoomSource::configure_output_ex(AssignmentMode mode,
                                      VideoResolution new_resolution,
                                      bool new_audience_audio)
 {
+    if (dedicated_active_speaker_source) {
+        mode = AssignmentMode::ActiveSpeaker;
+        new_participant_id = 0;
+        new_spotlight_slot = 1;
+        new_failover_participant_id = 0;
+    }
     if (new_isolate_audio) new_audience_audio = false;
     const bool active_speaker = (mode == AssignmentMode::ActiveSpeaker);
     if (source) {
@@ -451,9 +460,20 @@ void ZoomSource::subscribe()
     case AssignmentMode::ActiveSpeaker:
     case AssignmentMode::Participant:
     default: {
+        if (dedicated_active_speaker_source) {
+            maybe_update_director_subscription();
+            m_subscribed = true;
+            return;
+        }
         // Resolve target participant. If primary is missing from the current
         // roster and we have a failover ID, use it.
         const bool use_active_speaker = is_active_speaker_assignment(mode);
+        if (use_active_speaker) {
+            const ZoomPluginSettings settings = ZoomPluginSettings::load();
+            SpeakerDirector::instance().configure(
+                settings.speaker_sensitivity_ms, settings.speaker_hold_ms,
+                settings.speaker_require_video);
+        }
         uint32_t target = effective_participant_id(participant_id,
                                                     use_active_speaker);
         const uint32_t failover = failover_participant_id.load(std::memory_order_acquire);
@@ -486,8 +506,11 @@ void ZoomSource::unsubscribe()
 {
     if (!m_subscribed) return;
     ZoomEngineClient::instance().unsubscribe(source_uuid);
+    if (!m_director_preview_uuid.empty())
+        ZoomEngineClient::instance().unsubscribe(m_director_preview_uuid);
     m_subscribed = false;
     m_current_subscription_id = 0;
+    m_director_preview_subscription_id = 0;
 }
 
 void ZoomSource::activate()
@@ -517,6 +540,10 @@ void ZoomSource::on_roster_changed()
         mode == AssignmentMode::ScreenShare) return;
 
     if (is_active_speaker_assignment(mode)) {
+        if (dedicated_active_speaker_source) {
+            maybe_update_director_subscription();
+            return;
+        }
         const uint32_t subscribe_id =
             effective_participant_id(participant_id, true);
         if (subscribe_id == 0 || subscribe_id == m_current_subscription_id) return;
@@ -539,26 +566,91 @@ void ZoomSource::on_roster_changed()
     if (want != m_current_subscription_id) subscribe();
 }
 
+void ZoomSource::maybe_update_director_subscription()
+{
+    if (!dedicated_active_speaker_source)
+        return;
+    if (m_director_preview_uuid.empty())
+        m_director_preview_uuid = make_source_uuid();
+
+    const ZoomPluginSettings settings = ZoomPluginSettings::load();
+    SpeakerDirector::instance().configure(
+        settings.speaker_sensitivity_ms, settings.speaker_hold_ms,
+        settings.speaker_require_video);
+
+    const uint32_t directed_id = ZoomEngineClient::instance().active_speaker_id();
+    const uint32_t current_id =
+        m_current_subscription_id.load(std::memory_order_acquire);
+    const uint32_t preview_id =
+        m_director_preview_subscription_id.load(std::memory_order_acquire);
+
+    if (directed_id == 0 || directed_id == current_id ||
+        directed_id == preview_id) {
+        return;
+    }
+
+    ZoomEngineClient::instance().unsubscribe(m_director_preview_uuid);
+    shm_region_destroy(m_director_preview_shm);
+    ZoomEngineClient::instance().subscribe(m_director_preview_uuid, directed_id,
+                                           isolate_audio, audience_audio,
+                                           resolution);
+    m_director_preview_subscription_id.store(directed_id,
+                                             std::memory_order_release);
+    blog(LOG_INFO,
+         "[obs-zoom-plugin] Active speaker preview subscription: source=%s current=%u next=%u preview_uuid=%s",
+         output_name().c_str(), current_id, directed_id,
+         m_director_preview_uuid.c_str());
+}
+
 void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height,
                                  uint32_t resolved_participant_id)
 {
     std::lock_guard<std::mutex> lk(m_mtx);
-    const std::string shm_name = IPC_SHM_PREFIX + source_uuid;
-    if (event_width == 0 || event_height == 0) return;
+    output_video_from_shared_memory(source_uuid, m_video_shm, m_video_buf,
+                                    m_scaled_video_buf, event_width,
+                                    event_height, resolved_participant_id,
+                                    false);
+}
+
+void ZoomSource::on_director_preview_frame(uint32_t event_width,
+                                           uint32_t event_height,
+                                           uint32_t resolved_participant_id)
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    output_video_from_shared_memory(m_director_preview_uuid,
+                                    m_director_preview_shm,
+                                    m_director_preview_buf,
+                                    m_director_preview_scaled_buf,
+                                    event_width, event_height,
+                                    resolved_participant_id, true);
+}
+
+bool ZoomSource::output_video_from_shared_memory(
+    const std::string &uuid,
+    ShmRegion &video_shm,
+    std::vector<uint8_t> &video_buf,
+    std::vector<uint8_t> &scaled_video_buf,
+    uint32_t event_width,
+    uint32_t event_height,
+    uint32_t resolved_participant_id,
+    bool commit_director_cut)
+{
+    const std::string shm_name = IPC_SHM_PREFIX + uuid;
+    if (event_width == 0 || event_height == 0) return false;
     const size_t frame_bytes = sizeof(ShmFrameHeader) +
         static_cast<size_t>(event_width) * event_height * 3 / 2;
-    if ((!m_video_shm.ptr || m_video_shm.size < frame_bytes) &&
-        !shm_region_open_read(m_video_shm, shm_name, frame_bytes)) {
+    if ((!video_shm.ptr || video_shm.size < frame_bytes) &&
+        !shm_region_open_read(video_shm, shm_name, frame_bytes)) {
         if (m_frame_count == 0) {
             blog(LOG_WARNING,
                  "[obs-zoom-plugin] Failed to open video shared memory: source=%s uuid=%s w=%u h=%u bytes=%zu",
-                 output_name().c_str(), source_uuid.c_str(), event_width,
+                 output_name().c_str(), uuid.c_str(), event_width,
                  event_height, frame_bytes);
         }
-        return;
+        return false;
     }
 
-    auto *hdr = static_cast<const ShmFrameHeader *>(m_video_shm.ptr);
+    auto *hdr = static_cast<const ShmFrameHeader *>(video_shm.ptr);
     uint32_t w = 0;
     uint32_t h = 0;
     uint32_t y_len = 0;
@@ -573,22 +665,22 @@ void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height,
         if (!source || w == 0 || h == 0 || y_len != w * h) break;
         const size_t needed_bytes = sizeof(ShmFrameHeader) +
             static_cast<size_t>(y_len) + static_cast<size_t>(y_len) / 2;
-        if (needed_bytes > m_video_shm.size) {
+        if (needed_bytes > video_shm.size) {
             if (m_frame_count == 0) {
                 blog(LOG_WARNING,
                      "[obs-zoom-plugin] Video shared memory too small: source=%s uuid=%s need=%zu have=%zu",
-                     output_name().c_str(), source_uuid.c_str(), needed_bytes,
-                     m_video_shm.size);
+                     output_name().c_str(), uuid.c_str(), needed_bytes,
+                     video_shm.size);
             }
-            return;
+            return false;
         }
-        const auto *pixels = static_cast<const uint8_t *>(m_video_shm.ptr) +
+        const auto *pixels = static_cast<const uint8_t *>(video_shm.ptr) +
             sizeof(ShmFrameHeader);
         const size_t payload_size = static_cast<size_t>(y_len) +
             static_cast<size_t>(y_len) / 2;
-        if (m_video_buf.size() < payload_size)
-            m_video_buf.resize(payload_size);
-        std::memcpy(m_video_buf.data(), pixels, payload_size);
+        if (video_buf.size() < payload_size)
+            video_buf.resize(payload_size);
+        std::memcpy(video_buf.data(), pixels, payload_size);
         std::atomic_thread_fence(std::memory_order_acquire);
         const uint32_t seq2 = hdr->sequence;
         if (seq1 == seq2 && (seq2 & 1u) == 0) {
@@ -602,10 +694,10 @@ void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height,
                  "[obs-zoom-plugin] Incomplete video frame skipped: source=%s uuid=%s w=%u h=%u y_len=%u",
                  output_name().c_str(), source_uuid.c_str(), w, h, y_len);
         }
-        return;
+        return false;
     }
 
-    const auto *y_ptr = m_video_buf.data();
+    const auto *y_ptr = video_buf.data();
     const auto *u_ptr = y_ptr + y_len;
     const auto *v_ptr = u_ptr + y_len / 4;
     const uint32_t observed_w = w;
@@ -627,11 +719,11 @@ void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height,
     if (canvas_w != w || canvas_h != h) {
         const size_t scaled_size =
             static_cast<size_t>(canvas_w) * canvas_h * 3 / 2;
-        if (m_scaled_video_buf.size() < scaled_size)
-            m_scaled_video_buf.resize(scaled_size);
+        if (scaled_video_buf.size() < scaled_size)
+            scaled_video_buf.resize(scaled_size);
         scale_i420_letterbox(y_ptr, u_ptr, v_ptr, w, h,
-                             m_scaled_video_buf.data(), canvas_w, canvas_h);
-        obs_y_ptr = m_scaled_video_buf.data();
+                             scaled_video_buf.data(), canvas_w, canvas_h);
+        obs_y_ptr = scaled_video_buf.data();
         obs_u_ptr = obs_y_ptr + static_cast<size_t>(canvas_w) * canvas_h;
         obs_v_ptr = obs_u_ptr + static_cast<size_t>(canvas_w) * canvas_h / 4;
         obs_w = canvas_w;
@@ -671,6 +763,26 @@ void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height,
     set_yuv_frame_color_info(frame);
 
     obs_source_output_video(source, &frame);
+    if (commit_director_cut && dedicated_active_speaker_source) {
+        const uint32_t previous_id =
+            m_current_subscription_id.load(std::memory_order_acquire);
+        if (previous_id != resolved_participant_id) {
+            ZoomEngineClient::instance().unsubscribe(source_uuid);
+            ZoomEngineClient::instance().subscribe(source_uuid,
+                                                   resolved_participant_id,
+                                                   isolate_audio,
+                                                   audience_audio,
+                                                   resolution);
+            m_current_subscription_id.store(resolved_participant_id,
+                                            std::memory_order_release);
+            ZoomEngineClient::instance().unsubscribe(m_director_preview_uuid);
+            m_director_preview_subscription_id.store(0,
+                                                     std::memory_order_release);
+            blog(LOG_INFO,
+                 "[obs-zoom-plugin] Active speaker clean cut: source=%s from=%u to=%u",
+                 output_name().c_str(), previous_id, resolved_participant_id);
+        }
+    }
     ZoomIsoRecorder::instance().record_video_frame(
         output_info(), resolved_participant_id, w, h, y_ptr, u_ptr, v_ptr,
         w, w / 2, ts);
@@ -707,6 +819,7 @@ void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height,
         m_preview_last_ns = now_ns;
         m_preview_cb(w, h, y_ptr, u_ptr, v_ptr, w, w / 2);
     }
+    return true;
 }
 
 void ZoomSource::on_engine_audio(uint32_t event_byte_len,
@@ -898,6 +1011,7 @@ void ZoomSource::release_shared_memory()
 {
     std::lock_guard<std::mutex> lk(m_mtx);
     shm_region_destroy(m_video_shm);
+    shm_region_destroy(m_director_preview_shm);
     shm_region_destroy(m_audio_shm);
 }
 
@@ -906,11 +1020,26 @@ static const char *zoom_source_get_name(void *)
     return obs_module_text("ZoomSource.Name");
 }
 
-static void *zoom_source_create(obs_data_t *settings, obs_source_t *source)
+static const char *zoom_active_speaker_source_get_name(void *)
+{
+    return obs_module_text("ZoomActiveSpeakerSource.Name");
+}
+
+static void *zoom_source_create_common(obs_data_t *settings, obs_source_t *source,
+                                       bool dedicated_active_speaker)
 {
     auto *ctx = new ZoomSource();
     ctx->source = source;
     ctx->source_uuid = make_source_uuid();
+    ctx->dedicated_active_speaker_source = dedicated_active_speaker;
+    if (dedicated_active_speaker)
+        ctx->m_director_preview_uuid = make_source_uuid();
+    if (dedicated_active_speaker) {
+        obs_data_set_int(settings, PROP_ASSIGNMENT_MODE,
+                         static_cast<int>(AssignmentMode::ActiveSpeaker));
+        obs_data_set_bool(settings, PROP_ACTIVE_SPEAKER, true);
+        obs_data_set_int(settings, PROP_PARTICIPANT_ID, 0);
+    }
     ctx->apply_settings(settings);
 
     ZoomEngineClient::instance().register_source(ctx->source_uuid, {
@@ -921,6 +1050,17 @@ static void *zoom_source_create(obs_data_t *settings, obs_source_t *source)
             ctx->on_engine_audio(byte_len, participant_id);
         }
     });
+    if (dedicated_active_speaker) {
+        ZoomEngineClient::instance().register_source(ctx->m_director_preview_uuid, {
+            [ctx](uint32_t w, uint32_t h, uint32_t participant_id) {
+                ctx->on_director_preview_frame(w, h, participant_id);
+            },
+            [ctx](uint32_t, uint32_t) {
+                // Audio cuts follow the committed current slot. The preview
+                // slot is video-only so it can warm a frame before the cut.
+            }
+        });
+    }
     ZoomEngineClient::instance().add_roster_callback(ctx,
         [ctx]() { ctx->on_roster_changed(); });
     ZoomOutputManager::instance().register_source(ctx);
@@ -961,6 +1101,17 @@ static void *zoom_source_create(obs_data_t *settings, obs_source_t *source)
     return ctx;
 }
 
+static void *zoom_source_create(obs_data_t *settings, obs_source_t *source)
+{
+    return zoom_source_create_common(settings, source, false);
+}
+
+static void *zoom_active_speaker_source_create(obs_data_t *settings,
+                                               obs_source_t *source)
+{
+    return zoom_source_create_common(settings, source, true);
+}
+
 static void zoom_source_destroy(void *data)
 {
     auto *ctx = static_cast<ZoomSource *>(data);
@@ -970,6 +1121,8 @@ static void zoom_source_destroy(void *data)
     ZoomIsoRecorder::instance().on_output_removed(ctx->source_uuid);
     ctx->unsubscribe();
     ZoomEngineClient::instance().remove_roster_callback(ctx);
+    if (!ctx->m_director_preview_uuid.empty())
+        ZoomEngineClient::instance().unregister_source(ctx->m_director_preview_uuid);
     ZoomEngineClient::instance().unregister_source(ctx->source_uuid);
     ctx->release_shared_memory();
     ctx->m_hw_pipeline.shutdown();
@@ -1017,6 +1170,18 @@ static obs_properties_t *zoom_source_get_properties(void *data)
 
     obs_properties_add_text(props, PROP_OUTPUT_DISPLAY_NAME,
         obs_module_text("ZoomSource.OutputDisplayName"), OBS_TEXT_DEFAULT);
+
+    if (ctx->dedicated_active_speaker_source) {
+        obs_property_t *mode_note = obs_properties_add_text(
+            props, "active_speaker_note",
+            obs_module_text("ZoomActiveSpeakerSource.Mode"),
+            OBS_TEXT_DEFAULT);
+        obs_data_t *settings_note = obs_source_get_settings(ctx->source);
+        obs_data_set_string(settings_note, "active_speaker_note",
+                            "Follows the CoreVideo Active Speaker Director");
+        obs_data_release(settings_note);
+        obs_property_set_enabled(mode_note, false);
+    }
 
     obs_property_t *participant = obs_properties_add_list(props, PROP_PARTICIPANT_ID,
         obs_module_text("ZoomSource.ParticipantId"),
@@ -1145,6 +1310,16 @@ static obs_properties_t *zoom_source_get_properties(void *data)
         obs_module_text("ZoomSource.RefreshParticipants"),
         [](obs_properties_t *, obs_property_t *, void *) -> bool { return true; });
 
+    if (ctx->dedicated_active_speaker_source) {
+        obs_property_set_visible(participant, false);
+        obs_property_set_visible(obs_properties_get(props, PROP_ACTIVE_SPEAKER), false);
+        obs_property_set_visible(obs_properties_get(props, PROP_SPEAKER_SENSITIVITY), false);
+        obs_property_set_visible(obs_properties_get(props, PROP_SPEAKER_HOLD), false);
+        obs_property_set_visible(amode, false);
+        obs_property_set_visible(obs_properties_get(props, PROP_SPOTLIGHT_SLOT), false);
+        obs_property_set_visible(obs_properties_get(props, PROP_FAILOVER_PARTICIPANT), false);
+    }
+
     return props;
 }
 
@@ -1166,6 +1341,16 @@ static void zoom_source_get_defaults(obs_data_t *settings)
     obs_data_set_default_int(settings, PROP_FAILOVER_PARTICIPANT, 0);
 }
 
+static void zoom_active_speaker_source_get_defaults(obs_data_t *settings)
+{
+    zoom_source_get_defaults(settings);
+    obs_data_set_default_bool(settings, PROP_ACTIVE_SPEAKER, true);
+    obs_data_set_default_int(settings, PROP_ASSIGNMENT_MODE,
+                             static_cast<int>(AssignmentMode::ActiveSpeaker));
+    obs_data_set_default_string(settings, PROP_OUTPUT_DISPLAY_NAME,
+                                "CoreVideo Active Speaker");
+}
+
 void zoom_source_register()
 {
     obs_source_info info = {};
@@ -1183,4 +1368,11 @@ void zoom_source_register()
     info.get_properties = zoom_source_get_properties;
     info.get_defaults = zoom_source_get_defaults;
     obs_register_source(&info);
+
+    obs_source_info active_info = info;
+    active_info.id = "corevideo_active_speaker_source";
+    active_info.get_name = zoom_active_speaker_source_get_name;
+    active_info.create = zoom_active_speaker_source_create;
+    active_info.get_defaults = zoom_active_speaker_source_get_defaults;
+    obs_register_source(&active_info);
 }

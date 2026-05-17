@@ -1,4 +1,5 @@
 #include "zoom-engine-client.h"
+#include "speaker-director.h"
 #include "zoom-reconnect.h"
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -549,6 +550,7 @@ void ZoomEngineClient::handle_event(const std::string &line)
             std::lock_guard<std::mutex> lk(m_mtx);
             m_roster.clear();
             m_active_speaker_id = 0;
+            SpeakerDirector::instance().reset();
             keep_failed = !m_last_error.empty() &&
                 !m_user_leaving.load(std::memory_order_acquire);
         }
@@ -620,6 +622,8 @@ void ZoomEngineClient::handle_event(const std::string &line)
                 p.is_sharing_screen = po.value("is_sharing_screen").toBool();
                 m_roster.push_back(std::move(p));
             }
+            SpeakerDirector::instance().update_roster(
+                m_roster, m_active_speaker_id, os_gettime_ns() / 1000000ULL);
             for (const auto &entry : m_roster_callbacks)
                 if (entry.second) callbacks.push_back(entry.second);
         }
@@ -634,6 +638,8 @@ void ZoomEngineClient::handle_event(const std::string &line)
                 obj.value("participant_id").toInt());
             for (auto &p : m_roster)
                 p.is_talking = p.user_id == m_active_speaker_id;
+            SpeakerDirector::instance().update_roster(
+                m_roster, m_active_speaker_id, os_gettime_ns() / 1000000ULL);
             for (const auto &entry : m_roster_callbacks)
                 if (entry.second) callbacks.push_back(entry.second);
         }
@@ -704,6 +710,11 @@ void ZoomEngineClient::send_join_locked()
 }
 
 uint32_t ZoomEngineClient::active_speaker_id() const
+{
+    return SpeakerDirector::instance().directed_speaker_id();
+}
+
+uint32_t ZoomEngineClient::raw_active_speaker_id() const
 {
     std::lock_guard<std::mutex> lk(m_mtx);
     return m_active_speaker_id;

@@ -69,7 +69,7 @@ Operators deploying CoreVideo in a production environment are responsible for:
 1. **Participant consent** — Informing meeting participants that their video and audio are being captured and streamed or recorded. This is a legal requirement in most jurisdictions and a condition of the Zoom Meeting SDK Terms of Use.
 2. **Credential protection** — Securing the OBS plugin configuration directory to prevent unauthorised access to SDK credentials.
 3. **Recording compliance** — Ensuring that any OBS recording or stream created using CoreVideo complies with applicable laws, Zoom's Terms of Service, and the operator's organisational policies.
-4. **Enhanced Media License** — Confirming that the Zoom account used holds a valid Zoom Enhanced Media License (or equivalent) before deploying CoreVideo in production.
+4. **Zoom account and app entitlements** — Confirming that the Zoom account, meeting configuration, and Meeting SDK app approval support the intended production quality, bandwidth, and stream count before deploying CoreVideo in production.
 
 ## 6. Children's Privacy
 

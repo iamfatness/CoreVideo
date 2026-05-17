@@ -180,10 +180,11 @@
       and TCP/OSC control APIs for full broadcast automation.
     </p>
     <div class="callout warning" style="margin-top:18px;">
-      <div class="callout-title">⚠️ Zoom Enhanced Media License Required</div>
-      Capturing raw video and audio from Zoom meetings requires a <strong>Zoom Enhanced Media license</strong>
-      on the account hosting or joining the meeting. Operating without it will cause raw-data permission
-      errors at runtime. Contact your Zoom account representative before deploying in production.
+      <div class="callout-title">Zoom Raw Data Bandwidth Planning</div>
+      CoreVideo uses Zoom Meeting SDK raw data APIs. Raw data access does not require Enhanced Media by itself,
+      but quality and stream count follow Zoom account and app entitlements. Standard accounts are commonly
+      constrained to roughly 30 Mbps incoming video; Enhanced Media / HBM can raise that envelope to roughly
+      100 Mbps. Plan around 4-6 Mbps per standard 1080p feed.
     </div>
     <div class="hero-badges" style="margin-top:16px;">
       <span class="badge blue">C++17</span>
@@ -299,7 +300,7 @@
       <tr><td>Zoom Meeting SDK</td><td><strong>5.17.x or 7.x</strong></td><td>Place at <code>third_party/zoom-sdk/</code>. CMake detects flat (5.x) and subfolder (7.x) header layouts automatically.</td></tr>
       <tr><td>C++ Compiler</td><td>C++17</td><td>MSVC 2022 / Clang 14+ / GCC 11+</td></tr>
       <tr><td>Zoom Developer Account</td><td>—</td><td>SDK key + secret required. OAuth Client ID required for Marketplace / external-account joins. CoreVideo generates Meeting SDK JWT locally.</td></tr>
-      <tr><td>Zoom Enhanced Media License</td><td>—</td><td><strong>Required</strong> on the Zoom account joining the meeting. Without it the SDK returns raw-data permission errors.</td></tr>
+      <tr><td>Zoom bandwidth / app entitlements</td><td>—</td><td>Raw data is available through Meeting SDK apps. Standard accounts commonly have a 30 Mbps incoming video envelope; Enhanced Media / HBM can raise that to roughly 100 Mbps. Developers may need an app-level flag to test more than a small number of concurrent raw streams.</td></tr>
       <tr><td>FFmpeg</td><td>—</td><td>Required at runtime for ISO recording. Also used when building with <code>-DCOREVIDEO_HW_ACCEL=ON</code> for hardware-accelerated I420→NV12 conversion.</td></tr>
       <tr><td>Qt TLS backend (Windows)</td><td>—</td><td>Required for OAuth HTTPS. Ship Schannel TLS plugins to <code>obs-plugins/64bit/plugins/tls/</code>.</td></tr>
     </table>
@@ -1195,7 +1196,7 @@ sequenceDiagram
       <tr><td><code>AuthFailure</code></td><td>SDK authentication failed or expired without self-healing</td></tr>
       <tr><td><code>SdkError</code></td><td>Fatal SDK error returned to engine</td></tr>
       <tr><td><code>HostEndedMeeting</code></td><td>Host ended the meeting (re-join if meeting resumes)</td></tr>
-      <tr><td><code>LicenseError</code></td><td>Raw-data permission denied (Enhanced Media license missing)</td></tr>
+      <tr><td><code>LicenseError</code></td><td>Raw-data permission, app approval, or developer entitlement issue</td></tr>
     </table>
 
     <h3>Cancellation Safety</h3>

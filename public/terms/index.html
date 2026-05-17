@@ -21,11 +21,11 @@
 <h2>2. License</h2>
 <p>CoreVideo is released under the terms of its open-source license (see <a href="https://github.com/iamfatness/CoreVideo/blob/main/LICENSE">LICENSE</a> in the repository). You are free to use, modify, and redistribute the Plugin in accordance with that license.</p>
 <hr>
-<h2>3. Zoom Enhanced Media License Requirement</h2>
-<blockquote><p><strong>This is a hard prerequisite — not optional.</strong></p></blockquote>
-<p>CoreVideo uses the Zoom Meeting SDK's <strong>raw data APIs</strong> to capture uncompressed video and audio. Accessing these APIs requires a <strong>Zoom Enhanced Media License</strong> (or equivalent raw-data-enabled entitlement) on the Zoom account that hosts or joins the meeting.</p>
+<h2>3. Zoom Meeting SDK Raw Data and Account Limits</h2>
+<p>CoreVideo uses the Zoom Meeting SDK's <strong>raw data APIs</strong> to capture uncompressed video and audio. Raw data access is available through Meeting SDK apps, but negotiated quality, bandwidth, meeting duration, and concurrent stream count are governed by the signed-in Zoom account, the meeting configuration, and app/developer entitlements.</p>
+<p>Enhanced Media / HBM is not a hard prerequisite for raw data access. It can materially increase production headroom by raising the incoming video bandwidth envelope from roughly 30 Mbps to roughly 100 Mbps. At about 4-6 Mbps per standard 1080p stream, several 1080p feeds may work without EM; with EM/HBM, plan around up to 16 standard 1080p feeds or about 8 high-bitrate / 60 fps feeds before hitting the downlink budget.</p>
 <p>By using CoreVideo you confirm that:</p>
-<ul><li>You hold, or have obtained on behalf of your organization, the required Zoom Enhanced Media License.</li><li>You will not use the Plugin to capture Zoom meeting content in violation of the <a href="https://marketplace.zoom.us/docs/api-reference/developer-agreement">Zoom Marketplace Developer Agreement</a> or applicable Zoom terms of service.</li><li>You understand that operating without the required license will result in SDK-level permission errors and <strong>is a violation of Zoom's terms</strong>, not a bug in CoreVideo.</li></ul>
+<ul><li>You are responsible for confirming the Zoom account, meeting, and app entitlements needed for your intended production quality and stream count.</li><li>You will not use the Plugin to capture Zoom meeting content in violation of the <a href="https://marketplace.zoom.us/docs/api-reference/developer-agreement">Zoom Marketplace Developer Agreement</a> or applicable Zoom terms of service.</li><li>You understand that account bandwidth, app approval, developer flags, and Zoom plan limits can affect the number and quality of raw streams CoreVideo can receive.</li></ul>
 <hr>
 <h2>4. Zoom Terms of Service</h2>
 <p>Your use of the Zoom Meeting SDK through CoreVideo is additionally governed by:</p>

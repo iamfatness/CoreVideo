@@ -162,6 +162,7 @@ if(COREVIDEO_BUILD_PLUGIN)
         src/plugin-main.cpp
         src/zoom-source.cpp
         src/zoom-engine-client.cpp
+        src/speaker-director.cpp
         src/zoom-reconnect.cpp
         src/zoom-settings.cpp
         src/zoom-settings-dialog.cpp

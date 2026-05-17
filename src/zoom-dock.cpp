@@ -1,11 +1,13 @@
-#include "zoom-dock.h"
+﻿#include "zoom-dock.h"
 #include "cv-onboarding.h"
 #include "cv-style.h"
 #include "cv-widgets.h"
 #include "obs-utils.h"
+#include "speaker-director.h"
 #include "zoom-engine-client.h"
 #include "zoom-oauth.h"
 #include "zoom-output-manager.h"
+#include "zoom-output-dialog.h"
 #include "zoom-reconnect.h"
 #include "zoom-settings.h"
 #include "zoom-settings-dialog.h"
@@ -20,6 +22,7 @@
 #include <QDragMoveEvent>
 #include <QDropEvent>
 #include <QFrame>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -27,6 +30,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QListWidgetItem>
+#include <QMainWindow>
 #include <QMetaObject>
 #include <QMessageBox>
 #include <QMimeData>
@@ -36,18 +40,21 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QStringList>
+#include <QSpinBox>
 #include <QTableWidget>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <obs-frontend-api.h>
 #include <obs-module.h>
+#include <util/platform.h>
 #include <algorithm>
 #include <unordered_map>
 #if defined(_WIN32)
 #include <windows.h>
 #endif
 
-// ── Column layout for the output table ───────────────────────────────────────
+// â”€â”€ Column layout for the output table â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 enum DockOutputColumns {
     DColPreview    = 0,
     DColName       = 1,
@@ -101,7 +108,7 @@ static std::string redacted_tail(const std::string &value)
     return "****" + value.substr(value.size() - 4);
 }
 
-// Fast I420 → RGB888 for dock thumbnails (shared with output dialog logic)
+// Fast I420 â†’ RGB888 for dock thumbnails (shared with output dialog logic)
 static QImage i420_to_qimage_dock(uint32_t w, uint32_t h,
     const uint8_t *y, const uint8_t *u, const uint8_t *v,
     uint32_t sy, uint32_t suv)
@@ -124,7 +131,7 @@ static QImage i420_to_qimage_dock(uint32_t w, uint32_t h,
     return img;
 }
 
-// ── Draggable participant list ────────────────────────────────────────────────
+// â”€â”€ Draggable participant list â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Each item carries participant user_id as Qt::UserRole.
 // Dragging emits MIME type "application/x-cv-participant" with the user_id.
 class CvParticipantList : public QListWidget {
@@ -152,7 +159,7 @@ protected:
     }
 };
 
-// ── Drop-enabled output table ─────────────────────────────────────────────────
+// â”€â”€ Drop-enabled output table â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Accepts drops from CvParticipantList; sets the assignment combo on the
 // row that was hovered when the participant was dropped.
 class CvDropOutputTable : public QTableWidget {
@@ -198,10 +205,10 @@ static const char *state_label_text(MeetingState s)
 {
     switch (s) {
     case MeetingState::Idle:       return "Not connected";
-    case MeetingState::Joining:    return "Joining…";
+    case MeetingState::Joining:    return "Joiningâ€¦";
     case MeetingState::InMeeting:  return "In meeting";
-    case MeetingState::Leaving:    return "Leaving…";
-    case MeetingState::Recovering: return "Recovering…";
+    case MeetingState::Leaving:    return "Leavingâ€¦";
+    case MeetingState::Recovering: return "Recoveringâ€¦";
     case MeetingState::Failed:     return "Connection failed";
     }
     return "";
@@ -268,17 +275,18 @@ static QString signal_tooltip(const ZoomOutputInfo &output)
     return text;
 }
 
-// ── Constructor ───────────────────────────────────────────────────────────────
+// â”€â”€ Constructor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 ZoomDock::ZoomDock(QWidget *parent)
     : QWidget(parent)
 {
+    const ZoomPluginSettings initial_settings = ZoomPluginSettings::load();
     setMinimumWidth(760);
 
     auto *vLayout = new QVBoxLayout(this);
     vLayout->setContentsMargins(8, 8, 8, 8);
     vLayout->setSpacing(6);
 
-    // ── Status row ────────────────────────────────────────────────────────────
+    // â”€â”€ Status row â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     m_state_dot   = new CvStatusDot(this);
     m_state_label = new QLabel("Not connected", this);
 
@@ -294,8 +302,8 @@ ZoomDock::ZoomDock(QWidget *parent)
     m_error_label->setVisible(false);
     vLayout->addWidget(m_error_label);
 
-    // ── Active speaker ────────────────────────────────────────────────────────
-    m_speaker_label = new QLabel(QStringLiteral("—"), this);
+    // â”€â”€ Active speaker â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    m_speaker_label = new QLabel(QStringLiteral("â€”"), this);
     m_speaker_label->setObjectName("speakerValue");
 
     auto *speaker_row = new QHBoxLayout;
@@ -303,7 +311,104 @@ ZoomDock::ZoomDock(QWidget *parent)
     speaker_row->addWidget(new QLabel("Active speaker:", this));
     speaker_row->addWidget(m_speaker_label, 1);
     vLayout->addLayout(speaker_row);
-    // ── Credentials notice (hidden once credentials are set) ──────────────────
+
+    auto *speaker_group = new QGroupBox("Active Speaker Director", this);
+    auto *speaker_layout = new QVBoxLayout(speaker_group);
+    speaker_layout->setSpacing(6);
+
+    auto *speaker_grid = new QGridLayout;
+    speaker_grid->setHorizontalSpacing(10);
+    speaker_grid->setVerticalSpacing(4);
+    m_director_speaker_label = new QLabel(QStringLiteral("-"), speaker_group);
+    m_raw_speaker_label = new QLabel(QStringLiteral("-"), speaker_group);
+    m_candidate_speaker_label = new QLabel(QStringLiteral("-"), speaker_group);
+    m_last_speaker_label = new QLabel(QStringLiteral("-"), speaker_group);
+    speaker_grid->addWidget(new QLabel("Directed:", speaker_group), 0, 0);
+    speaker_grid->addWidget(m_director_speaker_label, 0, 1);
+    speaker_grid->addWidget(new QLabel("Raw:", speaker_group), 0, 2);
+    speaker_grid->addWidget(m_raw_speaker_label, 0, 3);
+    speaker_grid->addWidget(new QLabel("Candidate:", speaker_group), 1, 0);
+    speaker_grid->addWidget(m_candidate_speaker_label, 1, 1);
+    speaker_grid->addWidget(new QLabel("Last:", speaker_group), 1, 2);
+    speaker_grid->addWidget(m_last_speaker_label, 1, 3);
+    speaker_layout->addLayout(speaker_grid);
+
+    auto *speaker_controls = new QHBoxLayout;
+    speaker_controls->setSpacing(8);
+    m_speaker_sensitivity_spin = new QSpinBox(speaker_group);
+    m_speaker_sensitivity_spin->setRange(0, 3000);
+    m_speaker_sensitivity_spin->setSingleStep(50);
+    m_speaker_sensitivity_spin->setSuffix(" ms");
+    m_speaker_sensitivity_spin->setValue(
+        static_cast<int>(initial_settings.speaker_sensitivity_ms));
+    m_speaker_sensitivity_spin->setToolTip(
+        "How long someone must keep talking before CoreVideo considers switching.");
+    m_speaker_hold_spin = new QSpinBox(speaker_group);
+    m_speaker_hold_spin->setRange(0, 10000);
+    m_speaker_hold_spin->setSingleStep(100);
+    m_speaker_hold_spin->setSuffix(" ms");
+    m_speaker_hold_spin->setValue(
+        static_cast<int>(initial_settings.speaker_hold_ms));
+    m_speaker_hold_spin->setToolTip(
+        "Minimum time to hold the current speaker before switching away.");
+    speaker_controls->addWidget(new QLabel("Sensitivity", speaker_group));
+    speaker_controls->addWidget(m_speaker_sensitivity_spin);
+    speaker_controls->addWidget(new QLabel("Hold", speaker_group));
+    speaker_controls->addWidget(m_speaker_hold_spin);
+    speaker_controls->addStretch(1);
+    speaker_layout->addLayout(speaker_controls);
+    connect(m_speaker_sensitivity_spin, qOverload<int>(&QSpinBox::valueChanged),
+            this, [this](int value) {
+                auto s = ZoomPluginSettings::load();
+                s.speaker_sensitivity_ms = static_cast<uint32_t>(value);
+                if (m_speaker_hold_spin)
+                    s.speaker_hold_ms = static_cast<uint32_t>(m_speaker_hold_spin->value());
+                s.save();
+                update_state_indicator();
+            });
+    connect(m_speaker_hold_spin, qOverload<int>(&QSpinBox::valueChanged),
+            this, [this](int value) {
+                auto s = ZoomPluginSettings::load();
+                if (m_speaker_sensitivity_spin)
+                    s.speaker_sensitivity_ms = static_cast<uint32_t>(
+                        m_speaker_sensitivity_spin->value());
+                s.speaker_hold_ms = static_cast<uint32_t>(value);
+                s.save();
+                update_state_indicator();
+            });
+
+    auto *override_controls = new QHBoxLayout;
+    override_controls->setSpacing(8);
+    m_speaker_override_combo = new QComboBox(speaker_group);
+    m_speaker_override_combo->setMinimumWidth(180);
+    m_speaker_override_combo->setToolTip(
+        "Manually supersede the automatic speaker director until released.");
+    m_speaker_take_btn = new QPushButton("Take", speaker_group);
+    m_speaker_take_btn->setProperty("role", "primary");
+    m_speaker_release_btn = new QPushButton("Release", speaker_group);
+    override_controls->addWidget(new QLabel("Manual", speaker_group));
+    override_controls->addWidget(m_speaker_override_combo, 1);
+    override_controls->addWidget(m_speaker_take_btn);
+    override_controls->addWidget(m_speaker_release_btn);
+    speaker_layout->addLayout(override_controls);
+    connect(m_speaker_take_btn, &QPushButton::clicked, this, [this]() {
+        if (!m_speaker_override_combo)
+            return;
+        const uint32_t participant_id =
+            static_cast<uint32_t>(m_speaker_override_combo->currentData().toUInt());
+        if (SpeakerDirector::instance().set_manual_speaker(
+                participant_id, os_gettime_ns() / 1000000ULL))
+            ZoomOutputManager::instance().resubscribe_all();
+        update_state_indicator();
+    });
+    connect(m_speaker_release_btn, &QPushButton::clicked, this, [this]() {
+        if (SpeakerDirector::instance().clear_manual_speaker(
+                os_gettime_ns() / 1000000ULL))
+            ZoomOutputManager::instance().resubscribe_all();
+        update_state_indicator();
+    });
+    vLayout->addWidget(speaker_group);
+    // â”€â”€ Credentials notice (hidden once credentials are set) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     m_credentials_banner = new CvBanner(
         CvBannerKind::Info,
         "SDK credentials required to join meetings.",
@@ -316,7 +421,7 @@ ZoomDock::ZoomDock(QWidget *parent)
     });
     vLayout->addWidget(m_credentials_banner);
 
-    // ── Join controls ─────────────────────────────────────────────────────────
+    // â”€â”€ Join controls â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     auto *join_group  = new QGroupBox("Join Meeting", this);
     auto *join_layout = new QVBoxLayout(join_group);
     join_layout->setSpacing(6);
@@ -325,7 +430,7 @@ ZoomDock::ZoomDock(QWidget *parent)
     m_meeting_id->setPlaceholderText("Meeting ID or Zoom URL");
     m_meeting_id->setToolTip(
         "Enter a numeric meeting ID or paste a full Zoom URL "
-        "(e.g. https://zoom.us/j/123?pwd=abc) — the ID and passcode "
+        "(e.g. https://zoom.us/j/123?pwd=abc) â€” the ID and passcode "
         "will be extracted automatically.");
 
     m_passcode = new QLineEdit(join_group);
@@ -364,7 +469,7 @@ ZoomDock::ZoomDock(QWidget *parent)
     m_leave_btn = new QPushButton("Leave", join_group);
     m_leave_btn->setEnabled(false);
 
-    // Role-based styling — evaluated when stylesheet is applied below
+    // Role-based styling â€” evaluated when stylesheet is applied below
     m_join_btn->setProperty("role", "primary");
     m_leave_btn->setProperty("role", "danger");
 
@@ -404,6 +509,20 @@ ZoomDock::ZoomDock(QWidget *parent)
     engine_layout->addWidget(m_launch_sidecar_btn);
     vLayout->addWidget(engine_group);
 
+    auto *routing_group = new QGroupBox("Routing", this);
+    auto *routing_layout = new QHBoxLayout(routing_group);
+    routing_layout->setSpacing(8);
+    auto *routing_label = new QLabel(
+        "Manage participant-to-source assignments in the dedicated Output Manager.",
+        routing_group);
+    routing_label->setWordWrap(true);
+    m_output_manager_btn = new QPushButton("Open Output Manager", routing_group);
+    connect(m_output_manager_btn, &QPushButton::clicked,
+            this, [this]() { open_output_manager(); });
+    routing_layout->addWidget(routing_label, 1);
+    routing_layout->addWidget(m_output_manager_btn);
+    vLayout->addWidget(routing_group);
+
     // Pre-populate join fields from the last successful join, if any.
     {
         const ZoomPluginSettings prefill = ZoomPluginSettings::load();
@@ -436,7 +555,7 @@ ZoomDock::ZoomDock(QWidget *parent)
         on_join_clicked();
     });
 
-    // ── Recovery panel ────────────────────────────────────────────────────────
+    // â”€â”€ Recovery panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     m_recovery_frame = new QFrame(this);
     m_recovery_frame->setObjectName("recoveryPanel");
 
@@ -460,65 +579,20 @@ ZoomDock::ZoomDock(QWidget *parent)
         update_recovery_panel();
     });
 
-    // Periodic tick updates the lightweight state indicator (state dot, active
-    // speaker label, join-timeout watchdog). The output table is rebuilt only
-    // on roster callback to avoid thrashing while a user is mid-selection.
+    // Periodic tick updates the lightweight state indicator, active speaker
+    // director, and join-timeout watchdog.
     m_refresh_timer = new QTimer(this);
-    m_refresh_timer->setInterval(500);
+    m_refresh_timer->setInterval(100);
     connect(m_refresh_timer, &QTimer::timeout, this, [this]() {
+        if (SpeakerDirector::instance().tick(os_gettime_ns() / 1000000ULL))
+            ZoomOutputManager::instance().resubscribe_all();
         update_state_indicator();
     });
     m_refresh_timer->start();
 
     m_recovery_frame->setVisible(false);
 
-    // ── Output table ──────────────────────────────────────────────────────────
-    auto *output_group  = new QGroupBox("Outputs", this);
-    auto *output_layout = new QVBoxLayout(output_group);
-    output_layout->setSpacing(6);
-
-    m_participant_filter = new QLineEdit(output_group);
-    m_participant_filter->setPlaceholderText("Filter participants…");
-    m_participant_filter->setClearButtonEnabled(true);
-    connect(m_participant_filter, &QLineEdit::textChanged,
-            this, [this](const QString &) { refresh_outputs(); });
-    output_layout->addWidget(m_participant_filter);
-
-    // Draggable participant list (drop on output rows to assign)
-    m_participant_list = new CvParticipantList(output_group);
-    m_participant_list->setMinimumHeight(120);
-    m_participant_list->setMaximumHeight(160);
-    m_participant_list->setToolTip("Drag a participant onto an output row to assign them.");
-    output_layout->addWidget(m_participant_list);
-
-    m_output_table = new CvDropOutputTable(output_group);
-    m_output_table->setColumnCount(DColCount);
-    m_output_table->setHorizontalHeaderLabels({
-        "Preview", "Output", "Assignment", "Requested", "Signal", "Audio", "Isolated"
-    });
-    m_output_table->horizontalHeader()->setSectionResizeMode(DColPreview,    QHeaderView::Fixed);
-    m_output_table->horizontalHeader()->setSectionResizeMode(DColName,       QHeaderView::Stretch);
-    m_output_table->horizontalHeader()->setSectionResizeMode(DColAssignment, QHeaderView::Stretch);
-    m_output_table->horizontalHeader()->setSectionResizeMode(DColRequested,  QHeaderView::ResizeToContents);
-    m_output_table->horizontalHeader()->setSectionResizeMode(DColSignal,     QHeaderView::ResizeToContents);
-    m_output_table->horizontalHeader()->setSectionResizeMode(DColAudio,      QHeaderView::ResizeToContents);
-    m_output_table->horizontalHeader()->setSectionResizeMode(DColIsolate,    QHeaderView::ResizeToContents);
-    m_output_table->setColumnWidth(DColPreview, kThumbW + 2);
-    m_output_table->verticalHeader()->setVisible(false);
-    m_output_table->setSelectionMode(QAbstractItemView::NoSelection);
-    m_output_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_output_table->setAlternatingRowColors(true);
-    m_output_table->setMinimumHeight(220);
-
-    m_apply_btn = new QPushButton("Apply", output_group);
-    m_apply_btn->setProperty("role", "primary");
-    connect(m_apply_btn, &QPushButton::clicked, this, [this]() { apply_outputs(); });
-
-    output_layout->addWidget(m_output_table);
-    output_layout->addWidget(m_apply_btn);
-    vLayout->addWidget(output_group, 1);
-
-    // ── Subscribe to roster / state changes ───────────────────────────────────
+    // â”€â”€ Subscribe to roster / state changes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     auto self  = this;
     auto alive = m_alive;
 
@@ -539,13 +613,13 @@ ZoomDock::ZoomDock(QWidget *parent)
         }, Qt::QueuedConnection);
     });
 
-    // ── Apply stylesheet last so all properties are set before evaluation ─────
+    // â”€â”€ Apply stylesheet last so all properties are set before evaluation â”€â”€â”€â”€â”€
     setStyleSheet(cv_stylesheet());
 
     update_credentials_banner();
     refresh();
 
-    // ── First-run onboarding wizard ───────────────────────────────────────────
+    // â”€â”€ First-run onboarding wizard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if (!CvOnboardingWizard::isCompleted()) {
         const ZoomPluginSettings &cfg = ZoomPluginSettings::load();
         const bool noCredentials = cfg.sdk_key.empty()
@@ -568,7 +642,6 @@ ZoomDock::~ZoomDock()
         m_join_thread.join();
     ZoomEngineClient::instance().remove_roster_callback(this);
     ZoomEngineClient::instance().remove_error_callback(this);
-    ZoomOutputManager::instance().clear_all_preview_cbs();
 }
 
 void ZoomDock::prepare_shutdown()
@@ -583,7 +656,7 @@ void ZoomDock::prepare_shutdown()
         m_refresh_timer->stop();
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
+// â”€â”€ Internal helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 void ZoomDock::update_credentials_banner()
 {
     if (!m_alive->load(std::memory_order_acquire))
@@ -621,13 +694,13 @@ void ZoomDock::update_recovery_panel()
 
     if (ms_left > 0) {
         m_recovery_label->setText(
-            QString("Reconnecting in %1s… (attempt %2/%3)")
+            QString("Reconnecting in %1sâ€¦ (attempt %2/%3)")
                 .arg((ms_left + 999) / 1000)
                 .arg(attempt + 1)
                 .arg(max_att));
     } else {
         m_recovery_label->setText(
-            QString("Reconnecting… (attempt %1/%2)")
+            QString("Reconnectingâ€¦ (attempt %1/%2)")
                 .arg(attempt)
                 .arg(max_att));
     }
@@ -685,12 +758,11 @@ void ZoomDock::update_state_indicator()
     }
 
     update_recovery_panel();
-    refresh_output_signal_cells();
 
     // Active speaker name
     const uint32_t spk_id = ZoomEngineClient::instance().active_speaker_id();
     if (spk_id == 0) {
-        m_speaker_label->setText(QStringLiteral("—"));
+        m_speaker_label->setText(QStringLiteral("â€”"));
     } else {
         QString spk_name = QString("ID %1").arg(spk_id);
         for (const auto &p : ZoomEngineClient::instance().roster()) {
@@ -701,17 +773,82 @@ void ZoomDock::update_state_indicator()
         }
         m_speaker_label->setText(spk_name);
     }
+
+    if (m_speaker_sensitivity_spin && m_speaker_hold_spin) {
+        SpeakerDirector::instance().configure(
+            static_cast<uint32_t>(m_speaker_sensitivity_spin->value()),
+            static_cast<uint32_t>(m_speaker_hold_spin->value()),
+            true);
+    }
+    if (m_director_speaker_label && m_raw_speaker_label &&
+        m_candidate_speaker_label && m_last_speaker_label) {
+        const auto roster = ZoomEngineClient::instance().roster();
+        auto participant_name = [&roster](uint32_t participant_id) {
+            if (participant_id == 0)
+                return QStringLiteral("-");
+            QString name = QString("ID %1").arg(participant_id);
+            for (const auto &p : roster) {
+                if (p.user_id == participant_id && !p.display_name.empty()) {
+                    name = QString::fromStdString(p.display_name);
+                    break;
+                }
+            }
+            return name;
+        };
+        const auto director =
+            SpeakerDirector::instance().snapshot(os_gettime_ns() / 1000000ULL);
+        const QString directed_name = participant_name(director.directed_speaker_id);
+        m_speaker_label->setText(directed_name);
+        m_director_speaker_label->setText(directed_name);
+        m_raw_speaker_label->setText(participant_name(director.raw_speaker_id));
+        m_candidate_speaker_label->setText(participant_name(director.candidate_speaker_id));
+        m_last_speaker_label->setText(participant_name(director.last_speaker_id));
+        if (m_speaker_override_combo && !m_speaker_override_combo->view()->isVisible()) {
+            const QVariant current = m_speaker_override_combo->currentData();
+            m_speaker_override_combo->blockSignals(true);
+            m_speaker_override_combo->clear();
+            m_speaker_override_combo->addItem("Select participant", 0);
+            for (const auto &p : roster) {
+                if (p.user_id == 0 || p.is_muted || !p.has_video)
+                    continue;
+                m_speaker_override_combo->addItem(participant_label(p), p.user_id);
+            }
+            const int idx = m_speaker_override_combo->findData(current);
+            if (idx >= 0)
+                m_speaker_override_combo->setCurrentIndex(idx);
+            else if (director.manual_speaker_id != 0) {
+                const int midx = m_speaker_override_combo->findData(director.manual_speaker_id);
+                if (midx >= 0)
+                    m_speaker_override_combo->setCurrentIndex(midx);
+            }
+            m_speaker_override_combo->blockSignals(false);
+        }
+        if (m_speaker_take_btn && m_speaker_override_combo) {
+            m_speaker_take_btn->setEnabled(
+                m_speaker_override_combo->currentData().toUInt() != 0);
+        }
+        if (m_speaker_release_btn)
+            m_speaker_release_btn->setEnabled(director.manual_active);
+        m_candidate_speaker_label->setToolTip(
+            QString("Candidate age: %1 ms").arg(
+                static_cast<qulonglong>(director.candidate_elapsed_ms)));
+        m_speaker_label->setToolTip(
+            QString("Hold remaining: %1 ms").arg(
+                static_cast<qulonglong>(director.hold_remaining_ms)));
+        m_director_speaker_label->setToolTip(m_speaker_label->toolTip());
+    }
 }
 
 void ZoomDock::refresh()
 {
     update_state_indicator();
-    refresh_outputs();
 }
 
 void ZoomDock::refresh_outputs()
 {
-    // If a dropdown popup is open, the user is mid-selection — rebuilding the
+    if (!m_output_table)
+        return;
+    // If a dropdown popup is open, the user is mid-selection â€” rebuilding the
     // widgets right now would close the popup and lose the pick. Defer; the
     // next roster update (or any later refresh) will rebuild instead.
     for (int row = 0; row < m_output_table->rowCount(); ++row) {
@@ -894,6 +1031,14 @@ void ZoomDock::refresh_outputs()
     }
 }
 
+void ZoomDock::open_output_manager()
+{
+    auto *main_win = static_cast<QMainWindow *>(obs_frontend_get_main_window());
+    QWidget *parent = main_win ? static_cast<QWidget *>(main_win) : this;
+    ZoomOutputDialog dlg(parent);
+    dlg.exec();
+}
+
 void ZoomDock::refresh_output_signal_cells()
 {
     if (!m_output_table) return;
@@ -922,6 +1067,8 @@ void ZoomDock::refresh_output_signal_cells()
 
 void ZoomDock::apply_outputs()
 {
+    if (!m_output_table)
+        return;
     for (int row = 0; row < m_output_table->rowCount(); ++row) {
         auto *name_item  = m_output_table->item(row, DColName);
         auto *assignment = qobject_cast<QComboBox *>(m_output_table->cellWidget(row, DColAssignment));

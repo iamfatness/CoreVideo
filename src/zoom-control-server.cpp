@@ -1,5 +1,6 @@
 #include "zoom-control-server.h"
 #include "obs-utils.h"
+#include "speaker-director.h"
 #include "zoom-engine-client.h"
 #include "zoom-iso-recorder.h"
 #include "zoom-oauth.h"
@@ -14,6 +15,7 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <obs-module.h>
+#include <util/platform.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -54,6 +56,8 @@ static bool json_to_uint32(const QJsonObject &obj, const char *key, uint32_t &ou
     out = static_cast<uint32_t>(raw);
     return true;
 }
+
+static QJsonObject speaker_director_to_json();
 
 static QString meeting_state_to_string(MeetingState state);
 
@@ -162,6 +166,7 @@ void ZoomControlServer::poll_and_push()
             {"event",   "active_speaker"},
             {"user_id", static_cast<double>(spk)},
             {"name",    name},
+            {"speaker_director", speaker_director_to_json()},
         });
     }
 }
@@ -240,6 +245,25 @@ static QJsonObject participant_to_json(const ParticipantInfo &p)
     return obj;
 }
 
+static QJsonObject speaker_director_to_json()
+{
+    const SpeakerDirectorSnapshot s =
+        SpeakerDirector::instance().snapshot(os_gettime_ns() / 1000000ULL);
+    QJsonObject obj;
+    obj["directed_speaker_id"] = static_cast<double>(s.directed_speaker_id);
+    obj["raw_speaker_id"] = static_cast<double>(s.raw_speaker_id);
+    obj["candidate_speaker_id"] = static_cast<double>(s.candidate_speaker_id);
+    obj["last_speaker_id"] = static_cast<double>(s.last_speaker_id);
+    obj["manual_speaker_id"] = static_cast<double>(s.manual_speaker_id);
+    obj["manual_active"] = s.manual_active;
+    obj["candidate_elapsed_ms"] = static_cast<double>(s.candidate_elapsed_ms);
+    obj["hold_remaining_ms"] = static_cast<double>(s.hold_remaining_ms);
+    obj["sensitivity_ms"] = static_cast<double>(s.sensitivity_ms);
+    obj["hold_ms"] = static_cast<double>(s.hold_ms);
+    obj["require_video"] = s.require_video;
+    return obj;
+}
+
 static VideoResolution video_resolution_from_json(const QJsonObject &req)
 {
     const QString value = req.value("video_resolution").toString("720p");
@@ -289,6 +313,10 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
         QJsonArray commands;
         for (const char *c : {"help", "status", "list_participants", "list_outputs",
                               "assign_output", "assign_output_ex",
+                              "speaker_director_status",
+                              "speaker_director_configure",
+                              "speaker_director_take",
+                              "speaker_director_release",
                               "join", "leave", "start_engine", "stop_engine",
                               "oauth_callback",
                               "subscribe_events", "recovery_cancel"})
@@ -312,7 +340,68 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
                 ZoomEngineClient::instance().last_error())},
             {"active_speaker_id", static_cast<double>(
                 ZoomEngineClient::instance().active_speaker_id())},
+            {"raw_active_speaker_id", static_cast<double>(
+                ZoomEngineClient::instance().raw_active_speaker_id())},
+            {"speaker_director", speaker_director_to_json()},
             {"recovery", recovery}
+        });
+        return;
+    }
+
+    if (cmd == "speaker_director_status") {
+        write_response(socket, {
+            {"ok", true},
+            {"speaker_director", speaker_director_to_json()}
+        });
+        return;
+    }
+
+    if (cmd == "speaker_director_configure") {
+        uint32_t sensitivity_ms = 0;
+        uint32_t hold_ms = 0;
+        if (!json_to_uint32(req, "sensitivity_ms", sensitivity_ms) ||
+            !json_to_uint32(req, "hold_ms", hold_ms)) {
+            write_response(socket, {{"ok", false}, {"error", "invalid_director_timing"}});
+            return;
+        }
+        const bool require_video = req.value("require_video").toBool(true);
+        SpeakerDirector::instance().configure(sensitivity_ms, hold_ms, require_video);
+        auto settings = ZoomPluginSettings::load();
+        settings.speaker_sensitivity_ms = sensitivity_ms;
+        settings.speaker_hold_ms = hold_ms;
+        settings.speaker_require_video = require_video;
+        settings.save();
+        write_response(socket, {
+            {"ok", true},
+            {"speaker_director", speaker_director_to_json()}
+        });
+        return;
+    }
+
+    if (cmd == "speaker_director_take") {
+        uint32_t participant_id = 0;
+        if (!json_to_uint32(req, "participant_id", participant_id)) {
+            write_response(socket, {{"ok", false}, {"error", "invalid_participant_id"}});
+            return;
+        }
+        const bool ok = SpeakerDirector::instance().set_manual_speaker(
+            participant_id, os_gettime_ns() / 1000000ULL);
+        if (ok)
+            ZoomOutputManager::instance().resubscribe_all();
+        write_response(socket, ok
+            ? QJsonObject{{"ok", true}, {"speaker_director", speaker_director_to_json()}}
+            : QJsonObject{{"ok", false}, {"error", "participant_not_available"}});
+        return;
+    }
+
+    if (cmd == "speaker_director_release") {
+        const bool changed = SpeakerDirector::instance().clear_manual_speaker(
+            os_gettime_ns() / 1000000ULL);
+        if (changed)
+            ZoomOutputManager::instance().resubscribe_all();
+        write_response(socket, {
+            {"ok", true},
+            {"speaker_director", speaker_director_to_json()}
         });
         return;
     }
@@ -543,7 +632,8 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
             if (p.user_id == spk) { spkName = QString::fromStdString(p.display_name); break; }
         push_event({{"event", "active_speaker"},
                     {"user_id", static_cast<double>(spk)},
-                    {"name",    spkName}});
+                    {"name",    spkName},
+                    {"speaker_director", speaker_director_to_json()}});
         return;
     }
 

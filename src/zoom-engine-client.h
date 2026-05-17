@@ -56,6 +56,7 @@ public:
     std::string last_error() const;
     void clear_last_error();
     uint32_t active_speaker_id() const;
+    uint32_t raw_active_speaker_id() const;
     std::vector<ParticipantInfo> roster() const;
 
     void register_source(const std::string &source_uuid, SourceCallbacks callbacks);

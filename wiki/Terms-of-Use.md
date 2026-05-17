@@ -14,17 +14,17 @@ CoreVideo is released under the terms of its open-source license (see [LICENSE](
 
 ---
 
-## 3. Zoom Enhanced Media License Requirement
+## 3. Zoom Meeting SDK Raw Data and Account Limits
 
-> **This is a hard prerequisite — not optional.**
+CoreVideo uses the Zoom Meeting SDK's **raw data APIs** to capture uncompressed video and audio. Raw data access is available through Meeting SDK apps, but negotiated quality, bandwidth, meeting duration, and concurrent stream count are governed by the signed-in Zoom account, the meeting configuration, and app/developer entitlements.
 
-CoreVideo uses the Zoom Meeting SDK's **raw data APIs** to capture uncompressed video and audio. Accessing these APIs requires a **Zoom Enhanced Media License** (or equivalent raw-data-enabled entitlement) on the Zoom account that hosts or joins the meeting.
+Enhanced Media / HBM is not a hard prerequisite for raw data access. It can materially increase production headroom by raising the incoming video bandwidth envelope from roughly 30 Mbps to roughly 100 Mbps. At about 4-6 Mbps per standard 1080p stream, several 1080p feeds may work without EM; with EM/HBM, plan around up to 16 standard 1080p feeds or about 8 high-bitrate / 60 fps feeds before hitting the downlink budget.
 
 By using CoreVideo you confirm that:
 
-- You hold, or have obtained on behalf of your organization, the required Zoom Enhanced Media License.
+- You are responsible for confirming the Zoom account, meeting, and app entitlements needed for your intended production quality and stream count.
 - You will not use the Plugin to capture Zoom meeting content in violation of the [Zoom Marketplace Developer Agreement](https://marketplace.zoom.us/docs/api-reference/developer-agreement) or applicable Zoom terms of service.
-- You understand that operating without the required license will result in SDK-level permission errors and **is a violation of Zoom's terms**, not a bug in CoreVideo.
+- You understand that account bandwidth, app approval, developer flags, and Zoom plan limits can affect the number and quality of raw streams CoreVideo can receive.
 
 ---
 

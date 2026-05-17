@@ -109,7 +109,8 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     : QDialog(parent)
 {
     setWindowTitle("Zoom Output Manager");
-    resize(760, 500);
+    setMinimumSize(1080, 720);
+    resize(1180, 760);
 
     // ── Profile toolbar ───────────────────────────────────────────────────────
     m_profile_combo = new QComboBox(this);
@@ -143,9 +144,14 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
         "Participant", "ID", "Video", "Audio", "Talking"
     });
     m_participant_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_participant_table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    m_participant_table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    m_participant_table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    m_participant_table->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
     m_participant_table->verticalHeader()->setVisible(false);
     m_participant_table->setSelectionMode(QAbstractItemView::SingleSelection);
     m_participant_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_participant_table->setMinimumHeight(170);
 
     m_table = new QTableWidget(this);
     m_table->setColumnCount(ColumnCount);
@@ -155,9 +161,14 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     m_table->horizontalHeader()->setSectionResizeMode(ColumnPreview,    QHeaderView::Fixed);
     m_table->horizontalHeader()->setSectionResizeMode(ColumnName,       QHeaderView::Stretch);
     m_table->horizontalHeader()->setSectionResizeMode(ColumnAssignment, QHeaderView::Stretch);
+    m_table->horizontalHeader()->setSectionResizeMode(ColumnResolution, QHeaderView::ResizeToContents);
+    m_table->horizontalHeader()->setSectionResizeMode(ColumnSignal,     QHeaderView::ResizeToContents);
+    m_table->horizontalHeader()->setSectionResizeMode(ColumnAudio,      QHeaderView::ResizeToContents);
+    m_table->horizontalHeader()->setSectionResizeMode(ColumnIsolate,    QHeaderView::ResizeToContents);
     m_table->setColumnWidth(ColumnPreview, 162);
     m_table->verticalHeader()->setVisible(false);
     m_table->setSelectionMode(QAbstractItemView::NoSelection);
+    m_table->setMinimumHeight(360);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Apply |
                                          QDialogButtonBox::Close, this);

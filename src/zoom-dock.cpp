@@ -1469,7 +1469,9 @@ void ZoomDock::on_join_clicked()
             }
         }
 
-        const bool started = ZoomEngineClient::instance().start(jwt);
+        const ZoomPluginSettings settings = ZoomPluginSettings::load();
+        const bool started = ZoomEngineClient::instance().start(
+            jwt, settings.sdk_public_app_key);
         const bool still_current =
             self->m_join_generation.load(std::memory_order_acquire) == join_generation;
         const bool joined = started && still_current &&

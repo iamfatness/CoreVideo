@@ -30,7 +30,8 @@ public:
 
     static ZoomEngineClient &instance();
 
-    bool start(const std::string &jwt_token);
+    bool start(const std::string &jwt_token,
+               const std::string &public_app_key = {});
     void stop();
     // Same as stop() but does not set the user-leaving flag and does not
     // cancel a pending recovery. Used by ZoomReconnectManager between retries.

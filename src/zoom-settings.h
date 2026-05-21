@@ -6,6 +6,7 @@
 
 struct ZoomPluginSettings {
     std::string         sdk_key, sdk_secret, jwt_token;
+    std::string         sdk_public_app_key;
     std::string         oauth_client_id;
     std::string         oauth_client_secret;
     bool                oauth_use_client_secret = false;

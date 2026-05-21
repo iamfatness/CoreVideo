@@ -171,11 +171,13 @@ ZoomEngineClient::~ZoomEngineClient()
     stop();
 }
 
-bool ZoomEngineClient::start(const std::string &jwt_token)
+bool ZoomEngineClient::start(const std::string &jwt_token,
+                             const std::string &public_app_key)
 {
     if (m_running.load(std::memory_order_acquire)) return true;
-    if (jwt_token.empty()) {
-        const std::string message = "Cannot start Zoom engine: JWT token is empty";
+    if (jwt_token.empty() && public_app_key.empty()) {
+        const std::string message =
+            "Cannot start Zoom engine: no SDK auth credential is configured";
         set_last_error(message);
         blog(LOG_ERROR, "[obs-zoom-plugin] %s", message.c_str());
         return false;
@@ -212,7 +214,12 @@ bool ZoomEngineClient::start(const std::string &jwt_token)
     m_running.store(true, std::memory_order_release);
     m_reader  = std::thread([this]() { reader_loop(); });
     m_monitor = std::thread([this]() { monitor_loop(); });
-    write_json(R"({"cmd":"init","jwt":")" + json_escape(jwt_token) + "\"}");
+    std::string init = R"({"cmd":"init","jwt":")" + json_escape(jwt_token) + "\"";
+    if (!public_app_key.empty()) {
+        init += R"(,"public_app_key":")" + json_escape(public_app_key) + "\"";
+    }
+    init += "}";
+    write_json(init);
     return true;
 }
 

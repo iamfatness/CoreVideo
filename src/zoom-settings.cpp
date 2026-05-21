@@ -83,6 +83,14 @@ ZoomPluginSettings ZoomPluginSettings::load()
     // User-supplied values take precedence; fall back to compiled-in credentials.
     const char *key    = config_get_string(cfg, SECTION, "SdkKey");
     const char *secret = config_get_string(cfg, SECTION, "SdkSecret");
+    const char *meeting_sdk_client_id =
+        config_get_string(cfg, SECTION, "MeetingSdkClientId");
+    const char *meeting_sdk_client_secret =
+        config_get_string(cfg, SECTION, "MeetingSdkClientSecret");
+    const char *meeting_sdk_public_app_key =
+        config_get_string(cfg, SECTION, "MeetingSdkPublicAppKey");
+    const char *public_client_id =
+        config_get_string(cfg, SECTION, "PublicClientId");
     const char *jwt    = config_get_string(cfg, SECTION, "JwtToken");
     const char *oauth_client_id = config_get_string(cfg, SECTION, "OAuthClientId");
     const char *oauth_client_secret = config_get_string(cfg, SECTION, "OAuthClientSecret");
@@ -92,9 +100,22 @@ ZoomPluginSettings ZoomPluginSettings::load()
     const char *oauth_redirect_uri = config_get_string(cfg, SECTION, "OAuthRedirectUri");
     const char *oauth_scopes = config_get_string(cfg, SECTION, "OAuthScopes");
 
-    s.sdk_key    = (key    && *key)    ? key    : kEmbeddedSdkKey;
-    s.sdk_secret = (secret && *secret) ? secret : kEmbeddedSdkSecret;
+    s.sdk_key = (meeting_sdk_client_id && *meeting_sdk_client_id)
+        ? meeting_sdk_client_id
+        : ((key && *key) ? key : kEmbeddedSdkKey);
+
+    const std::string protected_meeting_secret =
+        unprotect_secret(meeting_sdk_client_secret);
+    if (!protected_meeting_secret.empty()) {
+        s.sdk_secret = protected_meeting_secret;
+    } else {
+        s.sdk_secret = (secret && *secret) ? secret : kEmbeddedSdkSecret;
+    }
     s.jwt_token  = (jwt    && *jwt)    ? jwt    : kEmbeddedJwtToken;
+    s.sdk_public_app_key = (meeting_sdk_public_app_key &&
+                            *meeting_sdk_public_app_key)
+        ? meeting_sdk_public_app_key
+        : ((public_client_id && *public_client_id) ? public_client_id : "");
     s.oauth_client_id = (oauth_client_id && *oauth_client_id)
         ? oauth_client_id
         : kEmbeddedOAuthClientId;
@@ -219,6 +240,11 @@ void ZoomPluginSettings::save() const
     config_t *cfg = obs_frontend_get_global_config();
     config_set_string(cfg, SECTION, "SdkKey",            sdk_key.c_str());
     config_set_string(cfg, SECTION, "SdkSecret",         sdk_secret.c_str());
+    config_set_string(cfg, SECTION, "MeetingSdkClientId", sdk_key.c_str());
+    config_set_string(cfg, SECTION, "MeetingSdkClientSecret",
+                      protect_secret(sdk_secret).c_str());
+    config_set_string(cfg, SECTION, "MeetingSdkPublicAppKey",
+                      sdk_public_app_key.c_str());
     config_set_string(cfg, SECTION, "JwtToken",          jwt_token.c_str());
     config_set_string(cfg, SECTION, "OAuthClientId",     oauth_client_id.c_str());
     config_set_string(cfg, SECTION, "OAuthClientSecret",

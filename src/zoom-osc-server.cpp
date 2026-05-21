@@ -333,7 +333,8 @@ void ZoomOscServer::dispatch(const QString &address,
             }
         }
 
-        if (!ZoomEngineClient::instance().start(settings.resolved_jwt_token())) {
+        if (!ZoomEngineClient::instance().start(settings.resolved_jwt_token(),
+                                                settings.sdk_public_app_key)) {
             blog(LOG_WARNING,
                  "[obs-zoom-plugin] OSC /zoom/join: engine failed to start");
             return;

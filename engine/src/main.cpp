@@ -1049,6 +1049,7 @@ int main()
 
         } else if (line.find(IPC_CMD_INIT) != std::string::npos) {
             std::string jwt = json_str(line, "jwt");
+            std::string public_app_key = json_str(line, "public_app_key");
             EngineIpc::write(R"({"cmd":"debug","stage":"init_received"})");
 
             ZOOMSDK::InitParam init_param;
@@ -1058,6 +1059,7 @@ int main()
             init_param.strWebDomain = "https://zoom.us";
 #endif
             init_param.enableGenerateDump = true;
+            init_param.obConfigOpts.optionalFeatures = ENABLE_CUSTOMIZED_UI_FLAG;
             init_param.rawdataOpts.videoRawdataMemoryMode = ZOOMSDK::ZoomSDKRawDataMemoryModeHeap;
             init_param.rawdataOpts.audioRawdataMemoryMode = ZOOMSDK::ZoomSDKRawDataMemoryModeHeap;
             EngineIpc::write(R"({"cmd":"debug","stage":"before_init_sdk"})");
@@ -1081,9 +1083,17 @@ int main()
             }
             auth_svc->SetEvent(&auth_event);
             g_wide_jwt = to_zstr(jwt); // persists for async SDKAuth call
+            auto public_app_key_zstr = to_zstr(public_app_key);
             ZOOMSDK::AuthContext ctx;
-            ctx.jwt_token = g_wide_jwt.c_str();
-            EngineIpc::write(R"({"cmd":"debug","stage":"before_sdk_auth"})");
+            if (!public_app_key.empty()) {
+                ctx.publicAppKey = public_app_key_zstr.c_str();
+            } else {
+                ctx.jwt_token = g_wide_jwt.c_str();
+            }
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"before_sdk_auth","auth_mode":")" +
+                std::string(public_app_key.empty() ? "jwt" : "public_app_key") +
+                R"("})");
             err = auth_svc->SDKAuth(ctx);
             EngineIpc::write(R"({"cmd":"debug","stage":"after_sdk_auth","code":)" +
                 std::to_string(static_cast<int>(err)) + "}");

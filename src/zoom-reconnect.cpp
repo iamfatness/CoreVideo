@@ -1,6 +1,7 @@
 #include "zoom-reconnect.h"
 #include "zoom-engine-client.h"
 #include "zoom-output-manager.h"
+#include "zoom-settings.h"
 #include <obs-module.h>
 #include <algorithm>
 #include <cmath>
@@ -327,7 +328,8 @@ void ZoomReconnectManager::execute_retry(uint64_t generation)
     blog(LOG_INFO, "[obs-zoom-plugin] Executing scheduled reconnect");
 
     ZoomEngineClient::instance().stop_for_reconnect();
-    if (!ZoomEngineClient::instance().start(jwt)) {
+    const ZoomPluginSettings settings = ZoomPluginSettings::load();
+    if (!ZoomEngineClient::instance().start(jwt, settings.sdk_public_app_key)) {
         blog(LOG_ERROR, "[obs-zoom-plugin] Failed to start engine on reconnect");
         on_join_failed(false);
         return;

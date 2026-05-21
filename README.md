@@ -365,6 +365,141 @@ CoreVideoOAuthCallback  (thin helper binary - ships beside the plugin)
 
 See the **[full documentation](https://corevideo.iamfatness.us/documentation/)** for all architecture diagrams including the ZoomEngineClient deep-dive, OAuth PKCE flow, assignment mode flows, auto-reconnect, hardware video acceleration, TCP + OSC API references, output profile format, and full IPC protocol reference.
 
+## CoreVideo Sidecar
+
+CoreVideo Sidecar is the standalone broadcast production console that ships alongside the OBS plugin. It is a Qt 6 application that connects to OBS via obs-websocket v5 and to the CoreVideo plugin via the TCP control API. It is designed to be the operator's primary interface during a live show.
+
+### M/E Bus
+
+The M/E (Mix/Effects) bus is the broadcast switcher core. It owns two Looks: **Program** (PGM — on-air) and **Preview** (PVW — staged next). All transitions route through `MEBus` so the UI, OBS bridge, and remote control share one state.
+
+| Operation | Description |
+|---|---|
+| **TAKE (cut)** | Commits PVW → PGM instantly; fires `tookProgram` so OBS receives the new Look immediately |
+| **AUTO** | Timed take: fades PGM through black, commits at the midpoint (OBS push fires here), then fades back up |
+| **FTB toggle** | Fade-to-black: fades PGM out, or back in if already black — cleanest "kill program" gesture |
+| **Swap** | Swaps PGM ↔ PVW in memory without pushing to OBS — useful for previewing a swap before committing |
+
+### Look Library
+
+A **Look** is the complete description of what is on air — template, slot assignments, tile style, and overlays. The Look Library ships 17 broadcast-ready presets:
+
+| Category | Looks |
+|---|---|
+| **Clean** | `one-up-clean`, `two-up-clean`, `three-up-feature`, `four-up-clean`, `five-up-feature`, `six-up-grid`, `seven-up-feature`, `eight-up-grid` |
+| **Speaker** | `solo-spotlight`, `speaker-screenshare` |
+| **News** | `news-desk`, `news-breaking` |
+| **Talk Show** | `talk-show-classic`, `talk-show-warm` |
+| **Podcast** | `podcast-duo`, `podcast-pip` |
+| **Panel** | `panel-discussion` |
+
+Each Look JSON lives in `sidecar/data/looks/` and references a template by ID, carries `TileStyle` (canvas colour, border, corner radius, drop shadow, name tags), and can embed `Overlay` objects. Looks are displayed in the **Look Panel** and can be staged to PVW with a single click.
+
+### Templates
+
+Templates define the slot geometry. 11 templates ship in `sidecar/data/templates/`:
+
+`1-up`, `2-up-pip`, `2-up-sbs`, `3-up-feature`, `4-up-grid`, `5-up-feature`, `6-up-grid`, `7-up-feature`, `8-up-grid`, `speaker-screenshare`, `talk-show`
+
+### Broadcast Overlays
+
+Overlays sit above the slot composition in canvas-relative coordinates (0..1). Five overlay types are supported:
+
+| Type | Use case |
+|---|---|
+| `LowerThird` | Name + title strip at the bottom of a tile |
+| `Bug` | Small channel bug / logo |
+| `Ticker` | Scrolling news-style bottom bar |
+| `TitleCard` | Full-frame title / segment intro |
+| `Bumper` | Timed transition graphic |
+
+Overlays are attached to a Look and rendered on the Sidecar preview canvas. The **Overlay Panel** lets operators add, edit, and remove overlays live.
+
+### Command Palette
+
+Press **Ctrl+K** (or the toolbar button) to open the Spotlight-style command palette. It provides instant search-and-execute access to every Sidecar action: apply Look, change template, set show phase, switch OBS scene, or jump to any panel.
+
+### Sidecar TCP Control Server
+
+Sidecar exposes its own JSON control server on `127.0.0.1:19880` (distinct from the plugin's port 19870) for Bitfocus Companion and other automation surfaces.
+
+| Command | Fields | Description |
+|---|---|---|
+| `status` | — | Returns phase, template, OBS state, current scene |
+| `list_templates` | — | Returns all available templates |
+| `set_phase` | `phase` | Set show phase (`pre_show`, `live`, `post_show`) |
+| `apply_template` | `template_id` | Apply a template by ID |
+| `set_scene` | `scene` | Switch OBS to a named scene |
+| `subscribe_events` | — | Keep socket open; receives push events |
+
+Push events: `phase_changed`, `template_changed`, `obs_state`, `scene_changed`, `scenes_updated`.
+
+### Build the Sidecar
+
+```sh
+cmake -B build-sidecar \
+  -DCOREVIDEO_BUILD_SIDECAR=ON \
+  -DCMAKE_PREFIX_PATH="/path/to/Qt6"
+cmake --build build-sidecar --config Release
+```
+
+Sidecar requires Qt 6 with WebSockets support. No Zoom SDK or OBS SDK is needed.
+
+### Connecting Sidecar to OBS
+
+1. In OBS: **Tools → obs-websocket Settings** — enable WebSocket Server, note the port (default 4455) and password.
+2. Launch CoreVideo Sidecar.
+3. In Sidecar **Settings**: enter OBS host, port, and password.
+4. Sidecar discovers scenes, sources, and starts receiving state events automatically.
+
+## Bitfocus Companion Integration
+
+CoreVideo ships a full Companion v3 module at `companion/companion-module-corevideo-obs/`. It connects to both the CoreVideo TCP API (port 19870) and Sidecar's control server (port 19880).
+
+### Actions
+
+| Action | Description |
+|---|---|
+| Zoom: Join Meeting | Join by ID, URL, or passcode |
+| Zoom: Leave Meeting | Leave the current meeting |
+| Zoom: Assign Participant to Output | Route a participant to an OBS source |
+| Zoom: Assign Spotlight Slot | Track Zoom spotlight slot N |
+| Zoom: Assign Screen Share | Route active screen share |
+| Zoom: Cancel Auto-Recovery | Abort a reconnect attempt |
+| Sidecar: Set Show Phase | `pre_show` / `live` / `post_show` |
+| Sidecar: Apply Template | Apply a Look template by ID |
+| Sidecar: Switch OBS Scene | Switch to a named OBS scene |
+
+### Feedbacks
+
+| Feedback | Description |
+|---|---|
+| Meeting State | Is meeting in state X? |
+| Meeting State Color | Button color tracks state automatically |
+| Is Active Speaker | Lights up when participant ID is active speaker |
+| Output Has Participant | Lights up when source has someone assigned |
+| Output Tracking Active Speaker | Lights up when source is in active-speaker mode |
+| Auto-Recovery Active | Lights up during reconnect attempts |
+
+### Variables
+
+| Variable | Value |
+|---|---|
+| `$(corevideo-obs:meeting_state)` | `idle` / `joining` / `in_meeting` / … |
+| `$(corevideo-obs:active_speaker_name)` | Display name of current active speaker |
+| `$(corevideo-obs:active_speaker_id)` | Numeric user ID |
+| `$(corevideo-obs:participant_count)` | Number of participants in roster |
+
+### Installing
+
+```bash
+cd companion/companion-module-corevideo-obs
+npm install && npm run build
+# Add dist/ as a local module in Companion Developer Mode
+```
+
+See [`companion/COMPANION_INTEGRATION.md`](companion/COMPANION_INTEGRATION.md) for the full setup guide and OSC module option.
+
 ## Project Structure
 
 ```
@@ -375,54 +510,102 @@ CoreVideo/
 |   `-- windows.cmake
 |-- cmake/
 |   `-- CoreVideoOAuthCallback-Info.plist.in  # macOS OAuth helper bundle plist
+|-- companion/
+|   |-- COMPANION_INTEGRATION.md             # Bitfocus Companion setup guide
+|   `-- companion-module-corevideo-obs/       # Companion v3 TypeScript module
+|       `-- src/
+|           |-- index.ts                     # Module entry: OBS-ws + Sidecar clients, events
+|           |-- actions.ts                   # All actions (zoom join/leave/assign, sidecar phase/template)
+|           |-- feedbacks.ts                 # Button feedbacks and color logic
+|           |-- variables.ts                 # Dynamic variables (meeting state, active speaker, …)
+|           |-- state.ts                     # Shared module state
+|           |-- obs-ws-client.ts             # obs-websocket v5 WebSocket client
+|           `-- sidecar-client.ts            # Sidecar TCP control server client
 |-- data/locale/en-US.ini
-|-- docs/                                     # GitHub Pages documentation
+|-- docs/                                    # GitHub Pages documentation
 |   |-- index.html
-|   |-- ZOOM_MARKETPLACE_OAUTH.md             # OAuth setup guide
-|   `-- policies/                             # Security & privacy policy documents
-|-- engine/src/                               # ZoomObsEngine (owns ALL SDK access)
-|   |-- main.cpp                              # IPC loop, SDK auth/join/webinar, spotlight tracking
-|   |-- engine-video.cpp/h                    # IZoomSDKRenderer -> named shared memory (I420)
-|   `-- engine-audio.cpp/h                    # SDK audio -> named shared memory (PCM)
-`-- src/                                      # OBS plugin (no SDK linkage)
-    |-- plugin-main.cpp                       # Module load/unload, dock, Tools menu, SIGPIPE
-    |-- zoom-source.*                         # Participant source: ShmRegion, AssignmentMode,
-    |                                         #   HwVideoPipeline, failover, hotkeys, placeholder
-    |-- zoom-engine-client.*                  # IPC singleton: engine launch, spotlight/screenshare,
-    |                                         #   monitor thread, deferred join, roster callbacks
-    |-- zoom-oauth.*                          # OAuth 2.0 PKCE: ZoomOAuthManager, ZAK fetch,
-    |                                         #   register_url_scheme, token refresh + DPAPI storage
-    |-- oauth-callback-helper.cpp             # Windows: CoreVideoOAuthCallback.exe entry point
-    |-- oauth-callback-helper-macos.mm        # macOS: CoreVideoOAuthCallback.app entry point
-    |-- zoom-dock.*                           # Qt dockable join/leave/recovery control panel;
-    |                                         #   CvStatusDot, CvBanner, token-type selector
-    |-- zoom-reconnect.*                      # Auto-reconnect with exponential back-off
-    |-- zoom-types.h                          # MeetingState, AssignmentMode, MeetingKind,
-    |                                         #   RecoveryReason, ParticipantInfo, ZoomJoinAuthTokens...
-    |-- cv-style.h                            # CoreVideo QSS stylesheet (dark theme, button roles)
-    |-- cv-widgets.*                          # CvStatusDot (animated dot), CvBanner (notice strip)
-    |-- hw-video-pipeline.*                   # FFmpeg I420->NV12 (CUDA/VAAPI/VideoToolbox/QSV)
-    |-- zoom-audio-delegate.*                 # Mixed/isolated SDK audio -> OBS
-    |-- zoom-audio-router.*                   # Central SDK audio fan-out
-    |-- zoom-auth.*                           # JWT auth + observable auth state
-    |-- zoom-meeting.*                        # Meeting state machine
-    |-- zoom-participants.*                   # Roster, active speaker, spotlight callbacks
-    |-- zoom-participant-audio-source.*       # Per-participant audio OBS source
-    |-- zoom-interpretation-audio-source.*    # Language interpretation OBS source
-    |-- zoom-video-delegate.*                 # Video frames, resolution, loss mode, preview
-    |-- zoom-share-delegate.*                 # Screen share frames -> OBS
-    |-- zoom-output-manager.*                 # Source registry + runtime reconfiguration
-    |-- zoom-output-profile.*                 # Named JSON profile persistence
-    |-- zoom-output-dialog.*                  # Qt Output Manager dock widget
-    |-- zoom-diagnostics-dialog.*             # Qt Diagnostics dock widget
-    |-- zoom-control-server.*                 # TCP JSON API (port 19870) + oauth_callback command
-    |-- zoom-osc-server.*                     # UDP OSC API (port 19871)
-    |-- zoom-settings.*                       # SDK key/secret/JWT + OAuth tokens + port persistence
-    |-- zoom-settings-dialog.*                # Qt Settings dialog with OAuth section
-    |-- zoom-credentials.h.in                 # Embedded SDK credentials (CMake-generated)
-    |-- obs-zoom-version.h.in                 # Plugin version (CMake-generated)
-    |-- engine-ipc.h                          # IPC constants + cross-platform helpers
-    `-- obs-utils.*                           # OBS helper functions
+|   |-- ZOOM_MARKETPLACE_OAUTH.md            # OAuth setup guide
+|   |-- COMPANION_INTEGRATION.md
+|   |-- PRODUCTION_CONSOLE_ARCHITECTURE.md
+|   `-- policies/                            # Security & privacy policy documents (CVP-01 … CVP-06)
+|-- engine/src/                              # ZoomObsEngine (owns ALL SDK access)
+|   |-- main.cpp                             # IPC loop, SDK auth/join/webinar, spotlight tracking
+|   |-- engine-video.cpp/h                   # IZoomSDKRenderer -> named shared memory (I420)
+|   `-- engine-audio.cpp/h                   # SDK audio -> named shared memory (PCM)
+|-- sidecar/                                 # CoreVideo Sidecar (standalone broadcast console)
+|   |-- CMakeLists.txt
+|   |-- data/
+|   |   |-- looks/                           # 17 broadcast Look presets (JSON)
+|   |   `-- templates/                       # 11 slot-geometry templates (JSON)
+|   `-- src/
+|       |-- main.cpp                         # Sidecar app entry point
+|       |-- mainwindow.*                     # Main window: M/E bus, panels, toolbar, keyboard shortcuts
+|       |-- me-bus.*                         # MEBus: PGM/PVW state, TAKE/AUTO/FTB transitions
+|       |-- look.h                           # Look struct: template + slot assignments + overlays + style
+|       |-- look-library.*                   # Look catalog: load from disk, built-in presets
+|       |-- look-panel.*                     # Look Library panel widget
+|       |-- look-render-plan.*               # Resolves a Look into an OBS scene layout plan
+|       |-- obs-look-renderer.*              # Pushes a LookRenderPlan to OBS via obs-websocket
+|       |-- overlay.h                        # Overlay struct: LowerThird / Bug / Ticker / TitleCard / Bumper
+|       |-- overlay-panel.*                  # Overlay editing panel widget
+|       |-- lower-third-controller.*         # Lower-third lifecycle and timed-out logic
+|       |-- layout-template.*                # LayoutTemplate: named slots with geometry
+|       |-- template-manager.*              # Loads and indexes all templates
+|       |-- template-panel.*                # Template picker panel widget
+|       |-- participant-panel.*              # Participant roster with drag-to-slot
+|       |-- preview-canvas.*                # QPainter canvas: live PGM/PVW preview
+|       |-- obs-client.*                     # OBSClient: obs-websocket v5 QWebSocket wrapper
+|       |-- sidecar-control-server.*         # TCP JSON control server on port 19880
+|       |-- zoom-control-client.*            # TCP client to CoreVideo plugin (port 19870)
+|       |-- command-palette.*                # Spotlight-style Ctrl+K command palette
+|       |-- obs-live-validator.*             # Live OBS scene graph validator
+|       |-- obs-audit-report.*              # OBS scene audit report generator
+|       |-- speaker-director.*              # Director automation helpers
+|       `-- sidecar-style.h                  # Sidecar QSS dark theme
+`-- src/                                     # OBS plugin (no SDK linkage)
+    |-- plugin-main.cpp                      # Module load/unload, dock, Tools menu, SIGPIPE
+    |-- zoom-source.*                        # Participant source: ShmRegion, AssignmentMode,
+    |                                        #   HwVideoPipeline, failover, hotkeys, placeholder
+    |-- zoom-engine-client.*                 # IPC singleton: engine launch, spotlight/screenshare,
+    |                                        #   monitor thread, deferred join, roster callbacks
+    |-- zoom-oauth.*                         # OAuth 2.0 PKCE: ZoomOAuthManager, ZAK fetch,
+    |                                        #   register_url_scheme, token refresh + DPAPI storage
+    |-- oauth-callback-helper.cpp            # Windows: CoreVideoOAuthCallback.exe entry point
+    |-- oauth-callback-helper-macos.mm       # macOS: CoreVideoOAuthCallback.app entry point
+    |-- zoom-dock.*                          # Qt dockable join/leave/recovery control panel;
+    |                                        #   CvStatusDot, CvBanner, token-type selector
+    |-- zoom-reconnect.*                     # Auto-reconnect with exponential back-off
+    |-- zoom-iso-recorder.*                  # Auto ISO recording: per-source FFmpeg+WAV sessions
+    |-- zoom-iso-panel.*                     # Zoom ISO Recorder dock widget (Tools menu)
+    |-- zoom-diagnostics-dialog.*            # Diagnostics dock: resolution, FPS, frame age, events
+    |-- speaker-director.*                   # Directed active speaker: debounce, take/release
+    |-- zoom-types.h                         # MeetingState, AssignmentMode, MeetingKind,
+    |                                        #   RecoveryReason, ParticipantInfo, ZoomJoinAuthTokens…
+    |-- cv-style.h                           # CoreVideo QSS stylesheet (dark theme, button roles)
+    |-- cv-widgets.*                         # CvStatusDot (animated dot), CvBanner (notice strip)
+    |-- cv-onboarding.*                      # First-run onboarding wizard
+    |-- hw-video-pipeline.*                  # FFmpeg I420->NV12 (CUDA/VAAPI/VideoToolbox/QSV)
+    |-- zoom-audio-delegate.*                # Mixed/isolated SDK audio -> OBS
+    |-- zoom-audio-router.*                  # Central SDK audio fan-out
+    |-- zoom-auth.*                          # JWT auth + observable auth state
+    |-- zoom-meeting.*                       # Meeting state machine
+    |-- zoom-participants.*                  # Roster, active speaker, spotlight callbacks
+    |-- zoom-participant-audio-source.*      # Per-participant audio OBS source
+    |-- zoom-interpretation-audio-source.*   # Language interpretation OBS source
+    |-- zoom-video-delegate.*               # Video frames, resolution, loss mode, preview
+    |-- zoom-share-delegate.*               # Screen share frames -> OBS
+    |-- zoom-output-manager.*               # Source registry + runtime reconfiguration
+    |-- zoom-output-profile.*               # Named JSON profile persistence
+    |-- zoom-output-dialog.*                # Qt Output Manager dock widget
+    |-- zoom-output-health.h                # Output health telemetry (resolution, FPS, age, retries)
+    |-- zoom-control-server.*               # TCP JSON API (port 19870) + oauth_callback command
+    |-- zoom-osc-server.*                   # UDP OSC API (port 19871)
+    |-- zoom-settings.*                     # SDK key/secret/JWT + OAuth tokens + port persistence
+    |-- zoom-settings-dialog.*              # Qt Settings dialog with simplified OAuth sign-in
+    |-- zoom-credentials.h.in              # Embedded SDK credentials (CMake-generated)
+    |-- obs-zoom-version.h.in              # Plugin version (CMake-generated)
+    |-- engine-ipc.h                        # IPC constants + cross-platform helpers
+    `-- obs-utils.*                         # OBS helper functions
 ```
 
 ## Security

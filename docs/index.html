@@ -159,6 +159,14 @@
   <a href="#iso-recording">Auto ISO Recording</a>
   <div class="nav-section">Plugin UI</div>
   <a href="#ui-modern">Modern UI</a>
+  <div class="nav-section">Sidecar Console</div>
+  <a href="#sidecar">CoreVideo Sidecar</a>
+  <a href="#me-bus">M/E Bus</a>
+  <a href="#look-library">Look Library</a>
+  <a href="#overlays">Broadcast Overlays</a>
+  <a href="#sidecar-control">Sidecar Control API</a>
+  <div class="nav-section">Automation</div>
+  <a href="#companion">Bitfocus Companion</a>
   <div class="nav-section">Reference</div>
   <a href="#control-api">TCP Control API</a>
   <a href="#osc-api">OSC Control API</a>
@@ -193,6 +201,8 @@
       <span class="badge green">Qt 6</span>
       <span class="badge purple">Zoom SDK 5.17+ / 7.x</span>
       <span class="badge purple">OAuth 2.0 PKCE</span>
+      <span class="badge blue">Sidecar Console</span>
+      <span class="badge blue">Bitfocus Companion</span>
       <span class="badge orange">Windows</span>
       <span class="badge orange">macOS</span>
       <span class="badge orange">Linux</span>
@@ -290,6 +300,16 @@
         <p>Record assigned participant video/audio tracks to separate files while optionally recording the main OBS program output.</p></div>
       <div class="card"><div class="card-icon">💻</div><h4>Multi-Platform</h4>
         <p>Windows (x64/arm64), macOS (universal arm64+x86_64), Linux. SDK 5.17.x and 7.x header layouts supported.</p></div>
+      <div class="card"><div class="card-icon">🎬</div><h4>CoreVideo Sidecar</h4>
+        <p>Standalone Qt 6 broadcast console with M/E Bus (PGM/PVW), Look Library (17 presets), Broadcast Overlays, and Command Palette.</p></div>
+      <div class="card"><div class="card-icon">M/E</div><h4>M/E Bus</h4>
+        <p>Program (on-air) and Preview (staged) bus with Cut (TAKE), AUTO timed fade, and FTB (Fade-to-Black) transitions.</p></div>
+      <div class="card"><div class="card-icon">🎨</div><h4>Look Library</h4>
+        <p>17 broadcast-ready Look presets across Clean, News, Talk Show, Podcast, and Panel categories. Each Look carries a template, tile style, and overlays.</p></div>
+      <div class="card"><div class="card-icon">📺</div><h4>Broadcast Overlays</h4>
+        <p>LowerThird, Bug, Ticker, TitleCard, and Bumper overlays in canvas-relative coordinates. Managed via the Overlay Panel.</p></div>
+      <div class="card"><div class="card-icon">🎮</div><h4>Bitfocus Companion</h4>
+        <p>Full Companion v3 module: actions, feedbacks, and dynamic variables for both the Zoom plugin and Sidecar console.</p></div>
     </div>
   </section>
 
@@ -1796,6 +1816,383 @@ sequenceDiagram
       An optional underlined action button on the right emits <code>actionClicked()</code>.
       Used in <code>ZoomDock</code> as a first-run prompt to configure SDK credentials.
     </p>
+  </section>
+
+  <!-- ══ COREVIDEO SIDECAR ══════════════════════════════════════ -->
+  <section id="sidecar">
+    <h2>CoreVideo Sidecar</h2>
+    <p>
+      <strong>CoreVideo Sidecar</strong> is the standalone broadcast production console that
+      ships alongside the OBS plugin. It is a Qt 6 desktop application that connects to OBS
+      via <strong>obs-websocket v5</strong> and to the CoreVideo plugin via the TCP control
+      API. It provides an operator-facing interface for managing show layouts, switching
+      between program and preview, applying visual Looks, and controlling overlays — all
+      without touching OBS directly.
+    </p>
+    <p>
+      Sidecar does <em>not</em> require the Zoom SDK or OBS SDK at build time. It needs only
+      Qt 6 with WebSockets.
+    </p>
+
+    <div class="callout tip">
+      <div class="callout-title">Quick Start</div>
+      Build with <code>-DCOREVIDEO_BUILD_SIDECAR=ON</code>, then connect it to OBS via
+      <strong>Tools → obs-websocket Settings</strong> in OBS Studio (port 4455).
+    </div>
+
+    <h3>Architecture</h3>
+    <div class="diagram-wrap">
+      <div class="mermaid">
+graph LR
+  subgraph Sidecar["CoreVideo Sidecar (Qt 6 app)"]
+    MW[MainWindow]
+    ME[MEBus\nPGM / PVW]
+    LL[LookLibrary\n17 presets]
+    TM[TemplateManager\n11 templates]
+    PP[PreviewCanvas\nQPainter]
+    OP[OverlayPanel]
+    CP[CommandPalette\nCtrl+K]
+    SCS[SidecarControlServer\nport 19880]
+    ZCC[ZoomControlClient\nport 19870]
+    OBC[OBSClient\nobs-ws v5]
+    OLR[OBSLookRenderer]
+  end
+
+  MW --> ME
+  MW --> LL
+  MW --> TM
+  MW --> PP
+  MW --> OP
+  MW --> CP
+  MW --> SCS
+  MW --> ZCC
+  ME -->|tookProgram| OLR
+  OLR -->|set scene items| OBC
+
+  OBC -- "port 4455\nobs-websocket v5" --> OBS[(OBS Studio)]
+  ZCC -- "port 19870\nTCP JSON" --> Plugin[(CoreVideo\nOBS Plugin)]
+      </div>
+      <p class="diagram-caption">Fig S1 — CoreVideo Sidecar component graph</p>
+    </div>
+
+    <h3>Building Sidecar</h3>
+    <pre><code>cmake -B build-sidecar \
+  -DCOREVIDEO_BUILD_SIDECAR=ON \
+  -DCMAKE_PREFIX_PATH="/path/to/Qt6"
+cmake --build build-sidecar --config Release</code></pre>
+
+    <h3>Connecting to OBS</h3>
+    <div class="steps">
+      <div class="step"><div class="step-body">
+        <h4>Enable obs-websocket in OBS</h4>
+        <p>In OBS go to <strong>Tools → obs-websocket Settings</strong>. Enable the WebSocket Server. Note the port (default <code>4455</code>) and password.</p>
+      </div></div>
+      <div class="step"><div class="step-body">
+        <h4>Connect Sidecar</h4>
+        <p>Launch Sidecar and open <strong>Settings</strong>. Enter OBS host, port, and password. Sidecar discovers all scenes automatically on connect.</p>
+      </div></div>
+      <div class="step"><div class="step-body">
+        <h4>Connect to the CoreVideo plugin</h4>
+        <p>In the same Settings page, enter the CoreVideo TCP address (<code>127.0.0.1:19870</code>) and token if set. Sidecar will pull participant state and meeting status.</p>
+      </div></div>
+    </div>
+  </section>
+
+  <!-- ══ M/E BUS ══════════════════════════════════════════════ -->
+  <section id="me-bus">
+    <h2>M/E Bus</h2>
+    <p>
+      The <strong>M/E (Mix/Effects) Bus</strong> is the broadcast switcher core of Sidecar.
+      It owns two <strong>Looks</strong>: <strong>Program (PGM)</strong> — what is currently
+      on air — and <strong>Preview (PVW)</strong> — what is staged next.
+      All on-air state mutations route through <code>MEBus</code> so the UI, OBS renderer,
+      and remote control surfaces share a single source of truth.
+    </p>
+
+    <table>
+      <thead><tr><th>Operation</th><th>API</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><strong>TAKE (cut)</strong></td><td><code>MEBus::take()</code></td><td>Commits PVW → PGM instantly. Fires <code>tookProgram</code> so OBS receives the new Look immediately.</td></tr>
+        <tr><td><strong>AUTO</strong></td><td><code>MEBus::autoTake(ms)</code></td><td>Timed TAKE. Fades PGM through black, commits at the midpoint (OBS push fires here), then fades back up. Default 1500 ms.</td></tr>
+        <tr><td><strong>FTB toggle</strong></td><td><code>MEBus::ftbToggle(ms)</code></td><td>If FTB is inactive, fades PGM out to black. If active, fades back from black. Default 500 ms.</td></tr>
+        <tr><td><strong>Swap</strong></td><td><code>MEBus::swap()</code></td><td>Swaps PGM ↔ PVW in memory without pushing to OBS — useful for previewing a swap before committing.</td></tr>
+        <tr><td><strong>Stage</strong></td><td><code>MEBus::stageLook(look)</code></td><td>Loads a Look onto PVW without changing PGM.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Transition Signals</h3>
+    <p>
+      <code>MEBus</code> emits signals that Sidecar's <code>PreviewCanvas</code> uses to animate
+      the transition in real time:
+    </p>
+    <ul>
+      <li><code>pgmOpacityChanged(float)</code> — drives canvas dimming (1.0 = fully visible, 0.0 = black)</li>
+      <li><code>transitionStarted(kind, durationMs)</code></li>
+      <li><code>transitionProgress(float)</code> — 0..1 interpolation fraction</li>
+      <li><code>transitionEnded()</code></li>
+      <li><code>tookProgram(Look)</code> — OBS push logic hooks here</li>
+    </ul>
+  </section>
+
+  <!-- ══ LOOK LIBRARY ══════════════════════════════════════════ -->
+  <section id="look-library">
+    <h2>Look Library</h2>
+    <p>
+      A <strong>Look</strong> is the complete description of a composition — template, slot
+      assignments, tile style, theme, and overlays. Looks are the unit that the M/E Bus
+      transitions between. The Look Library ships <strong>17 broadcast-ready presets</strong>
+      in <code>sidecar/data/looks/</code>.
+    </p>
+
+    <h3>Built-in Presets</h3>
+    <table>
+      <thead><tr><th>Category</th><th>Look IDs</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Clean</strong></td><td><code>one-up-clean</code>, <code>two-up-clean</code>, <code>three-up-feature</code>, <code>four-up-clean</code>, <code>five-up-feature</code>, <code>six-up-grid</code>, <code>seven-up-feature</code>, <code>eight-up-grid</code></td></tr>
+        <tr><td><strong>Speaker</strong></td><td><code>solo-spotlight</code>, <code>speaker-screenshare</code></td></tr>
+        <tr><td><strong>News</strong></td><td><code>news-desk</code>, <code>news-breaking</code></td></tr>
+        <tr><td><strong>Talk Show</strong></td><td><code>talk-show-classic</code>, <code>talk-show-warm</code></td></tr>
+        <tr><td><strong>Podcast</strong></td><td><code>podcast-duo</code>, <code>podcast-pip</code></td></tr>
+        <tr><td><strong>Panel</strong></td><td><code>panel-discussion</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3>Look JSON Format</h3>
+    <pre><code>{
+  "id": "news-desk",
+  "name": "News Desk",
+  "category": "News",
+  "description": "Two-up side-by-side with host and guest",
+  "templateId": "2-up-sbs",
+  "tileStyle": {
+    "canvasColor": "#1a1a2e",
+    "borderColor": "#2979ff",
+    "borderWidth": 2,
+    "cornerRadius": 8,
+    "dropShadow": true,
+    "showNameTag": true,
+    "excludeNoVideo": true
+  },
+  "slotAssignments": [
+    { "slotIndex": 0, "participantId": -1 },
+    { "slotIndex": 1, "participantId": -1 }
+  ],
+  "overlays": []
+}</code></pre>
+
+    <h3>Templates</h3>
+    <p>
+      Templates define the slot geometry. 11 templates ship in <code>sidecar/data/templates/</code>:
+    </p>
+    <table>
+      <thead><tr><th>Template ID</th><th>Slots</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>1-up</code></td><td>1</td><td>Single full-frame participant</td></tr>
+        <tr><td><code>2-up-pip</code></td><td>2</td><td>Large main + small picture-in-picture</td></tr>
+        <tr><td><code>2-up-sbs</code></td><td>2</td><td>Side-by-side equal split</td></tr>
+        <tr><td><code>3-up-feature</code></td><td>3</td><td>One large feature + two smaller</td></tr>
+        <tr><td><code>4-up-grid</code></td><td>4</td><td>2×2 equal grid</td></tr>
+        <tr><td><code>5-up-feature</code></td><td>5</td><td>One feature + four smaller</td></tr>
+        <tr><td><code>6-up-grid</code></td><td>6</td><td>2×3 equal grid</td></tr>
+        <tr><td><code>7-up-feature</code></td><td>7</td><td>One feature + six smaller</td></tr>
+        <tr><td><code>8-up-grid</code></td><td>8</td><td>2×4 equal grid</td></tr>
+        <tr><td><code>speaker-screenshare</code></td><td>2</td><td>Screenshare main + speaker PiP</td></tr>
+        <tr><td><code>talk-show</code></td><td>3</td><td>Host centre + two guest seats</td></tr>
+      </tbody>
+    </table>
+
+    <h3>TileStyle Properties</h3>
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>canvasColor</code></td><td>hex string</td><td>Background fill behind participant tiles</td></tr>
+        <tr><td><code>borderColor</code></td><td>hex string</td><td>Tile border colour</td></tr>
+        <tr><td><code>borderWidth</code></td><td>double</td><td>Border width in pixels</td></tr>
+        <tr><td><code>cornerRadius</code></td><td>double</td><td>Tile corner rounding in pixels</td></tr>
+        <tr><td><code>dropShadow</code></td><td>bool</td><td>Enable drop shadow on tiles</td></tr>
+        <tr><td><code>opacity</code></td><td>double (0..1)</td><td>Overall tile opacity</td></tr>
+        <tr><td><code>showNameTag</code></td><td>bool</td><td>Render participant display name tag</td></tr>
+        <tr><td><code>excludeNoVideo</code></td><td>bool</td><td>Skip participants with video off when auto-filling slots</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ══ BROADCAST OVERLAYS ════════════════════════════════════ -->
+  <section id="overlays">
+    <h2>Broadcast Overlays</h2>
+    <p>
+      Overlays are graphics that sit above the slot composition in the Sidecar preview canvas.
+      All positions are in <strong>canvas-relative coordinates</strong> (0..1) so a Look
+      renders consistently at any output resolution.
+    </p>
+
+    <table>
+      <thead><tr><th>Type</th><th>Typical use</th></tr></thead>
+      <tbody>
+        <tr><td><code>LowerThird</code></td><td>Name + title strip at the bottom of a tile; two text fields (<code>text1</code>, <code>text2</code>)</td></tr>
+        <tr><td><code>Bug</code></td><td>Small channel bug / logo in a corner</td></tr>
+        <tr><td><code>Ticker</code></td><td>Scrolling news-style bottom bar</td></tr>
+        <tr><td><code>TitleCard</code></td><td>Full-frame title or segment intro card</td></tr>
+        <tr><td><code>Bumper</code></td><td>Timed transition graphic; <code>durationMs &gt; 0</code> for auto-out</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Overlay JSON Format</h3>
+    <pre><code>{
+  "id": "ot-host",
+  "type": "LowerThird",
+  "text1": "Alex Rivera",
+  "text2": "Host",
+  "accent": "#2979ff",
+  "x": 0.02,
+  "y": 0.78,
+  "w": 0.40,
+  "h": 0.12,
+  "durationMs": 0
+}</code></pre>
+
+    <h3>Overlay Fields</h3>
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>string</td><td>Stable identifier (preset name or UUID)</td></tr>
+        <tr><td><code>type</code></td><td>string</td><td><code>LowerThird</code> / <code>Bug</code> / <code>Ticker</code> / <code>TitleCard</code> / <code>Bumper</code></td></tr>
+        <tr><td><code>text1</code></td><td>string</td><td>Primary text (name, headline)</td></tr>
+        <tr><td><code>text2</code></td><td>string</td><td>Secondary text (title, sub-headline)</td></tr>
+        <tr><td><code>accent</code></td><td>hex string</td><td>Accent colour; omit to inherit from theme</td></tr>
+        <tr><td><code>x</code>, <code>y</code></td><td>double 0..1</td><td>Canvas-relative top-left origin</td></tr>
+        <tr><td><code>w</code>, <code>h</code></td><td>double 0..1</td><td>Canvas-relative width and height</td></tr>
+        <tr><td><code>durationMs</code></td><td>int</td><td>0 = sticky; &gt;0 = auto-out after N ms</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ══ SIDECAR CONTROL API ═══════════════════════════════════ -->
+  <section id="sidecar-control">
+    <h2>Sidecar Control API</h2>
+    <p>
+      Sidecar exposes a newline-delimited JSON TCP control server on
+      <code>127.0.0.1:19880</code> (distinct from the OBS plugin's port 19870).
+      <strong>Bitfocus Companion</strong> and other automation surfaces connect here
+      to control show phases, apply templates, and receive push events.
+    </p>
+
+    <h3>Commands</h3>
+    <table>
+      <thead><tr><th>Command</th><th>Key fields</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>status</code></td><td>—</td><td>Returns <code>phase</code>, <code>template_id</code>, <code>template_name</code>, <code>obs_state</code>, <code>scenes</code>, <code>current_scene</code></td></tr>
+        <tr><td><code>list_templates</code></td><td>—</td><td>Returns all available template IDs and names</td></tr>
+        <tr><td><code>set_phase</code></td><td><code>phase</code></td><td>Set show phase: <code>pre_show</code>, <code>live</code>, or <code>post_show</code></td></tr>
+        <tr><td><code>apply_template</code></td><td><code>template_id</code></td><td>Apply a template by ID; updates PVW</td></tr>
+        <tr><td><code>set_scene</code></td><td><code>scene</code></td><td>Switch OBS to a named scene</td></tr>
+        <tr><td><code>subscribe_events</code></td><td>—</td><td>Keep connection open; receive push events until disconnect</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Push Events</h3>
+    <p>Emitted to all <code>subscribe_events</code> subscribers when Sidecar state changes:</p>
+    <table>
+      <thead><tr><th>Event</th><th>Fields</th></tr></thead>
+      <tbody>
+        <tr><td><code>phase_changed</code></td><td><code>phase</code></td></tr>
+        <tr><td><code>template_changed</code></td><td><code>template_id</code>, <code>template_name</code></td></tr>
+        <tr><td><code>obs_state</code></td><td><code>state</code> (e.g. <code>connected</code>, <code>disconnected</code>)</td></tr>
+        <tr><td><code>scene_changed</code></td><td><code>scene</code></td></tr>
+        <tr><td><code>scenes_updated</code></td><td><code>scenes</code> array</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Example</h3>
+    <pre><code># Get current Sidecar state
+echo '{"cmd":"status"}' | nc 127.0.0.1 19880
+
+# Switch to live phase
+echo '{"cmd":"set_phase","phase":"live"}' | nc 127.0.0.1 19880
+
+# Apply a template
+echo '{"cmd":"apply_template","template_id":"4-up-grid"}' | nc 127.0.0.1 19880
+
+# Subscribe for real-time push events (keep socket open)
+echo '{"cmd":"subscribe_events"}' | nc -q 0 127.0.0.1 19880</code></pre>
+  </section>
+
+  <!-- ══ BITFOCUS COMPANION ════════════════════════════════════ -->
+  <section id="companion">
+    <h2>Bitfocus Companion Integration</h2>
+    <p>
+      CoreVideo ships a full <strong>Companion v3 module</strong> at
+      <code>companion/companion-module-corevideo-obs/</code>. The module is written in
+      TypeScript and connects simultaneously to the CoreVideo TCP API (port 19870) and
+      the Sidecar control server (port 19880).
+    </p>
+
+    <div class="callout info">
+      <div class="callout-title">Two integration options</div>
+      <strong>Option A:</strong> Use the custom Companion module (recommended) for full actions,
+      feedbacks, variables, and push events.<br>
+      <strong>Option B:</strong> Use Companion's built-in OSC module pointed at
+      <code>127.0.0.1:19871</code> for lighter-weight control via the CoreVideo OSC API.
+    </div>
+
+    <h3>Installing the Module</h3>
+    <pre><code>cd companion/companion-module-corevideo-obs
+npm install
+npm run build
+# Add the dist/ folder as a local module in Companion Developer Mode</code></pre>
+
+    <h3>Actions</h3>
+    <table>
+      <thead><tr><th>Action</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td>Zoom: Join Meeting</td><td>Join by meeting ID, URL, or passcode</td></tr>
+        <tr><td>Zoom: Leave Meeting</td><td>Leave the current meeting</td></tr>
+        <tr><td>Zoom: Assign Participant to Output</td><td>Route a participant to a named OBS source</td></tr>
+        <tr><td>Zoom: Assign Spotlight Slot</td><td>Track Zoom spotlight slot N on an OBS source</td></tr>
+        <tr><td>Zoom: Assign Screen Share</td><td>Route active screen share to an OBS source</td></tr>
+        <tr><td>Zoom: Cancel Auto-Recovery</td><td>Abort an in-progress reconnect attempt</td></tr>
+        <tr><td>Zoom: Refresh Status</td><td>Pull fresh state from the CoreVideo plugin</td></tr>
+        <tr><td>Sidecar: Set Show Phase</td><td>Set <code>pre_show</code>, <code>live</code>, or <code>post_show</code></td></tr>
+        <tr><td>Sidecar: Apply Template</td><td>Apply a Look template by ID (updates Sidecar PVW)</td></tr>
+        <tr><td>Sidecar: Switch OBS Scene</td><td>Switch OBS to a named scene via Sidecar</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Feedbacks</h3>
+    <table>
+      <thead><tr><th>Feedback</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td>Meeting State</td><td>Boolean: is the meeting in state X?</td></tr>
+        <tr><td>Meeting State Color</td><td>Button color tracks meeting state automatically</td></tr>
+        <tr><td>Is Active Speaker</td><td>Lights up when the given participant ID is active speaker</td></tr>
+        <tr><td>Output Has Participant</td><td>Lights up when a named OBS source has a participant assigned</td></tr>
+        <tr><td>Output Tracking Active Speaker</td><td>Lights up when a source is in active-speaker mode</td></tr>
+        <tr><td>Auto-Recovery Active</td><td>Lights up during reconnect attempts</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Dynamic Variables</h3>
+    <table>
+      <thead><tr><th>Variable</th><th>Value</th></tr></thead>
+      <tbody>
+        <tr><td><code>$(corevideo-obs:meeting_state)</code></td><td><code>idle</code> / <code>joining</code> / <code>in_meeting</code> / …</td></tr>
+        <tr><td><code>$(corevideo-obs:active_speaker_name)</code></td><td>Display name of current active speaker</td></tr>
+        <tr><td><code>$(corevideo-obs:active_speaker_id)</code></td><td>Numeric participant ID of active speaker</td></tr>
+        <tr><td><code>$(corevideo-obs:participant_count)</code></td><td>Number of participants in the roster</td></tr>
+        <tr><td><code>$(corevideo-obs:output_N_source)</code></td><td>OBS source name for output slot N</td></tr>
+        <tr><td><code>$(corevideo-obs:output_N_participant)</code></td><td>Participant display name for output slot N</td></tr>
+        <tr><td><code>$(corevideo-obs:output_N_mode)</code></td><td>Assignment mode for output slot N</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Push Events (TCP subscribe_events)</h3>
+    <p>On connect the module sends <code>{"cmd": "subscribe_events"}</code>. CoreVideo streams events as state changes — no polling needed:</p>
+    <pre><code>{"event": "meeting_state", "state": "in_meeting"}
+{"event": "active_speaker", "user_id": 16778240, "name": "Alex Rivera"}
+{"event": "roster_changed"}
+{"event": "output_changed"}</code></pre>
+
+    <p>See <a href="https://github.com/iamfatness/CoreVideo/blob/main/companion/COMPANION_INTEGRATION.md">companion/COMPANION_INTEGRATION.md</a> for the full OSC module reference.</p>
   </section>
 
   <footer style="margin-top:64px;padding-top:24px;border-top:1px solid var(--border);color:var(--muted);font-size:0.8rem;">

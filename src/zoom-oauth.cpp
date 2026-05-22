@@ -100,7 +100,7 @@ bool ZoomOAuthManager::begin_authorization(QWidget *parent, QString *error)
 
     QUrlQuery query(url);
     const QString url_client_id = query.queryItemValue("client_id");
-    QString client_id = url_client_id.isEmpty()
+    QString client_id = (s.oauth_use_client_secret || url_client_id.isEmpty())
         ? QString::fromStdString(s.oauth_client_id)
         : url_client_id;
     if (client_id.isEmpty()) {

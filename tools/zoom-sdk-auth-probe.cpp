@@ -81,6 +81,7 @@ int main(int argc, char **argv)
     init_param.strWebDomain = "https://zoom.us";
 #endif
     init_param.enableGenerateDump = true;
+    init_param.enableLogByDefault = true;
     init_param.rawdataOpts.videoRawdataMemoryMode =
         ZOOMSDK::ZoomSDKRawDataMemoryModeHeap;
     init_param.rawdataOpts.audioRawdataMemoryMode =

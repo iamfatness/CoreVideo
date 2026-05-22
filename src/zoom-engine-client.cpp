@@ -214,12 +214,12 @@ bool ZoomEngineClient::start(const std::string &jwt_token,
     m_running.store(true, std::memory_order_release);
     m_reader  = std::thread([this]() { reader_loop(); });
     m_monitor = std::thread([this]() { monitor_loop(); });
-    std::string init = R"({"cmd":"init","jwt":")" + json_escape(jwt_token) + "\"";
     if (!public_app_key.empty()) {
-        init += R"(,"public_app_key":")" + json_escape(public_app_key) + "\"";
+        write_json(R"({"cmd":"init","public_app_key":")" +
+                   json_escape(public_app_key) + "\"}");
+    } else {
+        write_json(R"({"cmd":"init","jwt":")" + json_escape(jwt_token) + "\"}");
     }
-    init += "}";
-    write_json(init);
     return true;
 }
 

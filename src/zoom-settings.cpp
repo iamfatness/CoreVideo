@@ -13,7 +13,6 @@
 #endif
 
 static constexpr const char *SECTION = "ZoomPlugin";
-
 static QByteArray base64url(const QByteArray &data)
 {
     return data.toBase64(QByteArray::Base64UrlEncoding |
@@ -89,8 +88,6 @@ ZoomPluginSettings ZoomPluginSettings::load()
         config_get_string(cfg, SECTION, "MeetingSdkClientSecret");
     const char *meeting_sdk_public_app_key =
         config_get_string(cfg, SECTION, "MeetingSdkPublicAppKey");
-    const char *public_client_id =
-        config_get_string(cfg, SECTION, "PublicClientId");
     const char *jwt    = config_get_string(cfg, SECTION, "JwtToken");
     const char *oauth_client_id = config_get_string(cfg, SECTION, "OAuthClientId");
     const char *oauth_client_secret = config_get_string(cfg, SECTION, "OAuthClientSecret");
@@ -115,7 +112,7 @@ ZoomPluginSettings ZoomPluginSettings::load()
     s.sdk_public_app_key = (meeting_sdk_public_app_key &&
                             *meeting_sdk_public_app_key)
         ? meeting_sdk_public_app_key
-        : ((public_client_id && *public_client_id) ? public_client_id : "");
+        : "";
     s.oauth_client_id = (oauth_client_id && *oauth_client_id)
         ? oauth_client_id
         : kEmbeddedOAuthClientId;

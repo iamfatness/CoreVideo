@@ -1059,6 +1059,7 @@ int main()
             init_param.strWebDomain = "https://zoom.us";
 #endif
             init_param.enableGenerateDump = true;
+            init_param.enableLogByDefault = true;
             init_param.obConfigOpts.optionalFeatures = ENABLE_CUSTOMIZED_UI_FLAG;
             init_param.rawdataOpts.videoRawdataMemoryMode = ZOOMSDK::ZoomSDKRawDataMemoryModeHeap;
             init_param.rawdataOpts.audioRawdataMemoryMode = ZOOMSDK::ZoomSDKRawDataMemoryModeHeap;
@@ -1093,7 +1094,11 @@ int main()
             EngineIpc::write(
                 R"({"cmd":"debug","stage":"before_sdk_auth","auth_mode":")" +
                 std::string(public_app_key.empty() ? "jwt" : "public_app_key") +
-                R"("})");
+                R"(","jwt_present":)" +
+                std::string(jwt.empty() ? "false" : "true") +
+                R"(,"public_app_key_present":)" +
+                std::string(public_app_key.empty() ? "false" : "true") +
+                "}");
             err = auth_svc->SDKAuth(ctx);
             EngineIpc::write(R"({"cmd":"debug","stage":"after_sdk_auth","code":)" +
                 std::to_string(static_cast<int>(err)) + "}");

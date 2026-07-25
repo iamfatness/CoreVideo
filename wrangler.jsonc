@@ -21,6 +21,10 @@
   ],
   "assets": {
     "binding": "ASSETS",
-    "directory": "./public"
+    "directory": "./public",
+    // Run the Worker before serving static assets so host-level logic (the
+    // www.corevideo.io -> apex redirect) and the security headers in
+    // site-worker.js apply to every request, including asset paths.
+    "run_worker_first": true
   }
 }

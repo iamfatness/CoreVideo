@@ -7,6 +7,16 @@ const docsDir = path.join(root, "docs");
 const siteAssetsDir = path.join(root, "site-assets");
 const outDir = path.join(root, "public");
 
+// corevideo.io is the primary domain; corevideo.iamfatness.us continues to serve
+// the same content as an alias. Canonical tags point search engines at the
+// primary host so the two domains are not treated as duplicate content.
+const PRIMARY_ORIGIN = "https://corevideo.io";
+
+function canonicalUrl(output) {
+  const pathPart = ("/" + output).replace(/index\.html$/, "");
+  return PRIMARY_ORIGIN + (pathPart || "/");
+}
+
 const pages = [
   {
     source: "Home.md",
@@ -90,6 +100,10 @@ function renderImage(alt, src) {
 function resolveHref(href) {
   if (href.startsWith("https://iamfatness.github.io/CoreVideo/#"))
     return `/documentation/#${href.slice("https://iamfatness.github.io/CoreVideo/#".length)}`;
+  if (href.startsWith("https://corevideo.io/documentation/#"))
+    return `/documentation/#${href.slice("https://corevideo.io/documentation/#".length)}`;
+  if (href === "https://corevideo.io/documentation/")
+    return "/documentation/";
   if (href.startsWith("https://corevideo.iamfatness.us/documentation/#"))
     return `/documentation/#${href.slice("https://corevideo.iamfatness.us/documentation/#".length)}`;
   if (href === "https://corevideo.iamfatness.us/documentation/")
@@ -114,6 +128,7 @@ function normalizeText(value) {
     .replaceAll("â€¦", "...")
     .replaceAll("ðŸ“–", "")
     .replaceAll("behaviour", "behavior")
+    .replaceAll("https://corevideo.io/documentation/", "/documentation/")
     .replaceAll("https://corevideo.iamfatness.us/documentation/", "/documentation/")
     .replaceAll("https://iamfatness.github.io/CoreVideo/", "/documentation/")
     .replaceAll("https://iamfatness.github.io/CoreVideo", "/documentation");
@@ -472,7 +487,7 @@ function layout(page, content, options = {}) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${escapeHtml(page.title)} | CoreVideo</title>
   <meta name="description" content="${escapeHtml(page.description)}">
-  <link rel="stylesheet" href="/assets/site.css">
+${options.canonical ? `  <link rel="canonical" href="${escapeHtml(options.canonical)}">\n` : ""}  <link rel="stylesheet" href="/assets/site.css">
 </head>
 <body class="${options.home ? "home-page" : "document-page"}">
   <header class="site-header">
@@ -505,6 +520,7 @@ for (const page of pages) {
   const isHome = page.output === "index.html";
   const html = layout(page, isHome ? homeContent() : markdownToHtml(markdown), {
     home: isHome,
+    canonical: canonicalUrl(page.output),
   });
   writeText(page.output, html);
   for (const alias of page.aliases ?? []) {
@@ -514,7 +530,9 @@ for (const page of pages) {
 
 for (const page of markdownPages) {
   const markdown = normalizeText(fs.readFileSync(page.source, "utf8"));
-  const html = layout(page, markdownToHtml(markdown));
+  const html = layout(page, markdownToHtml(markdown), {
+    canonical: canonicalUrl(page.output),
+  });
   writeText(page.output, html);
 }
 
@@ -530,6 +548,7 @@ writeText(
     proPageContent(),
     {
       home: true,
+      canonical: canonicalUrl("pro/index.html"),
       footerText:
         "CoreVideo and CoreVideo Pro are independent products and are not affiliated with Zoom Video Communications, Inc.",
     },
@@ -547,6 +566,7 @@ writeText(
     },
     proDocsContent(),
     {
+      canonical: canonicalUrl("pro/documentation/index.html"),
       footerText:
         "CoreVideo and CoreVideo Pro are independent products and are not affiliated with Zoom Video Communications, Inc.",
     },
@@ -685,7 +705,11 @@ const docsHtml = fs.readFileSync(path.join(docsDir, "index.html"), "utf8")
     ? new URL("/documentation", publicDocumentationUrl).host + "/documentation"
     : "CoreVideo documentation")
   .replaceAll("https://iamfatness.github.io/CoreVideo/", "/documentation/")
-  .replaceAll('href="ZOOM_MARKETPLACE_OAUTH.md"', 'href="/oauth/"');
+  .replaceAll('href="ZOOM_MARKETPLACE_OAUTH.md"', 'href="/oauth/"')
+  .replace(
+    "</head>",
+    `  <link rel="canonical" href="${canonicalUrl("documentation/index.html")}">\n</head>`,
+  );
 writeText("documentation/index.html", docsHtml);
 writeText("docs/index.html", docsHtml);
 
@@ -1055,6 +1079,6 @@ writeText("_redirects", `/terms-of-use /terms/ 301
 /ZOOM_MARKETPLACE_OAUTH.md /oauth/ 301
 /docs/ZOOM_MARKETPLACE_OAUTH.md /oauth/ 301
 `);
-writeText("CNAME", "corevideo.iamfatness.us\n");
+writeText("CNAME", "corevideo.io\n");
 
 console.log(`Built CoreVideo site in ${path.relative(root, outDir)}`);

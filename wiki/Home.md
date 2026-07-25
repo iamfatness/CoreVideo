@@ -2,9 +2,9 @@
 
 Welcome to the CoreVideo wiki - an OBS Studio plugin for live Zoom meeting video, audio, screen share, and Zoom interpretation audio channel capture.
 
-**[Full Documentation & Architecture Diagrams](https://corevideo.iamfatness.us/documentation/)**
+**[Full Documentation & Architecture Diagrams](https://corevideo.io/documentation/)**
 
-**[Core Plugin Guide & Examples](https://corevideo.iamfatness.us/core-plugin/)**
+**[Core Plugin Guide & Examples](https://corevideo.io/core-plugin/)**
 
 ---
 
@@ -20,9 +20,9 @@ Welcome to the CoreVideo wiki - an OBS Studio plugin for live Zoom meeting video
 
 | Resource | Link |
 |---|---|
-| Documentation site | https://corevideo.iamfatness.us/documentation/ |
-| Core plugin guide | https://corevideo.iamfatness.us/core-plugin/ |
-| OAuth / Marketplace setup | https://corevideo.iamfatness.us/oauth/ |
+| Documentation site | https://corevideo.io/documentation/ |
+| Core plugin guide | https://corevideo.io/core-plugin/ |
+| OAuth / Marketplace setup | https://corevideo.io/oauth/ |
 | Latest Windows release | https://github.com/iamfatness/CoreVideo/releases/tag/v0.1.18 |
 | Source code | https://github.com/iamfatness/CoreVideo |
 | Issues & bug reports | https://github.com/iamfatness/CoreVideo/issues |

@@ -58,7 +58,7 @@ The broker at `corevideo.iamfatness.us` is used only for Zoom OAuth token exchan
 
 ### Cloudflare and GitHub (Documentation)
 
-The documentation site at `corevideo.iamfatness.us` is served through Cloudflare and sourced from the public CoreVideo GitHub repository. Cloudflare's and GitHub's privacy policies apply to visits to that site:
+The documentation site at `corevideo.io` is served through Cloudflare and sourced from the public CoreVideo GitHub repository. Cloudflare's and GitHub's privacy policies apply to visits to that site:
 
 - [Cloudflare Privacy Policy](https://www.cloudflare.com/privacypolicy/)
 - [GitHub Privacy Statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement)

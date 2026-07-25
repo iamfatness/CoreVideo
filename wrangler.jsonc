@@ -7,6 +7,14 @@
   "preview_urls": false,
   "routes": [
     {
+      "pattern": "corevideo.io",
+      "custom_domain": true
+    },
+    {
+      "pattern": "www.corevideo.io",
+      "custom_domain": true
+    },
+    {
       "pattern": "corevideo.iamfatness.us/*",
       "zone_name": "iamfatness.us"
     }

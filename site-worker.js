@@ -459,6 +459,14 @@ async function fetchAsset(request, env, pathname) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+
+    // corevideo.io is the primary domain. Redirect the www subdomain to the
+    // apex so there is a single canonical host, preserving path and query.
+    if (url.hostname === "www.corevideo.io") {
+      url.hostname = "corevideo.io";
+      return Response.redirect(url.toString(), 301);
+    }
+
     const pathname = url.pathname.replace(/\/$/u, "") || "/";
     if (pathname === "/oauth/start") {
       return handleOauthStart(request, env);

@@ -4,20 +4,20 @@
 
 Before opening an issue, check the full documentation site - most configuration questions and architecture details are covered there:
 
-**[https://corevideo.iamfatness.us/documentation/](https://corevideo.iamfatness.us/documentation/)**
+**[https://corevideo.io/documentation/](https://corevideo.io/documentation/)**
 
 | Topic | Link |
 |---|---|
-| Installation & build | [Installation](https://corevideo.iamfatness.us/documentation/#installation) |
-| Configuration | [Configuration](https://corevideo.iamfatness.us/documentation/#configuration) |
-| Zoom Control Dock | [Zoom Control Dock](https://corevideo.iamfatness.us/documentation/#zoom-dock) |
-| Assignment modes (Spotlight, Active Speaker, Screen Share) | [Assignment Modes](https://corevideo.iamfatness.us/documentation/#assignment-modes) |
-| Active speaker debounce | [Active Speaker Mode](https://corevideo.iamfatness.us/documentation/#active-speaker) |
-| Auto-reconnect | [Auto-Reconnect](https://corevideo.iamfatness.us/documentation/#auto-reconnect) |
-| Hardware video acceleration | [Hardware Video Acceleration](https://corevideo.iamfatness.us/documentation/#hw-accel) |
-| TCP control API | [TCP Control API](https://corevideo.iamfatness.us/documentation/#control-api) |
-| OSC control API | [OSC Control API](https://corevideo.iamfatness.us/documentation/#osc-api) |
-| IPC protocol reference | [IPC Protocol](https://corevideo.iamfatness.us/documentation/#ipc-protocol) |
+| Installation & build | [Installation](https://corevideo.io/documentation/#installation) |
+| Configuration | [Configuration](https://corevideo.io/documentation/#configuration) |
+| Zoom Control Dock | [Zoom Control Dock](https://corevideo.io/documentation/#zoom-dock) |
+| Assignment modes (Spotlight, Active Speaker, Screen Share) | [Assignment Modes](https://corevideo.io/documentation/#assignment-modes) |
+| Active speaker debounce | [Active Speaker Mode](https://corevideo.io/documentation/#active-speaker) |
+| Auto-reconnect | [Auto-Reconnect](https://corevideo.io/documentation/#auto-reconnect) |
+| Hardware video acceleration | [Hardware Video Acceleration](https://corevideo.io/documentation/#hw-accel) |
+| TCP control API | [TCP Control API](https://corevideo.io/documentation/#control-api) |
+| OSC control API | [OSC Control API](https://corevideo.io/documentation/#osc-api) |
+| IPC protocol reference | [IPC Protocol](https://corevideo.io/documentation/#ipc-protocol) |
 
 ---
 

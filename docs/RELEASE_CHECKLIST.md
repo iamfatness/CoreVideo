@@ -112,8 +112,8 @@ automated OBS smoke, and sidecar release gates.
 - `docs/CORE_PLUGIN_FUNCTIONALITY.md` matches current OBS UI.
 - `docs/OPERATOR_QUICKSTART.md` is current.
 - `docs/ZOOM_MARKETPLACE_OAUTH.md` matches the active production OAuth path.
-- Published website at `corevideo.iamfatness.us` is deployed from the same
-  commit as the release.
+- Published website at `corevideo.io` (with `corevideo.iamfatness.us` as a live
+  alias) is deployed from the same commit as the release.
 - Sidecar content is clearly labeled as roadmap or architecture until it is
   production-ready.
 

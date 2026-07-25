@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   deploy:
-    name: Deploy corevideo.iamfatness.us
+    name: Deploy corevideo.io
     runs-on: ubuntu-latest
     permissions:
       contents: read

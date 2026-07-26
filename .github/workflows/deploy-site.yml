@@ -48,7 +48,7 @@ jobs:
               echo
               echo "Set CLOUDFLARE_API_TOKEN as a repository secret and"
               echo "CLOUDFLARE_ACCOUNT_ID as either a repository secret or variable"
-              echo "to enable deployment to corevideo.iamfatness.us."
+              echo "to enable deployment to corevideo.io."
             } >> "$GITHUB_STEP_SUMMARY"
             echo "deploy_enabled=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -58,3 +58,26 @@ jobs:
       - name: Deploy to Cloudflare Workers
         if: steps.cloudflare_config.outputs.deploy_enabled == 'true'
         run: npx wrangler@latest deploy
+
+      # Purge the edge cache so a new deploy is served immediately instead of
+      # leaving a stale-cache window. Non-fatal: if the API token lacks
+      # Zone:Read / Cache Purge, this warns and the deploy still succeeds.
+      - name: Purge Cloudflare cache
+        if: steps.cloudflare_config.outputs.deploy_enabled == 'true'
+        shell: bash
+        run: |
+          for zone in corevideo.io iamfatness.us; do
+            zid=$(curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "https://api.cloudflare.com/client/v4/zones?name=$zone&status=active" \
+              | python3 -c "import sys,json; r=(json.load(sys.stdin).get('result') or []); print(r[0]['id'] if r else '')")
+            if [ -z "$zid" ]; then
+              echo "::warning::No zone id for $zone (token may lack Zone:Read); skipped purge."
+              continue
+            fi
+            resp=$(curl -s -X POST -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              "https://api.cloudflare.com/client/v4/zones/$zid/purge_cache" \
+              --data '{"purge_everything":true}')
+            ok=$(printf '%s' "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('success'))" 2>/dev/null)
+            if [ "$ok" = "True" ]; then echo "Purged cache for $zone"; else echo "::warning::Cache purge failed for $zone: $resp"; fi
+          done

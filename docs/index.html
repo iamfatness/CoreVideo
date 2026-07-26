@@ -330,14 +330,14 @@
         <p>Close OBS Studio if it is open, then double-click <code>CoreVideo-Setup.exe</code> and
         follow the prompts. The installer adds the CoreVideo plugin and its bundled Zoom runtime to
         your OBS Studio installation.</p>
-        <figure class="shot"><div class="shot-ph"><b>SCREENSHOT</b>CoreVideo-Setup.exe installer window (welcome / finish page)</div><figcaption>Running the CoreVideo Windows installer.</figcaption></figure>
+        
       </div></div>
       <div class="step"><div class="step-body">
         <h4>3. Open OBS Studio</h4>
         <p>Launch OBS Studio 30 or newer. CoreVideo loads automatically: you'll see the
         <strong>Zoom Control</strong> dock and a <strong>Tools&nbsp;→&nbsp;Zoom Plugin Settings</strong>
         menu item. If the dock is hidden, enable it from <strong>Docks&nbsp;→&nbsp;Zoom Control</strong>.</p>
-        <figure class="shot"><div class="shot-ph"><b>SCREENSHOT</b>OBS Studio with the CoreVideo "Zoom Control" dock visible</div><figcaption>OBS Studio after installing CoreVideo, showing the Zoom Control dock.</figcaption></figure>
+        
       </div></div>
       <div class="step"><div class="step-body">
         <h4>4. Sign in with Zoom</h4>
@@ -364,13 +364,13 @@
       <div class="step"><div class="step-body">
         <h4>1. Click "Sign in with Zoom"</h4>
         <p>In the Zoom Control dock, or via <strong>Tools&nbsp;→&nbsp;Zoom Plugin Settings</strong>.</p>
-        <figure class="shot"><div class="shot-ph"><b>SCREENSHOT</b>Tools &gt; Zoom Plugin Settings with the "Sign in with Zoom" button</div><figcaption>The sign-in control — no Client ID or secret fields for end users.</figcaption></figure>
+        <figure class="shot"><img src="/documentation/images/settings.png" alt="Tools → Zoom Plugin Settings: Sign in with Zoom (no Client ID or secret for end users)."><figcaption>Tools → Zoom Plugin Settings: Sign in with Zoom (no Client ID or secret for end users).</figcaption></figure>
       </div></div>
       <div class="step"><div class="step-body">
         <h4>2. Authorize in your browser</h4>
         <p>Your browser opens Zoom's consent screen. Approve access. CoreVideo registers its
         <code>corevideo://</code> callback handler automatically the first time.</p>
-        <figure class="shot"><div class="shot-ph"><b>SCREENSHOT</b>Zoom OAuth consent screen for CoreVideo</div><figcaption>Zoom's authorization screen.</figcaption></figure>
+        
       </div></div>
       <div class="step"><div class="step-body">
         <h4>3. Done</h4>
@@ -406,7 +406,7 @@
     <p>Paste a Meeting ID or Zoom URL, an optional passcode, and a display name, then click
     <strong>Join</strong>. Toggle <em>Join as Webinar</em> for webinars. The status dot turns green
     when connected.</p>
-    <figure class="shot"><div class="shot-ph"><b>SCREENSHOT</b>Zoom Control dock: Meeting ID / passcode / display name and Join button, connected state</div><figcaption>Joining a meeting from the Zoom Control dock.</figcaption></figure>
+    <figure class="shot"><img src="/documentation/images/control-dock.png" alt="The Zoom Control dock — Join Meeting and the Active Speaker Director."><figcaption>The Zoom Control dock — Join Meeting and the Active Speaker Director.</figcaption></figure>
 
     <h3>Add Zoom sources to a scene</h3>
     <p><strong>Use case:</strong> Bring individual participants, the active screen share, a spotlight
@@ -416,8 +416,8 @@
     <em>Zoom Participant</em> (video), <em>Zoom Participant Audio</em>, <em>Zoom Screen Share</em>,
     <em>Zoom Spotlight</em>, or <em>Zoom Interpretation Audio</em>. Pick a participant or slot in the
     source properties (see the <a href="#configuration">Configuration Reference</a>).</p>
-    <figure class="shot"><div class="shot-ph"><b>SCREENSHOT</b>OBS "Add Source" menu listing the CoreVideo source types</div><figcaption>CoreVideo source types in the OBS Add-Source menu.</figcaption></figure>
-    <figure class="shot"><div class="shot-ph"><b>SCREENSHOT</b>A Zoom Participant source properties panel (participant picker, resolution, audio)</div><figcaption>Zoom Participant source properties.</figcaption></figure>
+    <figure class="shot"><img src="/documentation/images/source-types.png" alt="CoreVideo source types in the OBS Add-Source menu."><figcaption>CoreVideo source types in the OBS Add-Source menu.</figcaption></figure>
+    
 
     <h3>Active Speaker Director</h3>
     <p><strong>Use case:</strong> Automatically switch a source to whoever is speaking, with
@@ -433,7 +433,7 @@
     <p><strong>Prerequisites:</strong> CoreVideo sources added to your scene.</p>
     <p>Open the <strong>Zoom Output Manager</strong> dock to assign participants, watch live thumbnails
     and health, and save/load profiles. See <a href="#output-profiles">Output Profiles</a>.</p>
-    <figure class="shot"><div class="shot-ph"><b>SCREENSHOT</b>Zoom Output Manager dock with assignments, thumbnails and feed health</div><figcaption>The Zoom Output Manager dock.</figcaption></figure>
+    
 
     <h3>ISO recording</h3>
     <p><strong>Use case:</strong> Record each assigned participant to a separate video/audio file

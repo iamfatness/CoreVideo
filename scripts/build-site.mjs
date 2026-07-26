@@ -733,6 +733,14 @@ if (fs.existsSync(docsImagesSource)) {
   });
 }
 
+// Plugin Docs screenshots (served at /documentation/images/).
+const pluginDocShots = path.join(siteAssetsDir, "plugin-docs");
+if (fs.existsSync(pluginDocShots)) {
+  fs.cpSync(pluginDocShots, path.join(outDir, "documentation", "images"), {
+    recursive: true,
+  });
+}
+
 const docsHtml = fs.readFileSync(path.join(docsDir, "index.html"), "utf8")
   .replaceAll("iamfatness.github.io/CoreVideo", publicDocumentationUrl
     ? new URL("/documentation", publicDocumentationUrl).host + "/documentation"

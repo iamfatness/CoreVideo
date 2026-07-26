@@ -17,6 +17,15 @@ function canonicalUrl(output) {
   return PRIMARY_ORIGIN + (pathPart || "/");
 }
 
+// The CoreVideo "Multiview" brand mark (mirrors Controls/MultiviewMark.xaml in
+// the app): a 16:9 monitor frame split 2x2 with the top-right tile live-green.
+const MULTIVIEW_MARK =
+  `<svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true">` +
+  `<rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/>` +
+  `<line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/>` +
+  `<line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/>` +
+  `<rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg>`;
+
 const pages = [
   {
     source: "Home.md",
@@ -137,7 +146,10 @@ function normalizeText(value) {
 function homeContent() {
   return `<section class="hero">
   <figure class="hero-media">
-    <img class="hero-logo" src="/assets/corevideo-logo.jpg" alt="CoreVideo">
+    <div class="console">
+      <div class="console-bar"><span class="tally tally-live">Live</span><span>Multiview 01</span><span class="tc">1080p60 &middot; 00:00:00:00</span></div>
+      <div class="console-screen center"><img class="hero-logo" src="/assets/corevideo-logo.jpg" alt="CoreVideo"></div>
+    </div>
   </figure>
   <div class="hero-copy">
     <p class="eyebrow">Live Zoom production &mdash; from free plugin to full studio</p>
@@ -168,7 +180,10 @@ function homeContent() {
 function proPageContent() {
   return `<section class="hero">
   <figure class="hero-media">
-    <img class="hero-logo" src="/pro/images/corevideo-pro-studio.webp" alt="CoreVideo Pro production console: scene list, live program with multi-camera layout and lower-third, participant roster with roles and audio meters, and Take/Record/Stream controls">
+    <div class="console">
+      <div class="console-bar"><span class="tally tally-air">On Air</span><span class="tally tally-pgm">Pgm</span><span class="tc">2160p60 &middot; 00:12:47:03</span></div>
+      <div class="console-screen"><img src="/pro/images/corevideo-pro-studio.webp" alt="CoreVideo Pro production console: scene list, live program with multi-camera layout and lower-third, participant roster with roles and audio meters, and Take/Record/Stream controls"></div>
+    </div>
   </figure>
   <div class="hero-copy">
     <p class="eyebrow">The complete CoreVideo production studio</p>
@@ -480,6 +495,8 @@ function layout(page, content, options = {}) {
   const footerText = options.footerText ??
     "CoreVideo is an independent product and is not affiliated with Zoom Video Communications, Inc.";
 
+  const here = options.canonical ? options.canonical.replace(PRIMARY_ORIGIN, "") : null;
+
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -487,12 +504,16 @@ function layout(page, content, options = {}) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${escapeHtml(page.title)} | CoreVideo</title>
   <meta name="description" content="${escapeHtml(page.description)}">
+  <meta name="theme-color" content="#0a0b0c">
+  <link rel="icon" href="/favicon.svg">
+  <link rel="preload" href="/assets/fonts/SpaceGrotesk-var.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/assets/fonts/IBMPlexMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
 ${options.canonical ? `  <link rel="canonical" href="${escapeHtml(options.canonical)}">\n` : ""}  <link rel="stylesheet" href="/assets/site.css">
 </head>
 <body class="${options.home ? "home-page" : "document-page"}">
   <header class="site-header">
-    <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span><span>CoreVideo</span></a>
-    <nav>${nav.map(([label, href]) => `<a href="${href}">${label}</a>`).join("")}</nav>
+    <a class="brand" href="/">${MULTIVIEW_MARK}<span>CoreVideo</span></a>
+    <nav>${nav.map(([label, href]) => `<a href="${href}"${here && href === here ? ' aria-current="page"' : ""}>${label}</a>`).join("")}</nav>
   </header>
   <main class="content">
     ${content}
@@ -713,362 +734,24 @@ const docsHtml = fs.readFileSync(path.join(docsDir, "index.html"), "utf8")
 writeText("documentation/index.html", docsHtml);
 writeText("docs/index.html", docsHtml);
 
-writeText("assets/site.css", `:root {
-  color-scheme: dark;
-  --bg: #070914;
-  --bg-2: #101528;
-  --panel: rgba(14, 18, 35, 0.88);
-  --panel-strong: #11172c;
-  --text: #f7faff;
-  --muted: #9daac2;
-  --line: rgba(125, 239, 255, 0.18);
-  --cyan: #22e7e8;
-  --blue: #2aa8ff;
-  --cyan-soft: rgba(34, 231, 232, 0.14);
+writeText(
+  "assets/site.css",
+  fs.readFileSync(path.join(siteAssetsDir, "site.css"), "utf8"),
+);
+
+// Bundled application fonts (Space Grotesk + IBM Plex Mono), self-hosted so
+// the CSP font-src 'self' policy allows them.
+const fontsSource = path.join(siteAssetsDir, "fonts");
+if (fs.existsSync(fontsSource)) {
+  fs.cpSync(fontsSource, path.join(outDir, "assets", "fonts"), { recursive: true });
 }
-* { box-sizing: border-box; }
-html { min-height: 100%; }
-body {
-  margin: 0;
-  min-height: 100%;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background:
-    radial-gradient(1100px 620px at 50% -10%, rgba(42, 168, 255, 0.10), transparent 60%),
-    radial-gradient(900px 600px at 88% 0%, rgba(34, 231, 232, 0.07), transparent 55%),
-    linear-gradient(180deg, var(--bg-2), var(--bg) 42%);
-  background-attachment: fixed;
-  color: var(--text);
-  line-height: 1.6;
-  -webkit-font-smoothing: antialiased;
-}
-a { color: var(--cyan); text-decoration-thickness: 1px; text-underline-offset: 3px; }
-.site-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 24px;
-  padding: 18px clamp(20px, 5vw, 56px);
-  border-bottom: 1px solid var(--line);
-  background: rgba(7, 9, 20, 0.82);
-  backdrop-filter: blur(16px);
-  position: sticky;
-  top: 0;
-  z-index: 10;
-}
-.brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  color: var(--text);
-  font-weight: 750;
-  font-size: 20px;
-  text-decoration: none;
-}
-.brand-mark {
-  position: relative;
-  display: inline-block;
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, var(--cyan), var(--blue));
-  box-shadow: 0 0 24px rgba(34, 231, 232, 0.35);
-}
-.brand-mark::before {
-  content: "";
-  position: absolute;
-  inset: 7px 8px;
-  background: #07101c;
-  border-radius: 50%;
-}
-.brand-mark::after {
-  content: "";
-  position: absolute;
-  left: 13px;
-  top: 9px;
-  width: 0;
-  height: 0;
-  border-top: 7px solid transparent;
-  border-bottom: 7px solid transparent;
-  border-left: 11px solid var(--cyan);
-  filter: drop-shadow(0 0 6px rgba(34, 231, 232, 0.75));
-}
-nav {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 16px;
-}
-nav a {
-  color: var(--muted);
-  font-size: 14px;
-  text-decoration: none;
-}
-nav a:hover { color: var(--text); }
-.content {
-  width: min(980px, calc(100% - 40px));
-  margin: 42px auto 56px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
-  padding: clamp(24px, 5vw, 52px);
-  position: relative;
-}
-.home-page .content {
-  width: min(1120px, calc(100% - 40px));
-  background: transparent;
-  border: 0;
-  box-shadow: none;
-  padding: 0;
-}
-.hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1.02fr) minmax(360px, 0.98fr);
-  align-items: center;
-  gap: clamp(30px, 5vw, 68px);
-  padding: clamp(28px, 6vw, 70px);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background:
-    linear-gradient(135deg, rgba(9, 13, 27, 0.96), rgba(12, 17, 34, 0.82)),
-    radial-gradient(circle at 12% 20%, rgba(34, 231, 232, 0.16), transparent 22rem);
-  box-shadow: 0 24px 90px rgba(0, 0, 0, 0.5);
-}
-.hero-copy { max-width: 620px; }
-.hero-media {
-  margin: 0;
-  position: relative;
-}
-.hero-media::before {
-  content: "";
-  position: absolute;
-  inset: 14% 18% auto auto;
-  width: 42%;
-  aspect-ratio: 1;
-  border-radius: 50%;
-  background: rgba(34, 231, 232, 0.18);
-  filter: blur(42px);
-}
-.hero-logo {
-  display: block;
-  position: relative;
-  width: 100%;
-  height: auto;
-  border-radius: 8px;
-  box-shadow:
-    0 22px 80px rgba(0, 0, 0, 0.42),
-    0 0 0 1px rgba(125, 239, 255, 0.12);
-}
-.eyebrow {
-  color: var(--cyan);
-  margin: 0 0 12px;
-  font-size: 13px;
-  font-weight: 750;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-.hero h1 {
-  margin: 0 0 18px;
-  max-width: 820px;
-  font-size: clamp(36px, 6vw, 70px);
-  letter-spacing: 0;
-}
-.lede {
-  color: #d5def0;
-  max-width: 660px;
-  font-size: 18px;
-}
-.hero-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-top: 28px;
-}
-.button {
-  display: inline-flex;
-  align-items: center;
-  min-height: 44px;
-  padding: 10px 20px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  color: var(--text);
-  background: rgba(255,255,255,0.04);
-  font-weight: 600;
-  text-decoration: none;
-  transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease, filter 0.15s ease;
-}
-.button:hover { background: rgba(255,255,255,0.09); transform: translateY(-1px); }
-.button.primary {
-  color: #06111a;
-  border-color: transparent;
-  background: linear-gradient(135deg, var(--cyan), var(--blue));
-  font-weight: 750;
-}
-.button.primary:hover { filter: brightness(1.05); }
-.link-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 14px;
-  margin-top: 18px;
-}
-.link-grid.products {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-.link-grid.products a {
-  min-height: 180px;
-}
-.link-grid a,
-.link-grid > div {
-  min-height: 160px;
-  padding: 22px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--panel-strong);
-  text-decoration: none;
-  transition: border-color 0.18s ease, background 0.18s ease, transform 0.18s ease;
-}
-.link-grid a:hover {
-  border-color: rgba(125, 239, 255, 0.34);
-  background: #141a30;
-  transform: translateY(-2px);
-}
-.link-grid strong {
-  display: block;
-  color: var(--text);
-  font-size: 18px;
-  margin-bottom: 8px;
-}
-.link-grid span { color: var(--muted); }
-.link-grid a.featured {
-  border-color: rgba(125, 239, 255, 0.34);
-  background: #131a30;
-}
-.link-grid .tier {
-  display: inline-block;
-  margin-bottom: 12px;
-  padding: 3px 11px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-.link-grid .tier-premium {
-  color: #06111a;
-  border-color: transparent;
-  background: linear-gradient(135deg, var(--cyan), var(--blue));
-}
-.feature-set {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 18px;
-  margin-top: 8px;
-}
-.feature-set > div {
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--panel-strong);
-  padding: 20px 22px;
-}
-.feature-set h3 {
-  margin: 0 0 12px;
-  padding: 0;
-  font-size: 16px;
-  color: var(--text);
-}
-.feature-set ul { margin: 0; padding-left: 18px; }
-.feature-set li { margin-bottom: 7px; font-size: 14px; color: var(--muted); }
-.feature-set li:last-child { margin-bottom: 0; }
-h1, h2, h3, h4 { line-height: 1.2; margin: 1.6em 0 0.55em; letter-spacing: 0; }
-h1 { margin-top: 0; font-size: clamp(34px, 5vw, 52px); }
-h2 { font-size: 26px; border-top: 1px solid var(--line); padding-top: 28px; }
-h3 { font-size: 21px; color: #dcecff; }
-p, ul, table, blockquote { margin: 0 0 18px; }
-p, li, td { color: #d6deee; }
-ul { padding-left: 24px; }
-code {
-  background: rgba(34, 231, 232, 0.1);
-  border: 1px solid rgba(34, 231, 232, 0.16);
-  border-radius: 4px;
-  padding: 0.1em 0.35em;
-  font-size: 0.92em;
-  color: #bafcff;
-}
-pre {
-  overflow-x: auto;
-  background: #08111f;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 16px;
-  margin: 0 0 18px;
-}
-pre code {
-  display: block;
-  background: transparent;
-  border: 0;
-  padding: 0;
-  color: #dcecff;
-}
-.doc-image {
-  margin: 0 0 22px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: #08111f;
-  padding: 12px;
-}
-.doc-image img {
-  display: block;
-  width: 100%;
-  height: auto;
-}
-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 15px;
-}
-th, td {
-  text-align: left;
-  vertical-align: top;
-  border: 1px solid var(--line);
-  padding: 10px 12px;
-}
-th { background: rgba(34, 231, 232, 0.08); color: var(--text); }
-blockquote {
-  border-left: 4px solid var(--cyan);
-  padding: 12px 18px;
-  background: var(--cyan-soft);
-  color: #e7fbff;
-}
-hr {
-  border: 0;
-  border-top: 1px solid var(--line);
-  margin: 30px 0;
-}
-.site-footer {
-  color: var(--muted);
-  font-size: 13px;
-  padding: 24px clamp(20px, 5vw, 56px) 40px;
-  text-align: center;
-}
-@media (max-width: 900px) {
-  .hero {
-    grid-template-columns: 1fr;
-  }
-  .hero-media { order: -1; }
-  .link-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .link-grid.products { grid-template-columns: 1fr; }
-}
-@media (max-width: 700px) {
-  .site-header { align-items: flex-start; flex-direction: column; }
-  nav { justify-content: flex-start; }
-  .content { margin-top: 24px; }
-  .hero { min-height: 0; }
-  .link-grid { grid-template-columns: 1fr; }
-}
-`);
+
+// Favicon: the Multiview brand mark on the app background.
+writeText(
+  "favicon.svg",
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#0A0B0C"/><rect x="6" y="8" width="20" height="16" rx="3" fill="none" stroke="#E9EDEF" stroke-width="1.6"/><line x1="16" y1="9" x2="16" y2="23" stroke="#E9EDEF" stroke-width="1.1" opacity=".5"/><line x1="7" y1="16" x2="25" y2="16" stroke="#E9EDEF" stroke-width="1.1" opacity=".5"/><rect x="17" y="9.2" width="8.4" height="6" rx="1" fill="#22C86E"/></svg>
+`,
+);
 
 writeText("_redirects", `/terms-of-use /terms/ 301
 /Terms-of-Use /terms/ 301

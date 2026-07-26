@@ -468,6 +468,15 @@ export default {
     }
 
     const pathname = url.pathname.replace(/\/$/u, "") || "/";
+
+    // Download CTA: always send users to the latest published release, where the
+    // signed Windows installer (CoreVideo-Setup-*.exe) and checksum are listed.
+    if (pathname === "/download") {
+      return Response.redirect(
+        "https://github.com/iamfatness/CoreVideo/releases/latest",
+        302,
+      );
+    }
     if (pathname === "/oauth/start") {
       return handleOauthStart(request, env);
     }

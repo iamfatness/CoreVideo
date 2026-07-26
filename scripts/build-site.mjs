@@ -486,6 +486,7 @@ function layout(page, content, options = {}) {
     ["Pro Docs", "/pro/documentation/"],
     ["Plugin Docs", "/documentation/"],
     ["Core Plugin", "/core-plugin/"],
+    ["Download", "/download"],
     ["OAuth", "/oauth/"],
     ["Terms", "/terms/"],
     ["Privacy", "/privacy/"],

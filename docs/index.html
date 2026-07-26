@@ -56,6 +56,12 @@
     /* Prose links must be distinguishable without color (WCAG 1.4.1). The
        sidebar nav lives outside <main>, so it is unaffected. */
     main a { text-decoration: underline; text-underline-offset: 2px; }
+    /* Screenshot figures (and placeholders until real captures are added) */
+    figure.shot { margin: 20px 0; }
+    figure.shot img { display: block; width: 100%; height: auto; border: 1px solid var(--border); border-radius: 10px; }
+    figure.shot figcaption { margin-top: 8px; font-size: 0.85rem; color: var(--muted); }
+    .shot-ph { border: 1px dashed rgba(124,133,139,0.5); border-radius: 10px; background: #0e1112; min-height: 200px; display: grid; place-items: center; text-align: center; color: var(--muted); font-family: "IBM Plex Mono", monospace; font-size: 0.8rem; line-height: 1.6; padding: 28px; }
+    .shot-ph b { color: var(--accent); display:block; margin-bottom: 6px; letter-spacing: .1em; }
     strong { color: var(--text); }
     code {
       background: rgba(34,200,110,.1); border: 1px solid rgba(34,200,110,.28); border-radius: 4px; padding: 1px 6px;
@@ -144,7 +150,14 @@
   <div class="nav-section">Overview</div>
   <a href="#overview">Introduction</a>
   <a href="#features">Features</a>
+  <div class="nav-section">Get Started</div>
+  <a href="#adding">Adding the App</a>
+  <a href="#signin">Sign in with Zoom</a>
   <a href="#requirements">Requirements</a>
+  <div class="nav-section">Using CoreVideo</div>
+  <a href="#usage">How to Use</a>
+  <a href="#removing">Removing the App</a>
+  <a href="#troubleshooting">Troubleshooting</a>
   <div class="nav-section">Architecture</div>
   <a href="#arch-system">System Overview</a>
   <a href="#arch-components">Plugin Components</a>
@@ -153,7 +166,7 @@
   <a href="#arch-video">Video Pipeline</a>
   <a href="#arch-audio">Audio Pipeline</a>
   <a href="#arch-share">Screen Share Pipeline</a>
-  <div class="nav-section">Flows</div>
+  <div class="nav-section">Flows &amp; Features</div>
   <a href="#flow-auth">Authentication Flow</a>
   <a href="#flow-oauth">OAuth PKCE</a>
   <a href="#flow-meeting">Meeting Join Flow</a>
@@ -163,16 +176,13 @@
   <a href="#zoom-dock">Zoom Control Dock</a>
   <a href="#hw-accel">Hardware Video Acceleration</a>
   <a href="#iso-recording">Auto ISO Recording</a>
-  <div class="nav-section">Plugin UI</div>
-  <a href="#ui-modern">Modern UI</a>
   <div class="nav-section">Reference</div>
   <a href="#control-api">TCP Control API</a>
   <a href="#osc-api">OSC Control API</a>
   <a href="#output-profiles">Output Profiles</a>
   <a href="#ipc-protocol">IPC Protocol</a>
-  <a href="#installation">Installation</a>
-  <a href="#configuration">Configuration</a>
-  <a href="#build">Building from Source</a>
+  <a href="#configuration">Configuration Reference</a>
+  <a href="#ui-modern">Plugin UI</a>
 </nav>
 
 <main>
@@ -193,15 +203,15 @@
       100 Mbps. Plan around 4-6 Mbps per standard 1080p feed.
     </div>
     <div class="hero-badges" style="margin-top:16px;">
-      <span class="badge blue">C++17</span>
-      <span class="badge blue">CMake 3.16+</span>
+      <span class="badge green">Free</span>
       <span class="badge green">OBS Studio 30+</span>
-      <span class="badge green">Qt 6</span>
-      <span class="badge purple">Zoom SDK 5.17+ / 7.x</span>
-      <span class="badge purple">OAuth 2.0 PKCE</span>
-      <span class="badge orange">Windows</span>
-      <span class="badge orange">macOS</span>
-      <span class="badge orange">Linux</span>
+      <span class="badge orange">Windows installer</span>
+      <span class="badge purple">Sign in with Zoom</span>
+      <span class="badge blue">OAuth 2.0 PKCE</span>
+    </div>
+    <div style="margin-top:18px;">
+      <a href="https://corevideo.io/download" style="display:inline-block;background:var(--accent);color:#06170d;font-weight:700;padding:11px 20px;border-radius:8px;text-decoration:none;">Download for Windows</a>
+      &nbsp;<a href="#adding" style="display:inline-block;padding:11px 18px;border:1px solid var(--border);border-radius:8px;text-decoration:none;">How to install</a>
     </div>
   </div>
 
@@ -301,22 +311,201 @@
     </div>
   </section>
 
-  <!-- ── Requirements ──────────────────────────────────────────── -->
+    <!-- ── Adding the App ─────────────────────────────────────────── -->
+  <section id="adding">
+    <h2>Adding the App</h2>
+    <p>
+      CoreVideo is distributed as a <strong>fully installable Windows application</strong> —
+      there is nothing to compile and no SDK to download. Installation takes a few minutes.
+    </p>
+    <div class="steps">
+      <div class="step"><div class="step-body">
+        <h4>1. Download CoreVideo</h4>
+        <p>Go to <a href="https://corevideo.io/download">corevideo.io/download</a> and get the
+        latest Windows installer (<code>CoreVideo-Setup.exe</code>). Every release also publishes a
+        matching <code>.sha256</code> checksum you can verify.</p>
+      </div></div>
+      <div class="step"><div class="step-body">
+        <h4>2. Run the installer</h4>
+        <p>Close OBS Studio if it is open, then double-click <code>CoreVideo-Setup.exe</code> and
+        follow the prompts. The installer adds the CoreVideo plugin and its bundled Zoom runtime to
+        your OBS Studio installation.</p>
+        <figure class="shot"><div class="shot-ph"><b>SCREENSHOT</b>CoreVideo-Setup.exe installer window (welcome / finish page)</div><figcaption>Running the CoreVideo Windows installer.</figcaption></figure>
+      </div></div>
+      <div class="step"><div class="step-body">
+        <h4>3. Open OBS Studio</h4>
+        <p>Launch OBS Studio 30 or newer. CoreVideo loads automatically: you'll see the
+        <strong>Zoom Control</strong> dock and a <strong>Tools&nbsp;→&nbsp;Zoom Plugin Settings</strong>
+        menu item. If the dock is hidden, enable it from <strong>Docks&nbsp;→&nbsp;Zoom Control</strong>.</p>
+        <figure class="shot"><div class="shot-ph"><b>SCREENSHOT</b>OBS Studio with the CoreVideo "Zoom Control" dock visible</div><figcaption>OBS Studio after installing CoreVideo, showing the Zoom Control dock.</figcaption></figure>
+      </div></div>
+      <div class="step"><div class="step-body">
+        <h4>4. Sign in with Zoom</h4>
+        <p>Click <strong>Sign in with Zoom</strong> and authorize CoreVideo in your browser
+        (details in <a href="#signin">Sign in with Zoom</a> below). That's it — you're ready to use it.</p>
+      </div></div>
+    </div>
+    <div class="callout info">
+      <div class="callout-title">ℹ️ Having trouble?</div>
+      See <a href="#troubleshooting">Troubleshooting</a> for installer, dock-not-showing, and sign-in
+      fixes, or contact <a href="/support/">CoreVideo Support</a>.
+    </div>
+  </section>
+
+  <!-- ── Sign in with Zoom ──────────────────────────────────────── -->
+  <section id="signin">
+    <h2>Sign in with Zoom</h2>
+    <p><strong>Use case:</strong> Authorize CoreVideo to join meetings and receive raw participant
+    media on your behalf. You sign in once; CoreVideo refreshes the session automatically.</p>
+    <p><strong>Prerequisites:</strong> A Zoom account and CoreVideo installed. You do <em>not</em> need
+    a Zoom developer account, an SDK key, or any client secret — published builds use CoreVideo's
+    hosted broker with OAuth&nbsp;2.0 + PKCE.</p>
+    <div class="steps">
+      <div class="step"><div class="step-body">
+        <h4>1. Click "Sign in with Zoom"</h4>
+        <p>In the Zoom Control dock, or via <strong>Tools&nbsp;→&nbsp;Zoom Plugin Settings</strong>.</p>
+        <figure class="shot"><div class="shot-ph"><b>SCREENSHOT</b>Tools &gt; Zoom Plugin Settings with the "Sign in with Zoom" button</div><figcaption>The sign-in control — no Client ID or secret fields for end users.</figcaption></figure>
+      </div></div>
+      <div class="step"><div class="step-body">
+        <h4>2. Authorize in your browser</h4>
+        <p>Your browser opens Zoom's consent screen. Approve access. CoreVideo registers its
+        <code>corevideo://</code> callback handler automatically the first time.</p>
+        <figure class="shot"><div class="shot-ph"><b>SCREENSHOT</b>Zoom OAuth consent screen for CoreVideo</div><figcaption>Zoom's authorization screen.</figcaption></figure>
+      </div></div>
+      <div class="step"><div class="step-body">
+        <h4>3. Done</h4>
+        <p>The dock shows a connected status and token expiry. Tokens are stored locally on your
+        machine (DPAPI-encrypted on Windows). CoreVideo never sees your Zoom password, and no client
+        secret is stored in the app.</p>
+      </div></div>
+    </div>
+  </section>
+
+  <!-- ── Requirements ───────────────────────────────────────────── -->
   <section id="requirements">
     <h2>Requirements</h2>
     <table>
-      <tr><th>Dependency</th><th>Version</th><th>Notes</th></tr>
-      <tr><td>OBS Studio</td><td>30+</td><td><code>libobs</code> + <code>obs-frontend-api</code></td></tr>
-      <tr><td>CMake</td><td>3.16+</td><td>Build system</td></tr>
-      <tr><td>Qt</td><td>6.x</td><td>Core + Network + Widgets</td></tr>
-      <tr><td>Zoom Meeting SDK</td><td><strong>5.17.x or 7.x</strong></td><td>Source builds only: place at <code>third_party/zoom-sdk/</code>. Official Windows release downloads bundle the runtime files needed by end users.</td></tr>
-      <tr><td>C++ Compiler</td><td>C++17</td><td>MSVC 2022 / Clang 14+ / GCC 11+</td></tr>
-      <tr><td>Zoom Developer Account</td><td>—</td><td>Marketplace app with Public Client OAuth + PKCE and Meeting SDK / Embed enabled for the same public client environment.</td></tr>
-      <tr><td>Zoom bandwidth / app entitlements</td><td>—</td><td>Raw data is available through Meeting SDK apps. Standard accounts commonly have a 30 Mbps incoming video envelope; Enhanced Media / HBM can raise that to roughly 100 Mbps. Developers may need an app-level flag to test more than a small number of concurrent raw streams.</td></tr>
-      <tr><td>FFmpeg</td><td>—</td><td>Required at runtime for ISO recording. Also used when building with <code>-DCOREVIDEO_HW_ACCEL=ON</code> for hardware-accelerated I420→NV12 conversion.</td></tr>
-      <tr><td>Qt TLS backend (Windows)</td><td>—</td><td>Required for OAuth HTTPS. Ship Schannel TLS plugins to <code>obs-plugins/64bit/plugins/tls/</code>.</td></tr>
+      <tr><th>Requirement</th><th>Notes</th></tr>
+      <tr><td>Windows 10 / 11 (64-bit)</td><td>The installable release is Windows-only.</td></tr>
+      <tr><td>OBS Studio 30+</td><td>Install OBS first; CoreVideo loads as a plugin.</td></tr>
+      <tr><td>A Zoom account</td><td>Any account you can sign in with. No developer account, SDK key, or client secret required.</td></tr>
+      <tr><td>Network bandwidth</td><td>Plan roughly 4-6 Mbps per 1080p participant feed. Your Zoom account and app entitlements affect maximum quality and stream count (standard accounts are commonly limited to ~30 Mbps incoming video; Enhanced Media / HBM can raise that to ~100 Mbps).</td></tr>
     </table>
   </section>
+
+  <!-- ── Using CoreVideo ────────────────────────────────────────── -->
+  <section id="usage">
+    <h2>Using CoreVideo</h2>
+    <p>Each capability below lists what it's for and what you need before using it. For deeper
+    technical detail, see the Architecture and Reference sections further down.</p>
+
+    <h3>Join a meeting from the Zoom Control dock</h3>
+    <p><strong>Use case:</strong> Connect OBS to a live Zoom meeting or webinar.</p>
+    <p><strong>Prerequisites:</strong> Signed in with Zoom. The host should admit "OBS" (the default
+    display name) from the waiting room, or allow guests.</p>
+    <p>Paste a Meeting ID or Zoom URL, an optional passcode, and a display name, then click
+    <strong>Join</strong>. Toggle <em>Join as Webinar</em> for webinars. The status dot turns green
+    when connected.</p>
+    <figure class="shot"><div class="shot-ph"><b>SCREENSHOT</b>Zoom Control dock: Meeting ID / passcode / display name and Join button, connected state</div><figcaption>Joining a meeting from the Zoom Control dock.</figcaption></figure>
+
+    <h3>Add Zoom sources to a scene</h3>
+    <p><strong>Use case:</strong> Bring individual participants, the active screen share, a spotlight
+    slot, or interpretation audio into OBS as native sources you can position, style, and mix.</p>
+    <p><strong>Prerequisites:</strong> Signed in and joined to a meeting.</p>
+    <p>In OBS, click <strong>+</strong> under <em>Sources</em> and choose a CoreVideo source:
+    <em>Zoom Participant</em> (video), <em>Zoom Participant Audio</em>, <em>Zoom Screen Share</em>,
+    <em>Zoom Spotlight</em>, or <em>Zoom Interpretation Audio</em>. Pick a participant or slot in the
+    source properties (see the <a href="#configuration">Configuration Reference</a>).</p>
+    <figure class="shot"><div class="shot-ph"><b>SCREENSHOT</b>OBS "Add Source" menu listing the CoreVideo source types</div><figcaption>CoreVideo source types in the OBS Add-Source menu.</figcaption></figure>
+    <figure class="shot"><div class="shot-ph"><b>SCREENSHOT</b>A Zoom Participant source properties panel (participant picker, resolution, audio)</div><figcaption>Zoom Participant source properties.</figcaption></figure>
+
+    <h3>Active Speaker Director</h3>
+    <p><strong>Use case:</strong> Automatically switch a source to whoever is speaking, with
+    broadcast-safe debounce so it doesn't cut on every cough.</p>
+    <p><strong>Prerequisites:</strong> In a meeting with participants on camera.</p>
+    <p>Enable <em>Follow active speaker</em> on a Zoom Participant source, or use the dock's Director
+    controls, and tune sensitivity and minimum hold time. Full algorithm:
+    <a href="#active-speaker">Active Speaker Mode</a>.</p>
+
+    <h3>Output Manager &amp; profiles</h3>
+    <p><strong>Use case:</strong> See every source's assignment and feed health at a glance, and
+    save/load named participant-to-source layouts between shows.</p>
+    <p><strong>Prerequisites:</strong> CoreVideo sources added to your scene.</p>
+    <p>Open the <strong>Zoom Output Manager</strong> dock to assign participants, watch live thumbnails
+    and health, and save/load profiles. See <a href="#output-profiles">Output Profiles</a>.</p>
+    <figure class="shot"><div class="shot-ph"><b>SCREENSHOT</b>Zoom Output Manager dock with assignments, thumbnails and feed health</div><figcaption>The Zoom Output Manager dock.</figcaption></figure>
+
+    <h3>ISO recording</h3>
+    <p><strong>Use case:</strong> Record each assigned participant to a separate video/audio file
+    (clean ISOs) for editing, while optionally recording the OBS program.</p>
+    <p><strong>Prerequisites:</strong> In a meeting with assigned sources, and disk space for
+    per-participant files.</p>
+    <p>Enable ISO recording from the dock. Details: <a href="#iso-recording">Auto ISO Recording</a>.</p>
+
+    <h3>Auto-reconnect</h3>
+    <p><strong>Use case:</strong> Automatically re-join after a network drop or engine restart so a
+    broadcast recovers on its own.</p>
+    <p><strong>Prerequisites:</strong> None — on by default; a cancel button appears during recovery.
+    See <a href="#auto-reconnect">Auto-Reconnect</a>.</p>
+
+    <h3>External control (TCP / OSC)</h3>
+    <p><strong>Use case:</strong> Drive CoreVideo from production tools, scripts, or lighting/broadcast
+    hardware.</p>
+    <p><strong>Prerequisites:</strong> Enable the control server (optionally set a token). See the
+    <a href="#control-api">TCP</a> and <a href="#osc-api">OSC</a> reference.</p>
+  </section>
+
+  <!-- ── Removing the App ───────────────────────────────────────── -->
+  <section id="removing">
+    <h2>Removing the App</h2>
+    <p>Removing CoreVideo has two parts: de-authorizing it from your Zoom account, and uninstalling
+    the software.</p>
+
+    <h3>1. De-authorize CoreVideo in Zoom</h3>
+    <p>Sign in to
+    <a href="https://marketplace.zoom.us/user/installed" target="_blank" rel="noopener">Zoom App Marketplace&nbsp;→&nbsp;Manage&nbsp;→&nbsp;Installed Apps</a>,
+    find <strong>CoreVideo</strong>, and click <strong>Remove</strong>. You can also click
+    <strong>Disconnect</strong> in Tools&nbsp;→&nbsp;Zoom Plugin Settings first to clear the local session.</p>
+    <div class="callout warning">
+      <div class="callout-title">⚠️ What de-authorization does</div>
+      Zoom immediately revokes CoreVideo's access and refresh tokens. CoreVideo can no longer join
+      meetings or receive any media on your behalf until you sign in again, and any active capture
+      stops at the next token refresh.
+    </div>
+
+    <h3>2. Uninstall the software</h3>
+    <p>Close OBS, then remove CoreVideo from
+    <strong>Windows Settings&nbsp;→&nbsp;Apps&nbsp;→&nbsp;Installed apps&nbsp;→&nbsp;CoreVideo&nbsp;→&nbsp;Uninstall</strong>
+    (or run the bundled uninstaller). This removes the plugin and its Zoom runtime from OBS.</p>
+
+    <h3>3. How your data is removed</h3>
+    <p>CoreVideo stores your Zoom OAuth tokens <strong>locally on your machine</strong>
+    (DPAPI-encrypted on Windows) inside the OBS plugin config directory. It does not upload or store
+    your account data on any server — CoreVideo's hosted broker only performs the OAuth token
+    exchange in transit and retains nothing about you.</p>
+    <ul>
+      <li>Clicking <strong>Disconnect</strong> (Tools&nbsp;→&nbsp;Zoom Plugin Settings) deletes the stored access and refresh tokens.</li>
+      <li>To remove all local settings, delete the <code>obs-zoom-plugin</code> folder under your OBS <code>plugin_config</code> directory after uninstalling.</li>
+      <li>De-authorizing in the Zoom Marketplace (step&nbsp;1) invalidates the tokens server-side regardless.</li>
+    </ul>
+    <p>See our <a href="/privacy/">Privacy Policy</a> for full details on data handling.</p>
+  </section>
+
+  <!-- ── Troubleshooting ────────────────────────────────────────── -->
+  <section id="troubleshooting">
+    <h2>Troubleshooting</h2>
+    <table>
+      <tr><th>Symptom</th><th>Fix</th></tr>
+      <tr><td>Zoom Control dock not visible after install</td><td>Enable it from OBS <strong>Docks&nbsp;→&nbsp;Zoom Control</strong>. Confirm OBS is version 30+ and was fully closed during install.</td></tr>
+      <tr><td>"Sign in with Zoom" doesn't complete</td><td>Finish the browser consent and allow the <code>corevideo://</code> link to open CoreVideo. Re-run sign-in from Tools&nbsp;→&nbsp;Zoom Plugin Settings.</td></tr>
+      <tr><td>Joined, but no video</td><td>Confirm the host admitted "OBS" from the waiting room, the participant has their camera on, and your Zoom account/app entitlements allow raw video (see Requirements).</td></tr>
+      <tr><td>Source shows color bars</td><td>The source isn't subscribed yet — assign a participant or slot in the source properties or the Output Manager.</td></tr>
+      <tr><td>Choppy or low-resolution feeds</td><td>Reduce the number of concurrent 1080p feeds or the requested resolution, and check available bandwidth (~4-6 Mbps per 1080p feed).</td></tr>
+    </table>
+    <p>Still stuck? Export a redacted support bundle from the <strong>Zoom Diagnostics</strong> dock
+    and contact <a href="/support/">CoreVideo Support</a>.</p>
+  </section>
+
 
   <!-- ══ ARCHITECTURE ════════════════════════════════════════════ -->
 
@@ -1563,58 +1752,12 @@ sequenceDiagram
       <tr><td><code>error</code></td><td><code>{"cmd":"error","msg":"…","code":N}</code></td><td>SDK or meeting error</td></tr>
     </table>
   </section>
-
-  <section id="installation">
-    <h2>Installation</h2>
-    <div class="callout info">
-      <div class="callout-title">ℹ️ Pre-built releases</div>
-      Download the Windows installer or ZIP from <a href="https://github.com/iamfatness/CoreVideo/releases">GitHub Releases</a>. Published Windows releases include the OBS plugin, ZoomObsEngine, the OAuth callback helper, Qt TLS plugins, and the required Zoom SDK runtime DLLs. Each downloadable release asset includes a matching <code>.sha256</code> checksum file. Operators should use the <a href="/core-plugin/OPERATOR_QUICKSTART.md">Operator Quickstart</a>; publishers should use the <a href="/core-plugin/RELEASE_CHECKLIST.md">Release Checklist</a> before shipping.
-    </div>
-    <div class="steps">
-      <div class="step"><div class="step-body">
-        <h4>For source builds, get the Zoom SDK</h4>
-        <p>Download from the <a href="https://developers.zoom.us/docs/meeting-sdk/releases/" target="_blank">Zoom Developer Portal</a>
-        and place it at <code>third_party/zoom-sdk/</code>.
-        CMake auto-detects x64 / arm64 / x86 sub-layouts on Windows. End users installing an official Windows release do not need to download or provide SDK files.</p>
-      </div></div>
-      <div class="step"><div class="step-body">
-        <h4>Configure CMake</h4>
-        <pre><code>cmake -B build \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DZOOM_SDK_DIR=third_party/zoom-sdk \
-  -DCMAKE_PREFIX_PATH="/path/to/obs-studio;/path/to/Qt6"</code></pre>
-      </div></div>
-      <div class="step"><div class="step-body">
-        <h4>Build</h4>
-        <pre><code>cmake --build build --config Release</code></pre>
-        <p>Builds <code>obs-zoom-plugin</code> and <code>ZoomObsEngine</code>.
-        On Windows, <code>sdk.dll</code> is copied automatically if found.</p>
-      </div></div>
-      <div class="step"><div class="step-body">
-        <h4>Install into OBS</h4>
-        <pre><code>cmake --install build --prefix "/path/to/obs-studio"</code></pre>
-      </div></div>
-      <div class="step"><div class="step-body">
-        <h4>Configure and launch</h4>
-        <p>Open OBS → <strong>Tools → Zoom Plugin Settings</strong>, sign in
-        with Zoom, and configure local control-server/reconnect settings. Published
-        builds already know the CoreVideo broker URL; end users do not enter Zoom
-        app credentials.</p>
-      </div></div>
-    </div>
-  </section>
-
   <section id="configuration">
     <h2>Configuration</h2>
 
     <h3>Settings Dialog (Tools → Zoom Plugin Settings)</h3>
-    <h4>SDK Credentials</h4>
-    <table>
-      <tr><th>Field</th><th>Default</th><th>Description</th></tr>
-      <tr><td>SDK Key</td><td>Developer-only</td><td>Developer-only override for local builds. Published builds use the embedded Marketplace Public Client ID as publicAppKey.</td></tr>
-      <tr><td>SDK Secret</td><td>Not used in published builds</td><td>Not entered by end users and not shipped in the plugin.</td></tr>
-      <tr><td>JWT Token</td><td>—</td><td>Optional developer override; leave blank for normal broker-backed joins.</td></tr>
-    </table>
+    <p style="color:var(--muted);font-size:.9rem;">Published builds use the embedded CoreVideo broker &mdash; end users do not enter SDK keys, secrets, or JWT tokens.</p>
+    
     <h4>OAuth Settings</h4>
     <table>
       <tr><th>Field</th><th>Default</th><th>Description</th></tr>
@@ -1683,79 +1826,6 @@ sequenceDiagram
       Ensure the host allows guests or pre-admits the OBS participant from the waiting room.
     </div>
   </section>
-
-  <section id="build">
-    <h2>Building from Source</h2>
-
-    <h3>Directory Layout</h3>
-    <pre><code>CoreVideo/
-├── CMakeLists.txt
-├── buildspec/
-│   ├── macos.cmake
-│   └── windows.cmake
-├── cmake/
-│   └── CoreVideoOAuthCallback-Info.plist.in  # macOS OAuth helper bundle plist
-├── data/locale/en-US.ini
-├── docs/                                     # GitHub Pages documentation
-│   ├── index.html
-│   ├── ZOOM_MARKETPLACE_OAUTH.md             # OAuth PKCE setup guide
-│   └── policies/                             # Security &amp; privacy policy documents
-├── engine/src/                               # ZoomObsEngine process (owns ALL SDK access)
-│   ├── main.cpp                              # IPC loop, SDK auth/join, roster/spotlight tracking
-│   ├── engine-video.cpp/h                    # IZoomSDKRenderer → named shared memory (I420)
-│   └── engine-audio.cpp/h                    # SDK audio → named shared memory (PCM)
-└── src/                                      # OBS plugin (no SDK linkage)
-    ├── plugin-main.cpp                       # Module load/unload, dock, Tools menu, SIGPIPE
-    ├── zoom-source.*                         # Participant source (ShmRegion, AssignmentMode,
-    │                                         #   HwVideoPipeline, failover, hotkeys, placeholder)
-    ├── zoom-engine-client.*                  # Singleton: IPC, engine launch, roster, callbacks,
-    │                                         #   spotlight/screenshare subscribe, monitor thread
-    ├── zoom-oauth.*                          # ZoomOAuthManager: broker PKCE, ZAK fetch, token storage
-    ├── oauth-callback-helper.cpp             # Windows: CoreVideoOAuthCallback.exe entry point
-    ├── oauth-callback-helper-macos.mm        # macOS: CoreVideoOAuthCallback.app entry point
-    ├── zoom-dock.*                           # Qt dockable panel: CvStatusDot, CvBanner,
-    │                                         #   token-type selector, recovery countdown
-    ├── zoom-reconnect.*                      # Auto-reconnect manager (exponential back-off)
-    ├── zoom-types.h                          # Shared enums + ZoomJoinAuthTokens struct
-    ├── cv-style.h                            # CoreVideo Qt stylesheet (dark theme, button roles)
-    ├── cv-widgets.*                          # CvStatusDot (animated dot), CvBanner (notice strip)
-    ├── hw-video-pipeline.*                   # FFmpeg I420→NV12 (CUDA/VAAPI/VideoToolbox/QSV)
-    ├── zoom-audio-delegate.*                 # Mixed / isolated SDK audio → OBS
-    ├── zoom-audio-router.*                   # Central SDK audio fan-out dispatcher
-    ├── zoom-auth.*                           # Legacy/manual SDK auth state helpers
-    ├── zoom-meeting.*                        # Meeting state machine
-    ├── zoom-participants.*                   # Roster, active speaker, spotlight callbacks
-    ├── zoom-participant-audio-source.*       # Per-participant audio OBS source
-    ├── zoom-interpretation-audio-source.*    # Language interpretation channel OBS source
-    ├── zoom-video-delegate.*                 # Video frames, resolution, loss mode, preview
-    ├── zoom-share-delegate.*                 # Screen share frames → OBS source
-    ├── zoom-output-manager.*                 # Source registry + runtime reconfiguration
-    ├── zoom-output-profile.*                 # Named JSON profile persistence
-    ├── zoom-output-dialog.*                  # Qt Output Manager dock widget
-    ├── zoom-control-server.*                 # TCP JSON control API (port 19870) + oauth_callback
-    ├── zoom-osc-server.*                     # UDP OSC control API (port 19871)
-    ├── zoom-settings.*                       # Broker URL, OAuth tokens, local ports + reconnect persistence
-    ├── zoom-settings-dialog.*                # Qt Settings dialog (Zoom sign-in + local settings)
-    ├── zoom-credentials.h.in                 # Embedded SDK credentials (CMake-generated)
-    ├── obs-zoom-version.h.in                 # Plugin version string (CMake-generated)
-    ├── engine-ipc.h                          # IPC constants + cross-platform pipe/socket helpers
-    └── obs-utils.*                           # OBS helper functions</code></pre>
-
-    <h3>Platform Matrix</h3>
-    <table>
-      <tr><th>Platform</th><th>Compiler</th><th>SDK Linkage</th><th>IPC Transport</th><th>Engine</th></tr>
-      <tr><td>Windows</td><td>MSVC 2022</td><td><code>sdk.lib</code> + <code>sdk.dll</code></td><td>Named pipes</td><td>Yes</td></tr>
-      <tr><td>macOS</td><td>Clang 14+</td><td><code>ZoomSDK.framework</code></td><td>Unix sockets</td><td>Source build path</td></tr>
-      <tr><td>Linux</td><td>GCC 11+</td><td><code>libsdk.so</code></td><td>Unix sockets</td><td>Source build path</td></tr>
-    </table>
-
-    <div class="callout tip">
-      <div class="callout-title">Platform status</div>
-      Windows is the primary packaged release target. macOS and Linux remain source-build paths that require local SDK and dependency setup.
-      Qt6::Network is required for the TCP and OSC servers.
-    </div>
-  </section>
-
   <!-- ══ AUTO ISO RECORDING ══════════════════════════════════════ -->
 
   <section id="iso-recording">
@@ -1874,7 +1944,8 @@ sequenceDiagram
   </section>
 
   <footer style="margin-top:64px;padding-top:24px;border-top:1px solid var(--border);color:var(--muted);font-size:0.8rem;">
-    <p>CoreVideo — OBS Plugin for Live Zoom Video &nbsp;·&nbsp; Docs generated from source</p>
+    <p>CoreVideo — OBS Plugin for Live Zoom Video</p>
+    <p style="margin-top:6px;">Developers: CoreVideo is open source — <a href="https://github.com/iamfatness/CoreVideo">build from source on GitHub</a>.</p>
   </footer>
 </main>
 
@@ -1883,15 +1954,15 @@ sequenceDiagram
     startOnLoad: true,
     theme: 'dark',
     themeVariables: {
-      background: '#16191b', primaryColor: '#1f6feb', primaryTextColor: '#e6edf3',
+      background: '#16191b', primaryColor: '#14231b', primaryTextColor: '#e6edf3',
       primaryBorderColor: '#30363d', lineColor: '#8b949e', secondaryColor: '#16191b',
       tertiaryColor: '#16191b', edgeLabelBackground: '#16191b',
       clusterBkg: '#16191b', clusterBorder: '#30363d', titleColor: '#e6edf3',
       nodeTextColor: '#e6edf3',
-      actorBkg: '#1f6feb', actorBorder: '#388bfd', actorTextColor: '#ffffff',
+      actorBkg: '#14231b', actorBorder: '#22c86e', actorTextColor: '#ffffff',
       actorLineColor: '#8b949e', signalColor: '#8b949e', signalTextColor: '#e6edf3',
       noteBkgColor: '#16191b', noteTextColor: '#e6edf3', noteBorderColor: '#30363d',
-      activationBorderColor: '#388bfd', activationBkgColor: '#0d2137',
+      activationBorderColor: '#22c86e', activationBkgColor: '#0e1f16',
       sequenceNumberColor: '#ffffff', labelBoxBkgColor: '#16191b',
       labelBoxBorderColor: '#30363d', labelTextColor: '#e6edf3', loopTextColor: '#e6edf3',
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',

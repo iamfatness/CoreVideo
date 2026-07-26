@@ -53,6 +53,9 @@
     li { margin-bottom: 6px; }
     a  { color: var(--accent); text-decoration: none; }
     a:hover { text-decoration: underline; }
+    /* Prose links must be distinguishable without color (WCAG 1.4.1). The
+       sidebar nav lives outside <main>, so it is unaffected. */
+    main a { text-decoration: underline; text-underline-offset: 2px; }
     strong { color: var(--text); }
     code {
       background: rgba(34,200,110,.1); border: 1px solid rgba(34,200,110,.28); border-radius: 4px; padding: 1px 6px;
@@ -1010,7 +1013,7 @@ sequenceDiagram
       <code>list_outputs</code> response for screen-share outputs includes the
       current sharing participant ID and display name.
     </p>
-    <pre><code>{
+    <pre tabindex="0"><code>{
   "assignment_mode": "screen_share",
   "screen_share_available": true,
   "screen_share_participant_id": 123456,
@@ -1427,10 +1430,10 @@ sequenceDiagram
     </table>
 
     <h3>Participant object</h3>
-    <pre><code>{ "id": 123, "name": "Alice", "has_video": true, "is_talking": false, "is_muted": false }</code></pre>
+    <pre tabindex="0"><code>{ "id": 123, "name": "Alice", "has_video": true, "is_talking": false, "is_muted": false }</code></pre>
 
     <h3>Output object</h3>
-    <pre><code>{ "source": "Zoom Participant 1", "participant_id": 123, "active_speaker": false,
+    <pre tabindex="0"><code>{ "source": "Zoom Participant 1", "participant_id": 123, "active_speaker": false,
   "assignment_mode": "participant", "video_resolution": "1080p",
   "observed_width": 1920, "observed_height": 1080, "observed_fps": 29.97,
   "isolate_audio": true, "audio_channels": "stereo" }</code></pre>
@@ -1494,7 +1497,7 @@ sequenceDiagram
       The <code>ZoomOutputProfile</code> namespace persists named output configurations
       as JSON files under the OBS plugin config directory:
     </p>
-    <pre><code>obs-studio/plugin_config/obs-zoom-plugin/profiles/&lt;name&gt;.json</code></pre>
+    <pre tabindex="0"><code>obs-studio/plugin_config/obs-zoom-plugin/profiles/&lt;name&gt;.json</code></pre>
     <p>
       Each profile stores all current output assignments (source name, participant ID,
       active speaker flag, audio isolation, audio mode). Use the
@@ -1516,7 +1519,7 @@ sequenceDiagram
     </div>
 
     <h3>Profile JSON format</h3>
-    <pre><code>[
+    <pre tabindex="0"><code>[
   {
     "source": "Zoom Participant 1",
     "display_name": "Camera A",
@@ -1577,20 +1580,20 @@ sequenceDiagram
       </div></div>
       <div class="step"><div class="step-body">
         <h4>Configure CMake</h4>
-        <pre><code>cmake -B build \
+        <pre tabindex="0"><code>cmake -B build \
   -DCMAKE_BUILD_TYPE=Release \
   -DZOOM_SDK_DIR=third_party/zoom-sdk \
   -DCMAKE_PREFIX_PATH="/path/to/obs-studio;/path/to/Qt6"</code></pre>
       </div></div>
       <div class="step"><div class="step-body">
         <h4>Build</h4>
-        <pre><code>cmake --build build --config Release</code></pre>
+        <pre tabindex="0"><code>cmake --build build --config Release</code></pre>
         <p>Builds <code>obs-zoom-plugin</code> and <code>ZoomObsEngine</code>.
         On Windows, <code>sdk.dll</code> is copied automatically if found.</p>
       </div></div>
       <div class="step"><div class="step-body">
         <h4>Install into OBS</h4>
-        <pre><code>cmake --install build --prefix "/path/to/obs-studio"</code></pre>
+        <pre tabindex="0"><code>cmake --install build --prefix "/path/to/obs-studio"</code></pre>
       </div></div>
       <div class="step"><div class="step-body">
         <h4>Configure and launch</h4>
@@ -1686,7 +1689,7 @@ sequenceDiagram
     <h2>Building from Source</h2>
 
     <h3>Directory Layout</h3>
-    <pre><code>CoreVideo/
+    <pre tabindex="0"><code>CoreVideo/
 ├── CMakeLists.txt
 ├── buildspec/
 │   ├── macos.cmake
@@ -1791,7 +1794,7 @@ sequenceDiagram
     </div>
 
     <h3>Start Recording</h3>
-    <pre><code>{
+    <pre tabindex="0"><code>{
   "cmd": "iso_recording_start",
   "output_dir": "C:/Recordings/CoreVideo",
   "ffmpeg_path": "ffmpeg",
@@ -1799,10 +1802,10 @@ sequenceDiagram
 }</code></pre>
 
     <h3>Check Status</h3>
-    <pre><code>{ "cmd": "iso_recording_status" }</code></pre>
+    <pre tabindex="0"><code>{ "cmd": "iso_recording_status" }</code></pre>
 
     <h3>Stop Recording</h3>
-    <pre><code>{ "cmd": "iso_recording_stop" }</code></pre>
+    <pre tabindex="0"><code>{ "cmd": "iso_recording_stop" }</code></pre>
 
     <h3>OSC Controls</h3>
     <table>

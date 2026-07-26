@@ -148,7 +148,7 @@ function homeContent() {
   <figure class="hero-media">
     <div class="console">
       <div class="console-bar"><span class="tally tally-live">Live</span><span>Multiview 01</span><span class="tc">1080p60 &middot; 00:00:00:00</span></div>
-      <div class="console-screen center"><img class="hero-logo" src="/assets/corevideo-logo.jpg" alt="CoreVideo"></div>
+      <div class="console-screen center"><div class="brand-lockup">${MULTIVIEW_MARK}<div class="wordmark">CoreVideo</div><div class="brand-sub">Live production studio</div></div></div>
     </div>
   </figure>
   <div class="hero-copy">
@@ -388,7 +388,7 @@ function markdownToHtml(markdown) {
     if (fence) {
       if (codeBlock) {
         const languageClass = codeBlock.language ? ` class="language-${escapeHtml(codeBlock.language)}"` : "";
-        html.push(`<pre><code${languageClass}>${escapeHtml(codeBlock.lines.join("\n"))}</code></pre>`);
+        html.push(`<pre tabindex="0"><code${languageClass}>${escapeHtml(codeBlock.lines.join("\n"))}</code></pre>`);
         codeBlock = null;
       } else {
         flushAll();
@@ -532,7 +532,18 @@ function writeText(relativePath, content) {
   fs.writeFileSync(filePath, content, "utf8");
 }
 
-fs.rmSync(outDir, { recursive: true, force: true });
+// Clean the output directory. On CI (fresh checkout) this always succeeds. On a
+// dev machine a process serving public/ (e.g. a local http server) can hold a
+// handle that makes removal fail; in that case warn loudly and overwrite in
+// place — every file below is rewritten, so output stays correct.
+try {
+  fs.rmSync(outDir, { recursive: true, force: true });
+} catch (err) {
+  console.warn(
+    `Warning: could not remove ${path.relative(root, outDir)} (${err.code}); ` +
+      `overwriting in place. Close any process serving public/ if stale files linger.`,
+  );
+}
 
 for (const page of pages) {
   const markdown = normalizeText(
@@ -727,6 +738,7 @@ const docsHtml = fs.readFileSync(path.join(docsDir, "index.html"), "utf8")
     : "CoreVideo documentation")
   .replaceAll("https://iamfatness.github.io/CoreVideo/", "/documentation/")
   .replaceAll('href="ZOOM_MARKETPLACE_OAUTH.md"', 'href="/oauth/"')
+  .replaceAll("<pre>", '<pre tabindex="0">')
   .replace(
     "</head>",
     `  <link rel="canonical" href="${canonicalUrl("documentation/index.html")}">\n</head>`,

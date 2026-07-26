@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CoreVideo (OBS Plugin) | CoreVideo</title>
+  <meta name="description" content="CoreVideo OBS plugin workflows, control examples, and ISO recording.">
+  <meta name="theme-color" content="#0a0b0c">
+  <link rel="icon" href="/favicon.svg">
+  <link rel="preload" href="/assets/fonts/SpaceGrotesk-var.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/assets/fonts/IBMPlexMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="canonical" href="https://corevideo.io/core-plugin/">
+  <link rel="stylesheet" href="/assets/site.css">
+</head>
+<body class="document-page">
+  <header class="site-header">
+    <a class="brand" href="/"><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
+    <nav><a href="/">Home</a><a href="/pro/">CoreVideo Pro</a><a href="/pro/documentation/">Pro Docs</a><a href="/documentation/">Plugin Docs</a><a href="/core-plugin/" aria-current="page">Core Plugin</a><a href="/oauth/">OAuth</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a></nav>
+  </header>
+  <main class="content">
+    <h1>Core Plugin Functionality</h1>
+<p>This guide covers the main CoreVideo OBS plugin workflows. It intentionally focuses on the OBS plugin, <code>ZoomObsEngine</code>, Zoom source assignment, control APIs, audio routing, and ISO recording.</p>
+<h2>Media Architecture</h2>
+<figure class="doc-image"><img src="images/core-plugin-pipeline.svg" alt="CoreVideo plugin media pipeline"></figure>
+<p>CoreVideo keeps all Zoom Meeting SDK access inside the lightweight <code>ZoomObsEngine</code> helper process. The OBS plugin starts the engine, joins the meeting, and sends subscription requests over JSON IPC. Video and audio payloads move through named shared memory so large frames are not copied through the IPC pipe.</p>
+<p>The plugin-side <code>ZoomSource</code> reads the shared memory frame, outputs it into OBS, and forwards the same copied buffer to optional plugin-side services such as ISO recording. This keeps the engine minimal and makes OBS/plugin features easier to test independently from the Zoom SDK.</p>
+<p><strong>Current limitation (high feed counts):</strong> All video frames travel as CPU I420 through shared memory. At 8+ concurrent 1080p sources this creates substantial memory bandwidth pressure due to multiple per-subscription copies. See <a href="ROADMAP.md">ROADMAP.md</a> (Large-meeting capacity guidance) for exploration of GPU texture sharing (Spout on Windows, Syphon on macOS) as a lower-CPU alternative transport in the future.</p>
+<h2>What It Looks Like in OBS</h2>
+<p>The CoreVideo plugin is operated from inside OBS. These diagrams mirror the current core plugin controls: the Zoom Control dock, regular OBS scenes/sources, the Active Speaker Director controls, the dockable profile-oriented Zoom Output Manager, and the Zoom Participant source properties. Exact styling can vary by OBS theme and platform, but the controls and labels should match the current plugin. This guide intentionally describes the OBS plugin path; optional Sidecar control-surface features are tracked separately in the roadmap.</p>
+<figure class="doc-image"><img src="images/corevideo-obs-workspace.svg" alt="CoreVideo OBS workspace with Zoom Control dock"></figure>
+<p>The Zoom Control dock joins and leaves meetings, starts and stops raw media, shows meeting state, lists participants, exposes Active Speaker Director controls, and opens the Output Manager for source assignment without leaving OBS.</p>
+<figure class="doc-image"><img src="images/corevideo-output-manager.svg" alt="CoreVideo Output Manager"></figure>
+<p>The dedicated Zoom Output Manager is the primary assignment surface. It supports profile save/load workflows and exposes requested resolution, observed signal, frame rate, assignment mode, screen-share/spotlight roster markers, and audio routing information for each output. The assignment menu exposes fixed participants, active speaker, screen share, and Spotlight 1-8 so an eight-feed show can be routed without opening individual source properties. Active-speaker, spotlight, and screen-share routing gaps are reported as specific health states, so operators can tell the difference between &quot;waiting for the next directed speaker&quot; and a stale or missing video feed. In <code>v0.1.18</code> it is a persistent OBS dock, so operators can keep assignments, live previews, and feed health visible while working in normal OBS scenes. Profile loading reports matched outputs and any saved source names that are not present in the current OBS scene/source set before the operator clicks Apply.</p>
+<p>Open the <strong>Zoom Diagnostics</strong> dock, or use <strong>Tools &gt; Zoom Diagnostics</strong> to focus it, during a live session to see requested versus observed resolution, FPS, frame age, stale and quality retry counters, and the latest <code>ZoomObsEngine</code> debug events. This is the fastest way to see whether a source is waiting for frames, receiving a lower-than-requested feed, or being resubscribed by recovery logic. Use <strong>Create Support Bundle</strong> from this dock to write a redacted troubleshooting bundle with engine status, output health, recent debug events, plugin settings with tokens removed, ISO recorder and FFmpeg encoder/session status, runtime/package validation, and the latest OBS log when available. On Windows, CoreVideo also creates a <code>.zip</code> next to the support bundle folder when PowerShell is available. OBS log data is written as a recent redacted excerpt; OAuth codes, access tokens, refresh tokens, ZAK/JWT values, passcodes, client secrets, and authorization headers are removed before the bundle is written.</p>
+<figure class="doc-image"><img src="images/corevideo-source-properties.svg" alt="CoreVideo Zoom Participant source properties"></figure>
+<p>Each Zoom Participant source can be configured independently for fixed participants, active speaker, spotlight slot, screen share, isolated audio, audience audio, resolution, video-loss behavior, and hardware conversion.</p>
+<h2>Joining Meetings</h2>
+<ol><li>Open OBS.</li><li>Open <strong>Tools &gt; Zoom Control</strong>.</li><li>Enter a Zoom meeting ID or full Zoom join URL.</li><li>Enter a display name.</li><li>Use <strong>Auto Zoom sign-in</strong> for the published broker-backed flow.</li><li>Click <strong>Join</strong>.</li><li>Use the visible Zoom Meeting SDK window for waiting-room admission, self video/audio, and normal meeting controls.</li><li>Click <strong>Start Engine</strong> after joining to request raw media from Zoom.</li></ol>
+<p>For external-account meetings, configure OAuth in <strong>Tools &gt; Zoom Plugin Settings</strong>. Published builds use the embedded CoreVideo broker URL: the browser sign-in uses Zoom Public Client OAuth + PKCE, CoreVideo fetches the signed-in user's ZAK, and the helper authenticates the Meeting SDK with the embedded Marketplace Public Client ID as <code>AuthContext.publicAppKey</code>. End users do not enter client IDs or secrets.</p>
+<h2>Source Assignment</h2>
+<p>Add one or more <strong>Zoom Participant</strong> sources in OBS. Each source can follow a different assignment mode:</p>
+<table><thead><tr><th>Mode</th><th>Behavior</th><th>Common Use</th></tr></thead><tbody><tr><td>Participant</td><td>Fixed Zoom participant ID</td><td>Dedicated guest ISO</td></tr><tr><td>Active Speaker</td><td>Follows the current active speaker</td><td>Host/speaker-follow shot</td></tr><tr><td>Spotlight Slot</td><td>Follows Zoom spotlight position 1-8</td><td>ZoomISO-style production</td></tr><tr><td>Screen Share</td><td>Follows active screen share</td><td>Slides/demo capture</td></tr></tbody></table>
+<p>Each output reports observed resolution and frame rate through the output manager and TCP <code>list_outputs</code> command.</p>
+<h3>Screen Share Workflow</h3>
+<p>To capture slides, demos, or a shared desktop, add a <strong>CoreVideo Screen Share</strong> source or set any <strong>CoreVideo Participant</strong> source to <strong>Assignment &gt; Active screen share</strong>. The source follows Zoom's active share feed and shows a placeholder when no participant is sharing.</p>
+<p>The Zoom Output Manager assignment menu also includes <strong>Screen share</strong>. When a share is active, the menu label includes the sharing participant name. The TCP <code>list_outputs</code> response for screen-share outputs includes:</p>
+<pre tabindex="0"><code class="language-json">{
+  &quot;assignment_mode&quot;: &quot;screen_share&quot;,
+  &quot;screen_share_available&quot;: true,
+  &quot;screen_share_participant_id&quot;: 123456,
+  &quot;screen_share_participant_name&quot;: &quot;Alex Rivera&quot;,
+  &quot;observed_width&quot;: 1920,
+  &quot;observed_height&quot;: 1080,
+  &quot;observed_fps&quot;: 30.0
+}</code></pre>
+<p>OSC parity is available for hardware panels and show-control systems: <code>/zoom/status</code> replies with <code>/zoom/status/screen_share ,is</code>, subscribers receive <code>/zoom/event/screen_share ,is</code> when the active sharer changes, and <code>/zoom/list_participants</code> emits <code>/zoom/participant/detail</code> packets with the <code>is_sharing_screen</code> flag plus host, co-host, raised-hand, and spotlight state.</p>
+<p>For a single directed speaker-follow output, add the dedicated <strong>CoreVideo Active Speaker</strong> OBS source. It follows the central Active Speaker Director and uses a two-slot handoff internally: the current participant remains visible while the next participant warms on a hidden slot, then the source cuts only after a valid frame is available.</p>
+<h2>Active Speaker Director</h2>
+<p>The Active Speaker Director is controlled from the Zoom Control dock. It is not just a pass-through of Zoom's raw active-speaker event; it builds CoreVideo's own production decision from the raw speaker signal.</p>
+<p>The dock shows:</p>
+<ul><li>Directed speaker: the participant currently being sent to active-speaker outputs.</li><li>Raw speaker: the latest speaker reported by Zoom.</li><li>Candidate speaker: the participant waiting out the sensitivity timer.</li><li>Last speaker: the previously directed participant.</li><li>Status line: whether the director is waiting, holding, evaluating a candidate, or locked by manual supersede.</li><li>Manual take/release: an operator supersede that holds a participant on air until released.</li></ul>
+<p>Timing controls:</p>
+<table><thead><tr><th>Setting</th><th>Default</th><th>Behavior</th></tr></thead><tbody><tr><td>Sensitivity</td><td>500 ms</td><td>Candidate must keep speaking this long before switching.</td></tr><tr><td>Hold</td><td>2000 ms</td><td>Minimum time to stay on the current directed speaker after a cut.</td></tr></tbody></table>
+<p>TCP examples:</p>
+<pre tabindex="0"><code class="language-json">{&quot;cmd&quot;:&quot;speaker_director_status&quot;}</code></pre>
+<p>The response includes the legacy numeric IDs plus resolved participant objects for <code>directed_speaker</code>, <code>raw_speaker</code>, <code>candidate_speaker</code>, <code>last_speaker</code>, <code>manual_speaker</code>, <code>excluded_participants</code>, and a <code>status</code> value such as <code>holding</code>, <code>candidate_pending</code>, <code>manual_supersede</code>, or <code>waiting_for_speaker</code>. Subscribed TCP clients also receive <code>speaker_director_changed</code> events when the directed, candidate, or manual speaker changes.</p>
+<pre tabindex="0"><code class="language-json">{&quot;cmd&quot;:&quot;speaker_director_configure&quot;,&quot;sensitivity_ms&quot;:650,&quot;hold_ms&quot;:2500}</code></pre>
+<pre tabindex="0"><code class="language-json">{&quot;cmd&quot;:&quot;speaker_director_take&quot;,&quot;participant_id&quot;:123456}</code></pre>
+<pre tabindex="0"><code class="language-json">{&quot;cmd&quot;:&quot;speaker_director_release&quot;}</code></pre>
+<h2>Audio Routing</h2>
+<p>CoreVideo supports three audio modes for participant outputs:</p>
+<table><thead><tr><th>Routing</th><th>Behavior</th></tr></thead><tbody><tr><td>Mixed</td><td>Full meeting mix</td></tr><tr><td>Isolated</td><td>Only the assigned participant's one-way audio</td></tr><tr><td>Audience</td><td>Residual one-way audio for participants not assigned to isolated outputs</td></tr></tbody></table>
+<p>Use <strong>Isolated</strong> when you need the assigned participant only. Use <strong>Audience</strong> for a remaining-room or overflow mic channel after dedicated isolated sources have claimed named participants.</p>
+<h2>Auto ISO Recording</h2>
+<figure class="doc-image"><img src="images/iso-recording-flow.svg" alt="CoreVideo ISO recording flow"></figure>
+<p>ISO recording is controlled by the OBS plugin, not the engine. When enabled, CoreVideo records one video file and one PCM WAV audio file per active source segment. A new segment starts when the resolved participant or source resolution changes.</p>
+<p>Requirements:</p>
+<ul><li><code>ffmpeg</code> must be available on <code>PATH</code>, or pass an explicit <code>ffmpeg_path</code>.</li><li>Raw media must be active.</li><li>Sources must be assigned to participant, active speaker, or spotlight modes.</li></ul>
+<h3>OBS ISO Recorder Panel</h3>
+<p>Open <strong>Tools &gt; Zoom ISO Recorder</strong> to manage ISO recording from a separate OBS dock. The panel provides:</p>
+<ul><li>Output folder picker.</li><li>FFmpeg executable field with a test button.</li><li>Video encoder selector for CPU x264, NVIDIA NVENC, Intel Quick Sync, or AMD AMF when the selected FFmpeg build supports that encoder.</li><li>Encoder guidance explaining CPU load, GPU encoder-session limits, and when to fall back to CPU x264 for 8 ISO feeds plus a program stream.</li><li>Safe hardware fallback: if the selected hardware encoder is missing from the FFmpeg build, CoreVideo falls back to <code>libx264</code> when available and reports the requested encoder, actual encoder, and fallback state.</li><li><strong>Also start/stop OBS program recording</strong> toggle.</li><li><strong>Start ISO Recording</strong> and <strong>Stop ISO Recording</strong> buttons.</li><li>Live status showing idle/recording and active session count.</li><li>Active session table with source, participant, resolution, video frame count, audio chunk count, current video/audio file paths, and FFmpeg error details.</li><li>Recently completed sessions remain in the table after stop so operators can confirm completed MP4/WAV outputs before opening the folder.</li></ul>
+<p>The panel uses the same <code>ZoomIsoRecorder</code> backend as the TCP and OSC APIs. It persists the output folder, FFmpeg path, and program-recording toggle in OBS global settings. Recording start is blocked when the selected output volume has less than 2 GB free and warns below 10 GB free.</p>
+<p>TCP start example:</p>
+<pre tabindex="0"><code class="language-json">{&quot;cmd&quot;:&quot;iso_recording_start&quot;,&quot;output_dir&quot;:&quot;C:/Recordings/CoreVideo&quot;,&quot;ffmpeg_path&quot;:&quot;ffmpeg&quot;,&quot;record_program&quot;:true}</code></pre>
+<p>TCP status example:</p>
+<pre tabindex="0"><code class="language-json">{&quot;cmd&quot;:&quot;iso_recording_status&quot;}</code></pre>
+<p>TCP stop example:</p>
+<pre tabindex="0"><code class="language-json">{&quot;cmd&quot;:&quot;iso_recording_stop&quot;}</code></pre>
+<p>OSC equivalents:</p>
+<table><thead><tr><th>Address</th><th>Type tags</th><th>Action</th></tr></thead><tbody><tr><td><code>/zoom/iso/start</code></td><td>optional <code>,ssi</code></td><td>Start ISO recording with optional output directory, video encoder, and record-program flag</td></tr><tr><td><code>/zoom/iso/status</code></td><td>none</td><td>Reply with active sessions, completed sessions, requested/actual encoder, fallback, hardware, disk warning, and recorder warning</td></tr><tr><td><code>/zoom/iso/stop</code></td><td>none</td><td>Stop ISO recording</td></tr></tbody></table>
+<p>Output files are written as:</p>
+<ul><li><code>*.mp4</code> for encoded I420 video through FFmpeg using the selected H.264 encoder</li><li><code>*.wav</code> for matching PCM audio</li></ul>
+<p>When <code>record_program</code> is true, CoreVideo also starts the normal OBS program recording and stops it when ISO recording stops, but only if CoreVideo started that OBS recording session.</p>
+<h2>TCP Control Examples</h2>
+<p>All TCP commands are newline-delimited JSON sent to <code>127.0.0.1:19870</code>.</p>
+<p>List participants:</p>
+<pre tabindex="0"><code class="language-json">{&quot;cmd&quot;:&quot;list_participants&quot;}</code></pre>
+<p>List outputs:</p>
+<pre tabindex="0"><code class="language-json">{&quot;cmd&quot;:&quot;list_outputs&quot;}</code></pre>
+<p>Output snapshots include requested resolution, observed resolution/FPS, stale state, last frame age, subscribed age for outputs still waiting on their first frame, recovery attempts, automatic quality-upgrade attempts, and remaining retry cooldowns.</p>
+<p>The <strong>Cancel Recovery</strong> button, TCP <code>recovery_cancel</code>, and OSC <code>/zoom/recovery/cancel</code> all use the same stop path: CoreVideo cancels pending reconnect timers, stops the engine process, and clears the stored join session so a canceled retry loop cannot restart itself.</p>
+<p>Force a retry for stale outputs:</p>
+<pre tabindex="0"><code class="language-json">{&quot;cmd&quot;:&quot;recover_stale_outputs&quot;,&quot;force&quot;:true}</code></pre>
+<p>Force a quality retry for live outputs below their requested resolution:</p>
+<pre tabindex="0"><code class="language-json">{&quot;cmd&quot;:&quot;upgrade_low_quality_outputs&quot;,&quot;force&quot;:true}</code></pre>
+<p>Quality retries are skipped when a feed is already observed at 1080p.</p>
+<p>Assign a source to a fixed participant with isolated mono audio:</p>
+<pre tabindex="0"><code class="language-json">{&quot;cmd&quot;:&quot;assign_output_ex&quot;,&quot;source&quot;:&quot;Zoom Participant 1&quot;,&quot;mode&quot;:&quot;participant&quot;,&quot;participant_id&quot;:123456,&quot;isolate_audio&quot;:true,&quot;audio_channels&quot;:&quot;mono&quot;,&quot;video_resolution&quot;:&quot;1080p&quot;}</code></pre>
+<p>Assign a source to active speaker:</p>
+<pre tabindex="0"><code class="language-json">{&quot;cmd&quot;:&quot;assign_output_ex&quot;,&quot;source&quot;:&quot;Zoom Participant 2&quot;,&quot;mode&quot;:&quot;active_speaker&quot;,&quot;audio_channels&quot;:&quot;mono&quot;,&quot;video_resolution&quot;:&quot;1080p&quot;}</code></pre>
+<p>Inspect and control the Active Speaker Director:</p>
+<pre tabindex="0"><code class="language-json">{&quot;cmd&quot;:&quot;speaker_director_status&quot;}</code></pre>
+<pre tabindex="0"><code class="language-json">{&quot;cmd&quot;:&quot;speaker_director_configure&quot;,&quot;sensitivity_ms&quot;:650,&quot;hold_ms&quot;:2500}</code></pre>
+<pre tabindex="0"><code class="language-json">{&quot;cmd&quot;:&quot;speaker_director_take&quot;,&quot;participant_id&quot;:123456}</code></pre>
+<pre tabindex="0"><code class="language-json">{&quot;cmd&quot;:&quot;speaker_director_release&quot;}</code></pre>
+<p>Assign a source to spotlight slot 1:</p>
+<pre tabindex="0"><code class="language-json">{&quot;cmd&quot;:&quot;assign_output_ex&quot;,&quot;source&quot;:&quot;Zoom Participant 3&quot;,&quot;mode&quot;:&quot;spotlight&quot;,&quot;spotlight_slot&quot;:1,&quot;audio_channels&quot;:&quot;mono&quot;,&quot;video_resolution&quot;:&quot;1080p&quot;}</code></pre>
+<h2>OSC Control Examples</h2>
+<p>List participants and outputs:</p>
+<pre tabindex="0"><code class="language-text">/zoom/list_participants
+/zoom/list_outputs
+/zoom/list_assignments</code></pre>
+<p><code>/zoom/list_assignments</code> replies with one <code>/zoom/output/assignment</code> message per CoreVideo source:</p>
+<pre tabindex="0"><code class="language-text">/zoom/output/assignment &quot;CoreVideo Participant 1&quot; &quot;participant&quot; 123456 &quot;Alex Rivera&quot; 123456 &quot;Alex Rivera&quot; 1 0</code></pre>
+<p>Arguments are <code>source</code>, <code>mode</code>, configured participant ID/name, resolved participant ID/name, spotlight slot, and failover participant ID. Active-speaker sources resolve to the current directed speaker.</p>
+<p>Retry stale video outputs:</p>
+<pre tabindex="0"><code class="language-text">/zoom/recover_stale_outputs 1</code></pre>
+<p>Retry low-quality video outputs:</p>
+<pre tabindex="0"><code class="language-text">/zoom/upgrade_low_quality_outputs 1</code></pre>
+<p>Inspect and control the Active Speaker Director:</p>
+<pre tabindex="0"><code class="language-text">/zoom/speaker_director/status
+/zoom/speaker_director/configure 650 2500 1 123456 789012
+/zoom/speaker_director/take 123456
+/zoom/speaker_director/release</code></pre>
+<p>The OSC status request preserves the original numeric <code>/zoom/speaker_director/status</code> reply and also sends <code>/zoom/speaker_director/status/detail ,iiiiiiiiiiiis</code>, including directed, raw, candidate, last, manual, sensitivity, hold, require-video, candidate elapsed, hold remaining, two exclusion IDs, and status text such as <code>holding</code>, <code>candidate_pending</code>, or <code>manual_supersede</code>.</p>
+<p>Assign a source:</p>
+<pre tabindex="0"><code class="language-text">/zoom/output/assign_ex &quot;Zoom Participant 1&quot; &quot;participant&quot; 123456 1</code></pre>
+<p>Assign active speaker:</p>
+<pre tabindex="0"><code class="language-text">/zoom/assign_output/active_speaker &quot;Zoom Participant 1&quot;</code></pre>
+<p>Set isolated audio:</p>
+<pre tabindex="0"><code class="language-text">/zoom/isolate_audio &quot;Zoom Participant 1&quot; 1</code></pre>
+<p>Start and stop ISO recording:</p>
+<pre tabindex="0"><code class="language-text">/zoom/iso/start &quot;C:/Recordings/CoreVideo&quot; &quot;h264_nvenc&quot; 1
+/zoom/iso/status
+/zoom/iso/stop</code></pre>
+<h2>Troubleshooting</h2>
+<table><thead><tr><th>Symptom</th><th>Check</th></tr></thead><tbody><tr><td>Color bars only</td><td>Confirm the meeting is joined, raw media is started, and the source has a participant/role assignment.</td></tr><tr><td>No isolated audio</td><td>Confirm the source is assigned to a real participant and <code>isolate_audio</code> is true.</td></tr><tr><td>ISO recording does not start</td><td>Confirm <code>ffmpeg</code> is on PATH or provide <code>ffmpeg_path</code>.</td></tr><tr><td>External meeting rejected</td><td>Confirm the Meeting SDK app/client ID is approved or published for external meeting joins.</td></tr><tr><td>Plugin cannot launch engine</td><td>Confirm <code>ZoomObsEngine.exe</code> and Zoom SDK runtime DLLs are installed under <code>obs-plugins/64bit/zoom-runtime</code>.</td></tr></tbody></table>
+  </main>
+  <footer class="site-footer">
+    <span>CoreVideo is an independent product and is not affiliated with Zoom Video Communications, Inc.</span>
+  </footer>
+</body>
+</html>

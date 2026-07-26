@@ -53,6 +53,9 @@
     li { margin-bottom: 6px; }
     a  { color: var(--accent); text-decoration: none; }
     a:hover { text-decoration: underline; }
+    /* Prose links must be distinguishable without color (WCAG 1.4.1). The
+       sidebar nav lives outside <main>, so it is unaffected. */
+    main a { text-decoration: underline; text-underline-offset: 2px; }
     strong { color: var(--text); }
     code {
       background: rgba(34,200,110,.1); border: 1px solid rgba(34,200,110,.28); border-radius: 4px; padding: 1px 6px;

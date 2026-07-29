@@ -43,6 +43,36 @@ enum OutputColumns {
     ColumnCount
 };
 
+// QTableWidget stretches a cell widget to fill the whole (tall) row cell. A
+// widget that cannot grow (fixed-size preview label) ends up anchored to the
+// top of the cell, while an unconstrained widget (a combo box) balloons to the
+// full row height. Both break the row's shared vertical baseline. Wrapping the
+// widget in a holder with a centering layout pins it to its natural size,
+// vertically centered, so every cell in the row lines up.
+static QWidget *center_in_cell(QWidget *inner, Qt::Alignment align, int h_margin)
+{
+    auto *holder = new QWidget(inner->parentWidget());
+    auto *lay = new QHBoxLayout(holder);
+    lay->setContentsMargins(h_margin, 0, h_margin, 0);
+    // A horizontally-centered widget keeps its own width (stretch 0); otherwise
+    // it fills the cell width (stretch 1) but is still vertically centered.
+    const int stretch = (align & Qt::AlignHCenter) ? 0 : 1;
+    lay->addWidget(inner, stretch, align);
+    return holder;
+}
+
+// Combos live inside a center_in_cell() holder, so fetch the combo from the
+// cell widget whether it is the widget itself or the holder's child.
+static QComboBox *cell_combo(QTableWidget *table, int row, int col)
+{
+    QWidget *w = table->cellWidget(row, col);
+    if (!w)
+        return nullptr;
+    if (auto *c = qobject_cast<QComboBox *>(w))
+        return c;
+    return w->findChild<QComboBox *>();
+}
+
 // Fast I420 -> RGB888 conversion for preview thumbnails.
 // Samples every (step) pixels to produce a scaled-down image.
 static QImage i420_to_qimage_scaled(uint32_t w, uint32_t h,
@@ -491,7 +521,7 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     m_table->setColumnWidth(ColumnAudio, 148);
     m_table->setColumnWidth(ColumnAudioRole, 168);
     m_table->verticalHeader()->setVisible(false);
-    m_table->verticalHeader()->setDefaultSectionSize(124);
+    m_table->verticalHeader()->setDefaultSectionSize(104);
     m_table->setSelectionMode(QAbstractItemView::NoSelection);
     m_table->setMinimumHeight(460);
     m_table->setMinimumWidth(1440);
@@ -583,8 +613,7 @@ bool ZoomOutputDialog::has_open_output_combo_popup() const
         for (const int col : {
                  ColumnAssignment, ColumnResolution, ColumnAudio, ColumnAudioRole
              }) {
-            if (auto *combo =
-                    qobject_cast<QComboBox *>(m_table->cellWidget(row, col))) {
+            if (auto *combo = cell_combo(m_table, row, col)) {
                 if (combo->view() && combo->view()->isVisible())
                     return true;
             }
@@ -634,14 +663,10 @@ void ZoomOutputDialog::refresh()
     if (m_table) {
         for (int row = 0; row < m_table->rowCount(); ++row) {
             auto *name_item = m_table->item(row, ColumnName);
-            auto *assignment = qobject_cast<QComboBox *>(
-                m_table->cellWidget(row, ColumnAssignment));
-            auto *resolution = qobject_cast<QComboBox *>(
-                m_table->cellWidget(row, ColumnResolution));
-            auto *audio = qobject_cast<QComboBox *>(
-                m_table->cellWidget(row, ColumnAudio));
-            auto *audio_role = qobject_cast<QComboBox *>(
-                m_table->cellWidget(row, ColumnAudioRole));
+            auto *assignment = cell_combo(m_table, row, ColumnAssignment);
+            auto *resolution = cell_combo(m_table, row, ColumnResolution);
+            auto *audio = cell_combo(m_table, row, ColumnAudio);
+            auto *audio_role = cell_combo(m_table, row, ColumnAudioRole);
             if (!name_item || !assignment || !resolution || !audio || !audio_role)
                 continue;
 
@@ -677,7 +702,7 @@ void ZoomOutputDialog::refresh()
 
     m_table->setRowCount(static_cast<int>(outputs.size()));
     for (int row = 0; row < static_cast<int>(outputs.size()); ++row) {
-        m_table->setRowHeight(row, 124);
+        m_table->setRowHeight(row, 104);
         const auto &output = outputs[row];
 
         // Preview thumbnail label
@@ -686,7 +711,8 @@ void ZoomOutputDialog::refresh()
         preview_label->setAlignment(Qt::AlignCenter);
         preview_label->setStyleSheet("background: #1a1a1a;");
         preview_label->setText("No video");
-        m_table->setCellWidget(row, ColumnPreview, preview_label);
+        m_table->setCellWidget(row, ColumnPreview,
+            center_in_cell(preview_label, Qt::AlignCenter, 0));
 
         // Register live preview callback for this source.
         // Capture preview_label via QPointer so the queued lambda is safe if
@@ -732,7 +758,8 @@ void ZoomOutputDialog::refresh()
         const QString current_assignment = assignment_data_for_output(output);
         const int assignment_index = assignment->findData(current_assignment);
         if (assignment_index >= 0) assignment->setCurrentIndex(assignment_index);
-        m_table->setCellWidget(row, ColumnAssignment, assignment);
+        m_table->setCellWidget(row, ColumnAssignment,
+            center_in_cell(assignment, Qt::AlignVCenter, 6));
 
         auto *audio = new QComboBox(m_table);
         audio->setMinimumWidth(112);
@@ -748,7 +775,8 @@ void ZoomOutputDialog::refresh()
         resolution->setCurrentIndex(
             output.video_resolution == VideoResolution::P360 ? 0 :
             output.video_resolution == VideoResolution::P1080 ? 2 : 1);
-        m_table->setCellWidget(row, ColumnResolution, resolution);
+        m_table->setCellWidget(row, ColumnResolution,
+            center_in_cell(resolution, Qt::AlignVCenter, 6));
 
         auto *signal = new QLabel(m_table);
         signal->setAlignment(Qt::AlignCenter);
@@ -784,7 +812,8 @@ void ZoomOutputDialog::refresh()
             sdk->setStyleSheet("color: #66d989; font-weight: 700;");
         m_table->setCellWidget(row, ColumnSdk, sdk);
 
-        m_table->setCellWidget(row, ColumnAudio, audio);
+        m_table->setCellWidget(row, ColumnAudio,
+            center_in_cell(audio, Qt::AlignVCenter, 6));
 
         auto *audio_role = new QComboBox(m_table);
         audio_role->setMinimumWidth(132);
@@ -798,7 +827,8 @@ void ZoomOutputDialog::refresh()
             audio_role->findData(audio_role_data_for_output(output));
         if (role_index >= 0)
             audio_role->setCurrentIndex(role_index);
-        m_table->setCellWidget(row, ColumnAudioRole, audio_role);
+        m_table->setCellWidget(row, ColumnAudioRole,
+            center_in_cell(audio_role, Qt::AlignVCenter, 6));
 
         const auto pit = pending.find(output.source_name);
         if (pit != pending.end()) {
@@ -908,10 +938,10 @@ void ZoomOutputDialog::save_profile()
     std::vector<ZoomOutputInfo> outputs;
     for (int row = 0; row < m_table->rowCount(); ++row) {
         auto *name_item  = m_table->item(row, ColumnName);
-        auto *assignment = qobject_cast<QComboBox *>(m_table->cellWidget(row, ColumnAssignment));
-        auto *resolution = qobject_cast<QComboBox *>(m_table->cellWidget(row, ColumnResolution));
-        auto *audio      = qobject_cast<QComboBox *>(m_table->cellWidget(row, ColumnAudio));
-        auto *audio_role = qobject_cast<QComboBox *>(m_table->cellWidget(row, ColumnAudioRole));
+        auto *assignment = cell_combo(m_table, row, ColumnAssignment);
+        auto *resolution = cell_combo(m_table, row, ColumnResolution);
+        auto *audio      = cell_combo(m_table, row, ColumnAudio);
+        auto *audio_role = cell_combo(m_table, row, ColumnAudioRole);
         if (!name_item || !assignment || !resolution || !audio || !audio_role) continue;
 
         ZoomOutputInfo o;
@@ -963,10 +993,10 @@ void ZoomOutputDialog::load_profile()
             if (name_item->data(Qt::UserRole).toString().toStdString() != o.source_name)
                 continue;
 
-            auto *assignment = qobject_cast<QComboBox *>(m_table->cellWidget(row, ColumnAssignment));
-            auto *resolution = qobject_cast<QComboBox *>(m_table->cellWidget(row, ColumnResolution));
-            auto *audio      = qobject_cast<QComboBox *>(m_table->cellWidget(row, ColumnAudio));
-            auto *audio_role = qobject_cast<QComboBox *>(m_table->cellWidget(row, ColumnAudioRole));
+            auto *assignment = cell_combo(m_table, row, ColumnAssignment);
+            auto *resolution = cell_combo(m_table, row, ColumnResolution);
+            auto *audio      = cell_combo(m_table, row, ColumnAudio);
+            auto *audio_role = cell_combo(m_table, row, ColumnAudioRole);
             if (!assignment || !resolution || !audio || !audio_role) continue;
 
             const QString ad = assignment_data_for_output(o);
@@ -1018,8 +1048,7 @@ void ZoomOutputDialog::apply()
     std::unordered_map<uint32_t, QStringList> fixed_assignments;
     for (int row = 0; row < m_table->rowCount(); ++row) {
         auto *name_item = m_table->item(row, ColumnName);
-        auto *assignment = qobject_cast<QComboBox *>(
-            m_table->cellWidget(row, ColumnAssignment));
+        auto *assignment = cell_combo(m_table, row, ColumnAssignment);
         if (!name_item || !assignment) continue;
 
         const QString assignment_data = assignment->currentData().toString();
@@ -1058,14 +1087,10 @@ void ZoomOutputDialog::apply()
 
     for (int row = 0; row < m_table->rowCount(); ++row) {
         auto *name_item = m_table->item(row, ColumnName);
-        auto *assignment = qobject_cast<QComboBox *>(
-            m_table->cellWidget(row, ColumnAssignment));
-        auto *resolution = qobject_cast<QComboBox *>(
-            m_table->cellWidget(row, ColumnResolution));
-        auto *audio = qobject_cast<QComboBox *>(
-            m_table->cellWidget(row, ColumnAudio));
-        auto *audio_role = qobject_cast<QComboBox *>(
-            m_table->cellWidget(row, ColumnAudioRole));
+        auto *assignment = cell_combo(m_table, row, ColumnAssignment);
+        auto *resolution = cell_combo(m_table, row, ColumnResolution);
+        auto *audio = cell_combo(m_table, row, ColumnAudio);
+        auto *audio_role = cell_combo(m_table, row, ColumnAudioRole);
         if (!name_item || !assignment || !resolution || !audio || !audio_role) continue;
 
         const std::string source_name =

@@ -26,7 +26,7 @@
     body {
       background: var(--bg); color: var(--text);
       font-family: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      line-height: 1.7; font-size: 16px;
+      line-height: 1.7; font-size: 18px;
     }
     /* Shared site top bar — matches the layout header in build-site.mjs */
     .site-topbar { position: sticky; top: 0; z-index: 200; display: flex; align-items: center; justify-content: space-between;
@@ -34,7 +34,7 @@
     .site-topbar .brand { display: inline-flex; align-items: center; gap: 10px; color: var(--text); font-weight: 600; font-size: 18px; letter-spacing: -0.01em; text-decoration: none; }
     .site-topbar .brand svg { display: block; width: 26px; height: 20px; color: var(--text); }
     .site-topbar .topnav { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 2px; }
-    .site-topbar .topnav a { color: var(--muted); font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; text-decoration: none; padding: 6px 9px; border: 1px solid transparent; border-radius: 6px; }
+    .site-topbar .topnav a { color: var(--muted); font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 12.5px; font-weight: 500; letter-spacing: 0.07em; text-transform: uppercase; text-decoration: none; padding: 7px 10px; border: 1px solid transparent; border-radius: 6px; }
     .site-topbar .topnav a:hover { color: var(--text); background: rgba(255,255,255,0.05); }
     .site-topbar .topnav a[aria-current="page"] { color: var(--text); border-color: rgba(34,200,110,0.45); background: rgba(34,200,110,0.12); }
     .site-topbar .topnav a.dl { color: #06170d; background: var(--accent); font-weight: 700; padding: 6px 13px; border-radius: 7px; margin-left: 5px; }
@@ -48,11 +48,11 @@
     .nav-logo h1 { font-size: 1.1rem; color: var(--accent); font-weight: 700; }
     .nav-logo p  { font-size: 0.75rem; color: var(--muted); margin-top: 2px; }
     #sidebar a {
-      display: block; padding: 6px 20px; color: var(--muted); text-decoration: none;
-      font-size: 0.875rem; border-left: 2px solid transparent; transition: all 0.15s;
+      display: block; padding: 7px 20px; color: var(--muted); text-decoration: none;
+      font-size: 0.95rem; border-left: 2px solid transparent; transition: all 0.15s;
     }
     #sidebar a:hover, #sidebar a.active { color: var(--text); border-left-color: var(--accent); background: rgba(34,200,110,.1); }
-    .nav-section { padding: 14px 20px 4px; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+    .nav-section { padding: 14px 20px 4px; font-size: 0.78rem; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
     main { margin-left: 260px; max-width: 960px; padding: 48px 56px; }
     section[id] { scroll-margin-top: 72px; }
 
@@ -165,7 +165,6 @@
     <a href="/pro/documentation/">Pro Docs</a>
     <a href="/documentation/" aria-current="page">Plugin Docs</a>
     <a href="/core-plugin/">Core Plugin</a>
-    <a href="/oauth/">OAuth</a>
     <a href="/terms/">Terms</a>
     <a href="/privacy/">Privacy</a>
     <a href="/support/">Support</a>
@@ -1985,18 +1984,20 @@ sequenceDiagram
     startOnLoad: true,
     theme: 'dark',
     themeVariables: {
-      background: '#16191b', primaryColor: '#14231b', primaryTextColor: '#e6edf3',
-      primaryBorderColor: '#30363d', lineColor: '#8b949e', secondaryColor: '#16191b',
-      tertiaryColor: '#16191b', edgeLabelBackground: '#16191b',
-      clusterBkg: '#16191b', clusterBorder: '#30363d', titleColor: '#e6edf3',
-      nodeTextColor: '#e6edf3',
-      actorBkg: '#14231b', actorBorder: '#22c86e', actorTextColor: '#ffffff',
-      actorLineColor: '#8b949e', signalColor: '#8b949e', signalTextColor: '#e6edf3',
-      noteBkgColor: '#16191b', noteTextColor: '#e6edf3', noteBorderColor: '#30363d',
-      activationBorderColor: '#22c86e', activationBkgColor: '#0e1f16',
-      sequenceNumberColor: '#ffffff', labelBoxBkgColor: '#16191b',
-      labelBoxBorderColor: '#30363d', labelTextColor: '#e6edf3', loopTextColor: '#e6edf3',
-      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+      darkMode: true,
+      background: '#0d1117',
+      mainBkg: '#1e2a35', primaryColor: '#1e2a35', primaryTextColor: '#eaf2f6',
+      primaryBorderColor: '#2fd07f', nodeBorder: '#2fd07f',
+      secondaryColor: '#26313c', tertiaryColor: '#1a222b',
+      lineColor: '#aeb7bf', textColor: '#eaf2f6', nodeTextColor: '#eaf2f6',
+      edgeLabelBackground: '#0d1117', clusterBkg: '#161d25', clusterBorder: '#3a4650', titleColor: '#eaf2f6',
+      actorBkg: '#1e2a35', actorBorder: '#2fd07f', actorTextColor: '#ffffff',
+      actorLineColor: '#aeb7bf', signalColor: '#aeb7bf', signalTextColor: '#eaf2f6',
+      noteBkgColor: '#2a3742', noteTextColor: '#eaf2f6', noteBorderColor: '#4a5762',
+      activationBorderColor: '#2fd07f', activationBkgColor: '#183a2a',
+      sequenceNumberColor: '#0d1117', labelBoxBkgColor: '#1e2a35',
+      labelBoxBorderColor: '#4a5762', labelTextColor: '#eaf2f6', loopTextColor: '#eaf2f6',
+      fontFamily: 'Space Grotesk, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
     },
     flowchart: { curve: 'basis', htmlLabels: true },
     sequence: { actorMargin: 60, messageMargin: 30 },

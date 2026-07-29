@@ -67,7 +67,8 @@ body {
   min-height: 100%;
   font-family: var(--ui);
   color: var(--tx);
-  line-height: 1.6;
+  font-size: 17px;
+  line-height: 1.65;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   background-color: var(--bg);
@@ -133,9 +134,9 @@ nav {
 nav a {
   color: var(--mut);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 12.5px;
   font-weight: 500;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.07em;
   text-transform: uppercase;
   text-decoration: none;
   padding: 6px 10px;

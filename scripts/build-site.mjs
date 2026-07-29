@@ -58,12 +58,6 @@ const pages = [
 
 const markdownPages = [
   {
-    source: path.join(docsDir, "ZOOM_MARKETPLACE_OAUTH.md"),
-    title: "OAuth Setup",
-    description: "Zoom Marketplace OAuth setup for CoreVideo.",
-    output: "oauth/index.html",
-  },
-  {
     source: path.join(docsDir, "CORE_PLUGIN_FUNCTIONALITY.md"),
     title: "CoreVideo (OBS Plugin)",
     description: "CoreVideo OBS plugin workflows, control examples, and ISO recording.",
@@ -487,7 +481,6 @@ function layout(page, content, options = {}) {
     ["Plugin Docs", "/documentation/"],
     ["Core Plugin", "/core-plugin/"],
     ["Download", "/download"],
-    ["OAuth", "/oauth/"],
     ["Terms", "/terms/"],
     ["Privacy", "/privacy/"],
     ["Support", "/support/"],
@@ -746,7 +739,7 @@ const docsHtml = fs.readFileSync(path.join(docsDir, "index.html"), "utf8")
     ? new URL("/documentation", publicDocumentationUrl).host + "/documentation"
     : "CoreVideo documentation")
   .replaceAll("https://iamfatness.github.io/CoreVideo/", "/documentation/")
-  .replaceAll('href="ZOOM_MARKETPLACE_OAUTH.md"', 'href="/oauth/"')
+  .replaceAll('href="ZOOM_MARKETPLACE_OAUTH.md"', 'href="https://github.com/iamfatness/CoreVideo/blob/main/docs/ZOOM_MARKETPLACE_OAUTH.md"')
   .replaceAll("<pre>", '<pre tabindex="0">')
   .replace(
     "</head>",
@@ -780,8 +773,8 @@ writeText("_redirects", `/terms-of-use /terms/ 301
 /Privacy-Policy /privacy/ 301
 /Support /support/ 301
 /docs /documentation/ 301
-/ZOOM_MARKETPLACE_OAUTH.md /oauth/ 301
-/docs/ZOOM_MARKETPLACE_OAUTH.md /oauth/ 301
+/oauth /documentation/#flow-oauth 301
+/oauth/ /documentation/#flow-oauth 301
 `);
 writeText("CNAME", "corevideo.io\n");
 

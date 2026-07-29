@@ -177,8 +177,14 @@ bool ZoomOscServer::start(quint16 port)
         }, Qt::QueuedConnection);
     });
 
-    m_poll_timer = new QTimer(this);
-    connect(m_poll_timer, &QTimer::timeout, this, [this]() { poll_and_push(); });
+    // Create the poll timer once. start() can be called again after stop()
+    // (e.g. when the port is changed in settings); re-using the existing timer
+    // avoids leaking a QTimer child and stacking duplicate timeout handlers on
+    // the singleton for the life of the OBS session.
+    if (!m_poll_timer) {
+        m_poll_timer = new QTimer(this);
+        connect(m_poll_timer, &QTimer::timeout, this, [this]() { poll_and_push(); });
+    }
     m_poll_timer->start(kPollIntervalMs);
 
     return true;

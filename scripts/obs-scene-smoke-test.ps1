@@ -40,6 +40,10 @@ param(
     [switch]$ExpectDockShow,
 
     [Parameter()]
+    [ValidateRange(1, 100)]
+    [int]$MinDockShows = 1,
+
+    [Parameter()]
     [switch]$LogOnly
 )
 
@@ -366,12 +370,62 @@ function Assert-LogDoesNotContain {
     }
 }
 
+function Assert-LogCountAtLeast {
+    param(
+        [string]$Path,
+        [string]$Marker,
+        [int]$Minimum
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "OBS log file not found: $Path"
+    }
+
+    $lines = @(Get-Content -LiteralPath $Path)
+    $escaped = [regex]::Escape($Marker)
+    $count = @($lines | Where-Object { $_ -match $escaped }).Count
+    if ($count -lt $Minimum) {
+        throw "OBS log expected marker '$Marker' at least $Minimum time(s) but found $count. Repeated dock open/close may be failing."
+    }
+}
+
+function Assert-NoMarkerAfterMarker {
+    param(
+        [string]$Path,
+        [string]$FirstMarker,
+        [string[]]$Forbidden
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "OBS log file not found: $Path"
+    }
+
+    $lines = @(Get-Content -LiteralPath $Path)
+    $escapedFirst = [regex]::Escape($FirstMarker)
+    $firstIndex = -1
+    for ($i = 0; $i -lt $lines.Count; ++$i) {
+        if ($lines[$i] -match $escapedFirst) { $firstIndex = $i; break }
+    }
+    if ($firstIndex -lt 0) {
+        return  # nothing to check; presence of $FirstMarker is asserted separately
+    }
+
+    for ($i = $firstIndex + 1; $i -lt $lines.Count; ++$i) {
+        foreach ($marker in $Forbidden) {
+            if ($lines[$i] -match [regex]::Escape($marker)) {
+                throw "OBS log shows '$marker' AFTER '$FirstMarker' (line $($i + 1)). Dock/engine activity after shutdown began indicates a teardown-order or use-after-free hazard."
+            }
+        }
+    }
+}
+
 function Test-CoreVideoObsLog {
     param(
         [string]$Path,
         [string[]]$ExpectedDockId,
         [bool]$ExpectShutdown,
-        [bool]$ExpectDockShow
+        [bool]$ExpectDockShow,
+        [int]$MinDockShows = 1
     )
 
     if (-not $Path) {
@@ -393,9 +447,40 @@ function Test-CoreVideoObsLog {
     Assert-LogContains -Path $Path -Expected $markers
     Assert-LogDoesNotContain -Path $Path -Forbidden @(
         "[obs-zoom-plugin] obs_frontend_get_main_window() returned null",
+        # A dock shown with no OBS host wrapper is the blank/detached-panel
+        # symptom this issue is about; it must never happen on reopen.
+        "[obs-zoom-plugin] Showing dock without host:",
         "Unhandled exception",
         "Access violation"
     )
+
+    # Repeated open/close coverage: with -ExpectDockShow -MinDockShows N, assert
+    # each dock was shown at least N times (i.e. reopened after being closed),
+    # not merely registered once at load.
+    if ($ExpectDockShow -and $MinDockShows -gt 1) {
+        foreach ($id in $ExpectedDockId) {
+            Assert-LogCountAtLeast -Path $Path `
+                -Marker "[obs-zoom-plugin] Showing dock: $id" `
+                -Minimum $MinDockShows
+        }
+        Write-Host "CoreVideo docks were each shown at least $MinDockShows time(s) (repeated open/close)."
+    }
+
+    # Clean-shutdown ordering: once teardown has begun, nothing may re-register
+    # or re-show a dock, and no crash marker may appear. Catches use-after-free
+    # / dock-resurrection during exit.
+    if ($ExpectShutdown) {
+        Assert-NoMarkerAfterMarker -Path $Path `
+            -FirstMarker "[obs-zoom-plugin] Shutting down CoreVideo runtime" `
+            -Forbidden @(
+                "[obs-zoom-plugin] Registered dock:",
+                "[obs-zoom-plugin] Showing dock:",
+                "Unhandled exception",
+                "Access violation"
+            )
+        Write-Host "CoreVideo shutdown ordering is clean (no dock activity or crash after teardown began)."
+    }
+
     Write-Host "CoreVideo OBS log lifecycle markers are present."
 }
 
@@ -404,7 +489,8 @@ if ($LogOnly) {
         -Path $ObsLogPath `
         -ExpectedDockId $ExpectedDockId `
         -ExpectShutdown:$ExpectShutdown `
-        -ExpectDockShow:$ExpectDockShow
+        -ExpectDockShow:$ExpectDockShow `
+        -MinDockShows $MinDockShows
     return
 }
 
@@ -456,7 +542,8 @@ try {
             -Path $ObsLogPath `
             -ExpectedDockId $ExpectedDockId `
             -ExpectShutdown:$ExpectShutdown `
-            -ExpectDockShow:$ExpectDockShow
+            -ExpectDockShow:$ExpectDockShow `
+            -MinDockShows $MinDockShows
     }
 
     $sourceScene = "CoreVideo Sources"

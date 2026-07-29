@@ -5,6 +5,7 @@
 #include "obs-utils.h"
 #include "speaker-director.h"
 #include "zoom-engine-client.h"
+#include "zoom-join-decision.h"
 #include "zoom-oauth.h"
 #include "zoom-output-manager.h"
 #include "zoom-output-dialog.h"
@@ -105,13 +106,6 @@ static QString sidecar_executable_path()
 #else
     return QStringLiteral("CoreVideoSidecar");
 #endif
-}
-
-static std::string redacted_tail(const std::string &value)
-{
-    if (value.empty()) return "empty";
-    if (value.size() <= 4) return "****";
-    return "****" + value.substr(value.size() - 4);
 }
 
 // Fast I420 -> RGB888 for dock thumbnails (shared with output dialog logic)
@@ -1602,42 +1596,51 @@ void ZoomDock::on_join_clicked()
     }
 
     ZoomPluginSettings s = ZoomPluginSettings::load();
-    const std::string resolved_public_app_key =
-        s.resolved_meeting_sdk_public_app_key();
+
+    // ── Single, auditable join decision path (issue #89) ────────────────────
+    // Every branch below is derived from one pure planner so the auth mode,
+    // ZAK plan, and sign-in requirement can be unit-tested and are logged as one
+    // coherent block. See src/zoom-join-decision.h.
+    zoom_join::JoinDecisionInputs decision_in;
+    decision_in.oauth_client_id         = s.oauth_client_id;
+    decision_in.oauth_authorization_url = s.oauth_authorization_url;
+    decision_in.meeting_sdk_auth_mode   = s.meeting_sdk_auth_mode;
+    decision_in.sdk_public_app_key      = s.sdk_public_app_key;
+    decision_in.has_sdk_key_secret_pair = !s.sdk_key.empty() && !s.sdk_secret.empty();
+    decision_in.has_embedded_jwt        = !s.jwt_token.empty();
+    decision_in.engine_already_authed   =
+        ZoomEngineClient::instance().is_authenticated();
+    decision_in.has_access_token        = !s.oauth_access_token.empty();
+    decision_in.has_refresh_token       = !s.oauth_refresh_token.empty();
+    decision_in.access_token_expired    =
+        s.oauth_expires_at <= QDateTime::currentSecsSinceEpoch();
+    decision_in.token_type              = token_type.toStdString();
+    // tokens.{user_zak,on_behalf_token} already reflect any typed/parsed value,
+    // so map them directly and leave has_typed_token false to avoid double count.
+    decision_in.has_parsed_zak          = !tokens.user_zak.empty();
+    decision_in.has_parsed_on_behalf    = !tokens.on_behalf_token.empty();
+
+    const zoom_join::JoinDecisionPlan plan = zoom_join::plan_join(decision_in);
+    blog(LOG_INFO, "[obs-zoom-plugin] %s",
+         zoom_join::format_join_decision_path(decision_in, plan).c_str());
+
+    const std::string resolved_public_app_key = plan.resolved_public_app_key;
     const bool use_public_app_key = !resolved_public_app_key.empty();
     std::string jwt = use_public_app_key ? std::string() : s.resolved_jwt_token();
-    if (!ZoomEngineClient::instance().is_authenticated() && jwt.empty() &&
-        !use_public_app_key) {
+
+    if (plan.blocking_error == zoom_join::ZoomJoinError::MissingCredentials) {
         QMessageBox::warning(this, "Zoom Authentication",
-            "This CoreVideo build does not have Zoom Meeting SDK credentials "
-            "configured. Rebuild with embedded SDK credentials or restore a "
-            "valid SDK JWT before joining.");
+            QString::fromUtf8(zoom_join::join_error_guidance(plan.blocking_error)));
         return;
     }
 
-    const bool needs_oauth_zak =
-        tokens.user_zak.empty() &&
-        tokens.on_behalf_token.empty();
-    blog(LOG_INFO,
-         "[obs-zoom-plugin] Zoom join token mode=%s zak_needed=%d typed_token=%d parsed_obf=%d parsed_zak=%d parsed_app=%d app_privilege_present=%d sdk_key=%s oauth_client_id=%s oauth_scopes=\"%s\"",
-         token_type.toUtf8().constData(),
-         needs_oauth_zak ? 1 : 0,
-         typed_token.empty() ? 0 : 1,
-         parsed.on_behalf_token.empty() ? 0 : 1,
-         parsed.user_zak.empty() ? 0 : 1,
-         parsed.app_privilege_token.empty() ? 0 : 1,
-         tokens.app_privilege_token.empty() ? 0 : 1,
-         use_public_app_key ? "(public_app_key)" : redacted_tail(s.sdk_key).c_str(),
-         redacted_tail(s.oauth_client_id).c_str(),
-         s.oauth_scopes.c_str());
-    if (needs_oauth_zak &&
-        s.oauth_access_token.empty() &&
-        s.oauth_refresh_token.empty()) {
+    if (plan.needs_oauth_sign_in) {
         QString error;
         if (!ZoomOAuthManager::instance().begin_authorization(this, &error)) {
             QMessageBox::warning(this, "Zoom Authentication",
                 error.isEmpty()
-                    ? QStringLiteral("Sign in with Zoom before joining meetings that require owner/host context.")
+                    ? QString::fromUtf8(zoom_join::join_error_guidance(
+                          zoom_join::ZoomJoinError::NeedsSignIn))
                     : error);
             return;
         }
@@ -1717,10 +1720,14 @@ void ZoomDock::on_join_clicked()
             }
         }
         blog(LOG_INFO,
-             "[obs-zoom-plugin] Meeting SDK auth mode=%s jwt_present=%d public_app_key_present=%d broker_jwt=%d",
-             settings.meeting_sdk_auth_mode.c_str(),
+             "[obs-zoom-plugin] [join-decision] resolved sdk_auth_mode=%s jwt_present=%d public_app_key=%s zak_present=%d broker_jwt=%d "
+             "(Meeting SDK result code follows from the engine as auth_ok/auth_fail)",
+             public_app_key.empty()
+                 ? (jwt.empty() ? "none" : "jwt")
+                 : "public_app_key",
              jwt.empty() ? 0 : 1,
-             public_app_key.empty() ? 0 : 1,
+             zoom_join::redacted_tail(public_app_key).c_str(),
+             tokens.user_zak.empty() ? 0 : 1,
              settings.use_broker_sdk_jwt() ? 1 : 0);
         const bool started = ZoomEngineClient::instance().start(jwt, public_app_key);
         const bool still_current =

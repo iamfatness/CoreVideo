@@ -463,6 +463,17 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoIpcHardening
              COMMAND CoreVideoIpcHardeningTest)
 
+    # Centralized Zoom auth/join decision path + error catalog (issue #89).
+    # Header-only logic; no Qt/OBS/SDK dependencies, no secrets.
+    add_executable(CoreVideoJoinDecisionTest
+        tests/join-decision-test.cpp
+    )
+    target_include_directories(CoreVideoJoinDecisionTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoJoinDecision
+             COMMAND CoreVideoJoinDecisionTest)
+
     # IPC line-I/O framing and write-failure semantics (POSIX socket-based test).
     if(NOT WIN32)
         add_executable(CoreVideoIpcLineIoTest

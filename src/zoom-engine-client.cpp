@@ -1,5 +1,6 @@
 #include "zoom-engine-client.h"
 #include "speaker-director.h"
+#include "zoom-join-decision.h"
 #include "zoom-reconnect.h"
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -58,23 +59,26 @@ static std::string zoom_error_message(const QJsonObject &obj)
     const int code = obj.value("code").toInt(0);
 
     if (cmd == "auth_fail") {
-        std::string out = auth_mode == "public_app_key"
-            ? "Zoom SDK public app key authentication failed"
-            : "Zoom SDK authentication failed";
+        // Centralized error catalog (issue #89): map the Meeting SDK AuthResult
+        // name onto a distinct, actionable operator message. The public-app-key
+        // vs jwt mode changes how key/secret/jwt rejections are interpreted.
+        const bool public_app_key_mode = auth_mode == "public_app_key";
+        const zoom_join::ZoomJoinError category =
+            zoom_join::classify_sdk_auth_result(name.toStdString(),
+                                                public_app_key_mode);
+        std::string out = zoom_join::join_error_guidance(category);
+        // Keep the raw result code/name in the message for support bundles.
+        out += " [";
+        out += "sdk_auth_mode=" + (auth_mode.isEmpty()
+                                       ? std::string("jwt")
+                                       : auth_mode.toStdString());
+        if (code != 0)
+            out += " code=" + std::to_string(code);
+        if (!name.isEmpty())
+            out += " " + name.toStdString();
         if (!stage.isEmpty())
-            out += " at " + stage.toStdString();
-        if (code != 0 || (!name.isEmpty() && auth_mode != "public_app_key")) {
-            out += " (";
-            if (code != 0)
-                out += std::to_string(code);
-            if (!name.isEmpty() && auth_mode != "public_app_key") {
-                if (code != 0) out += " ";
-                out += name.toStdString();
-            }
-            out += ")";
-        }
-        if (auth_mode == "public_app_key")
-            out += ". Confirm the Marketplace Public Client ID is enabled for Meeting SDK Embed on this app/environment.";
+            out += " stage=" + stage.toStdString();
+        out += "]";
         return out;
     }
 

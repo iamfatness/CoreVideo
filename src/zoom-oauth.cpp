@@ -1,4 +1,5 @@
 #include "zoom-oauth.h"
+#include "zoom-join-decision.h"
 #include "zoom-settings.h"
 
 #include <QCryptographicHash>
@@ -227,11 +228,13 @@ static QString oauth_error_message(const QByteArray &body,
         const QJsonObject obj = doc.object();
         const QString oauth_error = obj.value("error").toString();
         const QString reason = obj.value("reason").toString();
-        if (oauth_error == "invalid_client") {
-            return "Zoom rejected the OAuth client. The OAuth Client ID this "
-                   "build of CoreVideo was compiled with does not match an "
-                   "active Marketplace app, or the Marketplace app is not "
-                   "configured for Public Client OAuth (PKCE).";
+        // Centralized error catalog (issue #89): distinct guidance for wrong
+        // environment (invalid_client), expired token (invalid_grant), invalid
+        // redirect, and missing approval (invalid_scope).
+        const zoom_join::ZoomJoinError category =
+            zoom_join::classify_oauth_error(oauth_error.toStdString());
+        if (category != zoom_join::ZoomJoinError::Unknown) {
+            return QString::fromUtf8(zoom_join::join_error_guidance(category));
         }
         if (!reason.isEmpty())
             return reason;

@@ -98,6 +98,73 @@ local config cannot change the published app identity. Developers can still use
    waiting-room participants, manage self video/audio, and use normal meeting
    controls.
 
+## The enforced join decision path (issue #89)
+
+Sign-in has always worked; meeting *join* kept regressing because the code chose
+between OAuth / ZAK / public app key / SDK JWT / broker in several scattered
+places. Those choices are now centralized in one pure, unit-tested function,
+`zoom_join::plan_join()` in `src/zoom-join-decision.h`. Every caller (the dock's
+`on_join_clicked`, the engine client's error mapping, and the OAuth manager's
+token-error mapping) reads from that one place.
+
+The production path is fixed:
+
+1. **Sign-in** — Public Client OAuth + PKCE, issued through the HTTPS broker
+   (`/oauth/start`). `plan_join` reports `oauth_flow=broker`. Direct
+   `public_pkce` is a dev-only fallback when no broker URL is embedded.
+2. **ZAK** — if the operator did not supply a ZAK or on-behalf token, the
+   signed-in user's ZAK is fetched over OAuth (`zak=fetch_via_oauth`). If no
+   OAuth tokens are held yet, the plan sets `sign_in_required=1` and the dock
+   starts sign-in and retries the join afterward.
+3. **Meeting SDK auth** — the Marketplace Public Client ID is passed as
+   `AuthContext.publicAppKey` (`sdk_auth_mode=public_app_key`). Self-signed JWT
+   (from an SDK key/secret pair) and broker-minted SDK JWT are dev-only
+   fallbacks and are logged loudly as such, never silently.
+
+### The join-decision log block
+
+Every join attempt emits one coherent block (grep `[join-decision]`). It never
+contains a full secret — only masked tails (`****WXYZ`), kinds, and flags:
+
+```
+[obs-zoom-plugin] [join-decision] oauth_flow=broker oauth_client=****WXYZ \
+  broker=corevideo.iamfatness.us sdk_auth_mode=public_app_key \
+  public_app_key=****WXYZ zak=fetch_via_oauth token_type=auto_zak \
+  have_access_token=1 have_refresh_token=1 token_expired=0 \
+  sign_in_required=0 blocking_error=none
+```
+
+After the ZAK / broker-JWT step resolves, a second `[join-decision] resolved …`
+line records the final auth mode and ZAK presence. The Meeting SDK result code
+itself arrives asynchronously from the `ZoomObsEngine` child process and is
+logged by the engine client as `auth_ok` or `auth_fail` with the raw
+`AUTHRET_*` name and code.
+
+### Error-message catalog
+
+All operator-facing auth/join failures map to one enum, `zoom_join::ZoomJoinError`,
+with distinct guidance in `join_error_guidance()`. Distinct categories:
+
+| Category | Trigger (examples) | Operator guidance summary |
+| --- | --- | --- |
+| `wrong_environment` | OAuth `invalid_client`; `AUTHRET_JWTTOKENWRONG` in public-app-key mode; `AUTHRET_CLIENT_INCOMPATIBLE` | App identity is not valid for this Zoom environment / build. |
+| `expired_token` | OAuth `invalid_grant`; expired token, no refresh token | Sign in with Zoom again. |
+| `invalid_redirect` | OAuth `redirect_uri_mismatch` | Redirect URI not on the Marketplace allow list (publisher fix). |
+| `missing_approval` | OAuth `invalid_scope`; meeting fail 63/60/62/64 | App not published/approved or account not entitled. |
+| `sdk_auth_failure` | `AUTHRET_*` key/secret/jwt rejection (JWT mode) | Meeting SDK rejected the identity. |
+| `sdk_entitlement` | `AUTHRET_ACCOUNTNOTSUPPORT` / `ACCOUNTNOTENABLESDK` | Account not enabled for the Meeting SDK. |
+| `network_issue` | `AUTHRET_NETWORKISSUE` / `OVERTIME` / `SERVICE_BUSY` | Transient network problem; retry. |
+| `on_behalf_token_invalid` | meeting fail 500/502/503/505/506 | On-behalf token bad or mismatched. |
+| `needs_sign_in` | needs a ZAK but no tokens; meeting fail 504/82/23 | Sign in with Zoom first. |
+| `missing_credentials` | no SDK identity embedded and engine not authed | Install a build with the embedded identity. |
+
+These strings surface through the existing dock status/banner + error label and
+land in the support bundle, so the raw `AUTHRET_*` code stays available while the
+operator sees actionable text. The catalog and the planner are covered by
+`tests/join-decision-test.cpp` (ctest target `CoreVideoJoinDecision`), which
+also asserts that every category's message is non-empty and distinct and that
+the log block never leaks a full identifier.
+
 ## Security notes
 
 - No OAuth or Meeting SDK client secret is shipped in the binary. The settings

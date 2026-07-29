@@ -132,9 +132,11 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $fullPackage = if ($env:COREVIDEO_HAS_ZOOM_RUNTIME -eq "true") { "ON" } else { "OFF" }
+          $releaseVersion = "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}"
           cmake -B build `
             -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_BUILD_TYPE=Release `
+            "-DCOREVIDEO_RELEASE_VERSION=$releaseVersion" `
             "-DCOREVIDEO_BUILD_PLUGIN=$fullPackage" `
             "-DCOREVIDEO_BUILD_ENGINE=$fullPackage" `
             -DZOOM_SDK_DIR=third_party/zoom-sdk `

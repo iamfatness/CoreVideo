@@ -28,21 +28,33 @@
       font-family: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       line-height: 1.7; font-size: 16px;
     }
-    nav {
-      position: fixed; top: 0; left: 0; bottom: 0; width: 260px;
+    /* Shared site top bar — matches the layout header in build-site.mjs */
+    .site-topbar { position: sticky; top: 0; z-index: 200; display: flex; align-items: center; justify-content: space-between;
+      gap: 20px; padding: 11px clamp(18px,4vw,40px); background: rgba(10,11,12,0.92); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); }
+    .site-topbar .brand { display: inline-flex; align-items: center; gap: 10px; color: var(--text); font-weight: 600; font-size: 18px; letter-spacing: -0.01em; text-decoration: none; }
+    .site-topbar .brand svg { display: block; width: 26px; height: 20px; color: var(--text); }
+    .site-topbar .topnav { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 2px; }
+    .site-topbar .topnav a { color: var(--muted); font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; text-decoration: none; padding: 6px 9px; border: 1px solid transparent; border-radius: 6px; }
+    .site-topbar .topnav a:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+    .site-topbar .topnav a[aria-current="page"] { color: var(--text); border-color: rgba(34,200,110,0.45); background: rgba(34,200,110,0.12); }
+    .site-topbar .topnav a.dl { color: #06170d; background: var(--accent); font-weight: 700; padding: 6px 13px; border-radius: 7px; margin-left: 5px; }
+
+    #sidebar {
+      position: fixed; top: 52px; left: 0; bottom: 0; width: 260px;
       background: var(--surface); border-right: 1px solid var(--border);
       padding: 24px 0; overflow-y: auto; z-index: 100;
     }
     .nav-logo { padding: 0 20px 20px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
     .nav-logo h1 { font-size: 1.1rem; color: var(--accent); font-weight: 700; }
     .nav-logo p  { font-size: 0.75rem; color: var(--muted); margin-top: 2px; }
-    nav a {
+    #sidebar a {
       display: block; padding: 6px 20px; color: var(--muted); text-decoration: none;
       font-size: 0.875rem; border-left: 2px solid transparent; transition: all 0.15s;
     }
-    nav a:hover, nav a.active { color: var(--text); border-left-color: var(--accent); background: rgba(34,200,110,.1); }
+    #sidebar a:hover, #sidebar a.active { color: var(--text); border-left-color: var(--accent); background: rgba(34,200,110,.1); }
     .nav-section { padding: 14px 20px 4px; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
     main { margin-left: 260px; max-width: 960px; padding: 48px 56px; }
+    section[id] { scroll-margin-top: 72px; }
 
     h1 { font-size: 2.2rem; font-weight: 800; margin-bottom: 12px; }
     h2 { font-size: 1.5rem; font-weight: 700; margin: 48px 0 16px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
@@ -135,12 +147,31 @@
     section { scroll-margin-top: 24px; }
 
     @media (max-width: 768px) {
-      nav { display: none; }
+      #sidebar { display: none; }
       main { margin-left: 0; padding: 24px 20px; }
+      .site-topbar { flex-direction: column; align-items: flex-start; gap: 10px; }
+      .site-topbar .topnav { justify-content: flex-start; }
+      main > footer { margin-left: 0 !important; }
     }
   </style>
 </head>
 <body>
+
+<header class="site-topbar">
+  <a class="brand" href="/"><svg viewBox="0 0 32 24" width="26" height="20" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
+  <nav class="topnav">
+    <a href="/">Home</a>
+    <a href="/pro/">CoreVideo Pro</a>
+    <a href="/pro/documentation/">Pro Docs</a>
+    <a href="/documentation/" aria-current="page">Plugin Docs</a>
+    <a href="/core-plugin/">Core Plugin</a>
+    <a href="/oauth/">OAuth</a>
+    <a href="/terms/">Terms</a>
+    <a href="/privacy/">Privacy</a>
+    <a href="/support/">Support</a>
+    <a class="dl" href="/download">Download</a>
+  </nav>
+</header>
 
 <nav id="sidebar">
   <div class="nav-logo">
@@ -1943,9 +1974,9 @@ sequenceDiagram
     </p>
   </section>
 
-  <footer style="margin-top:64px;padding-top:24px;border-top:1px solid var(--border);color:var(--muted);font-size:0.8rem;">
-    <p>CoreVideo — OBS Plugin for Live Zoom Video</p>
-    <p style="margin-top:6px;">Developers: CoreVideo is open source — <a href="https://github.com/iamfatness/CoreVideo">build from source on GitHub</a>.</p>
+  <footer style="margin-top:64px;padding-top:26px;border-top:1px solid var(--border);color:var(--muted);font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;text-align:center;">
+    <p>CoreVideo is an independent product and is not affiliated with Zoom Video Communications, Inc.</p>
+    <p style="margin-top:10px;text-transform:none;letter-spacing:0;font-size:12px;">Developers: CoreVideo is open source — <a href="https://github.com/iamfatness/CoreVideo">build from source on GitHub</a>.</p>
   </footer>
 </main>
 
@@ -1972,12 +2003,12 @@ sequenceDiagram
   });
 
   const sections = document.querySelectorAll('section[id]');
-  const navLinks = document.querySelectorAll('nav a');
+  const navLinks = document.querySelectorAll('#sidebar a');
   const observer = new IntersectionObserver(entries => {
     entries.forEach(e => {
       if (e.isIntersecting) {
         navLinks.forEach(a => a.classList.remove('active'));
-        const active = document.querySelector(`nav a[href="#${e.target.id}"]`);
+        const active = document.querySelector(`#sidebar a[href="#${e.target.id}"]`);
         if (active) active.classList.add('active');
       }
     });

@@ -107,6 +107,10 @@ local config cannot change the published app identity. Developers can still use
   tokens are AES-GCM encrypted, contain only the authorization code, and expire
   after 5 minutes.
 - Windows token storage uses DPAPI before writing tokens into OBS global config.
+  macOS and Linux have no OS-level secret store wired up yet, so tokens are
+  written to OBS global config in plaintext there; the plugin logs a one-time
+  `SECURITY:` warning on those platforms. See README.md's Security section.
+  Keychain (macOS) / libsecret (Linux) support is tracked as follow-up work.
 - Refresh tokens are rotated; always persist the latest refresh token Zoom
   returns.
 - Windows builds must ship Qt's TLS backend plugins, especially the Schannel

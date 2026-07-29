@@ -53,12 +53,12 @@ Operator Quickstart: **[Install, sign in, assign outputs, record ISO ->](docs/OP
 - **Output profiles** - save and load named participant-to-source mappings as JSON files
 - **Output manager dock** - dockable OBS panel and API for viewing and reconfiguring all sources at runtime, including active speaker, screen-share, and Spotlight 1-8 assignments with roster markers
 - **Public Client Meeting SDK authentication** - published builds pass the Marketplace Public Client ID as `AuthContext.publicAppKey`; no Meeting SDK secret is shipped in the desktop app
-- **Zoom OAuth PKCE** - user-level OAuth 2.0 with PKCE (public client, no desktop secret) for attributed joins and Marketplace compliance; the broker start URL is baked in at build time; `corevideo://` custom URL scheme with platform callback helpers (`CoreVideoOAuthCallback.exe` / `.app`); DPAPI token protection on Windows
+- **Zoom OAuth PKCE** - user-level OAuth 2.0 with PKCE (public client, no desktop secret) for attributed joins and Marketplace compliance; the broker start URL is baked in at build time; `corevideo://` custom URL scheme with platform callback helpers (`CoreVideoOAuthCallback.exe` / `.app`); DPAPI token protection on Windows (plaintext with a logged warning elsewhere - see [Security](#security))
 - **Visible Zoom Meeting SDK window** - the helper process uses Zoom's default Meeting SDK UI so operators can admit waiting-room participants, start self video/audio, and use normal in-meeting controls while OBS receives raw feeds
 - **SDK 5.17.x and 7.x** - auto-detects flat and subfolder header layouts
 - **Hardened security** - constant-time token comparison, validated IPC input, sanitised participant IDs, SIGPIPE handling
 - **Modern UI** - CoreVideo stylesheet with dark theme, animated `CvStatusDot`, `CvBanner` first-run notices, and button role variants (primary / danger)
-- **Multi-platform** - Windows (x64/arm64), macOS (universal arm64 + x86_64), Linux
+- **Platform support** - Windows 10/11 x64 is the only supported, packaged, and CI-released target. The same CMake project also configures on Windows arm64, macOS, and Linux, so source builds are possible there, but they are unsupported/experimental: no official installers or ZIPs are published for them today. See [Platform Support](#platform-support) below.
 
 ## Requirements
 
@@ -71,6 +71,17 @@ Operator Quickstart: **[Install, sign in, assign outputs, record ISO ->](docs/OP
 | Zoom Meeting SDK | **5.17.x / 7.x** | Source builds only: place in `third_party/zoom-sdk/`. Official Windows release downloads bundle the runtime files needed by end users. |
 | C++ compiler | C++17 | MSVC 2022 / Clang 14+ / GCC 11+ |
 | Zoom Developer Account | - | Marketplace app with Public Client OAuth + PKCE and Meeting SDK / Embed enabled for the same environment. |
+
+## Platform Support
+
+| Platform | Status |
+|---|---|
+| **Windows 10/11 x64** | **Supported.** The only platform with a maintained release pipeline (`.github/workflows/release-windows.yml`): checksummed ZIP and NSIS installer, published to GitHub Releases. This is the only configuration the maintainers build, test, and run in production. |
+| Windows arm64 | Source build only, untested. `CMakeLists.txt` auto-detects an arm64 Zoom SDK layout under `third_party/zoom-sdk/arm64` if present, but there is no arm64 CI job, no arm64 release artifact, and no maintainer testing on arm64 hardware. Treat it as "may compile," not "known to work." |
+| macOS (arm64 / x86_64) | Source build only, unsupported - **no official packages**. CI (`build.yml`, macOS job) only compiles the cross-platform engine/plugin sources with `-DCOREVIDEO_BUILD_PLUGIN=OFF -DCOREVIDEO_BUILD_ENGINE=OFF` to catch portability regressions; it does not build, link, or package the actual OBS plugin, and the CI artifact it produces is a compile-validation ZIP, not an installable macOS build (see below). There is no macOS Keychain-backed token storage yet (see Security), no notarization/signing, and no macOS QA. |
+| Linux | Source build only, unsupported - **no official packages**. CI (`build.yml`, Linux job) compiles and unit-tests only the cross-platform C++ (`BUILD_TESTING`) with the plugin/engine/sidecar all `OFF`; it never links against Qt6, OBS, or the Zoom SDK on Linux. There is no Linux packaging, no distro integration, and no libsecret-backed token storage yet (see Security). |
+
+The CMake project genuinely supports configuring on all of the above (see `buildspec/macos.cmake`, the Unix-socket IPC path in `engine-ipc.h`, and `oauth-callback-helper-macos.mm`), so a source build is *possible* on macOS/Linux/Windows-arm64 - it is just not something the project packages, tests, or supports today. If you get one working, bug reports and PRs are welcome, but expect to do your own SDK/Qt/OBS wiring.
 
 ## Quick Start
 
@@ -260,7 +271,7 @@ These values are compiled into the plugin and used for every install of that bui
 2. The browser opens at `https://corevideo.iamfatness.us/oauth/start`; the broker generates the PKCE verifier/challenge and redirects to Zoom.
 3. Zoom redirects to `https://corevideo.iamfatness.us/oauth/callback`; the broker returns a short-lived broker token to `corevideo://oauth/callback`.
 4. `CoreVideoOAuthCallback.exe` (Windows) or `CoreVideoOAuthCallback.app` (macOS) forwards the URL to the plugin via the TCP control server (`oauth_callback` command).
-5. The plugin verifies state, redeems the broker token over HTTPS, and persists access + refresh tokens. On Windows, tokens are DPAPI-protected before storage.
+5. The plugin verifies state, redeems the broker token over HTTPS, and persists access + refresh tokens. On Windows, tokens are DPAPI-protected before storage; on macOS/Linux they are currently stored in plaintext with a logged warning (see [Security](#security)).
 6. Before each meeting join, CoreVideo refreshes the token if needed and fetches the signed-in user's ZAK. The Zoom helper process initializes the SDK with `AuthContext.publicAppKey` set to the embedded Public Client ID and `AuthContext.jwt_token` set to null, then joins with the ZAK.
 
 See [`docs/ZOOM_MARKETPLACE_OAUTH.md`](docs/ZOOM_MARKETPLACE_OAUTH.md) for the full setup guide and security notes.
@@ -549,6 +560,23 @@ CoreVideo/
 ## Security
 
 See [SECURITY.md](SECURITY.md) for the vulnerability disclosure policy.
+
+### OAuth token storage
+
+Zoom OAuth access and refresh tokens are persisted in OBS's global config
+(`global.ini`, `[ZoomPlugin]` section).
+
+- **Windows** - tokens are encrypted with DPAPI (`CryptProtectData`, scoped to
+  the current Windows user) before being written to disk.
+- **macOS / Linux** - there is currently no OS-level secret store wired up
+  (no Keychain, no libsecret), so tokens are written to `global.ini` in
+  **plaintext**. The plugin logs a prominent one-time warning
+  (`SECURITY: OAuth tokens are stored WITHOUT OS-level encryption...`) to the
+  OBS log on these platforms so this isn't silent. Anyone with read access to
+  the OBS config directory can read the stored tokens. Follow-up work to add
+  Keychain (`Security.framework`) support on macOS and `libsecret` support on
+  Linux is tracked as a to-do; see the PR that introduced this note for
+  details.
 
 ## License
 

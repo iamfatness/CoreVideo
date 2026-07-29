@@ -1,5 +1,6 @@
 #include "zoom-dock.h"
 #include "cv-style.h"
+#include "cv-update-check.h"
 #include "cv-widgets.h"
 #include "obs-utils.h"
 #include "speaker-director.h"
@@ -16,6 +17,7 @@
 #include <QComboBox>
 #include <QColor>
 #include <QDateTime>
+#include <QDesktopServices>
 #include <QDrag>
 #include <QDragEnterEvent>
 #include <QDragMoveEvent>
@@ -43,6 +45,7 @@
 #include <QSpinBox>
 #include <QTableWidget>
 #include <QTimer>
+#include <QUrl>
 #include <QVariant>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -647,6 +650,29 @@ ZoomDock::ZoomDock(QWidget *parent)
     });
     vLayout->addWidget(m_credentials_banner);
 
+    // -- Update-available notice -------------------------------------------------
+    // Non-intrusive: hidden until (and unless) CvUpdateChecker confirms a
+    // newer release exists. Never blocks startup, never auto-downloads.
+    m_update_banner = new CvBanner(CvBannerKind::Info, QString(), this);
+    m_update_banner->setActionText("View release");
+    m_update_banner->setVisible(false);
+    connect(m_update_banner, &CvBanner::actionClicked, this, [this]() {
+        if (!m_update_url.isEmpty())
+            QDesktopServices::openUrl(QUrl(m_update_url));
+    });
+    vLayout->addWidget(m_update_banner);
+
+    connect(&CvUpdateChecker::instance(), &CvUpdateChecker::update_available,
+            this, [this](const QString &tag, const QString &html_url) {
+        show_update_banner(tag, html_url);
+    });
+    if (CvUpdateChecker::instance().has_known_update()) {
+        show_update_banner(CvUpdateChecker::instance().known_update_tag(),
+                           CvUpdateChecker::instance().known_update_url());
+    } else if (initial_settings.check_for_updates_on_startup) {
+        CvUpdateChecker::instance().check_once();
+    }
+
     // -- Join controls ---------------------------------------------------------
     auto *join_group  = new QGroupBox("Join Meeting", this);
     auto *join_layout = new QVBoxLayout(join_group);
@@ -918,6 +944,15 @@ void ZoomDock::update_credentials_banner()
     const bool has_sdk_pair = !s.sdk_key.empty() && !s.sdk_secret.empty();
     const bool missing = !has_public_app_key && !has_jwt && !has_sdk_pair;
     m_credentials_banner->setVisible(missing);
+}
+
+void ZoomDock::show_update_banner(const QString &tag, const QString &html_url)
+{
+    if (!m_alive->load(std::memory_order_acquire) || !m_update_banner)
+        return;
+    m_update_url = html_url;
+    m_update_banner->setText(QString("CoreVideo %1 is available.").arg(tag));
+    m_update_banner->setVisible(true);
 }
 
 void ZoomDock::start_pending_oauth_join()

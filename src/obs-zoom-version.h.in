@@ -1,5 +1,12 @@
 #pragma once
-#define OBS_ZOOM_PLUGIN_VERSION       "@PROJECT_VERSION@"
+// OBS_ZOOM_PLUGIN_VERSION is the version CoreVideo reports at runtime (logs,
+// diagnostics bundle, update check). It reflects COREVIDEO_RELEASE_VERSION
+// when the build was configured with it (release-local.ps1 / CI pass the
+// git release tag there); otherwise it falls back to the CMake project()
+// version, which is a development placeholder and can drift behind the
+// most recent git tag between manual bumps. See COREVIDEO_RELEASE_VERSION
+// in CMakeLists.txt.
+#define OBS_ZOOM_PLUGIN_VERSION       "@COREVIDEO_REPORTED_VERSION@"
 #define OBS_ZOOM_PLUGIN_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
 #define OBS_ZOOM_PLUGIN_VERSION_MINOR @PROJECT_VERSION_MINOR@
 #define OBS_ZOOM_PLUGIN_VERSION_PATCH @PROJECT_VERSION_PATCH@

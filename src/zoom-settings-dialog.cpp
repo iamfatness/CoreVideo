@@ -118,6 +118,21 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     auto *hw_group = new QGroupBox("Hardware Video Acceleration", this);
     hw_group->setLayout(hw_form);
 
+    // ── Updates ───────────────────────────────────────────────────────────────
+    m_check_updates_cb = new QCheckBox("Check for updates on startup", this);
+    m_check_updates_cb->setChecked(s.check_for_updates_on_startup);
+    m_check_updates_cb->setToolTip(
+        "Makes one anonymous request to the public GitHub Releases API per "
+        "OBS session to see if a newer CoreVideo build is available. No "
+        "meeting data, credentials, or usage information is sent.");
+
+    auto *updates_form = new QFormLayout;
+    updates_form->setSpacing(8);
+    updates_form->addRow("", m_check_updates_cb);
+
+    auto *updates_group = new QGroupBox("Updates", this);
+    updates_group->setLayout(updates_form);
+
     // ── Auto-Reconnect ────────────────────────────────────────────────────────
     const ZoomReconnectPolicy &rp = s.reconnect_policy;
 
@@ -176,6 +191,7 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     layout->addWidget(ctrl_group);
     layout->addWidget(osc_group);
     layout->addWidget(hw_group);
+    layout->addWidget(updates_group);
     layout->addWidget(rc_group);
     layout->addWidget(buttons);
 
@@ -197,6 +213,7 @@ bool ZoomSettingsDialog::saveSettings(bool close_dialog, bool restart_servers)
     s.control_token       = m_control_token_edit->text().toStdString();
     s.hw_accel_mode       = static_cast<HwAccelMode>(
         m_hw_accel_combo->currentData().toInt());
+    s.check_for_updates_on_startup = m_check_updates_cb->isChecked();
     s.reconnect_policy.enabled         = m_rc_enabled_cb->isChecked();
     s.reconnect_policy.max_attempts    = m_rc_max_attempts_spin->value();
     s.reconnect_policy.base_delay_ms   = m_rc_base_delay_spin->value();

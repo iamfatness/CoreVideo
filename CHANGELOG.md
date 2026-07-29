@@ -1,0 +1,112 @@
+# Changelog
+
+All notable changes to CoreVideo are documented in this file. The format is
+based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); releases
+are tagged `vMAJOR.MINOR.PATCH` and published as
+[GitHub Releases](https://github.com/iamfatness/CoreVideo/releases).
+
+## [Unreleased]
+
+### Added
+- In-app update check: the Zoom Control dock shows a non-intrusive banner
+  when a newer CoreVideo release is available, with a toggle in Settings to
+  disable the startup check.
+
+## [0.1.27] - 2026-07-29
+
+### Fixed
+- Output Manager table rows: preview thumbnails, assignment/quality/audio
+  dropdowns, and labels now share one vertical baseline per row instead of
+  three different alignments, with tighter row heights.
+
+### Changed
+- Documentation site rebuilt in the app's broadcast-console design language,
+  with real plugin screenshots replacing placeholder boxes, fixed Mermaid
+  diagram contrast/legibility, a shared header/footer across doc pages, and
+  the OAuth setup page removed in favor of the updated Plugin Docs.
+  `corevideo.io` is now the primary domain with Cloudflare cache purge on
+  deploy.
+
+## [0.1.26] - 2026-06-13
+
+### Fixed
+- Output Manager live-refresh stability: the table and its controls no
+  longer disrupt an in-progress row selection or edit while background
+  refreshes are running.
+
+## [0.1.25] - 2026-06-13
+
+### Changed
+- The `ZoomObsEngine` helper process console window is now hidden, so
+  joining a meeting no longer flashes a visible terminal window on Windows.
+
+## [0.1.24] - 2026-06-13
+
+### Added
+- Video source subscriptions are now capped at a bounded maximum, preventing
+  unbounded growth when many sources are reconfigured in a session.
+
+### Fixed
+- Windows CI can now run without the LGPL FFmpeg asset present, and the
+  documentation site deploy step no longer hard-fails when Cloudflare
+  credentials are not configured.
+
+## [0.1.23] - 2026-06-13
+
+### Added
+- Unit test coverage for `SpeakerDirector`, output health, IPC parsing, and
+  reconnect logic.
+- IPC heartbeat to detect a hung Zoom engine process and trigger recovery.
+- CI hardening: a Linux build, hard-fail static analysis, and Companion
+  (Bitfocus) integration tests.
+
+### Fixed
+- IPC write failures are now detected and recovered from instead of leaving
+  the engine connection silently stuck.
+- Engine SDK calls are now null-checked, and reconnect jitter/session
+  persistence was corrected.
+- ISO recorder failure handling hardened against partial/failed encodes.
+- Windows CI package validation is skipped (instead of failing) when the
+  restricted Zoom SDK is unavailable to the build.
+
+### Docs
+- Explored Spout/Syphon GPU texture sharing as a future high-density video
+  transport (see `docs/GPU_TEXTURE_SHARING_RESEARCH.md`).
+
+## [0.1.22] - 2026-05-26
+
+### Added
+- Windows installer packaging (`CoreVideo-Setup-vX.Y.Z.exe` via NSIS),
+  produced alongside the existing ZIP package by `release-local.ps1` and the
+  release workflow.
+
+## [0.1.21] - 2026-05-26
+
+### Added
+- ISO recorder encoder selection (CPU/GPU H.264) plus per-feed diagnostics
+  in the ISO Recorder dock.
+
+## [0.1.20] - 2026-05-23
+
+### Fixed
+- Reopening the Zoom Control dock after closing it no longer leaves the
+  panel in a broken state.
+
+## 0.1.0 - 0.1.19 - Early development
+
+Initial development of the OBS plugin, the `ZoomObsEngine` helper process,
+and the surrounding tooling: Zoom Meeting SDK raw video/audio capture over a
+named-pipe/shared-memory IPC bridge, the dockable Qt control panel, OAuth PKCE
+sign-in, per-participant and screen-share sources, the Active Speaker
+Director, auto-reconnect, TCP/OSC control APIs, ISO recording, the Output
+Manager, and the initial Windows release packaging and CI pipeline.
+
+[Unreleased]: https://github.com/iamfatness/CoreVideo/compare/v0.1.27...HEAD
+[0.1.27]: https://github.com/iamfatness/CoreVideo/compare/v0.1.26...v0.1.27
+[0.1.26]: https://github.com/iamfatness/CoreVideo/compare/v0.1.25...v0.1.26
+[0.1.25]: https://github.com/iamfatness/CoreVideo/compare/v0.1.24...v0.1.25
+[0.1.24]: https://github.com/iamfatness/CoreVideo/compare/v0.1.23...v0.1.24
+[0.1.23]: https://github.com/iamfatness/CoreVideo/compare/v0.1.22...v0.1.23
+[0.1.22]: https://github.com/iamfatness/CoreVideo/compare/v0.1.21...v0.1.22
+[0.1.21]: https://github.com/iamfatness/CoreVideo/compare/v0.1.20...v0.1.21
+[0.1.20]: https://github.com/iamfatness/CoreVideo/compare/v0.1.19...v0.1.20

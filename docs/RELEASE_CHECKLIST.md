@@ -109,6 +109,9 @@ automated OBS smoke, and sidecar release gates.
 ## Documentation
 
 - README matches current plugin capabilities.
+- `CHANGELOG.md` has an entry for this version (move the `[Unreleased]`
+  bullets under a new `## [X.Y.Z] - YYYY-MM-DD` section and add the compare
+  link at the bottom of the file).
 - `docs/CORE_PLUGIN_FUNCTIONALITY.md` matches current OBS UI.
 - `docs/OPERATOR_QUICKSTART.md` is current.
 - `docs/ZOOM_MARKETPLACE_OAUTH.md` matches the active production OAuth path.

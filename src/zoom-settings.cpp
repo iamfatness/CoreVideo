@@ -179,6 +179,9 @@ ZoomPluginSettings ZoomPluginSettings::load()
     s.control_token = control_token ? control_token : "";
     s.hw_accel_mode = static_cast<HwAccelMode>(
         config_get_int(cfg, SECTION, "HwAccelMode"));
+    if (config_has_user_value(cfg, SECTION, "CheckForUpdatesOnStartup"))
+        s.check_for_updates_on_startup =
+            config_get_int(cfg, SECTION, "CheckForUpdatesOnStartup") != 0;
 
     // Reconnect policy — defaults come from the ZoomReconnectPolicy struct.
     const int rc_enabled = config_get_int(cfg, SECTION, "ReconnectEnabled");
@@ -344,6 +347,8 @@ void ZoomPluginSettings::save() const
     config_set_uint  (cfg, SECTION, "OscServerPort",     osc_server_port);
     config_set_string(cfg, SECTION, "ControlToken",      control_token.c_str());
     config_set_int   (cfg, SECTION, "HwAccelMode",       static_cast<int>(hw_accel_mode));
+    config_set_int   (cfg, SECTION, "CheckForUpdatesOnStartup",
+                      check_for_updates_on_startup ? 1 : 0);
     config_set_int   (cfg, SECTION, "ReconnectEnabled",       reconnect_policy.enabled ? 1 : 0);
     config_set_int   (cfg, SECTION, "ReconnectMaxAttempts",   reconnect_policy.max_attempts);
     config_set_int   (cfg, SECTION, "ReconnectBaseDelayMs",   reconnect_policy.base_delay_ms);

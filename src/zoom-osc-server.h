@@ -1,5 +1,6 @@
 #pragma once
 
+#include "zoom-osc-wire.h"
 #include "zoom-types.h"
 #include <QDateTime>
 #include <QHostAddress>
@@ -12,13 +13,8 @@
 
 class QUdpSocket;
 
-// Lightweight OSC argument — supports int32, float32, and string types.
-struct OscArg {
-    enum Type { Int32, Float32, String } type;
-    int32_t     i = 0;
-    float       f = 0.f;
-    std::string s;
-};
+// OscArg is defined in zoom-osc-wire.h (shared with the standalone OSC
+// wire-format unit tests).
 
 class ZoomOscServer : public QObject {
 public:

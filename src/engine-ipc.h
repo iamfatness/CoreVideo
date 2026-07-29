@@ -26,6 +26,55 @@
 // Shared-memory name prefix (no leading slash — added per-platform below)
 #define IPC_SHM_PREFIX "ZoomObsPlugin_"
 
+// ── IPC / SHM hardening policy (pure logic, unit-tested) ─────────────────────
+
+// Upper bound on distinct SHM-backed sources per media path. The video, share,
+// and audio paths each keep one region per source UUID; without a cap a
+// misbehaving or runaway peer could create unbounded SHM regions and exhaust
+// memory. The product targets up to 8 feeds plus active-speaker/spotlight/
+// screenshare slots; 32 leaves generous headroom while staying bounded.
+static constexpr size_t kMaxShmSources = 32;
+
+// True when registering a new source_uuid would push a media path past the SHM
+// cap. Re-registering an already-present source never counts against the cap.
+static inline bool shm_source_over_cap(size_t existing_count,
+                                       bool already_present,
+                                       size_t max_sources = kMaxShmSources)
+{
+    return !already_present && existing_count >= max_sources;
+}
+
+// True when a read-side SHM mapping must be (re)opened before consuming a
+// frame event: never mapped, mapped too small, or the event carries a newer
+// SHM generation than the mapping was opened against. The generation changes
+// whenever the engine (re)creates the region — e.g. after an engine restart —
+// at which point the old mapping points at an orphaned region that will never
+// be written again; without this check the plugin would show a frozen frame
+// forever. event_gen == 0 means the peer did not send a generation (older
+// engine binary) — the generation check is skipped for backward compatibility.
+static inline bool shm_mapping_stale(const void *mapped_ptr,
+                                     size_t mapped_size,
+                                     size_t needed_size,
+                                     uint32_t event_gen,
+                                     uint32_t mapped_gen)
+{
+    if (!mapped_ptr || mapped_size < needed_size) return true;
+    if (event_gen != 0 && event_gen != mapped_gen) return true;
+    return false;
+}
+
+// Heartbeat expiry: true when the peer has been silent for longer than
+// timeout_ms. last_rx_ms == 0 means "nothing received yet" — never expired
+// (callers seed the clock when the link comes up). A last_rx_ms in the future
+// (clock skew / re-seed race) is treated as fresh, not expired.
+static inline bool ipc_heartbeat_expired(uint64_t now_ms,
+                                         uint64_t last_rx_ms,
+                                         uint64_t timeout_ms)
+{
+    return last_rx_ms != 0 && now_ms > last_rx_ms &&
+           (now_ms - last_rx_ms) > timeout_ms;
+}
+
 struct ShmFrameHeader {
     uint32_t sequence;
     uint32_t width;

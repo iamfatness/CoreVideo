@@ -76,6 +76,20 @@ void EngineShare::subscribe(const std::string &source_uuid, IpcFd e2p_fd)
     if (source_uuid.empty())
         return;
     std::lock_guard<std::mutex> lock(m_mtx);
+    // Each share target backs an SHM region — enforce the shared cap
+    // (kMaxShmSources in engine-ipc.h). Re-registering is always allowed.
+    if (shm_source_over_cap(m_targets.size(),
+                            m_targets.find(source_uuid) != m_targets.end())) {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"share_subscribe_rejected_capacity","source_uuid":")" +
+            source_uuid + R"(","limit":)" +
+            std::to_string(kMaxShmSources) + "}");
+        EngineIpc::write(
+            R"({"cmd":"error","msg":"subscribe_rejected","reason":"shm_capacity","source_uuid":")" +
+            source_uuid + R"(","limit":)" +
+            std::to_string(kMaxShmSources) + "}");
+        return;
+    }
     const auto [it, inserted] = m_targets.emplace(source_uuid, nullptr);
     if (inserted)
         it->second = std::make_unique<ShareTarget>(e2p_fd);
@@ -241,7 +255,9 @@ bool EngineShare::ensure_shm(ShareTarget &target,
     if (target.shm.ptr && target.shm.size >= total) return true;
 
     const std::string region_name = IPC_SHM_PREFIX + source_uuid;
-    return shm_region_create(target.shm, region_name, total);
+    if (!shm_region_create(target.shm, region_name, total)) return false;
+    ++target.shm_gen; // new region — old plugin-side mappings are now stale
+    return true;
 }
 
 void EngineShare::set_active_share_user(uint32_t user_id)
@@ -282,13 +298,27 @@ void EngineShare::onRawDataFrameReceived(YUVRawDataI420 *data)
         const std::string &source_uuid = entry.first;
         ShareTarget &target = *entry.second;
         if (!ensure_shm(target, source_uuid, y_len) || !target.shm.ptr) {
-            if (target.frame_count == 0) {
+            // Surface once per failure episode (not per frame) as a real
+            // error so the plugin can show the operator that this source's
+            // frames are being dropped.
+            if (!target.shm_fail_reported) {
+                target.shm_fail_reported = true;
                 EngineIpc::write(
                     R"({"cmd":"debug","stage":"share_shm_create_failed","source_uuid":")" +
                     source_uuid + R"(","w":)" + std::to_string(w) +
                     R"(,"h":)" + std::to_string(h) + "}");
+                EngineIpc::write(
+                    R"({"cmd":"error","msg":"shm_create_failed","source_uuid":")" +
+                    source_uuid + R"(","w":)" + std::to_string(w) +
+                    R"(,"h":)" + std::to_string(h) + "}");
             }
             continue;
+        }
+        if (target.shm_fail_reported) {
+            target.shm_fail_reported = false;
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"share_shm_recovered","source_uuid":")" +
+                source_uuid + "\"}");
         }
 
         auto *hdr = static_cast<ShmFrameHeader *>(target.shm.ptr);
@@ -325,7 +355,8 @@ void EngineShare::onRawDataFrameReceived(YUVRawDataI420 *data)
             R"({"cmd":"frame","source_uuid":")" + source_uuid +
             R"(","participant_id":)" + std::to_string(share_user_id) +
             R"(,"w":)" + std::to_string(w) +
-            R"(,"h":)" + std::to_string(h) + "}");
+            R"(,"h":)" + std::to_string(h) +
+            R"(,"shm_gen":)" + std::to_string(target.shm_gen) + "}");
     }
 }
 

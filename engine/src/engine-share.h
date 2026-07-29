@@ -72,6 +72,12 @@ private:
         IpcFd e2p_fd;
         ShmRegion shm;
         uint64_t frame_count = 0;
+        // Increments each time the SHM region is (re)created; sent with every
+        // frame event so the plugin can detect an orphaned mapping.
+        uint32_t shm_gen = 0;
+        // True after an ensure_shm() failure has been surfaced as an error —
+        // avoids re-emitting once per frame while the failure persists.
+        bool shm_fail_reported = false;
     };
 
     uint32_t active_share_source_id(uint32_t *user_id) const;

@@ -23,6 +23,19 @@ bool EngineAudio::init(IpcFd e2p_fd,
     {
         std::lock_guard<std::mutex> lock(m_targets_mtx);
         auto it = m_targets.find(source_uuid);
+        // Each audio target backs an SHM region — enforce the shared cap
+        // (kMaxShmSources in engine-ipc.h). Re-registering is always allowed.
+        if (shm_source_over_cap(m_targets.size(), it != m_targets.end())) {
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"audio_subscribe_rejected_capacity","source_uuid":")" +
+                source_uuid + R"(","limit":)" +
+                std::to_string(kMaxShmSources) + "}");
+            EngineIpc::write(
+                R"({"cmd":"error","msg":"subscribe_rejected","reason":"shm_capacity","source_uuid":")" +
+                source_uuid + R"(","limit":)" +
+                std::to_string(kMaxShmSources) + "}");
+            return false;
+        }
         if (it == m_targets.end()) {
             m_targets.emplace(source_uuid,
                 std::make_unique<AudioTarget>(e2p_fd, participant_id,
@@ -163,13 +176,26 @@ void EngineAudio::output_audio_frame(AudioTarget &target,
     if (byte_len == 0) return;
 
     if (!ensure_shm(target, source_uuid, byte_len) || !target.shm.ptr) {
-        if (target.frame_count == 0) {
+        // Surface once per failure episode (not per callback) as a real error
+        // so the plugin can show the operator that audio is being dropped.
+        if (!target.shm_fail_reported) {
+            target.shm_fail_reported = true;
             EngineIpc::write(
                 R"({"cmd":"debug","stage":"audio_shm_create_failed","source_uuid":")" +
                 source_uuid + R"(","byte_len":)" +
                 std::to_string(byte_len) + "}");
+            EngineIpc::write(
+                R"({"cmd":"error","msg":"shm_create_failed","source_uuid":")" +
+                source_uuid + R"(","byte_len":)" +
+                std::to_string(byte_len) + "}");
         }
         return;
+    }
+    if (target.shm_fail_reported) {
+        target.shm_fail_reported = false;
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"audio_shm_recovered","source_uuid":")" +
+            source_uuid + "\"}");
     }
 
     auto *hdr        = static_cast<ShmAudioHeader *>(target.shm.ptr);

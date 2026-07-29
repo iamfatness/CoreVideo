@@ -1063,51 +1063,72 @@ void ZoomSource::maybe_update_director_subscription()
 }
 
 void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height,
-                                 uint32_t resolved_participant_id)
+                                 uint32_t resolved_participant_id,
+                                 uint32_t shm_generation)
 {
     std::lock_guard<std::mutex> lk(m_mtx);
-    output_video_from_shared_memory(source_uuid, m_video_shm, m_video_buf,
-                                    m_scaled_video_buf, event_width,
-                                    event_height, resolved_participant_id,
+    output_video_from_shared_memory(source_uuid, m_video_shm, m_video_shm_gen,
+                                    m_video_buf, m_scaled_video_buf,
+                                    event_width, event_height,
+                                    resolved_participant_id, shm_generation,
                                     false);
 }
 
 void ZoomSource::on_director_preview_frame(uint32_t event_width,
                                            uint32_t event_height,
-                                           uint32_t resolved_participant_id)
+                                           uint32_t resolved_participant_id,
+                                           uint32_t shm_generation)
 {
     std::lock_guard<std::mutex> lk(m_mtx);
     output_video_from_shared_memory(m_director_preview_uuid,
                                     m_director_preview_shm,
+                                    m_director_preview_shm_gen,
                                     m_director_preview_buf,
                                     m_director_preview_scaled_buf,
                                     event_width, event_height,
-                                    resolved_participant_id, true);
+                                    resolved_participant_id, shm_generation,
+                                    true);
 }
 
 bool ZoomSource::output_video_from_shared_memory(
     const std::string &uuid,
     ShmRegion &video_shm,
+    uint32_t &video_shm_gen,
     std::vector<uint8_t> &video_buf,
     std::vector<uint8_t> &scaled_video_buf,
     uint32_t event_width,
     uint32_t event_height,
     uint32_t resolved_participant_id,
+    uint32_t event_shm_gen,
     bool commit_director_cut)
 {
     const std::string shm_name = IPC_SHM_PREFIX + uuid;
     if (event_width == 0 || event_height == 0) return false;
     const size_t frame_bytes = sizeof(ShmFrameHeader) +
         static_cast<size_t>(event_width) * event_height * 3 / 2;
-    if ((!video_shm.ptr || video_shm.size < frame_bytes) &&
-        !shm_region_open_read(video_shm, shm_name, frame_bytes)) {
-        if (m_frame_count == 0) {
-            blog(LOG_WARNING,
-                 "[obs-zoom-plugin] Failed to open video shared memory: source=%s uuid=%s w=%u h=%u bytes=%zu",
-                 output_name().c_str(), uuid.c_str(), event_width,
-                 event_height, frame_bytes);
+    if (shm_mapping_stale(video_shm.ptr, video_shm.size, frame_bytes,
+                          event_shm_gen, video_shm_gen)) {
+        // A generation change means the engine recreated the region (e.g.
+        // after a restart) — our old mapping points at an orphaned region
+        // that will never update again, so drop it and re-open by name.
+        if (video_shm.ptr && event_shm_gen != 0 &&
+            event_shm_gen != video_shm_gen) {
+            blog(LOG_INFO,
+                 "[obs-zoom-plugin] Re-opening video shared memory after engine generation change: source=%s uuid=%s gen %u -> %u",
+                 output_name().c_str(), uuid.c_str(), video_shm_gen,
+                 event_shm_gen);
+            shm_region_destroy(video_shm);
         }
-        return false;
+        if (!shm_region_open_read(video_shm, shm_name, frame_bytes)) {
+            if (m_frame_count == 0) {
+                blog(LOG_WARNING,
+                     "[obs-zoom-plugin] Failed to open video shared memory: source=%s uuid=%s w=%u h=%u bytes=%zu",
+                     output_name().c_str(), uuid.c_str(), event_width,
+                     event_height, frame_bytes);
+            }
+            return false;
+        }
+        video_shm_gen = event_shm_gen;
     }
 
     auto *hdr = static_cast<const ShmFrameHeader *>(video_shm.ptr);
@@ -1484,6 +1505,8 @@ void ZoomSource::release_shared_memory()
     shm_region_destroy(m_video_shm);
     shm_region_destroy(m_director_preview_shm);
     shm_region_destroy(m_audio_shm);
+    m_video_shm_gen = 0;
+    m_director_preview_shm_gen = 0;
 }
 
 static const char *zoom_source_get_name(void *)
@@ -1519,10 +1542,11 @@ static void *zoom_source_create_common(obs_data_t *settings, obs_source_t *sourc
 
     ZoomEngineClient::instance().register_source(ctx->source_uuid, {
         [ctx, gate = ctx->m_callback_gate](uint32_t w, uint32_t h,
-                                           uint32_t participant_id) {
+                                           uint32_t participant_id,
+                                           uint32_t shm_gen) {
             std::lock_guard<std::mutex> callback_lock(gate->mtx);
             if (!gate->alive) return;
-            ctx->on_engine_frame(w, h, participant_id);
+            ctx->on_engine_frame(w, h, participant_id, shm_gen);
         },
         [ctx, gate = ctx->m_callback_gate](uint32_t byte_len,
                                            uint32_t participant_id) {
@@ -1534,10 +1558,11 @@ static void *zoom_source_create_common(obs_data_t *settings, obs_source_t *sourc
     if (dedicated_active_speaker) {
         ZoomEngineClient::instance().register_source(ctx->m_director_preview_uuid, {
             [ctx, gate = ctx->m_callback_gate](uint32_t w, uint32_t h,
-                                               uint32_t participant_id) {
+                                               uint32_t participant_id,
+                                               uint32_t shm_gen) {
                 std::lock_guard<std::mutex> callback_lock(gate->mtx);
                 if (!gate->alive) return;
-                ctx->on_director_preview_frame(w, h, participant_id);
+                ctx->on_director_preview_frame(w, h, participant_id, shm_gen);
             },
             [gate = ctx->m_callback_gate](uint32_t, uint32_t) {
                 std::lock_guard<std::mutex> callback_lock(gate->mtx);

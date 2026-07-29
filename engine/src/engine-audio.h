@@ -61,6 +61,9 @@ private:
         bool audience_audio = false;
         ShmRegion shm;
         uint64_t frame_count = 0;
+        // True after an ensure_shm() failure has been surfaced as an error —
+        // avoids re-emitting once per audio callback while the failure persists.
+        bool shm_fail_reported = false;
     };
 
     bool ensure_shm(AudioTarget &target,

@@ -169,7 +169,9 @@ bool ParticipantSubscription::ensure_shm(SourceTarget &target,
     if (target.shm.ptr && target.shm.size >= total) return true;
 
     const std::string region_name = IPC_SHM_PREFIX + source_uuid;
-    return shm_region_create(target.shm, region_name, total);
+    if (!shm_region_create(target.shm, region_name, total)) return false;
+    ++target.shm_gen; // new region — old plugin-side mappings are now stale
+    return true;
 }
 
 void ParticipantSubscription::onRawDataFrameReceived(YUVRawDataI420 *data)
@@ -192,14 +194,30 @@ void ParticipantSubscription::onRawDataFrameReceived(YUVRawDataI420 *data)
         SourceTarget &target = *entry.second;
 
         if (!ensure_shm(target, source_uuid, y_len) || !target.shm.ptr) {
-            if (target.frame_count == 0) {
+            // Surface once per failure episode (not per frame) as a real
+            // error so the plugin can show the operator that this source's
+            // frames are being dropped.
+            if (!target.shm_fail_reported) {
+                target.shm_fail_reported = true;
                 EngineIpc::write(
                     R"({"cmd":"debug","stage":"video_shm_create_failed","source_uuid":")" +
                     source_uuid + R"(","participant_id":)" +
                     std::to_string(m_participant_id) + R"(,"w":)" +
                     std::to_string(w) + R"(,"h":)" + std::to_string(h) + "}");
+                EngineIpc::write(
+                    R"({"cmd":"error","msg":"shm_create_failed","source_uuid":")" +
+                    source_uuid + R"(","participant_id":)" +
+                    std::to_string(m_participant_id) + R"(,"w":)" +
+                    std::to_string(w) + R"(,"h":)" + std::to_string(h) + "}");
             }
             continue;
+        }
+        if (target.shm_fail_reported) {
+            target.shm_fail_reported = false;
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"video_shm_recovered","source_uuid":")" +
+                source_uuid + R"(","participant_id":)" +
+                std::to_string(m_participant_id) + "}");
         }
 
         auto *hdr    = static_cast<ShmFrameHeader *>(target.shm.ptr);
@@ -231,7 +249,8 @@ void ParticipantSubscription::onRawDataFrameReceived(YUVRawDataI420 *data)
         EngineIpc::write(
             R"({"cmd":"frame","source_uuid":")" + source_uuid +
             R"(","participant_id":)" + std::to_string(m_participant_id) +
-            R"(,"w":)" + std::to_string(w) + R"(,"h":)" + std::to_string(h) + "}");
+            R"(,"w":)" + std::to_string(w) + R"(,"h":)" + std::to_string(h) +
+            R"(,"shm_gen":)" + std::to_string(target.shm_gen) + "}");
     }
 }
 
@@ -268,18 +287,21 @@ void EngineVideo::subscribe(uint32_t participant_id,
 
     // Bound the number of distinct video source UUIDs. Each source backs a
     // shared-memory region, so without a cap a misbehaving or runaway plugin
-    // could create unbounded SHM regions and exhaust memory. The product
-    // targets up to 8 feeds plus active-speaker/spotlight/screenshare slots;
-    // 32 leaves generous headroom while staying bounded. Re-subscribing an
+    // could create unbounded SHM regions and exhaust memory (policy and
+    // rationale live with kMaxShmSources in engine-ipc.h). Re-subscribing an
     // existing source is always allowed.
-    constexpr size_t kMaxVideoSources = 32;
-    if (m_source_participants.find(source_uuid) == m_source_participants.end() &&
-        m_source_participants.size() >= kMaxVideoSources) {
+    if (shm_source_over_cap(m_source_participants.size(),
+                            m_source_participants.find(source_uuid) !=
+                                m_source_participants.end())) {
         EngineIpc::write(
             R"({"cmd":"debug","stage":"video_subscribe_rejected_capacity","source_uuid":")" +
             source_uuid + R"(","participant_id":)" +
             std::to_string(participant_id) + R"(,"limit":)" +
-            std::to_string(kMaxVideoSources) + "}");
+            std::to_string(kMaxShmSources) + "}");
+        EngineIpc::write(
+            R"({"cmd":"error","msg":"subscribe_rejected","reason":"shm_capacity","source_uuid":")" +
+            source_uuid + R"(","limit":)" +
+            std::to_string(kMaxShmSources) + "}");
         return;
     }
 

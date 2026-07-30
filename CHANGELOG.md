@@ -7,6 +7,23 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.29] - 2026-07-30
+
+### Fixed
+- Setting an output's assignment to "None" now actually stops the previous
+  feed: the engine subscription is torn down and the signal readout clears.
+  Previously the old participant kept streaming into shared memory (a live
+  signal on a "None" row) and could not be cleaned up without restarting
+  the engine.
+- Unassigned outputs are no longer graded as stale/waiting or offered
+  Recover actions in the Output Manager.
+- Sign-in and join now always present production Zoom credentials: the
+  production OAuth broker URL is baked into every build (locally-built
+  releases previously embedded a blank broker identity, which allowed
+  leftover developer credential overrides on tester machines), and the
+  broker's Meeting SDK token service was updated to production credentials
+  server-side.
+
 ## [0.1.28] - 2026-07-30
 
 First public beta release.

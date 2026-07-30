@@ -286,6 +286,7 @@ if(COREVIDEO_BUILD_PLUGIN)
         target_link_libraries(obs-zoom-plugin PRIVATE
             "-framework CoreFoundation"
             "-framework Foundation"
+            "-framework Security"   # Keychain token storage (zoom-settings.cpp)
         )
         # Symbols provided by OBS at plugin load time; no link-time libobs
         # needed. The SHELL: prefix is required so CMake passes these as TWO

@@ -51,6 +51,7 @@ export function buildFeedbacks(inst: CoreVideoInstance): CompanionFeedbackDefini
 			name: 'Zoom: Meeting State Color',
 			description: 'Button tracks the current Zoom state with a dynamic color',
 			options: [],
+			affectedProperties: ['bgcolor', 'color', 'text'],
 			callback: () => ({
 				bgcolor: ZOOM_STATE_COLORS[inst.state.zoom.meetingState] ?? GREY,
 				color: WHITE,
@@ -187,6 +188,7 @@ export function buildFeedbacks(inst: CoreVideoInstance): CompanionFeedbackDefini
 			name: 'Show: Phase Color (dynamic)',
 			description: 'Button color tracks PRE (grey) / LIVE (red) / POST (blue)',
 			options: [],
+			affectedProperties: ['bgcolor', 'color', 'text'],
 			callback: () => ({
 				bgcolor: PHASE_COLORS[inst.state.sidecar.phase] ?? GREY,
 				color: WHITE,

@@ -1,5 +1,6 @@
 #include "zoom-settings-dialog.h"
 #include "cv-style.h"
+#include "obs-zoom-version.h"
 #include "zoom-settings.h"
 #include "zoom-control-server.h"
 #include "zoom-oauth.h"
@@ -185,6 +186,12 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     if (auto *save_btn = buttons->button(QDialogButtonBox::Save))
         save_btn->setProperty("role", "primary");
 
+    auto *version_label =
+        new QLabel(QString("CoreVideo v%1").arg(OBS_ZOOM_PLUGIN_VERSION), this);
+    version_label->setProperty("role", "muted");
+    version_label->setAlignment(Qt::AlignRight);
+    version_label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+
     auto *layout = new QVBoxLayout(this);
     layout->setSpacing(8);
     layout->addWidget(oauth_group);
@@ -193,6 +200,7 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     layout->addWidget(hw_group);
     layout->addWidget(updates_group);
     layout->addWidget(rc_group);
+    layout->addWidget(version_label);
     layout->addWidget(buttons);
 
     // Apply stylesheet last so all widget properties are already set

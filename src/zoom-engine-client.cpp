@@ -448,6 +448,12 @@ void ZoomEngineClient::leave()
     if (!m_running.load(std::memory_order_acquire)) return;
     m_user_leaving.store(true, std::memory_order_release);
     ZoomReconnectManager::instance().cancel(); // suppress any in-progress recovery
+    // Explicit user leave is a deliberate end of participation: drop the stored
+    // recovery session so sensitive join credentials (ZAK / on-behalf /
+    // app-privilege tokens) are wiped from memory rather than lingering until
+    // the next join() or stop(). Mirrors stop(); a subsequent rejoin re-stores
+    // a fresh session via join().
+    ZoomReconnectManager::instance().clear_session();
     m_state.store(MeetingState::Leaving, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lk(m_mtx);

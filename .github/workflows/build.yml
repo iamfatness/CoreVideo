@@ -21,7 +21,7 @@ jobs:
     outputs:
       has_zoom_runtime: ${{ steps.zoom_sdk.outputs.has_zoom_runtime }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -257,7 +257,7 @@ jobs:
     name: macOS Compile Validation (host arch)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -402,7 +402,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -448,7 +448,7 @@ jobs:
       run:
         working-directory: companion/companion-module-corevideo-obs
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v6
         with:

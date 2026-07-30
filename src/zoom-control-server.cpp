@@ -1,6 +1,7 @@
 #include "zoom-control-server.h"
 #include "obs-utils.h"
 #include "speaker-director.h"
+#include "zoom-control-parse.h"
 #include "zoom-engine-client.h"
 #include "zoom-iso-recorder.h"
 #include "zoom-oauth.h"
@@ -22,45 +23,11 @@
 #include <limits>
 #include <vector>
 
-// Timing-safe string equality — prevents token leakage via timing side-channel.
-// noinline prevents the compiler from inlining this and then optimising away
-// the constant-time loop when the result is observable from context.
-#if defined(_MSC_VER)
-__declspec(noinline)
-#else
-__attribute__((noinline))
-#endif
-static bool ct_equal(const std::string &a, const std::string &b)
-{
-    volatile size_t diff = a.size() ^ b.size();
-    const size_t max_len = std::max(a.size(), b.size());
-    for (size_t i = 0; i < max_len; ++i) {
-        const uint8_t ca = i < a.size() ? static_cast<uint8_t>(a[i]) : 0;
-        const uint8_t cb = i < b.size() ? static_cast<uint8_t>(b[i]) : 0;
-        diff |= static_cast<size_t>(ca ^ cb);
-    }
-    return diff == 0;
-}
-
-static bool json_to_uint32(const QJsonObject &obj, const char *key, uint32_t &out)
-{
-    const QJsonValue value = obj.value(key);
-    if (!value.isDouble()) return false;
-
-    const double raw = value.toDouble(-1);
-    if (!std::isfinite(raw) || raw < 0 ||
-        raw > static_cast<double>(std::numeric_limits<uint32_t>::max()) ||
-        std::floor(raw) != raw) {
-        return false;
-    }
-
-    out = static_cast<uint32_t>(raw);
-    return true;
-}
+// ct_equal, json_to_uint32, video_resolution_from_json and
+// meeting_state_to_string now live in zoom-control-parse.h so they can be
+// unit tested on the host without OBS/Qt-network/Zoom-SDK dependencies.
 
 static QJsonObject speaker_director_to_json();
-
-static QString meeting_state_to_string(MeetingState state);
 
 ZoomControlServer &ZoomControlServer::instance()
 {
@@ -406,64 +373,27 @@ static QJsonObject speaker_director_to_json()
     return obj;
 }
 
-static VideoResolution video_resolution_from_json(const QJsonObject &req)
-{
-    const QString value = req.value("video_resolution").toString("720p");
-    if (value == "360p" || value == "360") return VideoResolution::P360;
-    if (value == "1080p" || value == "1080") return VideoResolution::P1080;
-    return VideoResolution::P720;
-}
-
-static QString meeting_state_to_string(MeetingState state)
-{
-    switch (state) {
-    case MeetingState::Idle:       return "idle";
-    case MeetingState::Joining:    return "joining";
-    case MeetingState::InMeeting:  return "in_meeting";
-    case MeetingState::Leaving:    return "leaving";
-    case MeetingState::Recovering: return "recovering";
-    case MeetingState::Failed:     return "failed";
-    }
-    return "unknown";
-}
-
 void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
 {
-    QJsonParseError parse_error;
-    const QJsonDocument doc = QJsonDocument::fromJson(line, &parse_error);
-    if (parse_error.error != QJsonParseError::NoError || !doc.isObject()) {
+    const ParsedControlRequest parsed = parse_control_request(line, m_token);
+    if (parsed.error == ControlRequestError::InvalidJson) {
         write_response(socket, {
             {"ok", false},
             {"error", "invalid_json"}
         });
         return;
     }
-
-    const QJsonObject req = doc.object();
-
-    const QString cmd = req.value("cmd").toString();
-
-    if (!m_token.empty() && cmd != "oauth_callback") {
-        const std::string provided = req.value("token").toString().toStdString();
-        if (!ct_equal(provided, m_token)) {
-            write_response(socket, {{"ok", false}, {"error", "unauthorized"}});
-            return;
-        }
+    if (parsed.error == ControlRequestError::Unauthorized) {
+        write_response(socket, {{"ok", false}, {"error", "unauthorized"}});
+        return;
     }
+
+    const QJsonObject &req = parsed.request;
+    const QString &cmd = parsed.cmd;
 
     if (cmd == "help") {
         QJsonArray commands;
-        for (const char *c : {"help", "status", "list_participants", "list_outputs",
-                              "assign_output", "assign_output_ex",
-                              "recover_stale_outputs",
-                              "upgrade_low_quality_outputs",
-                              "speaker_director_status",
-                              "speaker_director_configure",
-                              "speaker_director_take",
-                              "speaker_director_release",
-                              "join", "leave", "start_engine", "stop_engine",
-                              "oauth_callback",
-                              "subscribe_events", "recovery_cancel"})
+        for (const char *c : known_control_commands())
             commands.append(c);
         write_response(socket, {{"ok", true}, {"commands", commands}});
         return;

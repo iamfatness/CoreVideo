@@ -16,112 +16,23 @@
 #include <cstring>
 
 // ── OSC wire-format helpers ──────────────────────────────────────────────────
-
-// Round up to the next multiple of 4.
-static int pad4(int n) { return (n + 3) & ~3; }
-
-// Read a null-terminated, 4-byte-padded OSC string from buf[offset].
-// Returns "" and leaves offset unchanged on error.
-static std::string read_osc_string(const QByteArray &buf, int &offset)
-{
-    const int start = offset;
-    const int len   = buf.size();
-    while (offset < len && buf[offset] != '\0') ++offset;
-    if (offset >= len) { offset = start; return {}; }
-    const std::string s(buf.constData() + start, offset - start);
-    ++offset; // consume NUL
-    offset = pad4(offset);
-    return s;
-}
-
-// Read a big-endian int32 from buf[offset].
-static int32_t read_int32(const QByteArray &buf, int &offset)
-{
-    if (offset + 4 > buf.size()) return 0;
-    const auto *p = reinterpret_cast<const uint8_t *>(buf.constData() + offset);
-    offset += 4;
-    return static_cast<int32_t>((uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
-                                 (uint32_t(p[2]) << 8)  |  uint32_t(p[3]));
-}
-
-// Read a big-endian float32 from buf[offset].
-static float read_float32(const QByteArray &buf, int &offset)
-{
-    const int32_t raw = read_int32(buf, offset);
-    float f; std::memcpy(&f, &raw, 4);
-    return f;
-}
-
-// Encode a big-endian int32.
-static void write_int32(QByteArray &out, int32_t v)
-{
-    out.append(static_cast<char>((v >> 24) & 0xFF));
-    out.append(static_cast<char>((v >> 16) & 0xFF));
-    out.append(static_cast<char>((v >>  8) & 0xFF));
-    out.append(static_cast<char>( v        & 0xFF));
-}
-
-// Encode an OSC string (null-terminated, padded to 4 bytes).
-static void write_osc_string(QByteArray &out, const std::string &s)
-{
-    out.append(s.c_str(), static_cast<int>(s.size()) + 1);
-    while (out.size() % 4 != 0) out.append('\0');
-}
-
-// Parse a raw OSC message datagram into address + args.
-// Returns false if the packet is malformed.
-static bool parse_osc(const QByteArray &data,
-                      QString &address,
+//
+// The actual encode/decode primitives (osc_read_string, osc_read_int32,
+// osc_parse_message, osc_build_message, etc.) live in zoom-osc-wire.h so they
+// can be exercised by a standalone host-side unit test without OBS, the Zoom
+// SDK, or a live UDP socket. Local aliases below keep the rest of this file
+// unchanged.
+static bool parse_osc(const QByteArray &data, QString &address,
                       std::vector<OscArg> &args)
 {
-    int offset = 0;
-    const std::string addr_str = read_osc_string(data, offset);
-    if (addr_str.empty() || addr_str[0] != '/') return false;
-    address = QString::fromStdString(addr_str);
-
-    if (offset >= data.size() || data[offset] != ',') return true; // no type tag — valid
-    const std::string type_tags = read_osc_string(data, offset);
-
-    for (size_t i = 1; i < type_tags.size(); ++i) {
-        OscArg arg;
-        switch (type_tags[i]) {
-        case 'i':
-            arg.type = OscArg::Int32;
-            arg.i    = read_int32(data, offset);
-            break;
-        case 'f':
-            arg.type = OscArg::Float32;
-            arg.f    = read_float32(data, offset);
-            break;
-        case 's':
-            arg.type = OscArg::String;
-            arg.s    = read_osc_string(data, offset);
-            break;
-        case 'T': arg.type = OscArg::Int32; arg.i = 1; break;
-        case 'F': arg.type = OscArg::Int32; arg.i = 0; break;
-        default:  return false; // unsupported type
-        }
-        args.push_back(std::move(arg));
-    }
-    return true;
+    return osc_parse_message(data, address, args);
 }
 
-// Build a complete single-message OSC packet (address + type tags + args).
 static QByteArray build_osc(const std::string &address,
                              const std::string &type_tags,
                              const std::vector<OscArg> &args)
 {
-    QByteArray pkt;
-    write_osc_string(pkt, address);
-    write_osc_string(pkt, "," + type_tags);
-    for (size_t i = 0; i < args.size(); ++i) {
-        switch (type_tags[i]) {
-        case 'i': write_int32(pkt, args[i].i); break;
-        case 's': write_osc_string(pkt, args[i].s); break;
-        default: break;
-        }
-    }
-    return pkt;
+    return osc_build_message(address, type_tags, args);
 }
 
 static bool find_output_by_source(const std::string &source, ZoomOutputInfo &out);

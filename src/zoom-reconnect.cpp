@@ -2,6 +2,7 @@
 #include "zoom-engine-client.h"
 #include "zoom-oauth.h"
 #include "zoom-output-manager.h"
+#include "zoom-reconnect-backoff.h"
 #include "zoom-settings.h"
 #include <obs-module.h>
 #include <algorithm>
@@ -26,8 +27,7 @@ ZoomReconnectManager::~ZoomReconnectManager()
     {
         std::lock_guard<std::mutex> lk(m_mtx);
         m_stop_thread = true;
-        m_pending     = false;
-        ++m_generation;
+        m_schedule.reset();
     }
     m_cv.notify_all();
     if (m_timer.joinable()) m_timer.join();
@@ -86,15 +86,15 @@ void ZoomReconnectManager::clear_session()
 
 int ZoomReconnectManager::compute_delay_locked(int attempt) const
 {
-    double delay = m_policy.base_delay_ms *
-                   std::pow(static_cast<double>(m_policy.backoff_multiplier), attempt);
-    delay = std::min(delay, static_cast<double>(m_policy.max_delay_ms));
-    // Apply randomized jitter in [0.8, 1.2] so simultaneous recoveries do not
-    // thunder against the broker/SDK at the same instant. The cap is applied
-    // before jitter; clamp again afterwards so the result never exceeds it.
+    // Randomized jitter in [0.8, 1.2] so simultaneous recoveries do not
+    // thunder against the broker/SDK at the same instant. See
+    // zoom-reconnect-backoff.h for the (unit-tested) clamp-then-jitter-then-
+    // clamp formula.
     std::uniform_real_distribution<double> jitter(0.8, 1.2);
-    delay *= jitter(m_rng);
-    delay = std::min(delay, static_cast<double>(m_policy.max_delay_ms));
+    const double delay = compute_backoff_delay_ms(
+        attempt, m_policy.base_delay_ms,
+        static_cast<double>(m_policy.backoff_multiplier),
+        m_policy.max_delay_ms, jitter(m_rng));
     return static_cast<int>(delay);
 }
 
@@ -103,15 +103,14 @@ int ZoomReconnectManager::next_retry_ms() const
     if (!m_recovering.load(std::memory_order_acquire)) return 0;
     using namespace std::chrono;
     std::lock_guard<std::mutex> lk(m_mtx);
-    if (!m_pending) return 0;
+    if (!m_schedule.pending()) return 0;
     auto remaining = duration_cast<milliseconds>(m_retry_at - steady_clock::now());
     return std::max(0, static_cast<int>(remaining.count()));
 }
 
 void ZoomReconnectManager::reset_state_locked()
 {
-    m_pending = false;
-    ++m_generation;
+    m_schedule.reset();
     m_recovering.store(false, std::memory_order_release);
     m_attempt.store(0, std::memory_order_release);
 }
@@ -195,7 +194,7 @@ void ZoomReconnectManager::cancel()
 {
     {
         std::lock_guard<std::mutex> lk(m_mtx);
-        if (!m_recovering.load(std::memory_order_acquire) && !m_pending) return;
+        if (!m_recovering.load(std::memory_order_acquire) && !m_schedule.pending()) return;
         reset_state_locked();
     }
     m_cv.notify_all();
@@ -229,7 +228,7 @@ void ZoomReconnectManager::on_join_failed(bool permanent)
     }
 
     std::unique_lock<std::mutex> lk(m_mtx);
-    if (!m_recovering.load(std::memory_order_acquire) && !m_pending) {
+    if (!m_recovering.load(std::memory_order_acquire) && !m_schedule.pending()) {
         blog(LOG_INFO,
              "[obs-zoom-plugin] Join failed outside recovery - not retrying");
         reset_state_locked();
@@ -265,8 +264,7 @@ void ZoomReconnectManager::schedule_retry_locked(int delay_ms)
     // Must be called with m_mtx held. Bumps generation so any previously
     // scheduled wake-up that races to fire will see the new generation and
     // ignore itself.
-    ++m_generation;
-    m_pending  = true;
+    m_schedule.schedule();
     m_retry_at = std::chrono::steady_clock::now() +
                  std::chrono::milliseconds(delay_ms);
     m_cv.notify_all();
@@ -276,16 +274,16 @@ void ZoomReconnectManager::timer_loop()
 {
     std::unique_lock<std::mutex> lk(m_mtx);
     while (!m_stop_thread) {
-        if (!m_pending) {
-            m_cv.wait(lk, [this]() { return m_stop_thread || m_pending; });
+        if (!m_schedule.pending()) {
+            m_cv.wait(lk, [this]() { return m_stop_thread || m_schedule.pending(); });
             continue;
         }
 
-        const uint64_t gen      = m_generation;
+        const uint64_t gen      = m_schedule.generation();
         const auto      deadline = m_retry_at;
         // Sleep until deadline, but wake early if state changes.
         const bool interrupted = m_cv.wait_until(lk, deadline, [this, gen]() {
-            return m_stop_thread || !m_pending || m_generation != gen;
+            return m_stop_thread || !m_schedule.pending() || m_schedule.generation() != gen;
         });
 
         if (interrupted) {
@@ -295,8 +293,8 @@ void ZoomReconnectManager::timer_loop()
         if (std::chrono::steady_clock::now() < m_retry_at) continue; // spurious wake
 
         // Consume the pending request before scheduling on UI thread.
-        m_pending = false;
-        const uint64_t fire_gen = m_generation;
+        m_schedule.consume_pending();
+        const uint64_t fire_gen = m_schedule.generation();
         lk.unlock();
 
         // We pass the generation through to execute_retry so it can verify
@@ -322,7 +320,7 @@ void ZoomReconnectManager::execute_retry(uint64_t generation)
     ZoomJoinAuthTokens tokens;
     {
         std::lock_guard<std::mutex> lk(m_mtx);
-        if (m_generation != generation) return;     // cancelled or superseded
+        if (!m_schedule.is_current(generation)) return; // cancelled or superseded
         if (!m_recovering.load(std::memory_order_acquire)) return;
         jwt          = m_jwt;
         meeting_id   = m_meeting_id;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "zoom-reconnect-schedule.h"
 #include "zoom-types.h"
 #include <atomic>
 #include <chrono>
@@ -92,9 +93,10 @@ private:
     // Timer thread state (guarded by m_mtx unless otherwise noted)
     std::thread                 m_timer;
     std::condition_variable     m_cv;
-    bool                        m_pending     = false;  // a retry is scheduled
     bool                        m_stop_thread = false;  // shut the timer thread down
-    // Generation: every call to schedule_retry_locked or cancel bumps this.
+    // Pending-retry / generation-guard bookkeeping. Every call to
+    // schedule_retry_locked or reset_state_locked bumps the generation;
     // execute_retry compares against the latest value and bails on mismatch.
-    uint64_t                    m_generation  = 0;
+    // See zoom-reconnect-schedule.h for the (unit-tested) rules.
+    ZoomReconnectSchedule       m_schedule;
 };

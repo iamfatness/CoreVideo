@@ -433,6 +433,63 @@ if(BUILD_TESTING)
         add_test(NAME CoreVideoIpcLineIo
                  COMMAND CoreVideoIpcLineIoTest)
     endif()
+
+    # Reconnect back-off schedule and generation-guard state machine. Pure
+    # C++, no Qt/OBS/Zoom SDK dependency, so this builds and runs on every
+    # platform/job (including the Linux GCC portability job).
+    add_executable(CoreVideoReconnectBackoffTest
+        tests/zoom-reconnect-backoff-test.cpp
+    )
+    target_include_directories(CoreVideoReconnectBackoffTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoReconnectBackoff
+             COMMAND CoreVideoReconnectBackoffTest)
+
+    add_executable(CoreVideoReconnectScheduleTest
+        tests/zoom-reconnect-schedule-test.cpp
+    )
+    target_include_directories(CoreVideoReconnectScheduleTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoReconnectSchedule
+             COMMAND CoreVideoReconnectScheduleTest)
+
+    # OSC wire-format and TCP control-request parsing. These use QByteArray /
+    # QJsonObject / QString, so they only build where Qt6::Core is available
+    # (i.e. when COREVIDEO_BUILD_PLUGIN found it above). Guarded rather than
+    # required so the Linux portability job and any Qt-less configuration
+    # keep working unchanged.
+    if(TARGET Qt6::Core)
+        add_executable(CoreVideoOscWireTest
+            tests/zoom-osc-wire-test.cpp
+        )
+        target_include_directories(CoreVideoOscWireTest PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        )
+        target_link_libraries(CoreVideoOscWireTest PRIVATE Qt6::Core)
+        add_test(NAME CoreVideoOscWire
+                 COMMAND CoreVideoOscWireTest)
+
+        add_executable(CoreVideoControlParseTest
+            tests/zoom-control-parse-test.cpp
+        )
+        target_include_directories(CoreVideoControlParseTest PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        )
+        target_link_libraries(CoreVideoControlParseTest PRIVATE Qt6::Core)
+        add_test(NAME CoreVideoControlParse
+                 COMMAND CoreVideoControlParseTest)
+
+        if(WIN32 AND _qt_bin_dir)
+            set_tests_properties(CoreVideoOscWire PROPERTIES
+                ENVIRONMENT_MODIFICATION
+                    "PATH=path_list_prepend:${_qt_bin_dir}")
+            set_tests_properties(CoreVideoControlParse PROPERTIES
+                ENVIRONMENT_MODIFICATION
+                    "PATH=path_list_prepend:${_qt_bin_dir}")
+        endif()
+    endif()
 endif()
 
 set(CPACK_GENERATOR                 "ZIP")

@@ -7,10 +7,49 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.28] - 2026-07-30
+
+First public beta release.
+
 ### Added
 - In-app update check: the Zoom Control dock shows a non-intrusive banner
   when a newer CoreVideo release is available, with a toggle in Settings to
   disable the startup check.
+- The plugin version is now shown in the Settings dialog.
+- Beta support surface: GitHub bug-report/feature-request templates (with
+  support-bundle instructions), a much larger Troubleshooting section in the
+  docs, and a documented flow for adding/removing CoreVideo on a Zoom account.
+- macOS groundwork: the real plugin and OAuth helper now build on Apple
+  Silicon CI and OAuth tokens use the macOS Keychain — no macOS packages are
+  published yet; Windows x64 remains the supported platform.
+
+### Fixed
+- Frozen-frame-forever after an engine crash/restart: shared-memory regions
+  now carry a generation stamp so sources re-attach automatically, shared
+  memory failures are surfaced as visible errors instead of dropped
+  silently, and region counts are capped with a clear "capacity" error.
+- Changing the OSC port no longer leaks the old poll timer and stack
+  duplicate handlers.
+- Leaving a meeting now clears the stored recovery session (including join
+  tokens) instead of keeping it in memory until the next join.
+- Bitfocus Companion module builds again against @companion-module/base 2.1.
+
+### Changed
+- Sign-in/join now runs through one centralized, unit-tested decision path:
+  every join attempt logs a single `[join-decision]` line and failures map
+  to distinct, actionable messages (expired token, wrong environment,
+  missing approval, and so on).
+- Zoom Meeting SDK updated from 7.0.2 to 7.1.5.
+- README documents the honest platform support matrix, and non-Windows
+  builds now log a prominent warning that OAuth tokens are stored without
+  OS-level encryption (Windows DPAPI is unchanged).
+- Documentation architecture diagrams rebuilt for readability (dark theme,
+  legible text, a hand-drawn system overview), fixing a content-security
+  policy issue that made production render them with Mermaid's light theme.
+- Test suite grew from 2 to 17 suites (IPC hardening, control/OSC parsing,
+  reconnect backoff and cancellation, join decisions, version comparison),
+  and the dock lifecycle smoke script now asserts reopen and shutdown
+  ordering.
 
 ## [0.1.27] - 2026-07-29
 

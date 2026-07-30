@@ -355,6 +355,10 @@ if(BUILD_ZOOM_ENGINE)
         # header resolution and `-framework ZoomSDK` linking.
         add_executable(ZoomObsEngine engine/src/main-macos.mm)
         target_include_directories(ZoomObsEngine PRIVATE src engine/src)
+        # -F must be on BOTH the compile line (so `#import <ZoomSDK/ZoomSDK.h>`
+        # resolves via the framework's Headers dir) and the link line (so
+        # `-framework ZoomSDK` finds the framework binary).
+        target_compile_options(ZoomObsEngine PRIVATE "-F${ZOOM_SDK_ACTIVE_DIR}")
         target_link_libraries(ZoomObsEngine PRIVATE
             "-F${ZOOM_SDK_ACTIVE_DIR}"
             "-framework ZoomSDK"

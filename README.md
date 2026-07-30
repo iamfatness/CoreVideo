@@ -257,6 +257,20 @@ obvious crash markers:
   -ExpectDockShow
 ```
 
+To exercise the **repeated open/close** acceptance criterion, close and reopen
+each dock several times in one OBS session, then assert each dock logged at
+least N shows with `-MinDockShows N`. With `-ExpectShutdown` the audit also
+enforces clean teardown ordering: it fails if any dock is (re)registered or
+shown *after* the shutdown marker, or if a dock was ever shown without an OBS
+host wrapper (the blank/detached-panel symptom), or if a crash marker appears:
+
+```powershell
+.\scripts\obs-scene-smoke-test.ps1 -LogOnly -ExpectShutdown `
+  -ObsLogPath "$env:APPDATA\obs-studio\logs\latest.log" `
+  -ExpectedDockId ZoomControlDock,ZoomOutputManagerDock,ZoomDiagnosticsDock,ZoomIsoRecorderDock `
+  -ExpectDockShow -MinDockShows 2
+```
+
 5. **Set up OAuth (for Marketplace / external-account joins)** - publishers configure the Cloudflare broker and bake `-DZOOM_EMBED_OAUTH_AUTHORIZATION_URL=https://corevideo.iamfatness.us/oauth/start` into the build. End users just open the Settings dialog and click **Sign in with Zoom**. See [`docs/ZOOM_MARKETPLACE_OAUTH.md`](docs/ZOOM_MARKETPLACE_OAUTH.md) for the full walkthrough.
 
 6. **Join once, then assign outputs** - use the CoreVideo dock or the TCP/OSC control APIs to join the meeting once per OBS session. Then add **Zoom Participant**, **Zoom Participant Audio**, **Zoom Share**, or **Zoom Interpretation Audio** sources and assign them to participants, active speaker, screen share, or Spotlight 1-8 dynamic roles.

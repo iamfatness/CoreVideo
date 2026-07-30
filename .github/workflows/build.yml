@@ -264,7 +264,10 @@ jobs:
     name: macOS arm64 (plugin + engine scaffold)
     runs-on: macos-14
     permissions:
-      contents: read   # needed for gh api to read the draft SDK release asset
+      # DRAFT releases are only visible to a token with write-level (push)
+      # access; contents: read cannot enumerate them, so the SDK asset lookup
+      # would silently find nothing and the engine would fall back to OFF.
+      contents: write
     steps:
       - uses: actions/checkout@v6
         with:

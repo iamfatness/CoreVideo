@@ -338,7 +338,7 @@ void ZoomEngineClient::monitor_loop()
             (st == MeetingState::InMeeting || st == MeetingState::Joining)) {
             const uint64_t now = os_gettime_ns() / 1000000ULL;
             const uint64_t last = m_last_rx_ms.load(std::memory_order_acquire);
-            if (last != 0 && now > last && (now - last) > kHeartbeatTimeoutMs) {
+            if (ipc_heartbeat_expired(now, last, kHeartbeatTimeoutMs)) {
                 heartbeat_timeout = true;
                 break;
             }
@@ -704,6 +704,38 @@ void ZoomEngineClient::handle_event(const std::string &line)
     }
     if (cmd == "error" || cmd == "auth_fail") {
         blog(LOG_ERROR, "[obs-zoom-plugin] Zoom engine event: %s", line.c_str());
+        const QString emsg = obj.value("msg").toString();
+        // Media-path errors: the meeting itself is still healthy, so surface
+        // them loudly to the operator but do NOT tear the session down or
+        // trigger the reconnect flow.
+        if (emsg == "shm_create_failed" || emsg == "subscribe_rejected") {
+            const std::string uuid =
+                obj.value("source_uuid").toString().toStdString();
+            std::string error_message;
+            if (emsg == "shm_create_failed") {
+                error_message =
+                    "Zoom engine could not allocate shared memory for source " +
+                    (uuid.empty() ? std::string("(unknown)") : uuid) +
+                    " — its frames are being dropped";
+            } else {
+                const int limit = obj.value("limit").toInt(0);
+                error_message =
+                    "Zoom engine rejected subscription for source " +
+                    (uuid.empty() ? std::string("(unknown)") : uuid) +
+                    ": too many active sources" +
+                    (limit > 0 ? " (limit " + std::to_string(limit) + ")"
+                               : std::string());
+            }
+            std::vector<ErrorCallback> error_callbacks;
+            {
+                std::lock_guard<std::mutex> lk(m_mtx);
+                m_last_error = error_message;
+                for (const auto &entry : m_error_callbacks)
+                    if (entry.second) error_callbacks.push_back(entry.second);
+            }
+            for (const auto &cb : error_callbacks) cb(error_message);
+            return;
+        }
         const QString reason = obj.value("reason").toString();
         const int code = obj.value("code").toInt(0);
         std::vector<ErrorCallback> error_callbacks;
@@ -814,10 +846,13 @@ void ZoomEngineClient::handle_event(const std::string &line)
                  uuid.c_str(), static_cast<unsigned long long>(frame_count),
                  obj.value("w").toInt(), obj.value("h").toInt());
         }
+        // shm_gen guards against reading a stale/orphaned SHM region after the
+        // engine recreated it (e.g. engine restart). 0 = not sent (old engine).
         callbacks.on_frame(static_cast<uint32_t>(obj.value("w").toInt()),
                            static_cast<uint32_t>(obj.value("h").toInt()),
                            static_cast<uint32_t>(
-                               obj.value("participant_id").toInt()));
+                               obj.value("participant_id").toInt()),
+                           static_cast<uint32_t>(obj.value("shm_gen").toInt()));
     }
     if (cmd == "audio" && callbacks.on_audio) {
         callbacks.on_audio(static_cast<uint32_t>(obj.value("byte_len").toInt()),

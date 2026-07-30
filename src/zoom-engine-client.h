@@ -22,8 +22,12 @@ public:
     };
 
     struct SourceCallbacks {
+        // shm_generation: engine-side generation of the SHM region backing the
+        // frame (increments each time the region is (re)created). 0 when the
+        // engine did not report one (older engine binary).
         std::function<void(uint32_t width, uint32_t height,
-                           uint32_t participant_id)> on_frame;
+                           uint32_t participant_id,
+                           uint32_t shm_generation)> on_frame;
         std::function<void(uint32_t byte_len,
                            uint32_t participant_id)> on_audio;
     };

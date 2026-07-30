@@ -452,6 +452,17 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoVersionCompare
              COMMAND CoreVideoVersionCompareTest)
 
+    # IPC/SHM hardening policy: heartbeat timeout, SHM generation guard, and
+    # source cap (plus Windows pipe line-I/O coverage on Windows).
+    add_executable(CoreVideoIpcHardeningTest
+        tests/ipc-hardening-test.cpp
+    )
+    target_include_directories(CoreVideoIpcHardeningTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoIpcHardening
+             COMMAND CoreVideoIpcHardeningTest)
+
     # IPC line-I/O framing and write-failure semantics (POSIX socket-based test).
     if(NOT WIN32)
         add_executable(CoreVideoIpcLineIoTest

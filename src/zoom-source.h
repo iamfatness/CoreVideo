@@ -79,9 +79,11 @@ struct ZoomSource {
     void deactivate();
     void on_roster_changed();
     void on_engine_frame(uint32_t width, uint32_t height,
-                         uint32_t resolved_participant_id);
+                         uint32_t resolved_participant_id,
+                         uint32_t shm_generation);
     void on_director_preview_frame(uint32_t width, uint32_t height,
-                                   uint32_t resolved_participant_id);
+                                   uint32_t resolved_participant_id,
+                                   uint32_t shm_generation);
     void on_engine_audio(uint32_t byte_len,
                          uint32_t resolved_participant_id);
 
@@ -104,17 +106,24 @@ private:
     void maybe_update_director_subscription();
     bool output_video_from_shared_memory(const std::string &uuid,
                                          ShmRegion &video_shm,
+                                         uint32_t &video_shm_gen,
                                          std::vector<uint8_t> &video_buf,
                                          std::vector<uint8_t> &scaled_video_buf,
                                          uint32_t event_width,
                                          uint32_t event_height,
                                          uint32_t resolved_participant_id,
+                                         uint32_t event_shm_gen,
                                          bool commit_director_cut);
 
     mutable std::mutex m_mtx;
     ShmRegion m_video_shm;
     ShmRegion m_director_preview_shm;
     ShmRegion m_audio_shm;
+    // Engine-reported SHM generation each mapping was opened against. Used to
+    // detect a recreated (orphaned) region so we re-open instead of reading a
+    // frozen frame forever. 0 = opened without a generation (older engine).
+    uint32_t m_video_shm_gen = 0;
+    uint32_t m_director_preview_shm_gen = 0;
     std::vector<uint8_t> m_placeholder_buf;
     std::vector<uint8_t> m_video_buf;
     std::vector<uint8_t> m_scaled_video_buf;

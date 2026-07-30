@@ -381,6 +381,45 @@
         (details in <a href="#signin">Sign in with Zoom</a> below). That's it — you're ready to use it.</p>
       </div></div>
     </div>
+
+    <h3>Adding CoreVideo to your Zoom account</h3>
+    <p>
+      In Zoom's terms, an app is <strong>added</strong> to your Zoom account the first time you
+      authorize it. There are two equivalent ways to do that:
+    </p>
+    <ul>
+      <li><strong>From OBS (recommended):</strong> click <strong>Sign in with Zoom</strong> in the
+      Zoom Control dock or Tools&nbsp;→&nbsp;Zoom Plugin Settings. Your browser opens Zoom's
+      authorization page; review the requested permissions and click <strong>Allow</strong>.
+      CoreVideo is added to your account automatically and the sign-in completes back in OBS.</li>
+      <li><strong>From the Zoom App Marketplace:</strong> open the
+      <a href="https://marketplace.zoom.us/" target="_blank" rel="noopener">Zoom App Marketplace</a>,
+      search for <strong>CoreVideo</strong>, open the listing, and click <strong>Add</strong>.
+      After you click <strong>Allow</strong> on the permissions screen, install the Windows app
+      (steps above) and sign in — the account authorization is already in place.</li>
+    </ul>
+    <p>
+      Either way, CoreVideo then appears under
+      <a href="https://marketplace.zoom.us/user/installed" target="_blank" rel="noopener">Zoom App Marketplace&nbsp;→&nbsp;Manage&nbsp;→&nbsp;Added Apps</a>,
+      where you can review or <a href="#removing">remove</a> it at any time.
+    </p>
+    <div class="callout info">
+      <div class="callout-title">ℹ️ What you are granting</div>
+      CoreVideo requests only two read-only scopes: <code>user:read:user</code> (your profile /
+      display name) and <code>user:read:token</code> (a short-lived Zoom Access Key used to join
+      meetings as you). It requests no write access, no recording access, and no access to other
+      users' data. Tokens are stored encrypted on your machine — see
+      <a href="#signin">Sign in with Zoom</a>.
+    </div>
+    <div class="callout warning">
+      <div class="callout-title">⚠️ Admin-managed accounts</div>
+      If your organization restricts Marketplace apps, the authorization page may show
+      <strong>Request pre-approval</strong> instead of <strong>Allow</strong>. Send the request (or
+      ask your Zoom admin to approve CoreVideo under
+      <strong>Admin&nbsp;→&nbsp;Advanced&nbsp;→&nbsp;App&nbsp;Marketplace</strong>), then sign in
+      again once it's approved.
+    </div>
+
     <div class="callout info">
       <div class="callout-title">ℹ️ Having trouble?</div>
       See <a href="#troubleshooting">Troubleshooting</a> for installer, dock-not-showing, and sign-in

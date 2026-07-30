@@ -233,6 +233,18 @@
       and TCP/OSC control APIs for full broadcast automation.
     </p>
     <div class="callout warning" style="margin-top:18px;">
+      <div class="callout-title">🧪 Beta status</div>
+      CoreVideo is in <strong>public beta</strong>. The supported platform is
+      <strong>Windows x64</strong> (installer or ZIP) — see
+      <a href="https://github.com/iamfatness/CoreVideo/blob/main/docs/ROADMAP.md">the Roadmap</a> for known limitations and what's
+      planned next. To report a problem, use
+      <a href="https://github.com/iamfatness/CoreVideo/issues/new/choose">GitHub Issues</a>
+      (the bug report template walks you through attaching a redacted
+      <a href="#troubleshooting">support bundle</a>). New releases are announced
+      through a dismissible in-app update banner in the Zoom Control dock and on the
+      <a href="https://github.com/iamfatness/CoreVideo/releases">GitHub Releases</a> page.
+    </div>
+    <div class="callout warning" style="margin-top:18px;">
       <div class="callout-title">Zoom Raw Data Bandwidth Planning</div>
       CoreVideo uses Zoom Meeting SDK raw data APIs. Raw data access does not require Enhanced Media by itself,
       but quality and stream count follow Zoom account and app entitlements. Standard accounts are commonly
@@ -240,6 +252,7 @@
       100 Mbps. Plan around 4-6 Mbps per standard 1080p feed.
     </div>
     <div class="hero-badges" style="margin-top:16px;">
+      <span class="badge orange">Public beta</span>
       <span class="badge green">Free</span>
       <span class="badge green">OBS Studio 30+</span>
       <span class="badge orange">Windows installer</span>
@@ -570,16 +583,183 @@
   <!-- ── Troubleshooting ────────────────────────────────────────── -->
   <section id="troubleshooting">
     <h2>Troubleshooting</h2>
+    <div class="callout warning">
+      <div class="callout-title">⚠️ Public beta</div>
+      CoreVideo is in public beta. The Windows installer is not yet code-signed, and
+      the issues below are the ones we expect to see most from new installs. If
+      something isn't covered here, see <a href="#filing-a-bug">Filing a bug</a> below.
+    </div>
     <table>
       <tr><th>Symptom</th><th>Fix</th></tr>
-      <tr><td>Zoom Control dock not visible after install</td><td>Enable it from OBS <strong>Docks&nbsp;→&nbsp;Zoom Control</strong>. Confirm OBS is version 30+ and was fully closed during install.</td></tr>
-      <tr><td>"Sign in with Zoom" doesn't complete</td><td>Finish the browser consent and allow the <code>corevideo://</code> link to open CoreVideo. Re-run sign-in from Tools&nbsp;→&nbsp;Zoom Plugin Settings.</td></tr>
-      <tr><td>Joined, but no video</td><td>Confirm the host admitted "OBS" from the waiting room, the participant has their camera on, and your Zoom account/app entitlements allow raw video (see Requirements).</td></tr>
+      <tr><td>Zoom Control dock not visible after install</td><td>Enable it from OBS <strong>Docks&nbsp;→&nbsp;Zoom Control</strong> (or <strong>Tools&nbsp;→&nbsp;Zoom Control</strong>, which creates and shows it even if you've never opened it before). Confirm OBS is version 30+ and was fully closed during install.</td></tr>
+      <tr><td>"Sign in with Zoom" doesn't complete</td><td>Finish the browser consent and allow the <code>corevideo://</code> link to open CoreVideo. Re-run sign-in from Tools&nbsp;→&nbsp;Zoom Plugin Settings. See <a href="#signin-loop">Sign-in loop</a> below for more.</td></tr>
+      <tr><td>Joined, but no video</td><td>Work through the <a href="#no-video-frames">No video frames</a> checklist below.</td></tr>
       <tr><td>Source shows color bars</td><td>The source isn't subscribed yet — assign a participant or slot in the source properties or the Output Manager.</td></tr>
       <tr><td>Choppy or low-resolution feeds</td><td>Reduce the number of concurrent 1080p feeds or the requested resolution, and check available bandwidth (~4-6 Mbps per 1080p feed).</td></tr>
+      <tr><td>Windows warns "Windows protected your PC" during install</td><td>Expected for the unsigned beta installer — see <a href="#smartscreen">SmartScreen</a> below.</td></tr>
+      <tr><td>Windows Firewall prompts for CoreVideo or ZoomObsEngine</td><td>Both control ports are loopback-only — see <a href="#firewall-prompts">Firewall prompts</a> below.</td></tr>
     </table>
-    <p>Still stuck? Export a redacted support bundle from the <strong>Zoom Diagnostics</strong> dock
-    and contact <a href="/support/">CoreVideo Support</a>.</p>
+
+    <h3 id="smartscreen">Installer blocked by Windows SmartScreen</h3>
+    <p>
+      CoreVideo's beta installer (<code>CoreVideo-Setup.exe</code>) is not yet
+      code-signed, so Windows SmartScreen will show <strong>"Windows protected your
+      PC"</strong> the first time you run it. This is expected during the beta —
+      it does not mean the download is unsafe, but you should still confirm you got
+      the file from <a href="https://corevideo.io/download">corevideo.io/download</a>
+      or the official <a href="https://github.com/iamfatness/CoreVideo/releases">GitHub Releases</a> page.
+    </p>
+    <div class="steps">
+      <div class="step"><div class="step-body">
+        <h4>1. Click "More info"</h4>
+        <p>On the SmartScreen dialog, click <strong>More info</strong>, then
+        <strong>Run anyway</strong>. If you don't see a "More info" link, your
+        organization's policy may be blocking unsigned installers entirely — check
+        with your IT administrator.</p>
+      </div></div>
+      <div class="step"><div class="step-body">
+        <h4>2. (Optional but recommended) Verify the checksum</h4>
+        <p>Every release publishes a matching <code>.sha256</code> file next to the
+        installer and ZIP. Compare it against a local hash before running the
+        installer:</p>
+        <pre tabindex="0"><code>certutil -hashfile CoreVideo-Setup.exe SHA256</code></pre>
+        <p>or, in PowerShell:</p>
+        <pre tabindex="0"><code>Get-FileHash .\CoreVideo-Setup.exe -Algorithm SHA256</code></pre>
+        <p>The result should match the contents of the corresponding
+        <code>.sha256</code> file from the same release.</p>
+      </div></div>
+    </div>
+
+    <h3 id="no-video-frames">"No video frames" checklist</h3>
+    <p>Work through these in order — each one rules out a different stage of the pipeline.</p>
+    <ol>
+      <li><strong>Assignment mode is set.</strong> A newly added Zoom Participant /
+      Spotlight / Screen Share source isn't subscribed to anything until you assign
+      it — in the source properties or the <strong>Zoom Output Manager</strong>
+      dock. An unassigned source shows the color-bar placeholder, not black.</li>
+      <li><strong>The participant actually has their camera on</strong> and has been
+      admitted from the waiting room (or the meeting allows guests). CoreVideo can
+      only capture video a participant is sending.</li>
+      <li><strong>Check requested vs. observed resolution in the Zoom Diagnostics
+      dock.</strong> Open <strong>Docks&nbsp;→&nbsp;Zoom Diagnostics</strong> (or
+      <strong>Tools&nbsp;→&nbsp;Zoom Diagnostics</strong>) and look at the Outputs
+      table. If <em>Observed</em> stays blank or 0×0 while <em>Requested</em> shows
+      a resolution, the subscription never came up — re-assign the source or click
+      <strong>Refresh</strong>. If observed resolution is consistently lower than
+      requested, that's usually a bandwidth or entitlement ceiling, not a bug.</li>
+      <li><strong>Confirm the engine is actually running.</strong> Every meeting
+      session launches <code>zoom-runtime\ZoomObsEngine.exe</code> as a child
+      process of OBS — all Zoom SDK access happens there, not in the plugin DLL. If
+      it isn't running (check Task Manager, or "Engine running" in a support
+      bundle's <code>summary.txt</code>), the plugin never receives frames.
+      Antivirus software occasionally quarantines or blocks a freshly-installed
+      <code>ZoomObsEngine.exe</code> — check your antivirus's quarantine/history if
+      it's missing.</li>
+      <li><strong>Bandwidth and entitlements.</strong> Your Zoom account and app
+      entitlements bound both quality and stream count: standard accounts are
+      commonly limited to ~30 Mbps incoming video (roughly 4-6 Mbps per 1080p
+      feed), while Enhanced Media / HBM can raise that to ~100 Mbps. If several
+      1080p feeds are requested at once on a standard account, expect some to
+      negotiate down or fail — see <a href="#requirements">Requirements</a>.</li>
+    </ol>
+
+    <h3 id="signin-loop">Sign-in loop / browser doesn't return to OBS</h3>
+    <p>
+      "Sign in with Zoom" opens your browser to Zoom's consent screen and expects
+      the browser to hand control back to CoreVideo afterward through the
+      <code>corevideo://</code> URL scheme. A few different things can break that
+      handoff:
+    </p>
+    <ul>
+      <li><strong>The <code>corevideo://</code> handler isn't registered yet.</strong>
+      CoreVideo registers it automatically the first time you click <strong>Sign in
+      with Zoom</strong>. If a browser prompt asks which app should open a
+      <code>corevideo://</code> link, choose CoreVideo (and "always allow" it) — if
+      you dismiss or block that prompt, the callback has nowhere to go and the
+      browser tab just sits there after you approve access in Zoom.</li>
+      <li><strong>The callback helper didn't launch.</strong> The last hop is a
+      small helper binary, <code>CoreVideoOAuthCallback.exe</code>, which the OS
+      launches for the <code>corevideo://oauth/callback</code> URL and which
+      forwards it to the plugin's local control server as an
+      <code>oauth_callback</code> command. If antivirus software or SmartScreen
+      blocked that helper from running, sign-in will look like it hung after you
+      approved access in the browser. Retry sign-in, and allow the helper if
+      prompted.</li>
+      <li><strong>Admin-managed Zoom account.</strong> If your organization
+      restricts Marketplace apps, the consent screen shows <strong>Request
+      pre-approval</strong> instead of <strong>Allow</strong> — sign-in cannot
+      complete until a Zoom admin approves CoreVideo. See <a href="#adding">Adding
+      CoreVideo to your Zoom account</a> for the pre-approval steps.</li>
+      <li>Whatever the cause, re-running sign-in from <strong>Tools&nbsp;→&nbsp;Zoom
+      Plugin Settings</strong> is safe and starts a fresh authorization attempt.</li>
+    </ul>
+
+    <h3 id="firewall-prompts">Firewall prompts for TCP 19870 / UDP 19871</h3>
+    <div class="callout info">
+      <div class="callout-title">ℹ️ Both ports are loopback-only</div>
+      The <a href="#control-api">TCP control API</a> and <a href="#osc-api">OSC
+      control API</a> both bind to <code>127.0.0.1</code> only — nothing outside
+      your machine can reach either port, regardless of how you answer a Windows
+      Firewall prompt. Windows may still prompt the first time one of these
+      servers binds, because it can't tell in advance that a listener is
+      loopback-restricted.
+    </div>
+    <p>
+      It's safe to <strong>Allow access</strong> on Private networks if you plan to
+      drive CoreVideo from an external control surface (Companion, a lighting
+      console, a custom script) running on the same machine. If you don't use the
+      TCP/OSC APIs, it's equally safe to <strong>Cancel</strong> or deny the
+      prompt — Zoom capture, sources, and sign-in do not depend on either server;
+      only external control does.
+    </p>
+
+    <h3>Zoom Diagnostics / Zoom Output Manager / other docks missing</h3>
+    <p>
+      Every CoreVideo dock — <strong>Zoom Control</strong>, <strong>Zoom
+      Diagnostics</strong>, <strong>Zoom Output Manager</strong>, and <strong>Zoom
+      ISO Recorder</strong> — can be re-shown from OBS's <strong>Docks</strong>
+      menu once it has appeared at least once. The first time, or if you closed it
+      permanently, use the matching item under the <strong>Tools</strong> menu
+      instead (e.g. <strong>Tools&nbsp;→&nbsp;Zoom Diagnostics</strong>) — the
+      Tools menu items create and show the dock even if OBS has never registered
+      it in the Docks list before.
+    </p>
+
+    <h3>Plugin not loading</h3>
+    <p>If OBS starts normally but none of the Zoom Control / Diagnostics / Output
+    Manager / ISO Recorder menu items or docks appear at all, the plugin itself
+    likely failed to load:</p>
+    <ul>
+      <li><strong>Confirm OBS Studio is 30 or newer</strong> (Help → About). CoreVideo
+      links against OBS 30's plugin API; older OBS builds cannot load it.</li>
+      <li><strong>Check the OBS log</strong> (Help&nbsp;→&nbsp;Log Files&nbsp;→&nbsp;View
+      Current Log) for a module-load failure mentioning
+      <code>obs-zoom-plugin.dll</code>. A missing-DLL style error there most often
+      means a required file didn't get installed alongside OBS — reinstall with
+      OBS fully closed (the installer refuses to proceed if <code>obs64.exe</code>
+      is still running, but a stuck background process can slip past that check).</li>
+      <li><strong>Missing Visual C++ runtime, in rare cases.</strong> CoreVideo's
+      Qt6 and plugin DLLs are built with the same MSVC toolchain as OBS Studio
+      itself, so if OBS runs at all the runtime is normally already present. On an
+      unusually minimal Windows install, installing the latest
+      <a href="https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist" target="_blank" rel="noopener">Microsoft Visual C++ x64 Redistributable</a>
+      is a reasonable thing to try if the log shows a generic DLL load failure.</li>
+    </ul>
+
+    <h3 id="filing-a-bug">Filing a bug</h3>
+    <p>
+      Still stuck? Open the <strong>Zoom Diagnostics</strong> dock
+      (<strong>Docks&nbsp;→&nbsp;Zoom Diagnostics</strong>, or
+      <strong>Tools&nbsp;→&nbsp;Zoom Diagnostics</strong>) and click <strong>Create
+      Support Bundle</strong>. It writes a redacted bundle — SDK keys, secrets,
+      OAuth tokens, and similar credentials are stripped before anything is written
+      to disk — plus a matching <code>.zip</code> under
+      <code>%AppData%\obs-studio\plugin_config\obs-zoom-plugin\support-bundles\</code>.
+      Attach that <code>.zip</code> when you
+      <a href="https://github.com/iamfatness/CoreVideo/issues/new?template=bug_report.yml">file a bug report</a>,
+      or contact <a href="/support/">CoreVideo Support</a> for anything that isn't
+      a clear bug.
+    </p>
   </section>
 
 

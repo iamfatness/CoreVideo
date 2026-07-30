@@ -740,6 +740,7 @@ const docsHtml = fs.readFileSync(path.join(docsDir, "index.html"), "utf8")
     : "CoreVideo documentation")
   .replaceAll("https://iamfatness.github.io/CoreVideo/", "/documentation/")
   .replaceAll('href="ZOOM_MARKETPLACE_OAUTH.md"', 'href="https://github.com/iamfatness/CoreVideo/blob/main/docs/ZOOM_MARKETPLACE_OAUTH.md"')
+  .replaceAll('href="ROADMAP.md"', 'href="https://github.com/iamfatness/CoreVideo/blob/main/docs/ROADMAP.md"')
   .replaceAll("<pre>", '<pre tabindex="0">')
   .replace(
     "</head>",

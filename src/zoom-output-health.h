@@ -50,11 +50,18 @@ inline void apply_output_health(std::vector<ZoomOutputInfo> &outputs,
     };
 
     for (auto &out : outputs) {
+        // Assignment "None" (Participant mode, participant id 0, not
+        // active-speaker) expects no media: it must not be graded as
+        // waiting/stale or offered recovery actions.
+        const bool unassigned =
+            out.assignment == AssignmentMode::Participant &&
+            out.participant_id == 0 && !out.active_speaker;
         const bool wants_media =
-            out.assignment == AssignmentMode::Participant ||
-            out.assignment == AssignmentMode::ActiveSpeaker ||
-            out.assignment == AssignmentMode::SpotlightIndex ||
-            out.assignment == AssignmentMode::ScreenShare;
+            !unassigned &&
+            (out.assignment == AssignmentMode::Participant ||
+             out.assignment == AssignmentMode::ActiveSpeaker ||
+             out.assignment == AssignmentMode::SpotlightIndex ||
+             out.assignment == AssignmentMode::ScreenShare);
         if (!raw_media_active) {
             out.health_reason = wants_media
                 ? ZoomOutputHealthReason::RawMediaNotReady
@@ -91,6 +98,8 @@ inline void apply_output_health(std::vector<ZoomOutputInfo> &outputs,
         }
 
         if (out.health_reason != ZoomOutputHealthReason::Ok)
+            continue;
+        if (unassigned)
             continue;
         if (out.video_stale) {
             out.health_reason = ZoomOutputHealthReason::StaleFrame;

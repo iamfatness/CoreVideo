@@ -744,6 +744,25 @@ void ZoomSource::subscribe()
                 [&](const ParticipantInfo &p) { return p.user_id == target; });
             if (!primary_present) target = failover;
         }
+        if (target == 0 && !use_active_speaker) {
+            // Assignment cleared ("None"). Tear down any previous engine
+            // subscription: skipping this left the old feed streaming into
+            // shared memory while the UI showed None, and flipping
+            // m_subscribed below made unsubscribe() a permanent no-op, so
+            // the leaked subscription could never be cleaned up.
+            const bool had_subscription =
+                m_subscribed.load(std::memory_order_acquire) ||
+                m_current_subscription_id.load(std::memory_order_acquire) != 0;
+            if (had_subscription) {
+                blog(LOG_INFO,
+                     "[obs-zoom-plugin] Assignment cleared; unsubscribing Zoom source: source=%s uuid=%s",
+                     output_name().c_str(), source_uuid.c_str());
+                clear_subscription_state();
+            }
+            m_subscribed = false;
+            m_current_subscription_id = 0;
+            return;
+        }
         if (target != 0)
             ZoomEngineClient::instance().subscribe(source_uuid, target,
                                                    isolate_audio, audience_audio,
@@ -768,6 +787,11 @@ void ZoomSource::subscribe()
 void ZoomSource::unsubscribe()
 {
     if (!m_subscribed) return;
+    clear_subscription_state();
+}
+
+void ZoomSource::clear_subscription_state()
+{
     ZoomEngineClient::instance().unsubscribe(source_uuid);
     if (!m_director_preview_uuid.empty())
         ZoomEngineClient::instance().unsubscribe(m_director_preview_uuid);

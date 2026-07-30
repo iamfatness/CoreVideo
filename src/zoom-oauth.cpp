@@ -30,6 +30,13 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #elif defined(__APPLE__)
 #include <CoreServices/CoreServices.h>
 #include <dlfcn.h>
+#include <QDir>
+#include <QFileInfo>
+
+// dladdr needs an address that lives inside this plugin binary so it can report
+// the plugin's own path. A pointer-to-member-function cannot be cast to void*
+// (ill-formed in C++), so use the address of this file-local free function.
+static void corevideo_oauth_module_anchor() {}
 #endif
 
 ZoomOAuthManager &ZoomOAuthManager::instance()
@@ -644,7 +651,7 @@ bool ZoomOAuthManager::register_url_scheme(QString *error)
     return true;
 #elif defined(__APPLE__)
     Dl_info info{};
-    if (!dladdr(reinterpret_cast<const void *>(&ZoomOAuthManager::register_url_scheme),
+    if (!dladdr(reinterpret_cast<const void *>(&corevideo_oauth_module_anchor),
                 &info) ||
         !info.dli_fname) {
         if (error) *error = "Could not locate the CoreVideo plugin directory.";

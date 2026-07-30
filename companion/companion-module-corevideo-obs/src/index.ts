@@ -25,7 +25,7 @@ import { SidecarClient } from './sidecar-client.js'
 export interface CoreVideoManifest {
 	config: CoreVideoConfig
 	secrets: undefined
-	actions: Record<string, CompanionActionSchema<CompanionOptionValues>>
+	actions: Record<string, CompanionActionSchema<CompanionOptionValues, void>>
 	feedbacks: Record<string, CompanionFeedbackSchema<CompanionOptionValues>>
 	variables: CompanionVariableValues
 }

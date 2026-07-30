@@ -1,7 +1,13 @@
-import type { CompanionActionDefinitions } from '@companion-module/base'
+import type {
+	CompanionActionDefinitions,
+	CompanionActionSchemaWithoutResult,
+	CompanionOptionValues,
+} from '@companion-module/base'
 import type { CoreVideoInstance } from './index.js'
 
-export function buildActions(inst: CoreVideoInstance): CompanionActionDefinitions {
+export function buildActions(
+	inst: CoreVideoInstance,
+): CompanionActionDefinitions<Record<string, CompanionActionSchemaWithoutResult<CompanionOptionValues>>> {
 	return {
 
 		// ── Zoom: Meeting ───────────────────────────────────────────────────────
@@ -68,8 +74,8 @@ export function buildActions(inst: CoreVideoInstance): CompanionActionDefinition
 			options: [
 				{ type: 'textinput', id: 'scene', label: 'Scene Name', default: '' },
 			],
-			callback: (a) => inst.obsRequest('SetCurrentProgramScene',
-				{ sceneName: a.options.scene }),
+			callback: async (a) => { await inst.obsRequest('SetCurrentProgramScene',
+				{ sceneName: a.options.scene }) },
 		},
 
 		obs_switch_scene_pick: {
@@ -81,8 +87,8 @@ export function buildActions(inst: CoreVideoInstance): CompanionActionDefinition
 					choices: inst.state.obs.scenes.map((s) => ({ id: s, label: s })),
 				},
 			],
-			callback: (a) => inst.obsRequest('SetCurrentProgramScene',
-				{ sceneName: a.options.scene }),
+			callback: async (a) => { await inst.obsRequest('SetCurrentProgramScene',
+				{ sceneName: a.options.scene }) },
 		},
 
 		// ── OBS: Recording ──────────────────────────────────────────────────────
@@ -90,25 +96,25 @@ export function buildActions(inst: CoreVideoInstance): CompanionActionDefinition
 		obs_start_record: {
 			name: 'OBS: Start Recording',
 			options: [],
-			callback: () => inst.obsRequest('StartRecord'),
+			callback: async () => { await inst.obsRequest('StartRecord') },
 		},
 
 		obs_stop_record: {
 			name: 'OBS: Stop Recording',
 			options: [],
-			callback: () => inst.obsRequest('StopRecord'),
+			callback: async () => { await inst.obsRequest('StopRecord') },
 		},
 
 		obs_toggle_record: {
 			name: 'OBS: Toggle Recording',
 			options: [],
-			callback: () => inst.obsRequest('ToggleRecord'),
+			callback: async () => { await inst.obsRequest('ToggleRecord') },
 		},
 
 		obs_pause_record: {
 			name: 'OBS: Pause / Resume Recording',
 			options: [],
-			callback: () => inst.obsRequest('ToggleRecordPause'),
+			callback: async () => { await inst.obsRequest('ToggleRecordPause') },
 		},
 
 		// ── OBS: Streaming ──────────────────────────────────────────────────────
@@ -116,19 +122,19 @@ export function buildActions(inst: CoreVideoInstance): CompanionActionDefinition
 		obs_start_stream: {
 			name: 'OBS: Start Streaming',
 			options: [],
-			callback: () => inst.obsRequest('StartStream'),
+			callback: async () => { await inst.obsRequest('StartStream') },
 		},
 
 		obs_stop_stream: {
 			name: 'OBS: Stop Streaming',
 			options: [],
-			callback: () => inst.obsRequest('StopStream'),
+			callback: async () => { await inst.obsRequest('StopStream') },
 		},
 
 		obs_toggle_stream: {
 			name: 'OBS: Toggle Streaming',
 			options: [],
-			callback: () => inst.obsRequest('ToggleStream'),
+			callback: async () => { await inst.obsRequest('ToggleStream') },
 		},
 
 		// ── OBS: Virtual Camera ─────────────────────────────────────────────────
@@ -136,19 +142,19 @@ export function buildActions(inst: CoreVideoInstance): CompanionActionDefinition
 		obs_start_vcam: {
 			name: 'OBS: Start Virtual Camera',
 			options: [],
-			callback: () => inst.obsRequest('StartVirtualCam'),
+			callback: async () => { await inst.obsRequest('StartVirtualCam') },
 		},
 
 		obs_stop_vcam: {
 			name: 'OBS: Stop Virtual Camera',
 			options: [],
-			callback: () => inst.obsRequest('StopVirtualCam'),
+			callback: async () => { await inst.obsRequest('StopVirtualCam') },
 		},
 
 		obs_toggle_vcam: {
 			name: 'OBS: Toggle Virtual Camera',
 			options: [],
-			callback: () => inst.obsRequest('ToggleVirtualCam'),
+			callback: async () => { await inst.obsRequest('ToggleVirtualCam') },
 		},
 
 		// ── OBS: Source visibility ──────────────────────────────────────────────

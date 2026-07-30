@@ -147,9 +147,12 @@ The CMake project genuinely supports configuring on all of the above (see `build
 
 GitHub Actions can validate the Windows build without the restricted Zoom
 runtime, but public client releases must include `ZoomObsEngine.exe`,
-`zoom-runtime\sdk.dll`, Qt TLS plugins, and the other bundled runtime files. If
-`ZOOM_SDK_WINDOWS_URL` is not configured as a GitHub repository secret, CI skips
-publishing a GitHub Release instead of shipping an incomplete package.
+`zoom-runtime\sdk.dll`, Qt TLS plugins, and the other bundled runtime files.
+CI fetches the license-restricted Zoom SDK from an asset on a **draft** GitHub
+release in this repository (draft releases are not publicly visible; the
+workflow token downloads the asset at build time). If the asset is missing, CI
+skips publishing a GitHub Release instead of shipping an incomplete package.
+Keep that release a draft — publishing it would make the SDK public.
 
 For fast local releases from a machine that already has the Zoom runtime, use:
 

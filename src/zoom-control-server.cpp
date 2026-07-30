@@ -599,20 +599,23 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
         const QString display_name = req.value("display_name").toString("OBS");
 
         // Accept either a numeric ID or a full Zoom URL in meeting_id.
-        const auto parsed = zoom_join_utils::parse_join_input(meeting_id.toStdString());
-        if (parsed.meeting_id.empty()) {
+        // Named distinctly from the outer `parsed` (the ParsedControlRequest
+        // for this whole dispatch call) -- they are different types and
+        // reusing the name shadowed the outer variable (cppcheck shadowVariable).
+        const auto join_input = zoom_join_utils::parse_join_input(meeting_id.toStdString());
+        if (join_input.meeting_id.empty()) {
             write_response(socket, {{"ok", false}, {"error", "invalid_meeting_id"}});
             return;
         }
         std::string passcode = passcode_in.toStdString();
-        if (passcode.empty()) passcode = parsed.passcode;
+        if (passcode.empty()) passcode = join_input.passcode;
         ZoomJoinAuthTokens tokens;
         tokens.on_behalf_token = req.value("on_behalf_token").toString(
-            QString::fromStdString(parsed.on_behalf_token)).toStdString();
+            QString::fromStdString(join_input.on_behalf_token)).toStdString();
         tokens.user_zak = req.value("user_zak").toString(
-            QString::fromStdString(parsed.user_zak)).toStdString();
+            QString::fromStdString(join_input.user_zak)).toStdString();
         tokens.app_privilege_token = req.value("app_privilege_token").toString(
-            QString::fromStdString(parsed.app_privilege_token)).toStdString();
+            QString::fromStdString(join_input.app_privilege_token)).toStdString();
         ZoomPluginSettings settings = ZoomPluginSettings::load();
         const bool needs_oauth_zak =
             tokens.user_zak.empty() &&
@@ -630,7 +633,7 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
 
             std::string zak;
             QString zak_error;
-            if (!ZoomOAuthManager::instance().fetch_zak_blocking(zak, parsed.meeting_id, &zak_error)) {
+            if (!ZoomOAuthManager::instance().fetch_zak_blocking(zak, join_input.meeting_id, &zak_error)) {
                 blog(LOG_WARNING, "[obs-zoom-plugin] Control join OAuth ZAK fetch failed: %s",
                      zak_error.toUtf8().constData());
                 write_response(socket, {
@@ -673,7 +676,7 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
              settings.use_broker_sdk_jwt() ? 1 : 0);
         const bool ok =
             ZoomEngineClient::instance().start(jwt, public_app_key) &&
-            ZoomEngineClient::instance().join(parsed.meeting_id, passcode,
+            ZoomEngineClient::instance().join(join_input.meeting_id, passcode,
                                               display_name.toStdString(),
                                               MeetingKind::Meeting, tokens);
         write_response(socket, {{"ok", ok}});

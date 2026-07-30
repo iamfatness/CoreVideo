@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QFrame>
+#include <QString>
 #include <QWidget>
 #include <atomic>
 #include <cstdint>
@@ -43,6 +44,7 @@ private:
     void apply_speaker_director_settings();
     void update_recovery_panel();
     void update_credentials_banner();
+    void show_update_banner(const QString &tag, const QString &html_url);
     void start_pending_oauth_join();
     void stop_pending_oauth_join();
 
@@ -69,6 +71,9 @@ private:
 
     // First-run credentials notice
     CvBanner    *m_credentials_banner = nullptr;
+    // Non-intrusive "a newer CoreVideo build is available" notice
+    CvBanner    *m_update_banner      = nullptr;
+    QString      m_update_url;
 
     // Join controls
     QLineEdit   *m_meeting_id   = nullptr;

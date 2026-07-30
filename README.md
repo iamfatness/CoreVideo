@@ -21,6 +21,7 @@ CoreVideo integrates the Zoom Meeting SDK into OBS - no screen capture or virtua
 Docs: **[Full Documentation & Architecture Diagrams ->](https://corevideo.iamfatness.us/documentation/)**
 Guide: **[Core Plugin Guide & Examples ->](https://corevideo.iamfatness.us/core-plugin/)**
 Operator Quickstart: **[Install, sign in, assign outputs, record ISO ->](docs/OPERATOR_QUICKSTART.md)**
+Changelog: **[Release notes & version history ->](CHANGELOG.md)**
 
 ---
 
@@ -42,6 +43,7 @@ Operator Quickstart: **[Install, sign in, assign outputs, record ISO ->](docs/OP
 - **Webinar support** - join Zoom Webinars using the dedicated SDK entry point (Webinar checkbox in control dock)
 - **Participant roster** - live list with video, mute, talking, host, co-host, raised hand, spotlight slot, and screen-sharing state
 - **Control dock** - dockable Qt panel with animated status dot, join/leave, token-type selector, recovery countdown, Active Speaker Director controls, and a routing section that opens the dedicated Output Manager; persists last meeting ID and display name across sessions
+- **Update check** - once per OBS session, a plain unauthenticated GET to the public GitHub Releases API checks for a newer CoreVideo release; if one exists, a dismissible `CvBanner` notice appears in the Zoom Control dock linking to the release page. Never auto-downloads, never blocks startup, fails completely silently offline, and can be turned off via **Settings -> Check for updates on startup**
 - **Diagnostics dock** - dockable OBS panel showing requested vs observed resolution, FPS, frame age, retry counts, recent engine debug events, ISO/FFmpeg recorder status, and a redacted support-bundle zip/folder export with a scrubbed OBS log excerpt for live troubleshooting
 - **Auto-reconnect** - exponential back-off recovery after engine crash, network drop, or unexpected disconnect
 - **Recovery cancel** - the dock, TCP API, and OSC cancel paths stop the engine,
@@ -182,6 +184,13 @@ FFmpeg runtime, creates a ZIP under `dist/`, optionally creates the NSIS setup
 EXE, and optionally uploads both assets plus their `.sha256` files to the
 matching GitHub Release. Local `-Install` refuses to copy into OBS while
 `obs64.exe` is running, matching the installer guard.
+
+`-Version` (with `-Configure`, or against an already-configured build
+directory) also passes `-DCOREVIDEO_RELEASE_VERSION` to CMake, so the built
+plugin reports that exact release tag at runtime (logs, the Diagnostics
+support bundle, and the in-app update check) instead of the `project()`
+placeholder version in `CMakeLists.txt`, which is only bumped by hand and
+drifts behind real releases.
 
 ### OBS scene smoke test
 
@@ -444,8 +453,10 @@ OBS Studio
     |-- ZoomDock              - dockable Qt panel: animated CvStatusDot, join/leave,
     |                           token-type selector, recovery countdown,
     |                           Active Speaker Director controls, routing actions;
-    |                           CvBanner first-run credentials notice; persists last
-    |                           meeting ID + display name
+    |                           CvBanner first-run credentials + update-available
+    |                           notices; persists last meeting ID + display name
+    |-- CvUpdateChecker  *    - once-per-session GitHub Releases API check (opt-out
+    |                           via Settings); async, silent-fail, no telemetry
     |-- ZoomOAuthManager      - broker-backed OAuth 2.0 PKCE: begin_authorization,
     |                           handle_redirect_url, register_url_scheme,
     |                           refresh_access_token_blocking, fetch_user_zak_blocking;
@@ -533,6 +544,9 @@ CoreVideo/
     |                                         #   RecoveryReason, ParticipantInfo, ZoomJoinAuthTokens...
     |-- cv-style.h                            # CoreVideo QSS stylesheet (dark theme, button roles)
     |-- cv-widgets.*                          # CvStatusDot (animated dot), CvBanner (notice strip)
+    |-- cv-update-check.*                     # CvUpdateChecker: once-per-session GitHub Releases
+    |                                         #   check, async + silent-fail (Qt Network)
+    |-- cv-version-compare.h                  # Dependency-free semver-ish tag comparison (unit tested)
     |-- hw-video-pipeline.*                   # FFmpeg I420->NV12 (CUDA/VAAPI/VideoToolbox/QSV)
     |-- zoom-audio-delegate.*                 # Mixed/isolated SDK audio -> OBS
     |-- zoom-audio-router.*                   # Central SDK audio fan-out

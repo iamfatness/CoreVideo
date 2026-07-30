@@ -46,7 +46,7 @@ Named output profiles (source-to-participant mappings) are saved as JSON files u
 ## 3. Data CoreVideo Does NOT Collect
 
 - CoreVideo does not collect analytics, telemetry, or usage statistics.
-- CoreVideo does not transmit meeting media or participant media to any party other than Zoom (via the Zoom Meeting SDK). Published builds contact the CoreVideo OAuth broker only for Zoom OAuth token exchange and token refresh.
+- CoreVideo does not transmit meeting media or participant media to any party other than Zoom (via the Zoom Meeting SDK). Published builds contact the CoreVideo OAuth broker only for Zoom OAuth token exchange and token refresh, and GitHub only for the opt-out-able update check described in §4.3.
 - CoreVideo does not use cookies, tracking pixels, or persistent identifiers.
 - CoreVideo does not create accounts or user profiles.
 
@@ -58,7 +58,10 @@ All meeting media and participant data flows through the Zoom Meeting SDK, which
 ### 4.2 GitHub
 The CoreVideo source code and documentation are hosted on GitHub. GitHub's [Privacy Statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement) governs data associated with repository access and GitHub Pages.
 
-### 4.3 No Other Third-Party Services
+### 4.3 Update Check (GitHub Releases API)
+Once per OBS session, CoreVideo makes a single anonymous HTTPS GET request to the public GitHub Releases API (`api.github.com/repos/iamfatness/CoreVideo/releases/latest`) to check whether a newer release is available. The request carries no meeting data, credentials, telemetry, or CoreVideo-specific identifiers - only what GitHub already logs for any anonymous HTTP request (e.g. IP address), governed by GitHub's own Privacy Statement (§4.2). The check never blocks plugin startup, never downloads or installs anything automatically, and fails silently if the request errors or the operator is offline. It can be disabled via **Tools -> Zoom Plugin Settings -> Check for updates on startup** (enabled by default).
+
+### 4.4 No Other Third-Party Services
 CoreVideo does not integrate with analytics platforms, advertising networks, or cloud storage services.
 
 ## 5. Operator Obligations

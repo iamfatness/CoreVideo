@@ -276,7 +276,8 @@ try {
             "-B", $resolvedBuildPath,
             "-G", $Generator,
             "-DCMAKE_BUILD_TYPE=$Configuration",
-            "-DZOOM_SDK_DIR=$ZoomSdkDir"
+            "-DZOOM_SDK_DIR=$ZoomSdkDir",
+            "-DCOREVIDEO_RELEASE_VERSION=$Version"
         )
         if ($DisableFfmpegHwAccel) {
             $configureArgs += "-DENABLE_FFMPEG_HW_ACCEL=OFF"
@@ -302,7 +303,7 @@ try {
     } elseif (-not (Test-Path -LiteralPath $resolvedBuildPath)) {
         throw "Build directory does not exist: $resolvedBuildPath. Rerun with -Configure and the required CMake paths, or provide -BuildPath."
     } else {
-        $reconfigureArgs = @("-B", $resolvedBuildPath)
+        $reconfigureArgs = @("-B", $resolvedBuildPath, "-DCOREVIDEO_RELEASE_VERSION=$Version")
         if ($DisableFfmpegHwAccel) {
             $reconfigureArgs += "-DENABLE_FFMPEG_HW_ACCEL=OFF"
         } elseif ($FfmpegRoot) {

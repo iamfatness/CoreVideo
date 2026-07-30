@@ -19,6 +19,26 @@ set(ZOOM_EMBED_OAUTH_AUTHORIZATION_URL "" CACHE STRING "Pre-embedded Zoom OAuth 
 set(ZOOM_EMBED_MEETING_SDK_PUBLIC_APP_KEY "y6sIWSwiTZe1JygMx4C9EQ" CACHE STRING "Pre-embedded Zoom Meeting SDK public app key")
 configure_file(src/zoom-credentials.h.in
                "${CMAKE_CURRENT_BINARY_DIR}/zoom-credentials.h" @ONLY)
+
+# The project() version above is a development placeholder that only gets
+# hand-bumped occasionally; it drifts behind the git tags actual releases
+# are cut from (releases are tagged vX.Y.Z and published via
+# scripts/release-local.ps1 / .github/workflows/release-windows.yml). Rather
+# than keep them in sync by hand, packaging entry points pass the real
+# release tag through COREVIDEO_RELEASE_VERSION, and that value - not
+# PROJECT_VERSION - is what CoreVideo reports at runtime (logs, diagnostics
+# bundle, update-availability check). Local/dev builds that don't set it
+# fall back to PROJECT_VERSION.
+set(COREVIDEO_RELEASE_VERSION "" CACHE STRING
+    "Release tag (e.g. v0.1.27) to report as the runtime plugin version. \
+Set by release-local.ps1/CI from the git tag being packaged; leave blank \
+for development builds.")
+if(COREVIDEO_RELEASE_VERSION)
+    string(REGEX REPLACE "^[vV]" "" COREVIDEO_REPORTED_VERSION "${COREVIDEO_RELEASE_VERSION}")
+else()
+    set(COREVIDEO_REPORTED_VERSION "${PROJECT_VERSION}")
+endif()
+
 configure_file(src/obs-zoom-version.h.in
                "${CMAKE_CURRENT_BINARY_DIR}/obs-zoom-version.h" @ONLY)
 
@@ -196,6 +216,7 @@ if(COREVIDEO_BUILD_PLUGIN)
         src/hw-video-pipeline.cpp
         src/cv-widgets.cpp
         src/cv-onboarding.cpp
+        src/cv-update-check.cpp
     )
 
     target_include_directories(obs-zoom-plugin PRIVATE
@@ -421,6 +442,15 @@ if(BUILD_TESTING)
     )
     add_test(NAME CoreVideoJoinInput
              COMMAND CoreVideoJoinInputTest)
+
+    add_executable(CoreVideoVersionCompareTest
+        tests/version-compare-test.cpp
+    )
+    target_include_directories(CoreVideoVersionCompareTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoVersionCompare
+             COMMAND CoreVideoVersionCompareTest)
 
     # IPC line-I/O framing and write-failure semantics (POSIX socket-based test).
     if(NOT WIN32)

@@ -39,4 +39,6 @@ private:
     QCheckBox *m_rc_on_crash_cb         = nullptr;
     QCheckBox *m_rc_on_disc_cb          = nullptr;
     QCheckBox *m_rc_on_auth_cb          = nullptr;
+    // Update check
+    QCheckBox *m_check_updates_cb       = nullptr;
 };

@@ -11,6 +11,9 @@
 #if defined(_WIN32)
 #include <windows.h>
 #include <dpapi.h>
+#elif defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#include <Security/Security.h>
 #endif
 
 static constexpr const char *SECTION = "ZoomPlugin";
@@ -38,11 +41,12 @@ static bool has_embedded_value(const char *value)
     return value && *value;
 }
 
-#if !defined(_WIN32)
-// No OS-level secret store is wired up on this platform yet (macOS Keychain /
-// Linux libsecret are tracked as follow-up work - see README.md "Security").
-// Until then, OAuth tokens are written to OBS's global.ini in plaintext, so
-// warn loudly instead of failing silently. Logged once per process.
+#if !defined(_WIN32) && !defined(__APPLE__)
+// No OS-level secret store is wired up on this platform yet (Windows uses
+// DPAPI, macOS uses the Keychain below; Linux libsecret is tracked as
+// follow-up work - see README.md "Security"). Until then, OAuth tokens are
+// written to OBS's global.ini in plaintext, so warn loudly instead of failing
+// silently. Logged once per process.
 static void warn_plaintext_token_storage_once()
 {
     static bool warned = false;
@@ -51,17 +55,123 @@ static void warn_plaintext_token_storage_once()
     blog(LOG_WARNING,
          "[obs-zoom-plugin] SECURITY: OAuth tokens are stored WITHOUT "
          "OS-level encryption on this platform (DPAPI token protection is "
-         "Windows-only). Access/refresh tokens are written in plaintext to "
-         "OBS's global.ini under the [ZoomPlugin] section. Anyone with "
-         "filesystem or config-file access can read them. See the Security "
-         "section of README.md.");
+         "Windows-only; macOS uses the Keychain). Access/refresh tokens are "
+         "written in plaintext to OBS's global.ini under the [ZoomPlugin] "
+         "section. Anyone with filesystem or config-file access can read "
+         "them. See the Security section of README.md.");
 }
 #endif
 
-static std::string protect_secret(const std::string &secret)
+#if defined(__APPLE__)
+// macOS Keychain-backed secret storage. Secrets live in the login Keychain
+// under the service "CoreVideo OBS Plugin", keyed by an account name (the
+// config key). global.ini stores only an empty placeholder, so tokens are
+// never written to disk in plaintext. Failures are loud and never fall back to
+// plaintext: a failed store leaves no token (re-auth required), and a failed
+// read returns empty (re-auth required) rather than a stale/guessed value.
+static constexpr const char *kKeychainService = "CoreVideo OBS Plugin";
+
+static bool keychain_set_secret(const char *account, const std::string &secret)
 {
-    if (secret.empty()) return {};
+    CFStringRef svc = CFStringCreateWithCString(nullptr, kKeychainService,
+                                                kCFStringEncodingUTF8);
+    CFStringRef acc = CFStringCreateWithCString(nullptr, account,
+                                                kCFStringEncodingUTF8);
+    const void *qkeys[] = {kSecClass, kSecAttrService, kSecAttrAccount};
+    const void *qvals[] = {kSecClassGenericPassword, svc, acc};
+    CFDictionaryRef query = CFDictionaryCreate(
+        nullptr, qkeys, qvals, 3, &kCFTypeDictionaryKeyCallBacks,
+        &kCFTypeDictionaryValueCallBacks);
+
+    OSStatus st;
+    bool ok;
+    if (secret.empty()) {
+        // No value to store: remove any existing item. Not-found is success.
+        st = SecItemDelete(query);
+        ok = (st == errSecSuccess || st == errSecItemNotFound);
+    } else {
+        CFDataRef data = CFDataCreate(
+            nullptr, reinterpret_cast<const UInt8 *>(secret.data()),
+            static_cast<CFIndex>(secret.size()));
+        const void *ukeys[] = {kSecValueData};
+        const void *uvals[] = {data};
+        CFDictionaryRef upd = CFDictionaryCreate(
+            nullptr, ukeys, uvals, 1, &kCFTypeDictionaryKeyCallBacks,
+            &kCFTypeDictionaryValueCallBacks);
+        st = SecItemUpdate(query, upd);
+        if (st == errSecItemNotFound) {
+            CFMutableDictionaryRef add =
+                CFDictionaryCreateMutableCopy(nullptr, 0, query);
+            CFDictionarySetValue(add, kSecValueData, data);
+            st = SecItemAdd(add, nullptr);
+            CFRelease(add);
+        }
+        ok = (st == errSecSuccess);
+        CFRelease(upd);
+        CFRelease(data);
+    }
+    if (!ok) {
+        blog(LOG_ERROR,
+             "[obs-zoom-plugin] SECURITY: Keychain store failed for '%s' "
+             "(OSStatus %d). Token was NOT persisted - re-authentication will "
+             "be required. The token is never written to disk in plaintext.",
+             account, static_cast<int>(st));
+    }
+    CFRelease(query);
+    CFRelease(acc);
+    CFRelease(svc);
+    return ok;
+}
+
+static std::string keychain_get_secret(const char *account)
+{
+    CFStringRef svc = CFStringCreateWithCString(nullptr, kKeychainService,
+                                                kCFStringEncodingUTF8);
+    CFStringRef acc = CFStringCreateWithCString(nullptr, account,
+                                                kCFStringEncodingUTF8);
+    const void *keys[] = {kSecClass, kSecAttrService, kSecAttrAccount,
+                          kSecReturnData, kSecMatchLimit};
+    const void *vals[] = {kSecClassGenericPassword, svc, acc, kCFBooleanTrue,
+                          kSecMatchLimitOne};
+    CFDictionaryRef query = CFDictionaryCreate(
+        nullptr, keys, vals, 5, &kCFTypeDictionaryKeyCallBacks,
+        &kCFTypeDictionaryValueCallBacks);
+
+    CFTypeRef result = nullptr;
+    OSStatus st = SecItemCopyMatching(query, &result);
+    std::string out;
+    if (st == errSecSuccess && result &&
+        CFGetTypeID(result) == CFDataGetTypeID()) {
+        CFDataRef data = static_cast<CFDataRef>(result);
+        out.assign(reinterpret_cast<const char *>(CFDataGetBytePtr(data)),
+                   static_cast<size_t>(CFDataGetLength(data)));
+    } else if (st != errSecItemNotFound) {
+        // A hard error (not merely "no item") - surface it; caller re-auths.
+        blog(LOG_ERROR,
+             "[obs-zoom-plugin] SECURITY: Keychain read failed for '%s' "
+             "(OSStatus %d). Re-authentication will be required.",
+             account, static_cast<int>(st));
+    }
+    if (result)
+        CFRelease(result);
+    CFRelease(query);
+    CFRelease(acc);
+    CFRelease(svc);
+    return out;
+}
+#endif
+
+// Transform a secret into the value stored in global.ini.
+//   Windows: DPAPI-encrypted base64 blob (byte-identical to before).
+//   macOS:   stored in the login Keychain under `account`; returns empty so
+//            the ini holds only a placeholder (never plaintext).
+//   Linux:   plaintext (loud one-time warning).
+// `account` is the config key; used only on macOS as the Keychain account.
+static std::string protect_secret(const std::string &secret, const char *account)
+{
 #if defined(_WIN32)
+    (void)account;
+    if (secret.empty()) return {};
     DATA_BLOB in;
     in.pbData = reinterpret_cast<BYTE *>(const_cast<char *>(secret.data()));
     in.cbData = static_cast<DWORD>(secret.size());
@@ -74,16 +184,24 @@ static std::string protect_secret(const std::string &secret)
                      static_cast<int>(out.cbData));
     LocalFree(out.pbData);
     return bytes.toBase64().toStdString();
+#elif defined(__APPLE__)
+    // Store (or clear) in the Keychain; the ini keeps only an empty
+    // placeholder. keychain_set_secret logs loudly on failure.
+    keychain_set_secret(account, secret);
+    return {};
 #else
+    (void)account;
+    if (secret.empty()) return {};
     warn_plaintext_token_storage_once();
     return secret;
 #endif
 }
 
-static std::string unprotect_secret(const char *stored)
+static std::string unprotect_secret(const char *stored, const char *account)
 {
-    if (!stored || !*stored) return {};
 #if defined(_WIN32)
+    (void)account;
+    if (!stored || !*stored) return {};
     const QByteArray encrypted = QByteArray::fromBase64(QByteArray(stored));
     if (encrypted.isEmpty()) return {};
     DATA_BLOB in;
@@ -96,7 +214,15 @@ static std::string unprotect_secret(const char *stored)
     std::string secret(reinterpret_cast<const char *>(out.pbData), out.cbData);
     LocalFree(out.pbData);
     return secret;
+#elif defined(__APPLE__)
+    // The real token lives in the Keychain; the ini value is only a
+    // placeholder. A missing/corrupt Keychain item yields empty (re-auth),
+    // never a silent stale value.
+    (void)stored;
+    return keychain_get_secret(account);
 #else
+    (void)account;
+    if (!stored || !*stored) return {};
     warn_plaintext_token_storage_once();
     return stored;
 #endif
@@ -148,7 +274,7 @@ ZoomPluginSettings ZoomPluginSettings::load()
             : ((key && *key) ? key : kEmbeddedSdkKey);
 
         const std::string protected_meeting_secret =
-            unprotect_secret(meeting_sdk_client_secret);
+            unprotect_secret(meeting_sdk_client_secret, "MeetingSdkClientSecret");
         if (!protected_meeting_secret.empty()) {
             s.sdk_secret = protected_meeting_secret;
         } else {
@@ -186,9 +312,9 @@ ZoomPluginSettings ZoomPluginSettings::load()
     if (oauth_scopes && *oauth_scopes)
         s.oauth_scopes = oauth_scopes;
     s.oauth_access_token = unprotect_secret(
-        config_get_string(cfg, SECTION, "OAuthAccessToken"));
+        config_get_string(cfg, SECTION, "OAuthAccessToken"), "OAuthAccessToken");
     s.oauth_refresh_token = unprotect_secret(
-        config_get_string(cfg, SECTION, "OAuthRefreshToken"));
+        config_get_string(cfg, SECTION, "OAuthRefreshToken"), "OAuthRefreshToken");
     s.oauth_expires_at = static_cast<int64_t>(
         config_get_int(cfg, SECTION, "OAuthExpiresAt"));
 
@@ -342,7 +468,7 @@ void ZoomPluginSettings::save() const
     config_set_string(cfg, SECTION, "SdkSecret",         saved_sdk_secret.c_str());
     config_set_string(cfg, SECTION, "MeetingSdkClientId", saved_sdk_key.c_str());
     config_set_string(cfg, SECTION, "MeetingSdkClientSecret",
-                      protect_secret(saved_sdk_secret).c_str());
+                      protect_secret(saved_sdk_secret, "MeetingSdkClientSecret").c_str());
     config_set_string(cfg, SECTION, "MeetingSdkPublicAppKey",
                       saved_public_app_key.c_str());
     config_set_string(cfg, SECTION, "MeetingSdkAuthMode",
@@ -361,9 +487,9 @@ void ZoomPluginSettings::save() const
     config_set_string(cfg, SECTION, "OAuthRedirectUri",  oauth_redirect_uri.c_str());
     config_set_string(cfg, SECTION, "OAuthScopes",       oauth_scopes.c_str());
     config_set_string(cfg, SECTION, "OAuthAccessToken",
-                      protect_secret(oauth_access_token).c_str());
+                      protect_secret(oauth_access_token, "OAuthAccessToken").c_str());
     config_set_string(cfg, SECTION, "OAuthRefreshToken",
-                      protect_secret(oauth_refresh_token).c_str());
+                      protect_secret(oauth_refresh_token, "OAuthRefreshToken").c_str());
     config_set_int   (cfg, SECTION, "OAuthExpiresAt",
                       static_cast<int>(oauth_expires_at));
     config_set_uint  (cfg, SECTION, "ControlServerPort", control_server_port);

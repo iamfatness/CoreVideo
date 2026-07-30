@@ -170,11 +170,13 @@ elseif(WIN32)
             "until the Zoom SDK bin/ runtime DLLs are available.")
     endif()
 elseif(APPLE)
-    if(EXISTS "${ZOOM_SDK_DIR}/ZoomSDK.framework")
+    # Resolve against the absolute active dir: if(EXISTS) requires an absolute
+    # path, and ZOOM_SDK_DIR is usually the relative "third_party/zoom-sdk".
+    if(EXISTS "${ZOOM_SDK_ACTIVE_DIR}/ZoomSDK.framework")
         set(BUILD_ZOOM_ENGINE ON)
     else()
         message(WARNING
-            "Zoom SDK framework not found at '${ZOOM_SDK_DIR}/ZoomSDK.framework'. "
+            "Zoom SDK framework not found at '${ZOOM_SDK_ACTIVE_DIR}/ZoomSDK.framework'. "
             "Building plugin bundle only; ZoomObsEngine will not be produced.")
     endif()
 elseif(UNIX)
@@ -284,9 +286,14 @@ if(COREVIDEO_BUILD_PLUGIN)
         target_link_libraries(obs-zoom-plugin PRIVATE
             "-framework CoreFoundation"
             "-framework Foundation"
+            "-framework Security"   # Keychain token storage (zoom-settings.cpp)
         )
-        # Symbols provided by OBS at plugin load time; no link-time libobs needed.
-        target_link_options(obs-zoom-plugin PRIVATE "-undefined dynamic_lookup")
+        # Symbols provided by OBS at plugin load time; no link-time libobs
+        # needed. The SHELL: prefix is required so CMake passes these as TWO
+        # separate linker arguments ("-undefined" "dynamic_lookup"); without it
+        # the space-containing string is forwarded as a single argument and the
+        # flag never takes effect (obs_*/blog/config_* stay undefined at link).
+        target_link_options(obs-zoom-plugin PRIVATE "SHELL:-undefined dynamic_lookup")
     endif()
 
     set_target_properties(obs-zoom-plugin PROPERTIES PREFIX "")
@@ -336,15 +343,40 @@ if(BUILD_ZOOM_ENGINE)
         target_link_libraries(ZoomSdkAuthProbe PRIVATE ${ZOOM_SDK_LIBRARY})
         set_target_properties(ZoomSdkAuthProbe PROPERTIES WIN32_EXECUTABLE FALSE)
     elseif(APPLE)
-        add_executable(ZoomObsEngine ${ENGINE_SOURCES})
-        target_include_directories(ZoomObsEngine PRIVATE ${ENGINE_INCLUDES})
+        # SCAFFOLD ONLY — the macOS engine is NOT the C++ engine. The macOS Zoom
+        # Meeting SDK (ZoomSDK.framework) is a pure Objective-C framework and
+        # exposes none of the ZOOMSDK:: C++ interfaces the shared ENGINE_SOURCES
+        # are written against (no zoom_sdk.h, no IMeetingService, ...). Those
+        # sources cannot compile here. Build a small Objective-C++ scaffold that
+        # links the real framework (validating the SDK fetch + link path) and
+        # fails loudly at runtime on any meeting request. A functional macOS
+        # engine requires an Objective-C++ rewrite — tracked as a PR gap.
+        #
+        # -F<dir> adds the framework search path for both `#import <ZoomSDK/...>`
+        # header resolution and `-framework ZoomSDK` linking.
+        add_executable(ZoomObsEngine engine/src/main-macos.mm)
+        target_include_directories(ZoomObsEngine PRIVATE src engine/src)
+        # -F must be on BOTH the compile line (so `#import <ZoomSDK/ZoomSDK.h>`
+        # resolves via the framework's Headers dir) and the link line (so
+        # `-framework ZoomSDK` finds the framework binary).
+        target_compile_options(ZoomObsEngine PRIVATE "-F${ZOOM_SDK_ACTIVE_DIR}")
         target_link_libraries(ZoomObsEngine PRIVATE
-            "-framework ${ZOOM_SDK_FRAMEWORK}"
-            "-framework CoreFoundation"
+            "-F${ZOOM_SDK_ACTIVE_DIR}"
+            "-framework ZoomSDK"
             "-framework Foundation"
         )
+        # rpath so the linker/loader can resolve ZoomSDK.framework from where the
+        # SDK was fetched (CI compile/link validation only; not a shippable rpath).
+        set_target_properties(ZoomObsEngine PROPERTIES
+            BUILD_WITH_INSTALL_RPATH OFF
+            INSTALL_RPATH "@loader_path/zoom-runtime"
+        )
+        # Relative DESTINATION (resolved against the install prefix). An
+        # absolute "${CMAKE_INSTALL_PREFIX}/..." expands to the configure-time
+        # default (/usr/local) and ignores `cmake --install --prefix`, which
+        # fails with "cannot create directory: /usr/local/...".
         install(TARGETS ZoomObsEngine
-            RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}/obs-plugins/64bit"
+            RUNTIME DESTINATION "obs-plugins/64bit"
         )
     elseif(UNIX)
         add_executable(ZoomObsEngine ${ENGINE_SOURCES})
@@ -354,7 +386,7 @@ if(BUILD_ZOOM_ENGINE)
             rt
         )
         install(TARGETS ZoomObsEngine
-            RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}/obs-plugins/64bit"
+            RUNTIME DESTINATION "obs-plugins/64bit"
         )
     endif()
 endif()

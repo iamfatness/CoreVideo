@@ -28,6 +28,10 @@ Makefile
 !third_party/**/*.so
 !third_party/**/*.dylib
 
+# Zoom SDK: fetched at build time (CI or release-local), NEVER committed.
+third_party/zoom-sdk/
+third_party/zoom-sdk-extracted/
+
 # Local package/dependency output
 node_modules/
 .npm-cache/

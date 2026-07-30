@@ -249,13 +249,25 @@ jobs:
           path: build/
           if-no-files-found: ignore
 
-  # macOS
+  # macOS (arm64) - real plugin bundle + engine scaffold
   build-macos:
-    # Host-arch compile validation only - see "Configure" step below for why
-    # plugin/engine stay OFF, and "Package as ZIP" for why this is not a
-    # "universal" build and not a shippable macOS package.
-    name: macOS Compile Validation (host arch)
+    # Builds the ACTUAL obs-zoom-plugin bundle (COREVIDEO_BUILD_PLUGIN=ON) plus
+    # the macOS ZoomObsEngine scaffold linked against the real ZoomSDK.framework
+    # (COREVIDEO_BUILD_ENGINE=ON when the SDK is fetched). This is arm64-only
+    # (host arch on the macos-14 runner) by design - NOT a universal binary and
+    # NOT a signed/notarized shippable package yet (see PR for remaining work).
+    #
+    # The engine is a SCAFFOLD: the macOS Zoom Meeting SDK is Objective-C only,
+    # so the shared C++ engine sources cannot compile here. The scaffold links
+    # the framework (validating fetch + link) and fails loudly at runtime on any
+    # meeting request. See engine/src/main-macos.mm.
+    name: macOS arm64 (plugin + engine scaffold)
     runs-on: macos-14
+    permissions:
+      # DRAFT releases are only visible to a token with write-level (push)
+      # access; contents: read cannot enumerate them, so the SDK asset lookup
+      # would silently find nothing and the engine would fall back to OFF.
+      contents: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -306,36 +318,66 @@ jobs:
           echo "=== obs-frontend-apiConfig.cmake ==="
           cat /tmp/obs-sdk/cmake/obs-frontend-api/obs-frontend-apiConfig.cmake
 
-      - name: Download Zoom macOS SDK
+      # The macOS Zoom Meeting SDK is stored as a private draft-release asset.
+      # Draft releases are invisible to the public but visible to the workflow's
+      # own GITHUB_TOKEN; the asset bytes are downloadable via the asset API with
+      # `Accept: application/octet-stream`. `gh api` handles the S3 redirect and
+      # strips the Authorization header on the redirect hop for us. Never commit
+      # the SDK; never publish this draft release.
+      - name: Download Zoom macOS SDK (private draft-release asset)
+        id: zoom_sdk
         env:
-          ZOOM_SDK_DOWNLOAD_URL: ${{ secrets.ZOOM_SDK_MACOS_URL }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ -n "$ZOOM_SDK_DOWNLOAD_URL" ]; then
-              curl -L "$ZOOM_SDK_DOWNLOAD_URL" -o zoom-sdk.zip
-              unzip zoom-sdk.zip -d third_party/zoom-sdk-extracted
-              mv "third_party/zoom-sdk-extracted/$(ls third_party/zoom-sdk-extracted | head -1)" \
-                 third_party/zoom-sdk
+          set -euo pipefail
+          asset_name="zoom-sdk-macos-7.1.5.84750.zip"
+          asset_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases" \
+              --jq ".[] | select(.draft) | .assets[] | select(.name==\"${asset_name}\") | .id" \
+              | head -1)"
+          if [ -z "${asset_id}" ]; then
+              echo "::warning::${asset_name} not found on any draft release; building plugin only (engine OFF)."
+              echo "has_zoom_sdk=false" >> "$GITHUB_OUTPUT"
+              exit 0
           fi
+          echo "Fetching ${asset_name} (asset id ${asset_id})"
+          gh api -H "Accept: application/octet-stream" \
+              "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > zoom-sdk.zip
+          echo "Downloaded $(du -h zoom-sdk.zip | cut -f1)"
+          mkdir -p third_party/zoom-sdk-extracted
+          unzip -q zoom-sdk.zip -d third_party/zoom-sdk-extracted
+          # Archive layout: <root>/ZoomSDK/ZoomSDK.framework + sibling frameworks.
+          sdk_root="$(find third_party/zoom-sdk-extracted -maxdepth 3 -type d -name ZoomSDK \
+              -exec test -d '{}/ZoomSDK.framework' ';' -print | head -1)"
+          if [ -z "${sdk_root}" ]; then
+              echo "::error::Could not locate ZoomSDK/ZoomSDK.framework in the SDK archive."
+              find third_party/zoom-sdk-extracted -maxdepth 3 -type d | head -40
+              exit 1
+          fi
+          rm -rf third_party/zoom-sdk
+          mv "${sdk_root}" third_party/zoom-sdk
+          rm -rf third_party/zoom-sdk-extracted zoom-sdk.zip
+          echo "ZoomSDK.framework present:"
+          ls -la third_party/zoom-sdk/ZoomSDK.framework | head
+          echo "has_zoom_sdk=true" >> "$GITHUB_OUTPUT"
 
       - name: Configure
-        # Plugin/engine stay OFF in CI. The engine links the Zoom SDK
-        # (ZoomSDK.framework), which is not available without the secret SDK
-        # download, so it genuinely cannot be built here. The plugin itself
-        # does not require the Zoom SDK and links OBS symbols lazily
-        # (-undefined dynamic_lookup), but enabling it would add a Qt6 AUTOMOC
-        # build of the full Qt UI that is not exercised by any packaged macOS
-        # artifact today; turning it on only to discard it would add CI time
-        # and a new failure surface without shipping anything. Left OFF
-        # deliberately; revisit if a macOS plugin artifact is ever released.
+        # COREVIDEO_BUILD_PLUGIN=ON builds the real obs-zoom-plugin bundle + the
+        # macOS OAuth callback helper. The plugin links OBS symbols lazily
+        # (-undefined dynamic_lookup), so only OBS headers + Qt6 are needed at
+        # build time. COREVIDEO_BUILD_ENGINE is ON only when the Zoom SDK was
+        # fetched above (otherwise there is no framework to link the engine
+        # scaffold against).
         run: |
           QT_PREFIX="$(brew --prefix qt@6)"
           HOST_ARCH="$(uname -m)"
+          BUILD_ENGINE="${{ steps.zoom_sdk.outputs.has_zoom_sdk == 'true' && 'ON' || 'OFF' }}"
+          echo "Building engine scaffold: ${BUILD_ENGINE}"
           cmake -B build \
               -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_OSX_ARCHITECTURES="$HOST_ARCH" \
               -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
-              -DCOREVIDEO_BUILD_PLUGIN=OFF \
-              -DCOREVIDEO_BUILD_ENGINE=OFF \
+              -DCOREVIDEO_BUILD_PLUGIN=ON \
+              -DCOREVIDEO_BUILD_ENGINE="$BUILD_ENGINE" \
               -DZOOM_SDK_DIR=third_party/zoom-sdk \
               "-DCMAKE_PREFIX_PATH=/tmp/obs-sdk;$QT_PREFIX" \
               "-DLibObs_DIR=/tmp/obs-sdk/cmake/LibObs" \
@@ -354,26 +396,22 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
       - name: Package as ZIP
-        # NOTE: this is a compile-validation artifact, not a product build.
-        # COREVIDEO_BUILD_PLUGIN and COREVIDEO_BUILD_ENGINE are OFF above, so
-        # `install` contains no obs-zoom-plugin, no ZoomObsEngine, and no
-        # OAuth callback helper - just whatever no-op install rules the
-        # top-level CMakeLists.txt runs with both targets disabled. It is
-        # NOT a "macOS universal" build (CMAKE_OSX_ARCHITECTURES is pinned to
-        # the single runner host-arch, not "arm64;x86_64"), and it is not
-        # uploaded to GitHub Releases (see the release job below). The name
-        # says "tools-unsupported" so nobody mistakes it for an installable
-        # macOS package.
+        # Compile/link-validation artifact for the macOS port. It contains the
+        # real plugin bundle, OAuth helper, and (when built) the engine
+        # SCAFFOLD - which is NOT a functional Zoom engine (see
+        # engine/src/main-macos.mm). arm64-only; unsigned/un-notarized; not a
+        # universal binary; NOT attached to GitHub Releases. The name marks it
+        # "unsigned-arm64" so nobody mistakes it for an installable package.
         run: |
           cmake --install build --prefix install
           ARCH="$(uname -m)"
-          cd install && zip -r "../CoreVideo-macOS-${ARCH}-tools-unsupported.zip" .
+          cd install && zip -r "../CoreVideo-macOS-${ARCH}-unsigned.zip" .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: CoreVideo-macOS-compile-validation
-          path: CoreVideo-macOS-*-tools-unsupported.zip
+          path: CoreVideo-macOS-*-unsigned.zip
           if-no-files-found: warn
 
       - name: Upload build logs on failure

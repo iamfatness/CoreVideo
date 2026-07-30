@@ -302,6 +302,9 @@ static QString latest_obs_log_path()
     if (appdata.isEmpty())
         return {};
     QDir logs(QDir(appdata).absoluteFilePath("obs-studio/logs"));
+#elif defined(__APPLE__)
+    QDir logs(QDir::home().absoluteFilePath(
+        "Library/Application Support/obs-studio/logs"));
 #else
     QDir logs(QDir::home().absoluteFilePath(".config/obs-studio/logs"));
 #endif

@@ -135,7 +135,12 @@ static void test_known_commands()
     expect("unknown command is rejected", !is_known_control_command("totally_bogus_cmd"));
     expect("empty command is rejected", !is_known_control_command(""));
     expect("known commands are case sensitive", !is_known_control_command("HELP"));
+    // Intentional regression guard -- known_control_commands() is a fixed
+    // literal list, so cppcheck correctly proves the count is 19 today.
+    // That's the point of this assertion: it forces this test to be updated
+    // whenever a command is added or removed.
     expect("known command list has no duplicates and no gaps",
+           // cppcheck-suppress knownConditionTrueFalse
            known_control_commands().size() == 19);
 }
 

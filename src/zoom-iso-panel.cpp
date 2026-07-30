@@ -274,8 +274,12 @@ static qint64 estimated_iso_bytes_per_second(
     const std::vector<ZoomOutputInfo> &outputs, bool record_program)
 {
     qint64 bytes_per_second = 0;
+    // Accumulation is conditional (filtered by is_iso_eligible_output), so
+    // std::accumulate would need an equivalent-or-more-convoluted lambda
+    // here with no readability gain over the plain loop.
     for (const auto &output : outputs) {
         if (is_iso_eligible_output(output))
+            // cppcheck-suppress useStlAlgorithm
             bytes_per_second += estimated_output_bytes_per_second(output);
     }
     if (record_program)

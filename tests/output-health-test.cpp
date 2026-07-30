@@ -37,7 +37,7 @@ static ZoomOutputInfo output(uint32_t participant_id = 1)
 
 static bool expect_reason(const char *name,
                           ZoomOutputInfo output_info,
-                          std::vector<ParticipantInfo> roster,
+                          const std::vector<ParticipantInfo> &roster,
                           bool raw_media_active,
                           ZoomOutputHealthReason expected)
 {

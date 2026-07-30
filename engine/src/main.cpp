@@ -1142,6 +1142,11 @@ int main()
             for (int i = 0; i < 20 && running.load(std::memory_order_acquire); ++i)
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             if (!running.load(std::memory_order_acquire)) break;
+            // cppcheck-suppress knownConditionTrueFalse ; false positive --
+            // cppcheck's bounded (--check-level=normal) branch analysis of
+            // ipc_write_line() (engine-ipc.h), which has multiple return
+            // points inside a retry loop, misreads it as always returning
+            // false. It legitimately returns true on a successful write.
             if (!EngineIpc::write(R"({"cmd":"ping"})")) break;
         }
     });

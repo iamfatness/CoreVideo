@@ -6,6 +6,7 @@
 #include <QJsonObject>
 #include <QMessageAuthenticationCode>
 #include <obs-frontend-api.h>
+#include <util/base.h>
 #include <util/config-file.h>
 #if defined(_WIN32)
 #include <windows.h>
@@ -37,6 +38,26 @@ static bool has_embedded_value(const char *value)
     return value && *value;
 }
 
+#if !defined(_WIN32)
+// No OS-level secret store is wired up on this platform yet (macOS Keychain /
+// Linux libsecret are tracked as follow-up work - see README.md "Security").
+// Until then, OAuth tokens are written to OBS's global.ini in plaintext, so
+// warn loudly instead of failing silently. Logged once per process.
+static void warn_plaintext_token_storage_once()
+{
+    static bool warned = false;
+    if (warned) return;
+    warned = true;
+    blog(LOG_WARNING,
+         "[obs-zoom-plugin] SECURITY: OAuth tokens are stored WITHOUT "
+         "OS-level encryption on this platform (DPAPI token protection is "
+         "Windows-only). Access/refresh tokens are written in plaintext to "
+         "OBS's global.ini under the [ZoomPlugin] section. Anyone with "
+         "filesystem or config-file access can read them. See the Security "
+         "section of README.md.");
+}
+#endif
+
 static std::string protect_secret(const std::string &secret)
 {
     if (secret.empty()) return {};
@@ -54,6 +75,7 @@ static std::string protect_secret(const std::string &secret)
     LocalFree(out.pbData);
     return bytes.toBase64().toStdString();
 #else
+    warn_plaintext_token_storage_once();
     return secret;
 #endif
 }
@@ -75,6 +97,7 @@ static std::string unprotect_secret(const char *stored)
     LocalFree(out.pbData);
     return secret;
 #else
+    warn_plaintext_token_storage_once();
     return stored;
 #endif
 }

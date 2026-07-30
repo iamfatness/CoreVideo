@@ -251,7 +251,10 @@ jobs:
 
   # macOS
   build-macos:
-    name: macOS Universal
+    # Host-arch compile validation only - see "Configure" step below for why
+    # plugin/engine stay OFF, and "Package as ZIP" for why this is not a
+    # "universal" build and not a shippable macOS package.
+    name: macOS Compile Validation (host arch)
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v6
@@ -351,15 +354,26 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
       - name: Package as ZIP
+        # NOTE: this is a compile-validation artifact, not a product build.
+        # COREVIDEO_BUILD_PLUGIN and COREVIDEO_BUILD_ENGINE are OFF above, so
+        # `install` contains no obs-zoom-plugin, no ZoomObsEngine, and no
+        # OAuth callback helper - just whatever no-op install rules the
+        # top-level CMakeLists.txt runs with both targets disabled. It is
+        # NOT a "macOS universal" build (CMAKE_OSX_ARCHITECTURES is pinned to
+        # the single runner host-arch, not "arm64;x86_64"), and it is not
+        # uploaded to GitHub Releases (see the release job below). The name
+        # says "tools-unsupported" so nobody mistakes it for an installable
+        # macOS package.
         run: |
           cmake --install build --prefix install
-          cd install && zip -r ../CoreVideo-macOS-universal.zip .
+          ARCH="$(uname -m)"
+          cd install && zip -r "../CoreVideo-macOS-${ARCH}-tools-unsupported.zip" .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: CoreVideo-macOS
-          path: CoreVideo-macOS-universal.zip
+          name: CoreVideo-macOS-compile-validation
+          path: CoreVideo-macOS-*-tools-unsupported.zip
           if-no-files-found: warn
 
       - name: Upload build logs on failure
@@ -483,6 +497,12 @@ jobs:
           draft: false
           prerelease: ${{ steps.release_name.outputs.pre == 'true' }}
           generate_release_notes: true
+          # Windows x64 is the only shippable artifact today. The macOS job
+          # only compiles the cross-platform sources for portability
+          # validation (COREVIDEO_BUILD_PLUGIN/ENGINE=OFF); its ZIP contains
+          # no plugin, no engine, and no OAuth helper, so it is deliberately
+          # NOT attached to the GitHub Release - attaching it would look like
+          # an installable macOS package that doesn't exist. See the
+          # build-macos job's "Package as ZIP" step for details.
           files: |
             artifacts/CoreVideo-Windows/CoreVideo-Windows-x64.zip
-            artifacts/CoreVideo-macOS/CoreVideo-macOS-universal.zip

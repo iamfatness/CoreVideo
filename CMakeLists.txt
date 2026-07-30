@@ -287,8 +287,12 @@ if(COREVIDEO_BUILD_PLUGIN)
             "-framework CoreFoundation"
             "-framework Foundation"
         )
-        # Symbols provided by OBS at plugin load time; no link-time libobs needed.
-        target_link_options(obs-zoom-plugin PRIVATE "-undefined dynamic_lookup")
+        # Symbols provided by OBS at plugin load time; no link-time libobs
+        # needed. The SHELL: prefix is required so CMake passes these as TWO
+        # separate linker arguments ("-undefined" "dynamic_lookup"); without it
+        # the space-containing string is forwarded as a single argument and the
+        # flag never takes effect (obs_*/blog/config_* stay undefined at link).
+        target_link_options(obs-zoom-plugin PRIVATE "SHELL:-undefined dynamic_lookup")
     endif()
 
     set_target_properties(obs-zoom-plugin PROPERTIES PREFIX "")

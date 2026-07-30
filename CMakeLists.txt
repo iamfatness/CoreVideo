@@ -370,8 +370,12 @@ if(BUILD_ZOOM_ENGINE)
             BUILD_WITH_INSTALL_RPATH OFF
             INSTALL_RPATH "@loader_path/zoom-runtime"
         )
+        # Relative DESTINATION (resolved against the install prefix). An
+        # absolute "${CMAKE_INSTALL_PREFIX}/..." expands to the configure-time
+        # default (/usr/local) and ignores `cmake --install --prefix`, which
+        # fails with "cannot create directory: /usr/local/...".
         install(TARGETS ZoomObsEngine
-            RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}/obs-plugins/64bit"
+            RUNTIME DESTINATION "obs-plugins/64bit"
         )
     elseif(UNIX)
         add_executable(ZoomObsEngine ${ENGINE_SOURCES})
@@ -381,7 +385,7 @@ if(BUILD_ZOOM_ENGINE)
             rt
         )
         install(TARGETS ZoomObsEngine
-            RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}/obs-plugins/64bit"
+            RUNTIME DESTINATION "obs-plugins/64bit"
         )
     endif()
 endif()

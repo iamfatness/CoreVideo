@@ -161,6 +161,19 @@ FunctionEnd
 
 Section "CoreVideo for OBS" SecCoreVideo
   Call CheckObsClosed
+
+  ; v0.1.29 and earlier left the FFmpeg runtime loose in obs-plugins\64bit,
+  ; where it collides with the same-named FFmpeg 8 DLLs OBS 32.2+ keeps in
+  ; bin\64bit and stops OBS's own obs-ffmpeg module from loading. The runtime
+  ; now lives in obs-plugins\64bit\corevideo-ffmpeg\; sweep any leftovers.
+  Delete "$INSTDIR\obs-plugins\64bit\avcodec-*.dll"
+  Delete "$INSTDIR\obs-plugins\64bit\avdevice-*.dll"
+  Delete "$INSTDIR\obs-plugins\64bit\avfilter-*.dll"
+  Delete "$INSTDIR\obs-plugins\64bit\avformat-*.dll"
+  Delete "$INSTDIR\obs-plugins\64bit\avutil-*.dll"
+  Delete "$INSTDIR\obs-plugins\64bit\swresample-*.dll"
+  Delete "$INSTDIR\obs-plugins\64bit\swscale-*.dll"
+
   SetOutPath "$INSTDIR"
   File /r "${SOURCE_DIR}\*.*"
   Call VerifyInstalledRuntime

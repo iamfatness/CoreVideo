@@ -98,10 +98,48 @@ if(ENABLE_FFMPEG_HW_ACCEL)
         add_library(corevideo_ffmpeg INTERFACE)
         target_include_directories(corevideo_ffmpeg INTERFACE
             "${COREVIDEO_AVFILTER_INC}")
-        target_link_libraries(corevideo_ffmpeg INTERFACE
-            "${COREVIDEO_AVFILTER_LIB}" "${COREVIDEO_AVUTIL_LIB}")
-        set(COREVIDEO_FFMPEG_TARGET corevideo_ffmpeg)
         set(COREVIDEO_FFMPEG_BIN_DIR "${FFMPEG_ROOT}/bin")
+        if(WIN32 AND MSVC)
+            # The prebuilt import libs are dlltool-style long-format archives,
+            # which /DELAYLOAD cannot match (LNK4199 leaves the imports
+            # static). Regenerate short-format import libs from the DLLs'
+            # export tables so the delay-load resolver in
+            # cv-ffmpeg-loader.cpp actually receives the loads.
+            file(GLOB _cv_avfilter_bin "${COREVIDEO_FFMPEG_BIN_DIR}/avfilter-*.dll")
+            file(GLOB _cv_avutil_bin "${COREVIDEO_FFMPEG_BIN_DIR}/avutil-*.dll")
+            if(NOT _cv_avfilter_bin OR NOT _cv_avutil_bin)
+                message(FATAL_ERROR "ENABLE_FFMPEG_HW_ACCEL: avfilter/avutil "
+                    "DLL not found in ${COREVIDEO_FFMPEG_BIN_DIR}")
+            endif()
+            list(GET _cv_avfilter_bin 0 _cv_avfilter_bin)
+            list(GET _cv_avutil_bin 0 _cv_avutil_bin)
+            get_filename_component(_cv_msvc_bin "${CMAKE_LINKER}" DIRECTORY)
+            set(_cv_delaylib_dir "${CMAKE_CURRENT_BINARY_DIR}/ffmpeg-delay-libs")
+            file(MAKE_DIRECTORY "${_cv_delaylib_dir}")
+            foreach(_cv_dll IN ITEMS "${_cv_avfilter_bin}" "${_cv_avutil_bin}")
+                get_filename_component(_cv_dll_we "${_cv_dll}" NAME_WE)
+                set(_cv_out_lib "${_cv_delaylib_dir}/${_cv_dll_we}.lib")
+                execute_process(
+                    COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                        -File "${CMAKE_CURRENT_SOURCE_DIR}/scripts/New-DelayImportLib.ps1"
+                        -DllPath "${_cv_dll}"
+                        -DumpbinExe "${_cv_msvc_bin}/dumpbin.exe"
+                        -LibExe "${_cv_msvc_bin}/lib.exe"
+                        -OutLib "${_cv_out_lib}"
+                    RESULT_VARIABLE _cv_gen_result
+                    OUTPUT_VARIABLE _cv_gen_output
+                    ERROR_VARIABLE _cv_gen_output)
+                if(NOT _cv_gen_result EQUAL 0)
+                    message(FATAL_ERROR "Import library regeneration failed "
+                        "for ${_cv_dll}:\n${_cv_gen_output}")
+                endif()
+                target_link_libraries(corevideo_ffmpeg INTERFACE "${_cv_out_lib}")
+            endforeach()
+        else()
+            target_link_libraries(corevideo_ffmpeg INTERFACE
+                "${COREVIDEO_AVFILTER_LIB}" "${COREVIDEO_AVUTIL_LIB}")
+        endif()
+        set(COREVIDEO_FFMPEG_TARGET corevideo_ffmpeg)
         message(STATUS "FFmpeg HW accel: using FFMPEG_ROOT=${FFMPEG_ROOT}")
     else()
         find_package(PkgConfig REQUIRED)
@@ -220,6 +258,7 @@ if(COREVIDEO_BUILD_PLUGIN)
         src/zoom-osc-server.cpp
         src/obs-utils.cpp
         src/hw-video-pipeline.cpp
+        src/cv-ffmpeg-loader.cpp
         src/cv-widgets.cpp
         src/cv-onboarding.cpp
         src/cv-update-check.cpp
@@ -268,21 +307,44 @@ if(COREVIDEO_BUILD_PLUGIN)
     if(ENABLE_FFMPEG_HW_ACCEL)
         target_link_libraries(obs-zoom-plugin PRIVATE ${COREVIDEO_FFMPEG_TARGET})
         target_compile_definitions(obs-zoom-plugin PRIVATE COREVIDEO_HW_ACCEL)
-        # Ship the FFmpeg runtime DLLs alongside the plugin on Windows so
-        # OBS's plugin loader can resolve avfilter / avutil / avcodec /
-        # swscale / swresample without polluting PATH.
+        # Ship the FFmpeg runtime in the private corevideo-ffmpeg/ subdirectory
+        # and delay-load it. OBS 32.2+ bundles FFmpeg 8 under the same DLL
+        # names; loose copies in obs-plugins/64bit made OBS's own obs-ffmpeg
+        # module bind our build and fail to load. cv-ffmpeg-loader.cpp resolves
+        # the delayed imports (in-process copies first, else the private dir).
         if(WIN32 AND COREVIDEO_FFMPEG_BIN_DIR AND EXISTS "${COREVIDEO_FFMPEG_BIN_DIR}")
             file(GLOB COREVIDEO_FFMPEG_DLLS "${COREVIDEO_FFMPEG_BIN_DIR}/*.dll")
             if(COREVIDEO_FFMPEG_DLLS)
                 add_custom_command(TARGET obs-zoom-plugin POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E make_directory
+                        "$<TARGET_FILE_DIR:obs-zoom-plugin>/corevideo-ffmpeg"
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
                         ${COREVIDEO_FFMPEG_DLLS}
-                        "$<TARGET_FILE_DIR:obs-zoom-plugin>"
+                        "$<TARGET_FILE_DIR:obs-zoom-plugin>/corevideo-ffmpeg"
                     COMMENT "Copying FFmpeg runtime DLLs for obs-zoom-plugin")
             endif()
             install(DIRECTORY "${COREVIDEO_FFMPEG_BIN_DIR}/"
-                DESTINATION "obs-plugins/64bit"
+                DESTINATION "obs-plugins/64bit/corevideo-ffmpeg"
                 FILES_MATCHING PATTERN "*.dll")
+
+            file(GLOB _cv_avfilter_dlls RELATIVE "${COREVIDEO_FFMPEG_BIN_DIR}"
+                "${COREVIDEO_FFMPEG_BIN_DIR}/avfilter-*.dll")
+            file(GLOB _cv_avutil_dlls RELATIVE "${COREVIDEO_FFMPEG_BIN_DIR}"
+                "${COREVIDEO_FFMPEG_BIN_DIR}/avutil-*.dll")
+            if(NOT _cv_avfilter_dlls OR NOT _cv_avutil_dlls)
+                message(FATAL_ERROR
+                    "ENABLE_FFMPEG_HW_ACCEL: avfilter/avutil DLL not found in "
+                    "${COREVIDEO_FFMPEG_BIN_DIR}; cannot set up delay-loading")
+            endif()
+            list(GET _cv_avfilter_dlls 0 _cv_avfilter_dll)
+            list(GET _cv_avutil_dlls 0 _cv_avutil_dll)
+            target_compile_definitions(obs-zoom-plugin PRIVATE
+                "COREVIDEO_AVFILTER_DLL=\"${_cv_avfilter_dll}\""
+                "COREVIDEO_AVUTIL_DLL=\"${_cv_avutil_dll}\"")
+            target_link_options(obs-zoom-plugin PRIVATE
+                "/DELAYLOAD:${_cv_avfilter_dll}"
+                "/DELAYLOAD:${_cv_avutil_dll}")
+            target_link_libraries(obs-zoom-plugin PRIVATE delayimp)
         endif()
     endif()
 

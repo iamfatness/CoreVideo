@@ -101,8 +101,18 @@ $ffmpegDlls = @(
     "swresample-6.dll",
     "swscale-9.dll"
 )
+
+# The FFmpeg runtime must never sit loose in obs-plugins\64bit: OBS 32.2+
+# bundles FFmpeg 8 under identical DLL names, and loose copies there stop
+# OBS's own obs-ffmpeg module from loading (breaks OBS outright).
+$looseFfmpeg = @(Get-ChildItem -LiteralPath (Join-Path $root "obs-plugins\64bit") -File -ErrorAction Stop |
+    Where-Object { $_.Name -match '^(avcodec|avdevice|avfilter|avformat|avutil|swresample|swscale)-\d+\.dll$' })
+if ($looseFfmpeg.Count -gt 0) {
+    throw "Release package validation failed. FFmpeg DLLs must live in obs-plugins\64bit\corevideo-ffmpeg, not loose in obs-plugins\64bit: $($looseFfmpeg.Name -join ', ')"
+}
+
 $ffmpegPresent = $ffmpegDlls | Where-Object {
-    Test-Path -LiteralPath (Join-Path $root "obs-plugins\64bit\$_")
+    Test-Path -LiteralPath (Join-Path $root "obs-plugins\64bit\corevideo-ffmpeg\$_")
 }
 if ($ffmpegPresent.Count -gt 0 -and $ffmpegPresent.Count -ne $ffmpegDlls.Count) {
     throw "Release package has a partial FFmpeg runtime. Present: $($ffmpegPresent -join ', ')"

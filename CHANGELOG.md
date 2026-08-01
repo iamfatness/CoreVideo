@@ -7,6 +7,22 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+### Fixed
+- **OBS 32.2 compatibility: OBS no longer breaks after installing CoreVideo.**
+  OBS Studio 32.2 upgraded its bundled FFmpeg to major version 8, which uses
+  the same DLL filenames (`avcodec-62.dll`, `avutil-60.dll`, …) as the FFmpeg
+  runtime CoreVideo shipped loose into `obs-plugins\64bit`. On OBS 32.2+ those
+  loose copies shadowed OBS's own DLLs, so OBS's built-in `obs-ffmpeg` module
+  (and CoreVideo itself) failed to load, taking down recording/streaming
+  encoders with it. The FFmpeg runtime now lives in a private
+  `obs-plugins\64bit\corevideo-ffmpeg\` directory and is delay-loaded through
+  a resolver that binds whatever FFmpeg the OBS process already has (OBS
+  32.2+) or CoreVideo's bundled copy (OBS ≤ 32.1) — never a mix. The
+  installer removes the legacy loose DLLs on upgrade; zip users should delete
+  `av*-*.dll` / `sw*-*.dll` from `obs-plugins\64bit` manually. If a usable
+  FFmpeg runtime cannot be bound, hardware-accelerated conversion falls back
+  to the CPU path with a clear log message instead of failing.
+
 ## [0.1.29] - 2026-07-30
 
 ### Fixed

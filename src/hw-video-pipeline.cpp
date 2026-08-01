@@ -1,4 +1,5 @@
 #include "hw-video-pipeline.h"
+#include "cv-ffmpeg-loader.h"
 #ifdef COREVIDEO_HW_ACCEL
 
 extern "C" {
@@ -60,6 +61,14 @@ bool HwVideoPipeline::init(HwAccelMode mode)
     shutdown();
     if (mode == HwAccelMode::None)
         return false;
+
+    // Without a usable runtime the first avfilter call would raise a
+    // delay-load exception instead of failing over to the CPU path.
+    if (!cv_ffmpeg_available()) {
+        blog(LOG_WARNING, "[obs-zoom-plugin] HW accel: %s",
+             cv_ffmpeg_runtime_describe());
+        return false;
+    }
 
     if (mode == HwAccelMode::Auto) {
         const auto it = std::find_if(std::begin(kBackends), std::end(kBackends),

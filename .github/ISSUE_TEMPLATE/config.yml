@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions
+    url: https://corevideo.io/support/
+    about: For "how do I..." questions, check the Support page and full documentation first.
+  - name: Security vulnerability
+    url: https://github.com/iamfatness/CoreVideo/blob/main/SECURITY.md
+    about: Do not open a public issue for security vulnerabilities — see the responsible disclosure process instead.

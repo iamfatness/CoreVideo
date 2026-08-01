@@ -9,21 +9,25 @@ inline void apply_output_health(std::vector<ZoomOutputInfo> &outputs,
                                 const std::vector<ParticipantInfo> &roster,
                                 bool raw_media_active)
 {
+    // Loop variables are named `out` rather than `output` because a test
+    // translation unit that includes this header (tests/output-health-test.cpp)
+    // defines a file-static helper function named `output()`; a local
+    // `output` here shadowed it (cppcheck shadowFunction).
     std::unordered_map<uint32_t, size_t> assigned_counts;
-    for (const auto &output : outputs) {
-        if (output.assignment == AssignmentMode::Participant &&
-            output.participant_id != 0) {
-            ++assigned_counts[output.participant_id];
+    for (const auto &out : outputs) {
+        if (out.assignment == AssignmentMode::Participant &&
+            out.participant_id != 0) {
+            ++assigned_counts[out.participant_id];
         }
     }
 
-    for (auto &output : outputs) {
-        output.duplicate_participant_assignment = false;
-        output.health_reason = ZoomOutputHealthReason::Ok;
-        if (output.assignment == AssignmentMode::Participant &&
-            output.participant_id != 0) {
-            output.duplicate_participant_assignment =
-                assigned_counts[output.participant_id] > 1;
+    for (auto &out : outputs) {
+        out.duplicate_participant_assignment = false;
+        out.health_reason = ZoomOutputHealthReason::Ok;
+        if (out.assignment == AssignmentMode::Participant &&
+            out.participant_id != 0) {
+            out.duplicate_participant_assignment =
+                assigned_counts[out.participant_id] > 1;
         }
     }
 
@@ -45,55 +49,64 @@ inline void apply_output_health(std::vector<ZoomOutputInfo> &outputs,
             });
     };
 
-    for (auto &output : outputs) {
+    for (auto &out : outputs) {
+        // Assignment "None" (Participant mode, participant id 0, not
+        // active-speaker) expects no media: it must not be graded as
+        // waiting/stale or offered recovery actions.
+        const bool unassigned =
+            out.assignment == AssignmentMode::Participant &&
+            out.participant_id == 0 && !out.active_speaker;
         const bool wants_media =
-            output.assignment == AssignmentMode::Participant ||
-            output.assignment == AssignmentMode::ActiveSpeaker ||
-            output.assignment == AssignmentMode::SpotlightIndex ||
-            output.assignment == AssignmentMode::ScreenShare;
+            !unassigned &&
+            (out.assignment == AssignmentMode::Participant ||
+             out.assignment == AssignmentMode::ActiveSpeaker ||
+             out.assignment == AssignmentMode::SpotlightIndex ||
+             out.assignment == AssignmentMode::ScreenShare);
         if (!raw_media_active) {
-            output.health_reason = wants_media
+            out.health_reason = wants_media
                 ? ZoomOutputHealthReason::RawMediaNotReady
                 : ZoomOutputHealthReason::Ok;
-        } else if (output.duplicate_participant_assignment) {
-            output.health_reason = ZoomOutputHealthReason::DuplicateAssignment;
-        } else if (output.assignment == AssignmentMode::ScreenShare &&
+        } else if (out.duplicate_participant_assignment) {
+            out.health_reason = ZoomOutputHealthReason::DuplicateAssignment;
+        } else if (out.assignment == AssignmentMode::ScreenShare &&
                    !screen_share_available) {
-            output.health_reason = ZoomOutputHealthReason::ScreenShareUnavailable;
-        } else if (output.assignment == AssignmentMode::ActiveSpeaker &&
-                   output.participant_id == 0 &&
+            out.health_reason = ZoomOutputHealthReason::ScreenShareUnavailable;
+        } else if (out.assignment == AssignmentMode::ActiveSpeaker &&
+                   out.participant_id == 0 &&
                    !active_video_speaker_available) {
-            output.health_reason = ZoomOutputHealthReason::ActiveSpeakerUnavailable;
-        } else if (output.assignment == AssignmentMode::SpotlightIndex &&
-                   output.spotlight_slot > 0) {
+            out.health_reason = ZoomOutputHealthReason::ActiveSpeakerUnavailable;
+        } else if (out.assignment == AssignmentMode::SpotlightIndex &&
+                   out.spotlight_slot > 0) {
             const auto spotlight_it = std::find_if(
                 roster.begin(), roster.end(),
-                [&output](const ParticipantInfo &participant) {
-                    return participant.spotlight_index == output.spotlight_slot;
+                [&out](const ParticipantInfo &participant) {
+                    return participant.spotlight_index == out.spotlight_slot;
                 });
             if (spotlight_it == roster.end()) {
-                output.health_reason = ZoomOutputHealthReason::SpotlightUnavailable;
+                out.health_reason = ZoomOutputHealthReason::SpotlightUnavailable;
             } else if (!spotlight_it->has_video) {
-                output.health_reason = ZoomOutputHealthReason::ParticipantVideoOff;
+                out.health_reason = ZoomOutputHealthReason::ParticipantVideoOff;
             }
-        } else if (output.assignment == AssignmentMode::Participant &&
-                   output.participant_id != 0) {
-            const auto participant_it = find_participant(output.participant_id);
+        } else if (out.assignment == AssignmentMode::Participant &&
+                   out.participant_id != 0) {
+            const auto participant_it = find_participant(out.participant_id);
             if (participant_it == roster.end()) {
-                output.health_reason = ZoomOutputHealthReason::ParticipantMissing;
+                out.health_reason = ZoomOutputHealthReason::ParticipantMissing;
             } else if (!participant_it->has_video) {
-                output.health_reason = ZoomOutputHealthReason::ParticipantVideoOff;
+                out.health_reason = ZoomOutputHealthReason::ParticipantVideoOff;
             }
         }
 
-        if (output.health_reason != ZoomOutputHealthReason::Ok)
+        if (out.health_reason != ZoomOutputHealthReason::Ok)
             continue;
-        if (output.video_stale) {
-            output.health_reason = ZoomOutputHealthReason::StaleFrame;
-        } else if (output.observed_width == 0 || output.observed_height == 0) {
-            output.health_reason = ZoomOutputHealthReason::WaitingForFirstFrame;
-        } else if (output_signal_below_requested(output)) {
-            output.health_reason = ZoomOutputHealthReason::ZoomDeliveredLowerResolution;
+        if (unassigned)
+            continue;
+        if (out.video_stale) {
+            out.health_reason = ZoomOutputHealthReason::StaleFrame;
+        } else if (out.observed_width == 0 || out.observed_height == 0) {
+            out.health_reason = ZoomOutputHealthReason::WaitingForFirstFrame;
+        } else if (output_signal_below_requested(out)) {
+            out.health_reason = ZoomOutputHealthReason::ZoomDeliveredLowerResolution;
         }
     }
 }

@@ -41,18 +41,17 @@
 
     #sidebar {
       position: fixed; top: 52px; left: 0; bottom: 0; width: 260px;
-      background: var(--surface); border-right: 1px solid var(--border);
-      padding: 24px 0; overflow-y: auto; z-index: 100;
+      background: var(--bg); border-right: 1px solid var(--border);
+      padding: 18px 0 32px; overflow-y: auto; z-index: 100;
     }
-    .nav-logo { padding: 0 20px 20px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
-    .nav-logo h1 { font-size: 1.1rem; color: var(--accent); font-weight: 700; }
-    .nav-logo p  { font-size: 0.75rem; color: var(--muted); margin-top: 2px; }
     #sidebar a {
-      display: block; padding: 7px 20px; color: var(--muted); text-decoration: none;
-      font-size: 0.95rem; border-left: 2px solid transparent; transition: all 0.15s;
+      display: block; padding: 6px 20px; color: var(--muted); text-decoration: none;
+      font-size: 0.88rem; border-left: 2px solid transparent; transition: color .15s, background .15s, border-color .15s;
     }
-    #sidebar a:hover, #sidebar a.active { color: var(--text); border-left-color: var(--accent); background: rgba(34,200,110,.1); }
-    .nav-section { padding: 14px 20px 4px; font-size: 0.78rem; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+    #sidebar a:hover, #sidebar a.active { color: var(--text); border-left-color: var(--accent); background: rgba(34,200,110,.08); }
+    .nav-section { padding: 18px 20px 6px; font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: .14em; color: #77828a; }
+    .nav-section-first { padding-top: 4px; }
     main { margin-left: 260px; max-width: 960px; padding: 48px 56px; }
     section[id] { scroll-margin-top: 72px; }
 
@@ -116,12 +115,16 @@
     .card h4 { margin: 0 0 6px; font-size: 0.9rem; }
     .card p { font-size: 0.8rem; color: var(--muted); margin: 0; }
 
+    .diagram-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .diagram-wrap {
       background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
-      padding: 28px; margin: 20px 0; overflow-x: auto;
+      padding: 24px; margin: 20px 0; overflow-x: auto;
     }
-    .diagram-wrap .mermaid { display: flex; justify-content: center; }
-    .diagram-caption { font-size: 0.8rem; color: var(--muted); text-align: center; margin-top: 12px; font-style: italic; }
+    .diagram-wrap .mermaid { display: flex; justify-content: safe center; min-width: min-content; }
+    .diagram-wrap .mermaid svg { max-width: none; }
+    .diagram-wrap > svg.arch { display: block; width: 100%; height: auto; min-width: 720px; }
+    .diagram-caption { font-size: 0.85rem; color: var(--muted); text-align: center; margin-top: 14px;
+      font-family: "IBM Plex Mono", ui-monospace, monospace; }
 
     table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.875rem; }
     th { background: #16191b; border: 1px solid var(--border); padding: 10px 14px; text-align: left; font-weight: 600; color: var(--muted); }
@@ -146,9 +149,16 @@
 
     section { scroll-margin-top: 24px; }
 
-    @media (max-width: 768px) {
-      #sidebar { display: none; }
-      main { margin-left: 0; padding: 24px 20px; }
+    @media (max-width: 960px) {
+      /* Sidebar becomes a horizontal on-page index instead of disappearing. */
+      #sidebar { position: static; width: auto; bottom: auto; display: flex; align-items: center;
+        overflow-x: auto; white-space: nowrap; padding: 10px 12px; gap: 2px;
+        border-right: none; border-bottom: 1px solid var(--border); }
+      .nav-section { padding: 0 6px 0 14px; }
+      .nav-section-first { padding-left: 6px; }
+      #sidebar a { padding: 6px 10px; border-left: none; border-radius: 6px; font-size: 0.82rem; }
+      #sidebar a:hover, #sidebar a.active { background: rgba(34,200,110,.12); }
+      main { margin-left: 0; padding: 28px 20px; }
       .site-topbar { flex-direction: column; align-items: flex-start; gap: 10px; }
       .site-topbar .topnav { justify-content: flex-start; }
       main > footer { margin-left: 0 !important; }
@@ -172,12 +182,8 @@
   </nav>
 </header>
 
-<nav id="sidebar">
-  <div class="nav-logo">
-    <h1>📹 CoreVideo</h1>
-    <p>OBS Plugin for Live Zoom Video</p>
-  </div>
-  <div class="nav-section">Overview</div>
+<nav id="sidebar" aria-label="On this page">
+  <div class="nav-section nav-section-first">Overview</div>
   <a href="#overview">Introduction</a>
   <a href="#features">Features</a>
   <div class="nav-section">Get Started</div>
@@ -226,6 +232,18 @@
       and TCP/OSC control APIs for full broadcast automation.
     </p>
     <div class="callout warning" style="margin-top:18px;">
+      <div class="callout-title">🧪 Beta status</div>
+      CoreVideo is in <strong>public beta</strong>. The supported platform is
+      <strong>Windows x64</strong> (installer or ZIP) — see
+      <a href="ROADMAP.md">the Roadmap</a> for known limitations and what's
+      planned next. To report a problem, use
+      <a href="https://github.com/iamfatness/CoreVideo/issues/new/choose">GitHub Issues</a>
+      (the bug report template walks you through attaching a redacted
+      <a href="#troubleshooting">support bundle</a>). New releases are announced
+      through a dismissible in-app update banner in the Zoom Control dock and on the
+      <a href="https://github.com/iamfatness/CoreVideo/releases">GitHub Releases</a> page.
+    </div>
+    <div class="callout warning" style="margin-top:18px;">
       <div class="callout-title">Zoom Raw Data Bandwidth Planning</div>
       CoreVideo uses Zoom Meeting SDK raw data APIs. Raw data access does not require Enhanced Media by itself,
       but quality and stream count follow Zoom account and app entitlements. Standard accounts are commonly
@@ -233,6 +251,7 @@
       100 Mbps. Plan around 4-6 Mbps per standard 1080p feed.
     </div>
     <div class="hero-badges" style="margin-top:16px;">
+      <span class="badge orange">Public beta</span>
       <span class="badge green">Free</span>
       <span class="badge green">OBS Studio 30+</span>
       <span class="badge orange">Windows installer</span>
@@ -375,6 +394,45 @@
         (details in <a href="#signin">Sign in with Zoom</a> below). That's it — you're ready to use it.</p>
       </div></div>
     </div>
+
+    <h3>Adding CoreVideo to your Zoom account</h3>
+    <p>
+      In Zoom's terms, an app is <strong>added</strong> to your Zoom account the first time you
+      authorize it. There are two equivalent ways to do that:
+    </p>
+    <ul>
+      <li><strong>From OBS (recommended):</strong> click <strong>Sign in with Zoom</strong> in the
+      Zoom Control dock or Tools&nbsp;→&nbsp;Zoom Plugin Settings. Your browser opens Zoom's
+      authorization page; review the requested permissions and click <strong>Allow</strong>.
+      CoreVideo is added to your account automatically and the sign-in completes back in OBS.</li>
+      <li><strong>From the Zoom App Marketplace:</strong> open the
+      <a href="https://marketplace.zoom.us/" target="_blank" rel="noopener">Zoom App Marketplace</a>,
+      search for <strong>CoreVideo</strong>, open the listing, and click <strong>Add</strong>.
+      After you click <strong>Allow</strong> on the permissions screen, install the Windows app
+      (steps above) and sign in — the account authorization is already in place.</li>
+    </ul>
+    <p>
+      Either way, CoreVideo then appears under
+      <a href="https://marketplace.zoom.us/user/installed" target="_blank" rel="noopener">Zoom App Marketplace&nbsp;→&nbsp;Manage&nbsp;→&nbsp;Added Apps</a>,
+      where you can review or <a href="#removing">remove</a> it at any time.
+    </p>
+    <div class="callout info">
+      <div class="callout-title">ℹ️ What you are granting</div>
+      CoreVideo requests only two read-only scopes: <code>user:read:user</code> (your profile /
+      display name) and <code>user:read:token</code> (a short-lived Zoom Access Key used to join
+      meetings as you). It requests no write access, no recording access, and no access to other
+      users' data. Tokens are stored encrypted on your machine — see
+      <a href="#signin">Sign in with Zoom</a>.
+    </div>
+    <div class="callout warning">
+      <div class="callout-title">⚠️ Admin-managed accounts</div>
+      If your organization restricts Marketplace apps, the authorization page may show
+      <strong>Request pre-approval</strong> instead of <strong>Allow</strong>. Send the request (or
+      ask your Zoom admin to approve CoreVideo under
+      <strong>Admin&nbsp;→&nbsp;Advanced&nbsp;→&nbsp;App&nbsp;Marketplace</strong>), then sign in
+      again once it's approved.
+    </div>
+
     <div class="callout info">
       <div class="callout-title">ℹ️ Having trouble?</div>
       See <a href="#troubleshooting">Troubleshooting</a> for installer, dock-not-showing, and sign-in
@@ -524,16 +582,183 @@
   <!-- ── Troubleshooting ────────────────────────────────────────── -->
   <section id="troubleshooting">
     <h2>Troubleshooting</h2>
+    <div class="callout warning">
+      <div class="callout-title">⚠️ Public beta</div>
+      CoreVideo is in public beta. The Windows installer is not yet code-signed, and
+      the issues below are the ones we expect to see most from new installs. If
+      something isn't covered here, see <a href="#filing-a-bug">Filing a bug</a> below.
+    </div>
     <table>
       <tr><th>Symptom</th><th>Fix</th></tr>
-      <tr><td>Zoom Control dock not visible after install</td><td>Enable it from OBS <strong>Docks&nbsp;→&nbsp;Zoom Control</strong>. Confirm OBS is version 30+ and was fully closed during install.</td></tr>
-      <tr><td>"Sign in with Zoom" doesn't complete</td><td>Finish the browser consent and allow the <code>corevideo://</code> link to open CoreVideo. Re-run sign-in from Tools&nbsp;→&nbsp;Zoom Plugin Settings.</td></tr>
-      <tr><td>Joined, but no video</td><td>Confirm the host admitted "OBS" from the waiting room, the participant has their camera on, and your Zoom account/app entitlements allow raw video (see Requirements).</td></tr>
+      <tr><td>Zoom Control dock not visible after install</td><td>Enable it from OBS <strong>Docks&nbsp;→&nbsp;Zoom Control</strong> (or <strong>Tools&nbsp;→&nbsp;Zoom Control</strong>, which creates and shows it even if you've never opened it before). Confirm OBS is version 30+ and was fully closed during install.</td></tr>
+      <tr><td>"Sign in with Zoom" doesn't complete</td><td>Finish the browser consent and allow the <code>corevideo://</code> link to open CoreVideo. Re-run sign-in from Tools&nbsp;→&nbsp;Zoom Plugin Settings. See <a href="#signin-loop">Sign-in loop</a> below for more.</td></tr>
+      <tr><td>Joined, but no video</td><td>Work through the <a href="#no-video-frames">No video frames</a> checklist below.</td></tr>
       <tr><td>Source shows color bars</td><td>The source isn't subscribed yet — assign a participant or slot in the source properties or the Output Manager.</td></tr>
       <tr><td>Choppy or low-resolution feeds</td><td>Reduce the number of concurrent 1080p feeds or the requested resolution, and check available bandwidth (~4-6 Mbps per 1080p feed).</td></tr>
+      <tr><td>Windows warns "Windows protected your PC" during install</td><td>Expected for the unsigned beta installer — see <a href="#smartscreen">SmartScreen</a> below.</td></tr>
+      <tr><td>Windows Firewall prompts for CoreVideo or ZoomObsEngine</td><td>Both control ports are loopback-only — see <a href="#firewall-prompts">Firewall prompts</a> below.</td></tr>
     </table>
-    <p>Still stuck? Export a redacted support bundle from the <strong>Zoom Diagnostics</strong> dock
-    and contact <a href="/support/">CoreVideo Support</a>.</p>
+
+    <h3 id="smartscreen">Installer blocked by Windows SmartScreen</h3>
+    <p>
+      CoreVideo's beta installer (<code>CoreVideo-Setup.exe</code>) is not yet
+      code-signed, so Windows SmartScreen will show <strong>"Windows protected your
+      PC"</strong> the first time you run it. This is expected during the beta —
+      it does not mean the download is unsafe, but you should still confirm you got
+      the file from <a href="https://corevideo.io/download">corevideo.io/download</a>
+      or the official <a href="https://github.com/iamfatness/CoreVideo/releases">GitHub Releases</a> page.
+    </p>
+    <div class="steps">
+      <div class="step"><div class="step-body">
+        <h4>1. Click "More info"</h4>
+        <p>On the SmartScreen dialog, click <strong>More info</strong>, then
+        <strong>Run anyway</strong>. If you don't see a "More info" link, your
+        organization's policy may be blocking unsigned installers entirely — check
+        with your IT administrator.</p>
+      </div></div>
+      <div class="step"><div class="step-body">
+        <h4>2. (Optional but recommended) Verify the checksum</h4>
+        <p>Every release publishes a matching <code>.sha256</code> file next to the
+        installer and ZIP. Compare it against a local hash before running the
+        installer:</p>
+        <pre><code>certutil -hashfile CoreVideo-Setup.exe SHA256</code></pre>
+        <p>or, in PowerShell:</p>
+        <pre><code>Get-FileHash .\CoreVideo-Setup.exe -Algorithm SHA256</code></pre>
+        <p>The result should match the contents of the corresponding
+        <code>.sha256</code> file from the same release.</p>
+      </div></div>
+    </div>
+
+    <h3 id="no-video-frames">"No video frames" checklist</h3>
+    <p>Work through these in order — each one rules out a different stage of the pipeline.</p>
+    <ol>
+      <li><strong>Assignment mode is set.</strong> A newly added Zoom Participant /
+      Spotlight / Screen Share source isn't subscribed to anything until you assign
+      it — in the source properties or the <strong>Zoom Output Manager</strong>
+      dock. An unassigned source shows the color-bar placeholder, not black.</li>
+      <li><strong>The participant actually has their camera on</strong> and has been
+      admitted from the waiting room (or the meeting allows guests). CoreVideo can
+      only capture video a participant is sending.</li>
+      <li><strong>Check requested vs. observed resolution in the Zoom Diagnostics
+      dock.</strong> Open <strong>Docks&nbsp;→&nbsp;Zoom Diagnostics</strong> (or
+      <strong>Tools&nbsp;→&nbsp;Zoom Diagnostics</strong>) and look at the Outputs
+      table. If <em>Observed</em> stays blank or 0×0 while <em>Requested</em> shows
+      a resolution, the subscription never came up — re-assign the source or click
+      <strong>Refresh</strong>. If observed resolution is consistently lower than
+      requested, that's usually a bandwidth or entitlement ceiling, not a bug.</li>
+      <li><strong>Confirm the engine is actually running.</strong> Every meeting
+      session launches <code>zoom-runtime\ZoomObsEngine.exe</code> as a child
+      process of OBS — all Zoom SDK access happens there, not in the plugin DLL. If
+      it isn't running (check Task Manager, or "Engine running" in a support
+      bundle's <code>summary.txt</code>), the plugin never receives frames.
+      Antivirus software occasionally quarantines or blocks a freshly-installed
+      <code>ZoomObsEngine.exe</code> — check your antivirus's quarantine/history if
+      it's missing.</li>
+      <li><strong>Bandwidth and entitlements.</strong> Your Zoom account and app
+      entitlements bound both quality and stream count: standard accounts are
+      commonly limited to ~30 Mbps incoming video (roughly 4-6 Mbps per 1080p
+      feed), while Enhanced Media / HBM can raise that to ~100 Mbps. If several
+      1080p feeds are requested at once on a standard account, expect some to
+      negotiate down or fail — see <a href="#requirements">Requirements</a>.</li>
+    </ol>
+
+    <h3 id="signin-loop">Sign-in loop / browser doesn't return to OBS</h3>
+    <p>
+      "Sign in with Zoom" opens your browser to Zoom's consent screen and expects
+      the browser to hand control back to CoreVideo afterward through the
+      <code>corevideo://</code> URL scheme. A few different things can break that
+      handoff:
+    </p>
+    <ul>
+      <li><strong>The <code>corevideo://</code> handler isn't registered yet.</strong>
+      CoreVideo registers it automatically the first time you click <strong>Sign in
+      with Zoom</strong>. If a browser prompt asks which app should open a
+      <code>corevideo://</code> link, choose CoreVideo (and "always allow" it) — if
+      you dismiss or block that prompt, the callback has nowhere to go and the
+      browser tab just sits there after you approve access in Zoom.</li>
+      <li><strong>The callback helper didn't launch.</strong> The last hop is a
+      small helper binary, <code>CoreVideoOAuthCallback.exe</code>, which the OS
+      launches for the <code>corevideo://oauth/callback</code> URL and which
+      forwards it to the plugin's local control server as an
+      <code>oauth_callback</code> command. If antivirus software or SmartScreen
+      blocked that helper from running, sign-in will look like it hung after you
+      approved access in the browser. Retry sign-in, and allow the helper if
+      prompted.</li>
+      <li><strong>Admin-managed Zoom account.</strong> If your organization
+      restricts Marketplace apps, the consent screen shows <strong>Request
+      pre-approval</strong> instead of <strong>Allow</strong> — sign-in cannot
+      complete until a Zoom admin approves CoreVideo. See <a href="#adding">Adding
+      CoreVideo to your Zoom account</a> for the pre-approval steps.</li>
+      <li>Whatever the cause, re-running sign-in from <strong>Tools&nbsp;→&nbsp;Zoom
+      Plugin Settings</strong> is safe and starts a fresh authorization attempt.</li>
+    </ul>
+
+    <h3 id="firewall-prompts">Firewall prompts for TCP 19870 / UDP 19871</h3>
+    <div class="callout info">
+      <div class="callout-title">ℹ️ Both ports are loopback-only</div>
+      The <a href="#control-api">TCP control API</a> and <a href="#osc-api">OSC
+      control API</a> both bind to <code>127.0.0.1</code> only — nothing outside
+      your machine can reach either port, regardless of how you answer a Windows
+      Firewall prompt. Windows may still prompt the first time one of these
+      servers binds, because it can't tell in advance that a listener is
+      loopback-restricted.
+    </div>
+    <p>
+      It's safe to <strong>Allow access</strong> on Private networks if you plan to
+      drive CoreVideo from an external control surface (Companion, a lighting
+      console, a custom script) running on the same machine. If you don't use the
+      TCP/OSC APIs, it's equally safe to <strong>Cancel</strong> or deny the
+      prompt — Zoom capture, sources, and sign-in do not depend on either server;
+      only external control does.
+    </p>
+
+    <h3>Zoom Diagnostics / Zoom Output Manager / other docks missing</h3>
+    <p>
+      Every CoreVideo dock — <strong>Zoom Control</strong>, <strong>Zoom
+      Diagnostics</strong>, <strong>Zoom Output Manager</strong>, and <strong>Zoom
+      ISO Recorder</strong> — can be re-shown from OBS's <strong>Docks</strong>
+      menu once it has appeared at least once. The first time, or if you closed it
+      permanently, use the matching item under the <strong>Tools</strong> menu
+      instead (e.g. <strong>Tools&nbsp;→&nbsp;Zoom Diagnostics</strong>) — the
+      Tools menu items create and show the dock even if OBS has never registered
+      it in the Docks list before.
+    </p>
+
+    <h3>Plugin not loading</h3>
+    <p>If OBS starts normally but none of the Zoom Control / Diagnostics / Output
+    Manager / ISO Recorder menu items or docks appear at all, the plugin itself
+    likely failed to load:</p>
+    <ul>
+      <li><strong>Confirm OBS Studio is 30 or newer</strong> (Help → About). CoreVideo
+      links against OBS 30's plugin API; older OBS builds cannot load it.</li>
+      <li><strong>Check the OBS log</strong> (Help&nbsp;→&nbsp;Log Files&nbsp;→&nbsp;View
+      Current Log) for a module-load failure mentioning
+      <code>obs-zoom-plugin.dll</code>. A missing-DLL style error there most often
+      means a required file didn't get installed alongside OBS — reinstall with
+      OBS fully closed (the installer refuses to proceed if <code>obs64.exe</code>
+      is still running, but a stuck background process can slip past that check).</li>
+      <li><strong>Missing Visual C++ runtime, in rare cases.</strong> CoreVideo's
+      Qt6 and plugin DLLs are built with the same MSVC toolchain as OBS Studio
+      itself, so if OBS runs at all the runtime is normally already present. On an
+      unusually minimal Windows install, installing the latest
+      <a href="https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist" target="_blank" rel="noopener">Microsoft Visual C++ x64 Redistributable</a>
+      is a reasonable thing to try if the log shows a generic DLL load failure.</li>
+    </ul>
+
+    <h3 id="filing-a-bug">Filing a bug</h3>
+    <p>
+      Still stuck? Open the <strong>Zoom Diagnostics</strong> dock
+      (<strong>Docks&nbsp;→&nbsp;Zoom Diagnostics</strong>, or
+      <strong>Tools&nbsp;→&nbsp;Zoom Diagnostics</strong>) and click <strong>Create
+      Support Bundle</strong>. It writes a redacted bundle — SDK keys, secrets,
+      OAuth tokens, and similar credentials are stripped before anything is written
+      to disk — plus a matching <code>.zip</code> under
+      <code>%AppData%\obs-studio\plugin_config\obs-zoom-plugin\support-bundles\</code>.
+      Attach that <code>.zip</code> when you
+      <a href="https://github.com/iamfatness/CoreVideo/issues/new?template=bug_report.yml">file a bug report</a>,
+      or contact <a href="/support/">CoreVideo Support</a> for anything that isn't
+      a clear bug.
+    </p>
   </section>
 
 
@@ -556,65 +781,89 @@
       which feed they subscribe to: a fixed participant, the active speaker, a
       spotlight slot, or the active screen share.
     </p>
-    <div class="diagram-wrap">
-      <div class="mermaid">
-graph TB
-    subgraph Machine["User's Machine"]
-      subgraph OBS["OBS Studio"]
-        Canvas["Canvas / Output"]
-        VSrc["Zoom Participant\nSource"]
-        Canvas --> VSrc
-      end
+    <div class="diagram-wrap" tabindex="0" role="group" aria-label="Architecture diagram (scrollable)">
+      <svg class="arch" viewBox="0 0 1140 600" role="img" aria-labelledby="fig1-t fig1-d" xmlns="http://www.w3.org/2000/svg">
+  <title id="fig1-t">CoreVideo system overview</title>
+  <desc id="fig1-d">Zoom Cloud feeds the ZoomObsEngine child process over HTTPS/WSS. The engine owns all Zoom SDK access and writes I420 video and PCM audio into shared memory, which the obs-zoom-plugin reads and hands to OBS Studio sources. Plugin and engine exchange JSON IPC over a named pipe or Unix socket. External controllers reach the plugin over TCP 19870 and OSC 19871.</desc>
+  <defs>
+    <marker id="ar-g" markerWidth="9" markerHeight="8" refX="7.5" refY="3" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L0,6 L8,3 z" fill="#22c86e"/></marker>
+    <marker id="ar-n" markerWidth="9" markerHeight="8" refX="7.5" refY="3" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L0,6 L8,3 z" fill="#8b949b"/></marker>
+    <marker id="ar-nr" markerWidth="9" markerHeight="8" refX="0.5" refY="3" orient="auto" markerUnits="userSpaceOnUse"><path d="M8,0 L8,6 L0,3 z" fill="#8b949b"/></marker>
+  </defs>
+  <style>
+    .p-title { font: 700 13px "Space Grotesk", sans-serif; letter-spacing: .1em; fill: #e9edef; }
+    .p-tag   { font: 400 9.5px "IBM Plex Mono", monospace; letter-spacing: .06em; fill: #77828a; }
+    .chip    { fill: #1a2025; stroke: #2c343b; }
+    .c-txt   { font: 400 12px "IBM Plex Mono", monospace; fill: #dbe3e8; }
+    .e-lab   { font: 600 11px "IBM Plex Mono", monospace; letter-spacing: .08em; fill: #8b949b; }
+    .e-lab.g { fill: #4fd88f; }
+    .e-sub   { font: 400 10px "IBM Plex Mono", monospace; fill: #6d777d; }
+  </style>
 
-      subgraph Plugin["obs-zoom-plugin  (no SDK dependency)"]
-        ZDock["ZoomDock\n(Control UI · CvStatusDot · CvBanner)"]
-        ZEC["ZoomEngineClient\n★ central singleton"]
-        ZRM["ZoomReconnectManager\n(auto-reconnect)"]
-        ZOAuth["ZoomOAuthManager\n(OAuth broker · ZAK fetch · DPAPI)"]
-        ZS["ZoomSource\n(ShmRegion · AssignmentMode)"]
-        ZOM["ZoomOutputManager"]
-        ZCS["ZoomControlServer :19870"]
-        ZOSC["ZoomOscServer :19871"]
+  <!-- Zoom Cloud -->
+  <rect x="16" y="210" width="160" height="128" rx="12" fill="#10151a" stroke="rgba(188,140,255,.38)" stroke-width="1.5"/>
+  <circle cx="34" cy="234" r="4" fill="#bc8cff"/>
+  <text class="p-title" x="46" y="238">ZOOM CLOUD</text>
+  <text class="p-tag" x="30" y="258">RAW A/V SOURCE</text>
+  <rect class="chip" x="30" y="274" width="132" height="30" rx="7"/>
+  <text class="c-txt" x="42" y="293">Live meeting</text>
 
-        ZDock --> ZEC
-        ZDock --> ZOAuth
-        ZRM --> ZEC
-        ZEC --> ZS
-        ZCS & ZOSC --> ZOM & ZEC
-        ZEC --> ZRM
-        ZOAuth -->|"ZAK + publicAppKey"| ZEC
-      end
+  <!-- Engine -->
+  <rect x="252" y="70" width="280" height="400" rx="12" fill="#10151a" stroke="rgba(34,200,110,.5)" stroke-width="1.5"/>
+  <circle cx="270" cy="94" r="4" fill="#22c86e"/>
+  <text class="p-title" x="282" y="98">ZOOMOBSENGINE</text>
+  <text class="p-tag" x="266" y="118">ALL ZOOM SDK ACCESS &#183; CHILD PROCESS</text>
+  <rect class="chip" x="266" y="136" width="252" height="30" rx="7"/><text class="c-txt" x="278" y="155">Zoom SDK &#183; auth / meeting / raw</text>
+  <rect class="chip" x="266" y="178" width="252" height="30" rx="7"/><text class="c-txt" x="278" y="197">Participant + spotlight tracking</text>
+  <rect class="chip" x="266" y="220" width="252" height="30" rx="7"/><text class="c-txt" x="278" y="239">EngineVideo &#8212; I420 &#8594; SHM</text>
+  <rect class="chip" x="266" y="262" width="252" height="30" rx="7"/><text class="c-txt" x="278" y="281">EngineAudio &#8212; PCM &#8594; SHM</text>
+  <rect class="chip" x="266" y="304" width="252" height="30" rx="7"/><text class="c-txt" x="278" y="323">ISO recorder &#8212; FFmpeg</text>
+  <rect class="chip" x="266" y="346" width="252" height="30" rx="7"/><text class="c-txt" x="278" y="365">IPC loop</text>
 
-      subgraph Engine["ZoomObsEngine  (ALL SDK access)"]
-        ELoop["IPC Loop"]
-        EVid["EngineVideo\n(SHM write)"]
-        EAud["EngineAudio\n(SHM write)"]
-        EPart["Participant &amp; Spotlight\ntracking"]
-        SDK["Zoom SDK\nAuth · Meeting · Webinar · Raw data"]
-        ELoop --> EVid & EAud & EPart --> SDK
-      end
+  <!-- Plugin -->
+  <rect x="632" y="70" width="280" height="400" rx="12" fill="#10151a" stroke="rgba(233,237,239,.22)" stroke-width="1.5"/>
+  <circle cx="650" cy="94" r="4" fill="#e9edef"/>
+  <text class="p-title" x="662" y="98">OBS-ZOOM-PLUGIN</text>
+  <text class="p-tag" x="646" y="118">OBS MODULE &#183; NO SDK DEPENDENCY</text>
+  <rect class="chip" x="646" y="136" width="252" height="30" rx="7"/><text class="c-txt" x="658" y="155">ZoomEngineClient &#183; singleton</text>
+  <rect class="chip" x="646" y="178" width="252" height="30" rx="7"/><text class="c-txt" x="658" y="197">ZoomSource &#215;N &#8212; SHM read</text>
+  <rect class="chip" x="646" y="220" width="252" height="30" rx="7"/><text class="c-txt" x="658" y="239">ZoomDock &#8212; control UI</text>
+  <rect class="chip" x="646" y="262" width="252" height="30" rx="7"/><text class="c-txt" x="658" y="281">OAuth manager &#8212; PKCE &#183; ZAK</text>
+  <rect class="chip" x="646" y="304" width="252" height="30" rx="7"/><text class="c-txt" x="658" y="323">Output manager &#183; reconnect</text>
+  <rect class="chip" x="646" y="346" width="252" height="30" rx="7"/><text class="c-txt" x="658" y="365">Control APIs &#8212; TCP &#183; OSC</text>
 
-      subgraph ZoomCloud["Zoom Cloud"]
-        Mtg["Live Meeting / Webinar"]
-      end
+  <!-- OBS Studio -->
+  <rect x="972" y="199" width="152" height="150" rx="12" fill="#10151a" stroke="rgba(233,237,239,.22)" stroke-width="1.5"/>
+  <circle cx="990" cy="223" r="4" fill="#e9edef"/>
+  <text class="p-title" x="1002" y="227">OBS STUDIO</text>
+  <rect class="chip" x="986" y="244" width="124" height="30" rx="7"/><text class="c-txt" x="998" y="263">Zoom sources</text>
+  <rect class="chip" x="986" y="286" width="124" height="30" rx="7"/><text class="c-txt" x="998" y="305">Program out</text>
 
-      subgraph External["External Control"]
-        Ctrl["Script / Dashboard"]
-      end
-    end
+  <!-- External control -->
+  <rect x="632" y="506" width="280" height="64" rx="12" fill="#10151a" stroke="rgba(232,164,31,.4)" stroke-width="1.5"/>
+  <circle cx="650" cy="530" r="4" fill="#e8a41f"/>
+  <text class="p-title" x="662" y="534">EXTERNAL CONTROL</text>
+  <text class="p-tag" x="646" y="554">COMPANION &#183; SCRIPTS &#183; CONSOLES</text>
 
-    OBS -->|loads| Plugin
-    VSrc <--> ZS
-    Plugin <-->|"JSON IPC\n(named pipe / Unix socket)"| ELoop
-    EVid & EAud -->|"Named Shared Memory\nI420 frames · PCM audio"| ZS
-    SDK <-->|HTTPS/WSS| Mtg
-    Ctrl <-->|"TCP :19870\nUDP OSC :19871"| ZCS & ZOSC
-    style OBS fill:#0d2137,stroke:#22c86e,color:#e6edf3
-    style Plugin fill:#1a2332,stroke:#388bfd,color:#e6edf3
-    style Engine fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
-    style ZoomCloud fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
-    style External fill:#2d2000,stroke:#d29922,color:#e6edf3
-      </div>
+  <!-- Edges -->
+  <path d="M176,274 L244,274" stroke="#8b949b" stroke-width="2" fill="none" marker-end="url(#ar-n)"/>
+  <text class="e-lab" x="210" y="252" text-anchor="middle">HTTPS</text>
+  <text class="e-sub" x="210" y="264" text-anchor="middle">/ WSS</text>
+
+  <path d="M532,250 L624,250" stroke="#22c86e" stroke-width="3.5" fill="none" marker-end="url(#ar-g)"/>
+  <text class="e-lab g" x="582" y="226" text-anchor="middle">SHARED MEMORY</text>
+  <text class="e-sub" x="582" y="240" text-anchor="middle">I420 &#183; PCM</text>
+
+  <path d="M540,340 L624,340" stroke="#8b949b" stroke-width="2" fill="none" marker-start="url(#ar-nr)" marker-end="url(#ar-n)"/>
+  <text class="e-lab" x="582" y="316" text-anchor="middle">JSON IPC</text>
+  <text class="e-sub" x="582" y="330" text-anchor="middle">pipe / socket</text>
+
+  <path d="M912,274 L964,274" stroke="#22c86e" stroke-width="3.5" fill="none" marker-end="url(#ar-g)"/>
+  <text class="e-lab g" x="938" y="258" text-anchor="middle">FRAMES</text>
+
+  <path d="M772,498 L772,478" stroke="#8b949b" stroke-width="2" fill="none" marker-start="url(#ar-nr)" marker-end="url(#ar-n)"/>
+  <text class="e-sub" x="786" y="492" text-anchor="start">TCP :19870 &#183; UDP OSC :19871</text>
+</svg>
       <div class="diagram-caption">Fig 1 - All SDK access is in ZoomObsEngine. ZoomOAuthManager handles broker-backed OAuth PKCE, token storage, and ZAK fetches. TCP and OSC provide external control without linking the Zoom SDK into OBS.</div>
     </div>
   </section>
@@ -628,39 +877,26 @@ graph TB
       New additions: <code>ZoomDock</code> (join UI), <code>ZoomReconnectManager</code>
       (auto-reconnect), and <code>HwVideoPipeline</code> (hardware I420→NV12).
     </p>
-    <div class="diagram-wrap">
+    <div class="diagram-wrap" tabindex="0" role="group" aria-label="Architecture diagram (scrollable)">
       <div class="mermaid">
 classDiagram
     class ZoomEngineClient {
         &lt;&lt;Singleton&gt;&gt;
-        +start(auth_token, public_app_key) / stop() / stop_for_reconnect()
-        +join(id, pass, name, kind: MeetingKind)
-        +leave()
-        +subscribe(uuid, pid, isolate_audio)
+        +start() / stop()
+        +join() / leave()
+        +subscribe(uuid, pid)
         +subscribe_spotlight(uuid, slot)
         +subscribe_screenshare(uuid)
-        +unsubscribe(uuid)
-        +state() MeetingState
-        +is_authenticated() bool
-        +active_speaker_id() uint32_t
-        +roster() vector~ParticipantInfo~
+        +state() / roster()
         +register_source(uuid, callbacks)
-        +add_roster_callback(key, cb)
     }
     class ZoomSource {
         +assignment : AssignmentMode
-        +participant_id : atomic~uint32_t~
-        +spotlight_slot : atomic~uint32_t~
-        +failover_participant_id : atomic~uint32_t~
         +resolution : VideoResolution
         +video_loss_mode : VideoLossMode
-        +hw_accel_override : int
-        +speaker_sensitivity_ms, speaker_hold_ms
-        +configure_output_ex(mode, pid, slot, failover, …)
+        +configure_output_ex(...)
         +on_engine_frame(w, h)
-        +on_engine_audio(byte_len)
-        +m_hk_active_on_id, m_hk_active_off_id
-        +m_hw_pipeline : HwVideoPipeline
+        +on_engine_audio(bytes)
     }
     class ZoomOAuthManager {
         &lt;&lt;Singleton&gt;&gt;
@@ -669,29 +905,19 @@ classDiagram
         +register_url_scheme() bool
         +refresh_access_token_blocking() bool
         +fetch_user_zak_blocking(zak) bool
-        -m_pending_state : QString
-        -m_pending_verifier : QString
     }
     class ZoomDock {
         +on_join_clicked()
         +on_leave_clicked()
         +on_cancel_recovery_clicked()
         +update_state_indicator()
-        +update_recovery_panel()
-        +update_credentials_banner()
-        -m_state_dot : CvStatusDot
-        -m_credentials_banner : CvBanner
-        -m_join_token_type : QComboBox
-        -m_output_table : QTableWidget
     }
     class ZoomReconnectManager {
         &lt;&lt;Singleton&gt;&gt;
         +set_policy(policy)
-        +store_session(auth_token, id, pass, name)
-        +trigger(reason: RecoveryReason)
-        +cancel()
-        +on_join_success() / on_join_failed(permanent)
-        +is_recovering() bool
+        +store_session(...)
+        +trigger(reason) / cancel()
+        +on_join_success() / on_join_failed()
         +next_retry_ms() int
     }
     class HwVideoPipeline {
@@ -742,23 +968,17 @@ classDiagram
       All Zoom SDK state (auth, meeting, roster, active speaker) is owned by the
       engine; the client tracks it locally by processing the event stream.
     </p>
-    <div class="diagram-wrap">
+    <div class="diagram-wrap" tabindex="0" role="group" aria-label="Architecture diagram (scrollable)">
       <div class="mermaid">
 graph TB
     subgraph Plugin["obs-zoom-plugin process"]
         ZEC["ZoomEngineClient\n★ singleton"]
         Reader["reader_loop()\n(dedicated thread)"]
-        S1["ZoomSource A\n(ShmRegion video+audio)"]
-        S2["ZoomSource B\n(ShmRegion video+audio)"]
+        S1["ZoomSource A"]
+        S2["ZoomSource B"]
         ZEC --> Reader
-        ZEC -->|"on_frame / on_audio callbacks"| S1
-        ZEC -->|"on_frame / on_audio callbacks"| S2
-    end
-
-    subgraph IPC["IPC"]
-        P2E["Plugin → Engine\njson cmds"]
-        E2P["Engine → Plugin\njson events"]
-        SHM["Named Shared Memory\nZoomObsPlugin_&lt;uuid&gt;"]
+        ZEC -->|"frame / audio callbacks"| S1
+        ZEC -->|"frame / audio callbacks"| S2
     end
 
     subgraph Engine["ZoomObsEngine process"]
@@ -767,14 +987,11 @@ graph TB
         SDK3 --- ETrack
     end
 
-    ZEC -- "init · join · leave · subscribe · unsubscribe · quit" --> P2E --> Engine
-    Engine -- "ready · auth_ok · joined · left · frame · audio\nparticipants · active_speaker · error" --> E2P --> Reader
-    Engine -- "write frames" --> SHM
+    ZEC -- "commands · JSON" --> SDK3
+    SDK3 -- "events · JSON" --> Reader
+    SDK3 -- "frame write" --> SHM["Named shared memory"]
     S1 & S2 -- "mmap read" --> SHM
 
-    style Plugin fill:#0d2137,stroke:#22c86e,color:#e6edf3
-    style Engine fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
-    style IPC fill:#2d1f00,stroke:#d29922,color:#e6edf3
       </div>
       <div class="diagram-caption">Fig 3 — ZoomEngineClient launches the engine, owns IPC channels, and dispatches callbacks to each ZoomSource.</div>
     </div>
@@ -826,35 +1043,23 @@ graph TB
       Frame data flows through named shared memory to avoid copying large buffers.
       <code>ZoomEngineClient</code> in the plugin abstracts all IPC details.
     </p>
-    <div class="diagram-wrap">
+    <div class="diagram-wrap" tabindex="0" role="group" aria-label="Architecture diagram (scrollable)">
       <div class="mermaid">
-graph LR
+flowchart LR
     subgraph Plugin["obs-zoom-plugin"]
         ZEC2["ZoomEngineClient"]
-        SHM_R["ZoomSource\nShmRegion (mmap read)"]
-    end
-
-    subgraph IPC["IPC Channels"]
-        P2E["Plugin → Engine\nWindows: named pipe\nmacOS/Linux: Unix socket"]
-        E2P["Engine → Plugin\nWindows: named pipe\nmacOS/Linux: Unix socket"]
-        SHM["Named Shared Memory\nZoomObsPlugin_&lt;uuid&gt;"]
+        SHM_R["ZoomSource\nSHM read (mmap)"]
     end
 
     subgraph Engine["ZoomObsEngine"]
-        ELoop["IPC Loop\n+ reader_loop"]
-        EVid["EngineVideo"]
-        EAud["EngineAudio"]
-        SDK2["Zoom SDK\n(all SDK access)"]
-        ELoop --> EVid & EAud --> SDK2
+        ELoop["IPC loop"]
+        EMed["EngineVideo · EngineAudio"]
     end
 
-    ZEC2 -- "init · join · leave · subscribe · unsubscribe · quit" --> P2E --> ELoop
-    ELoop -- "ready · auth_ok · auth_fail · joined · left · frame · audio\nparticipants · active_speaker · error" --> E2P --> ZEC2
-    EVid & EAud -- "write I420 + PCM" --> SHM --> SHM_R
+    ZEC2 -- "commands · JSON" --> ELoop
+    ELoop -- "events · JSON" --> ZEC2
+    EMed -- "I420 + PCM" --> SHM["Named shared memory"] --> SHM_R
 
-    style Plugin fill:#0d2137,stroke:#22c86e,color:#e6edf3
-    style Engine fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
-    style IPC fill:#2d1f00,stroke:#d29922,color:#e6edf3
       </div>
       <div class="diagram-caption">Fig 4 — Cross-platform IPC: JSON over named pipes (Windows) or Unix sockets (macOS/Linux); frames through shared memory.</div>
     </div>
@@ -867,9 +1072,9 @@ graph LR
 
   <section id="arch-video">
     <h2>Architecture: Video Pipeline</h2>
-    <div class="diagram-wrap">
+    <div class="diagram-wrap" tabindex="0" role="group" aria-label="Architecture diagram (scrollable)">
       <div class="mermaid">
-flowchart LR
+flowchart TB
     CAM["Participant\nCamera"] --> ZC["Zoom Cloud"]
     ZC -->|decoded I420| EV["Engine EngineVideo\n(IZoomSDKRenderer)"]
     EV -->|"write I420 to\nShmRegion"| SHM2["Shared Memory\nZoomObsPlugin_&lt;uuid&gt;"]
@@ -878,14 +1083,6 @@ flowchart LR
     ZS5 -->|"VideoLossMode:\nLastFrame / Black"| LOSS["Loss handling"]
     LOSS -->|"I420 planar\nPreviewCallback ≤5fps"| OBS_V["OBS Video\nobs_source_output_video()"]
 
-    style CAM fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
-    style ZC fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
-    style EV fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
-    style SHM2 fill:#2d1f00,stroke:#d29922,color:#e6edf3
-    style ZEC3 fill:#0d2137,stroke:#22c86e,color:#e6edf3
-    style ZS5 fill:#0d2137,stroke:#22c86e,color:#e6edf3
-    style LOSS fill:#1a2332,stroke:#388bfd,color:#e6edf3
-    style OBS_V fill:#1a2137,stroke:#388bfd,color:#e6edf3
       </div>
       <div class="diagram-caption">Fig 5 — Video path: engine writes I420 to shared memory; ZoomSource reads via ShmRegion and forwards to OBS.</div>
     </div>
@@ -909,7 +1106,7 @@ flowchart LR
       pushes it to OBS. Stereo sources use an internal <code>m_stereo_buf</code> to
       interleave channels before output.
     </p>
-    <div class="diagram-wrap">
+    <div class="diagram-wrap" tabindex="0" role="group" aria-label="Architecture diagram (scrollable)">
       <div class="mermaid">
 flowchart TB
     SDK4["Zoom SDK\n(inside engine)"]
@@ -922,10 +1119,6 @@ flowchart TB
 
     ZS6 -->|"Mono: direct S16\nStereo: interleaved"| OBS_A["OBS Audio\nobs_source_output_audio()"]
 
-    style SDK4 fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
-    style EAud2 fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
-    style SHM3 fill:#2d1f00,stroke:#d29922,color:#e6edf3
-    style ZS6 fill:#0d2137,stroke:#22c86e,color:#e6edf3
       </div>
       <div class="diagram-caption">Fig 6 — Audio pipeline: engine mixes/isolates audio in-process and delivers chunks through shared memory.</div>
     </div>
@@ -949,9 +1142,9 @@ flowchart TB
       <code>frame</code> events on the share source UUID and forwards them to OBS
       exactly like participant video.
     </p>
-    <div class="diagram-wrap">
+    <div class="diagram-wrap" tabindex="0" role="group" aria-label="Architecture diagram (scrollable)">
       <div class="mermaid">
-flowchart LR
+flowchart TB
     SC2["Screen Share\nIn Meeting"] --> ZC3["Zoom Cloud"]
     ZC3 -->|onSharingStatus| EShare["Engine\nShareDelegate\n(inside ZoomObsEngine)"]
     EShare -->|subscribe share renderer| Rnd["IZoomSDKRenderer"]
@@ -959,12 +1152,6 @@ flowchart LR
     SHM4 -->|"frame event"| ZEC4["ZoomEngineClient\n→ ZoomSource (share)"]
     ZEC4 -->|obs_source_output_video| OBS_SS["OBS Zoom\nShare Source"]
 
-    style SC2 fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
-    style ZC3 fill:#2d1a2d,stroke:#bc8cff,color:#e6edf3
-    style EShare fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
-    style SHM4 fill:#2d1f00,stroke:#d29922,color:#e6edf3
-    style ZEC4 fill:#0d2137,stroke:#22c86e,color:#e6edf3
-    style OBS_SS fill:#1a2137,stroke:#388bfd,color:#e6edf3
       </div>
       <div class="diagram-caption">Fig 7 — Screen share: engine-side delegate writes I420 to shared memory; plugin receives via ZoomEngineClient frame callback.</div>
     </div>
@@ -981,7 +1168,7 @@ flowchart LR
       the helper with <code>AuthContext.publicAppKey</code>. The engine is not
       started on module load; it is launched the first time a join is requested.
     </p>
-    <div class="diagram-wrap">
+    <div class="diagram-wrap" tabindex="0" role="group" aria-label="Architecture diagram (scrollable)">
       <div class="mermaid">
 sequenceDiagram
     participant OBS as OBS Studio
@@ -997,7 +1184,7 @@ sequenceDiagram
     PM->>ZOA2: load OAuth tokens and broker URL
     PM->>ZoomControlServer: start(control_server_port)
     PM->>ZoomOscServer: start(osc_server_port)
-    PM->>ZDock: ensure_zoom_dock() [after OBS_FRONTEND_EVENT_FINISHED_LOADING]
+    PM->>ZDock: ensure_zoom_dock() after frontend loaded
 
     Note over ZDock: User clicks Join or API sends join cmd
 
@@ -1067,7 +1254,7 @@ sequenceDiagram
     </div>
 
     <h3>Authorization Flow</h3>
-    <div class="diagram-wrap">
+    <div class="diagram-wrap" tabindex="0" role="group" aria-label="Architecture diagram (scrollable)">
       <div class="mermaid">
 sequenceDiagram
     participant User
@@ -1085,17 +1272,17 @@ sequenceDiagram
     ZOA->>Browser: QDesktopServices::openUrl(/oauth/start?state=…)
     Browser->>Broker2: GET /oauth/start
     Broker2->>Broker2: generate PKCE verifier/challenge
-    Broker2->>ZoomCloud2: redirect to /v2/authorize?client_id=…&code_challenge=…
+    Broker2->>ZoomCloud2: redirect → /v2/authorize (PKCE)
     ZoomCloud2-->>Browser: consent screen
     User->>Browser: approve
     ZoomCloud2-->>Broker2: redirect to /oauth/callback?code=…&state=…
-    Broker2-->>Browser: redirect to corevideo://oauth/callback?broker_token=…&state=…
-    Browser->>Helper: launch CoreVideoOAuthCallback (Windows: .exe / macOS: .app)
-    Helper->>ZCS2: POST {"cmd":"oauth_callback","url":"corevideo://oauth/callback?broker_token=…&state=…"}
+    Broker2-->>Browser: redirect → corevideo://oauth/callback
+    Browser->>Helper: launch CoreVideoOAuthCallback helper
+    Helper->>ZCS2: POST {"cmd":"oauth_callback", url}
     ZCS2->>ZOA: handle_redirect_url(url)
     ZOA->>ZOA: verify state matches m_pending_state
     ZOA->>Broker2: POST /oauth/redeem broker_token=…
-    Broker2->>ZoomCloud2: POST /oauth/token client_id + code_verifier, no secret
+    Broker2->>ZoomCloud2: POST /oauth/token (PKCE, no secret)
     Broker2-->>ZOA: {access_token, refresh_token, expires_in}
     ZOA->>ZOA: store tokens (DPAPI on Windows)
     Note over ZOA: Ready to fetch ZAK on next join
@@ -1104,7 +1291,7 @@ sequenceDiagram
     </div>
 
     <h3>ZAK Fetch and publicAppKey SDK Auth (before each join)</h3>
-    <div class="diagram-wrap">
+    <div class="diagram-wrap" tabindex="0" role="group" aria-label="Architecture diagram (scrollable)">
       <div class="mermaid">
 sequenceDiagram
     participant ZDock4 as ZoomDock
@@ -1114,12 +1301,12 @@ sequenceDiagram
     participant ZEC8 as ZoomEngineClient
 
     ZDock4->>ZOA2: fetch_user_zak_blocking(zak)
-    ZOA2->>ZOA2: check token expiry\nrefresh_access_token_blocking() if expired
-    ZOA2->>ZoomAPI: GET /v2/users/me/token?type=zak\nAuthorization: Bearer {access_token}
+    ZOA2->>ZOA2: refresh access token if expired
+    ZOA2->>ZoomAPI: GET /users/me/token?type=zak
     ZoomAPI-->>ZOA2: signed-in user ZAK
     ZOA2-->>ZDock4: zak string
-    ZDock4->>ZEC8: start(public_app_key), then join(id, pass, name, kind, zak)
-    ZEC8->>Engine: {"cmd":"init","public_app_key":"…"} then {"cmd":"join","meeting_id":"…","user_zak":"…"}
+    ZDock4->>ZEC8: start(publicAppKey) → join(…, zak)
+    ZEC8->>Engine: {"cmd":"init"} then {"cmd":"join"}
       </div>
       <div class="diagram-caption">Fig 8c - A user ZAK is fetched before each join using the stored OAuth access token; token refresh is automatic when expired.</div>
     </div>
@@ -1149,7 +1336,7 @@ sequenceDiagram
       Joining is centralized in <code>ZoomDock</code> (or the TCP/OSC control APIs) —
       not in individual sources. Sources subscribe to the already-joined meeting.
     </p>
-    <div class="diagram-wrap">
+    <div class="diagram-wrap" tabindex="0" role="group" aria-label="Architecture diagram (scrollable)">
       <div class="mermaid">
 sequenceDiagram
     participant U as User / Control API
@@ -1159,23 +1346,23 @@ sequenceDiagram
     participant ZS3 as ZoomSource
     participant Engine as ZoomObsEngine
 
-    U->>ZDock2: click Join (meeting_id, passcode, display_name, [webinar])
+    U->>ZDock2: click Join
     ZDock2->>ZRM2: store_session(auth_token, id, pass, name)
-    ZDock2->>ZEC6: start(public_app_key) [launches engine if not running]
+    ZDock2->>ZEC6: start() — launch engine if needed
     ZDock2->>ZEC6: join(id, pass, name, kind=Meeting|Webinar)
-    ZEC6->>Engine: {"cmd":"join","meeting_id":"…","kind":"meeting|webinar"}
+    ZEC6->>Engine: {"cmd":"join", kind}
     Engine-->>ZEC6: {"cmd":"joined"}
     ZEC6-->>ZRM2: on_join_success()
 
     Note over ZS3: ZoomSource.activate() when OBS activates source
 
-    ZS3->>ZEC6: subscribe(uuid, pid, isolate) OR subscribe_spotlight(uuid, slot)
-    ZEC6->>Engine: {"cmd":"subscribe","source_uuid":"…","participant_id":N}
+    ZS3->>ZEC6: subscribe() / subscribe_spotlight()
+    ZEC6->>Engine: {"cmd":"subscribe", uuid, pid}
 
     loop Live capture
         Engine-->>ZEC6: {"cmd":"frame","uuid":"…","w":W,"h":H}
         ZEC6-->>ZS3: on_engine_frame(w, h)
-        ZS3->>ZS3: read I420 from video shm, process with HwVideoPipeline if enabled
+        ZS3->>ZS3: read I420 from SHM (+HW pipeline)
         ZS3->>OBS: obs_source_output_video()
         Engine-->>ZEC6: {"cmd":"audio","uuid":"…","byte_len":B}
         ZEC6-->>ZS3: on_engine_audio(byte_len)
@@ -1259,7 +1446,7 @@ sequenceDiagram
       This mirrors the ZoomISO "Spotlight 1/2/3" output model.
     </p>
 
-    <div class="diagram-wrap">
+    <div class="diagram-wrap" tabindex="0" role="group" aria-label="Architecture diagram (scrollable)">
       <div class="mermaid">
 flowchart LR
     subgraph Source["ZoomSource (AssignmentMode)"]
@@ -1276,9 +1463,6 @@ flowchart LR
 
     ZEC7 -->|JSON IPC| Engine2["ZoomObsEngine\n(resolves → SDK renderer)"]
 
-    style Source fill:#0d2137,stroke:#22c86e,color:#e6edf3
-    style ZEC7 fill:#1a2332,stroke:#388bfd,color:#e6edf3
-    style Engine2 fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
       </div>
       <div class="diagram-caption">Assignment modes map to different ZoomEngineClient subscribe calls; the engine resolves each to the correct SDK renderer.</div>
     </div>
@@ -1328,7 +1512,7 @@ flowchart LR
       <code>obs_queue_task(OBS_TASK_UI, …)</code> to re-evaluate on the OBS UI thread.
     </p>
 
-    <div class="diagram-wrap">
+    <div class="diagram-wrap" tabindex="0" role="group" aria-label="Architecture diagram (scrollable)">
       <div class="mermaid">
 stateDiagram-v2
     [*] --> Idle : active_speaker_mode = off
@@ -1360,7 +1544,7 @@ stateDiagram-v2
     </div>
 
     <h3>Switch Sequence</h3>
-    <div class="diagram-wrap">
+    <div class="diagram-wrap" tabindex="0" role="group" aria-label="Architecture diagram (scrollable)">
       <div class="mermaid">
 sequenceDiagram
     participant ZP as ZoomEngineClient\n(roster_callback)
@@ -1369,8 +1553,8 @@ sequenceDiagram
     participant UI as OBS UI Thread
     participant VD as VideoDelegate
 
-    ZP-->>ZS4: roster callback\n(active_speaker_id from engine event = X)
-    ZS4->>ZS4: on_active_speaker_changed()\npending = X, candidate_since = now
+    ZP-->>ZS4: roster callback: active_speaker = X
+    ZS4->>ZS4: pending = X, start hold timer
 
     alt delay == 0
         ZS4->>ZS4: do_speaker_switch(X)
@@ -1529,7 +1713,7 @@ sequenceDiagram
       position in OBS. It is the primary UI for meeting management.
     </p>
 
-    <div class="diagram-wrap">
+    <div class="diagram-wrap" tabindex="0" role="group" aria-label="Architecture diagram (scrollable)">
       <img src="/core-plugin/images/corevideo-obs-workspace.svg" alt="CoreVideo OBS workspace with Zoom Control dock" style="max-width:100%;height:auto;">
       <div class="diagram-caption">CoreVideo runs as normal OBS UI: the Zoom Control dock manages meeting state and raw media while Zoom Participant sources render inside OBS scenes.</div>
     </div>
@@ -1731,7 +1915,7 @@ sequenceDiagram
       <tr><td><code>ZoomOutputProfile::remove(name)</code></td><td>Deletes profile JSON file</td></tr>
     </table>
 
-    <div class="diagram-wrap">
+    <div class="diagram-wrap" tabindex="0" role="group" aria-label="Architecture diagram (scrollable)">
       <img src="/core-plugin/images/corevideo-output-manager.svg" alt="CoreVideo Output Manager with participant and output mapping" style="max-width:100%;height:auto;">
       <div class="diagram-caption">The Output Manager mirrors the dock assignment controls and remains useful for named profile save/load workflows.</div>
     </div>
@@ -1820,7 +2004,7 @@ sequenceDiagram
     </table>
 
     <h3>Zoom Participant Source Properties</h3>
-    <div class="diagram-wrap">
+    <div class="diagram-wrap" tabindex="0" role="group" aria-label="Architecture diagram (scrollable)">
       <img src="/core-plugin/images/corevideo-source-properties.svg" alt="CoreVideo Zoom Participant source properties" style="max-width:100%;height:auto;">
       <div class="diagram-caption">Each Zoom Participant source keeps its own assignment mode, audio routing, requested resolution, and failover behavior.</div>
     </div>
@@ -1887,7 +2071,7 @@ sequenceDiagram
       state in the panel and TCP status payload.
     </p>
 
-    <div class="diagram-wrap">
+    <div class="diagram-wrap" tabindex="0" role="group" aria-label="Architecture diagram (scrollable)">
       <img src="/core-plugin/images/iso-recording-flow.svg" alt="CoreVideo ISO recording flow" style="max-width:100%;height:auto;">
       <div class="diagram-caption">Assignments resolve the participant IDs. Each assigned Zoom source can feed an FFmpeg writer for video/audio ISO files while OBS continues to own the program output.</div>
     </div>
@@ -1979,42 +2163,6 @@ sequenceDiagram
   </footer>
 </main>
 
-<script>
-  mermaid.initialize({
-    startOnLoad: true,
-    theme: 'dark',
-    themeVariables: {
-      darkMode: true,
-      background: '#0d1117',
-      mainBkg: '#1e2a35', primaryColor: '#1e2a35', primaryTextColor: '#eaf2f6',
-      primaryBorderColor: '#2fd07f', nodeBorder: '#2fd07f',
-      secondaryColor: '#26313c', tertiaryColor: '#1a222b',
-      lineColor: '#aeb7bf', textColor: '#eaf2f6', nodeTextColor: '#eaf2f6',
-      edgeLabelBackground: '#0d1117', clusterBkg: '#161d25', clusterBorder: '#3a4650', titleColor: '#eaf2f6',
-      actorBkg: '#1e2a35', actorBorder: '#2fd07f', actorTextColor: '#ffffff',
-      actorLineColor: '#aeb7bf', signalColor: '#aeb7bf', signalTextColor: '#eaf2f6',
-      noteBkgColor: '#2a3742', noteTextColor: '#eaf2f6', noteBorderColor: '#4a5762',
-      activationBorderColor: '#2fd07f', activationBkgColor: '#183a2a',
-      sequenceNumberColor: '#0d1117', labelBoxBkgColor: '#1e2a35',
-      labelBoxBorderColor: '#4a5762', labelTextColor: '#eaf2f6', loopTextColor: '#eaf2f6',
-      fontFamily: 'Space Grotesk, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-    },
-    flowchart: { curve: 'basis', htmlLabels: true },
-    sequence: { actorMargin: 60, messageMargin: 30 },
-  });
-
-  const sections = document.querySelectorAll('section[id]');
-  const navLinks = document.querySelectorAll('#sidebar a');
-  const observer = new IntersectionObserver(entries => {
-    entries.forEach(e => {
-      if (e.isIntersecting) {
-        navLinks.forEach(a => a.classList.remove('active'));
-        const active = document.querySelector(`#sidebar a[href="#${e.target.id}"]`);
-        if (active) active.classList.add('active');
-      }
-    });
-  }, { rootMargin: '-20% 0px -70% 0px' });
-  sections.forEach(s => observer.observe(s));
-</script>
+<script src="/assets/docs-init.js"></script>
 </body>
 </html>

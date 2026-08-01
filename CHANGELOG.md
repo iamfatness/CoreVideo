@@ -7,10 +7,99 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.31] - 2026-08-01
+
+### Fixed
+- **Hardware-accelerated video conversion works on OBS 32.2+ again.** v0.1.30
+  avoided the OBS 32.2 FFmpeg collision by binding the FFmpeg build OBS
+  already had in the process — but OBS's slim build has no `scale_cuda` or
+  `vpp_qsv`, so hardware conversion silently fell back to the CPU path. The
+  bundled runtime is now renamed to globally unique DLL names
+  (`cvfilter-11.dll`, `cvutil-60.dll`, …, patched in the PE name strings —
+  the same effect as an FFmpeg `--build-suffix` build), so CoreVideo always
+  loads its own full-featured FFmpeg on every OBS version with zero
+  possibility of colliding with OBS's. A new automated test loads the
+  renamed runtime, asserts `scale_cuda`/`vpp_qsv` are present, and asserts
+  no original-named FFmpeg module leaks into the process.
+
+## [0.1.30] - 2026-07-31
+
+### Fixed
+- **OBS 32.2 compatibility: OBS no longer breaks after installing CoreVideo.**
+  OBS Studio 32.2 upgraded its bundled FFmpeg to major version 8, which uses
+  the same DLL filenames (`avcodec-62.dll`, `avutil-60.dll`, …) as the FFmpeg
+  runtime CoreVideo shipped loose into `obs-plugins\64bit`. On OBS 32.2+ those
+  loose copies shadowed OBS's own DLLs, so OBS's built-in `obs-ffmpeg` module
+  (and CoreVideo itself) failed to load, taking down recording/streaming
+  encoders with it. The FFmpeg runtime now lives in a private
+  `obs-plugins\64bit\corevideo-ffmpeg\` directory and is delay-loaded through
+  a resolver that binds whatever FFmpeg the OBS process already has (OBS
+  32.2+) or CoreVideo's bundled copy (OBS ≤ 32.1) — never a mix. The
+  installer removes the legacy loose DLLs on upgrade; zip users should delete
+  `av*-*.dll` / `sw*-*.dll` from `obs-plugins\64bit` manually. If a usable
+  FFmpeg runtime cannot be bound, hardware-accelerated conversion falls back
+  to the CPU path with a clear log message instead of failing.
+
+## [0.1.29] - 2026-07-30
+
+### Fixed
+- Setting an output's assignment to "None" now actually stops the previous
+  feed: the engine subscription is torn down and the signal readout clears.
+  Previously the old participant kept streaming into shared memory (a live
+  signal on a "None" row) and could not be cleaned up without restarting
+  the engine.
+- Unassigned outputs are no longer graded as stale/waiting or offered
+  Recover actions in the Output Manager.
+- Sign-in and join now always present production Zoom credentials: the
+  production OAuth broker URL is baked into every build (locally-built
+  releases previously embedded a blank broker identity, which allowed
+  leftover developer credential overrides on tester machines), and the
+  broker's Meeting SDK token service was updated to production credentials
+  server-side.
+
+## [0.1.28] - 2026-07-30
+
+First public beta release.
+
 ### Added
 - In-app update check: the Zoom Control dock shows a non-intrusive banner
   when a newer CoreVideo release is available, with a toggle in Settings to
   disable the startup check.
+- The plugin version is now shown in the Settings dialog.
+- Beta support surface: GitHub bug-report/feature-request templates (with
+  support-bundle instructions), a much larger Troubleshooting section in the
+  docs, and a documented flow for adding/removing CoreVideo on a Zoom account.
+- macOS groundwork: the real plugin and OAuth helper now build on Apple
+  Silicon CI and OAuth tokens use the macOS Keychain — no macOS packages are
+  published yet; Windows x64 remains the supported platform.
+
+### Fixed
+- Frozen-frame-forever after an engine crash/restart: shared-memory regions
+  now carry a generation stamp so sources re-attach automatically, shared
+  memory failures are surfaced as visible errors instead of dropped
+  silently, and region counts are capped with a clear "capacity" error.
+- Changing the OSC port no longer leaks the old poll timer and stack
+  duplicate handlers.
+- Leaving a meeting now clears the stored recovery session (including join
+  tokens) instead of keeping it in memory until the next join.
+- Bitfocus Companion module builds again against @companion-module/base 2.1.
+
+### Changed
+- Sign-in/join now runs through one centralized, unit-tested decision path:
+  every join attempt logs a single `[join-decision]` line and failures map
+  to distinct, actionable messages (expired token, wrong environment,
+  missing approval, and so on).
+- Zoom Meeting SDK updated from 7.0.2 to 7.1.5.
+- README documents the honest platform support matrix, and non-Windows
+  builds now log a prominent warning that OAuth tokens are stored without
+  OS-level encryption (Windows DPAPI is unchanged).
+- Documentation architecture diagrams rebuilt for readability (dark theme,
+  legible text, a hand-drawn system overview), fixing a content-security
+  policy issue that made production render them with Mermaid's light theme.
+- Test suite grew from 2 to 17 suites (IPC hardening, control/OSC parsing,
+  reconnect backoff and cancellation, join decisions, version comparison),
+  and the dock lifecycle smoke script now asserts reopen and shutdown
+  ordering.
 
 ## [0.1.27] - 2026-07-29
 

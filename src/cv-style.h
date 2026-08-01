@@ -149,6 +149,7 @@ QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal { width: 0; }
 /* ─── Named Widgets ─────────────────────────────────────────────────────────── */
 QLabel#speakerValue { color: #999999; font-style: italic; }
 QLabel#errorLabel   { color: #ee5555; font-size: 11px; }
+QLabel[role="muted"] { color: #8a8a8a; font-size: 11px; }
 
 QFrame#recoveryPanel {
     background-color: rgba(240,160,0,0.10);

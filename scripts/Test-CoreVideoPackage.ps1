@@ -92,17 +92,35 @@ foreach ($forbidden in @($ForbiddenBinaryText | Where-Object { $_ })) {
     }
 }
 
+# The runtime ships renamed (cv* — see New-PrivateFfmpeg.ps1) so it can
+# never collide with the FFmpeg OBS bundles under the standard names.
 $ffmpegDlls = @(
-    "avcodec-62.dll",
-    "avdevice-62.dll",
-    "avfilter-11.dll",
-    "avformat-62.dll",
-    "avutil-60.dll",
-    "swresample-6.dll",
-    "swscale-9.dll"
+    "cvcodec-62.dll",
+    "cvdevice-62.dll",
+    "cvfilter-11.dll",
+    "cvformat-62.dll",
+    "cvutil-60.dll",
+    "cvresample-6.dll",
+    "cvscale-9.dll"
 )
+
+# No FFmpeg runtime may sit loose in obs-plugins\64bit: OBS 32.2+ bundles
+# FFmpeg 8 under the standard names, and loose copies there stop OBS's own
+# obs-ffmpeg module from loading (breaks OBS outright). Original-named DLLs
+# must not appear anywhere in the package at all.
+$looseFfmpeg = @(Get-ChildItem -LiteralPath (Join-Path $root "obs-plugins\64bit") -File -ErrorAction Stop |
+    Where-Object { $_.Name -match '^(avcodec|avdevice|avfilter|avformat|avutil|swresample|swscale|cvcodec|cvdevice|cvfilter|cvformat|cvutil|cvresample|cvscale)-\d+\.dll$' })
+if ($looseFfmpeg.Count -gt 0) {
+    throw "Release package validation failed. FFmpeg DLLs must live in obs-plugins\64bit\corevideo-ffmpeg, not loose in obs-plugins\64bit: $($looseFfmpeg.Name -join ', ')"
+}
+$originalNamed = @(Get-ChildItem -LiteralPath (Join-Path $root "obs-plugins\64bit") -Recurse -File -ErrorAction Stop |
+    Where-Object { $_.Name -match '^(avcodec|avdevice|avfilter|avformat|avutil|swresample|swscale)-\d+\.dll$' })
+if ($originalNamed.Count -gt 0) {
+    throw "Release package validation failed. Original-named FFmpeg DLLs found (must be cv*-renamed): $($originalNamed.FullName -join ', ')"
+}
+
 $ffmpegPresent = $ffmpegDlls | Where-Object {
-    Test-Path -LiteralPath (Join-Path $root "obs-plugins\64bit\$_")
+    Test-Path -LiteralPath (Join-Path $root "obs-plugins\64bit\corevideo-ffmpeg\$_")
 }
 if ($ffmpegPresent.Count -gt 0 -and $ffmpegPresent.Count -ne $ffmpegDlls.Count) {
     throw "Release package has a partial FFmpeg runtime. Present: $($ffmpegPresent -join ', ')"

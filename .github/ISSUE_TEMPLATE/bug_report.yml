@@ -1,0 +1,124 @@
+name: Bug Report
+description: Something in CoreVideo (the OBS plugin) isn't working as expected.
+title: "[Bug]: "
+labels: ["bug", "beta"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug during the CoreVideo public beta. The more of this
+        we can fill in, the faster we can reproduce it.
+
+        Before filing, it's worth skimming the
+        [Troubleshooting section](https://corevideo.io/documentation/#troubleshooting)
+        of the docs — SmartScreen warnings, "no video" checklists, sign-in loops,
+        and firewall prompts are all covered there.
+
+  - type: input
+    id: version
+    attributes:
+      label: CoreVideo version
+      description: >
+        CoreVideo does not currently show its version in the Zoom Plugin Settings
+        dialog. Find it one of these ways: the exported support bundle's
+        `summary.txt` ("Plugin version: ..."), the OBS log line
+        `[obs-zoom-plugin] Loading plugin v...` (Help → Log Files → View Current
+        Log in OBS), or the installer/ZIP filename you downloaded from
+        https://corevideo.io/download or the
+        [Releases page](https://github.com/iamfatness/CoreVideo/releases)
+        (e.g. `CoreVideo-Setup-1.4.0.exe`).
+      placeholder: e.g. 1.4.0
+    validations:
+      required: true
+
+  - type: input
+    id: obs-version
+    attributes:
+      label: OBS Studio version
+      description: Help → About in OBS Studio. CoreVideo requires OBS Studio 30+.
+      placeholder: e.g. 31.0.2
+    validations:
+      required: true
+
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version
+      description: Settings → System → About, or run `winver`. Windows 10/11 x64 is the only supported platform.
+      placeholder: e.g. Windows 11 23H2 (build 22631.3737)
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: A clear description of the bug. Screenshots or a short screen recording help a lot.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro-steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Sign in with Zoom
+        2. Join meeting ...
+        3. Add a Zoom Participant source assigned to ...
+        4. ...
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: support-bundle-checklist
+    attributes:
+      label: Support bundle
+      description: >
+        Please attach a redacted support bundle — it's the single most useful
+        thing you can attach and takes under a minute to create.
+
+
+        **How to export it:** In OBS, open the **Zoom Diagnostics** dock
+        (Docks → Zoom Diagnostics, or Tools → Zoom Diagnostics if you haven't
+        shown the dock yet) and click **Create Support Bundle**. This writes a
+        timestamped folder and a matching `.zip`
+        (`CoreVideo-support-<timestamp>.zip`) under
+        `%AppData%\obs-studio\plugin_config\obs-zoom-plugin\support-bundles\`.
+        The bundle already redacts SDK keys/secrets, OAuth tokens, and other
+        credentials before writing anything to disk — it's safe to attach in
+        full. Drag the `.zip` onto this issue text box to upload it.
+      options:
+        - label: I attached the redacted support bundle `.zip`, or explained below why I couldn't
+          required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Additional logs or context
+      description: >
+        Anything else worth including — a full OBS log
+        (Help → Log Files → Upload Current Log File, paste the link), the
+        Meeting SDK/OBS version combo, or anything unusual about your setup
+        (VPN, admin-managed Zoom account, multiple OBS profiles, etc).
+    validations:
+      required: false
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Installed platform
+      description: CoreVideo's only supported, packaged, and released target is Windows x64. Source builds on other platforms are unsupported/experimental.
+      options:
+        - Windows 10/11 x64 (installer or ZIP release)
+        - Windows arm64 (source build)
+        - macOS (source build)
+        - Linux (source build)
+    validations:
+      required: true

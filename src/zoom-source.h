@@ -73,6 +73,10 @@ struct ZoomSource {
                              bool new_audience_audio = false);
     void subscribe();
     void unsubscribe();
+    // Sends the engine unsubscribe and resets latched signal state without
+    // consulting m_subscribed — used when an assignment is cleared, where the
+    // subscribed flag may already be false but an engine feed still exists.
+    void clear_subscription_state();
     bool recover_stale_video(uint64_t now_ns, bool force = false);
     bool upgrade_low_quality_video(uint64_t now_ns, bool force = false);
     void activate();

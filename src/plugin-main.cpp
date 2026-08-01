@@ -14,6 +14,7 @@
 #include "zoom-iso-panel.h"
 #include "zoom-control-server.h"
 #include "zoom-osc-server.h"
+#include "cv-ffmpeg-loader.h"
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
@@ -349,7 +350,9 @@ bool obs_module_load(void)
 {
     blog(LOG_INFO, "[obs-zoom-plugin] Loading plugin v%s", OBS_ZOOM_PLUGIN_VERSION);
 #ifdef COREVIDEO_HW_ACCEL
-    blog(LOG_INFO, "[obs-zoom-plugin] Hardware video acceleration: enabled at build (FFmpeg)");
+    cv_ffmpeg_loader_init();
+    blog(LOG_INFO, "[obs-zoom-plugin] Hardware video acceleration: %s",
+         cv_ffmpeg_runtime_describe());
 #else
     blog(LOG_INFO, "[obs-zoom-plugin] Hardware video acceleration: disabled (built without ENABLE_FFMPEG_HW_ACCEL - CPU path only)");
 #endif

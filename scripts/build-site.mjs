@@ -740,6 +740,7 @@ const docsHtml = fs.readFileSync(path.join(docsDir, "index.html"), "utf8")
     : "CoreVideo documentation")
   .replaceAll("https://iamfatness.github.io/CoreVideo/", "/documentation/")
   .replaceAll('href="ZOOM_MARKETPLACE_OAUTH.md"', 'href="https://github.com/iamfatness/CoreVideo/blob/main/docs/ZOOM_MARKETPLACE_OAUTH.md"')
+  .replaceAll('href="ROADMAP.md"', 'href="https://github.com/iamfatness/CoreVideo/blob/main/docs/ROADMAP.md"')
   .replaceAll("<pre>", '<pre tabindex="0">')
   .replace(
     "</head>",
@@ -751,6 +752,15 @@ writeText("docs/index.html", docsHtml);
 writeText(
   "assets/site.css",
   fs.readFileSync(path.join(siteAssetsDir, "site.css"), "utf8"),
+);
+
+// Docs-page script (mermaid theme init + sidebar highlighting). Must be an
+// external self-hosted file: the worker's CSP has script-src 'self' + jsdelivr
+// with no 'unsafe-inline', so inline scripts are silently blocked in
+// production (that is how the mermaid theme config never applied for months).
+writeText(
+  "assets/docs-init.js",
+  fs.readFileSync(path.join(siteAssetsDir, "docs-init.js"), "utf8"),
 );
 
 // Bundled application fonts (Space Grotesk + IBM Plex Mono), self-hosted so
@@ -777,5 +787,25 @@ writeText("_redirects", `/terms-of-use /terms/ 301
 /oauth/ /documentation/#flow-oauth 301
 `);
 writeText("CNAME", "corevideo.io\n");
+
+// Guard: the production CSP blocks inline scripts, so any inline <script> in
+// built HTML is a page that will silently misbehave in production only.
+// Fail the build loudly instead.
+function findHtmlFiles(dir) {
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    const p = path.join(dir, e.name);
+    return e.isDirectory() ? findHtmlFiles(p) : e.name.endsWith(".html") ? [p] : [];
+  });
+}
+const inlineOffenders = findHtmlFiles(outDir).filter((f) =>
+  /<script(?![^>]*src=)[^>]*>/i.test(fs.readFileSync(f, "utf8")),
+);
+if (inlineOffenders.length) {
+  const list = inlineOffenders.map((f) => path.relative(outDir, f)).join(", ");
+  throw new Error(
+    `Inline <script> blocked by the production CSP found in: ${list}. ` +
+      "Move the code into an external file under assets/ instead.",
+  );
+}
 
 console.log(`Built CoreVideo site in ${path.relative(root, outDir)}`);

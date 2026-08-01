@@ -63,13 +63,21 @@
 #include <sys/un.h>
 #include <poll.h>
 #include <unistd.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <tuple>
+#include <unordered_map>
 #include <vector>
+
+// Defined with the raw-media code further down; the meeting delegate has to
+// release renderers and SHM regions when the meeting ends.
+static void handle_stop_media(const char *reason);
 
 // Set false during teardown so the heartbeat thread stops before the IPC
 // sockets close. File scope because the heartbeat thread is detached and
@@ -511,6 +519,7 @@ static void send_roster()
     }
     case ZoomSDKMeetingStatus_Disconnecting:
     case ZoomSDKMeetingStatus_Ended: {
+        handle_stop_media("meeting_left");
         ZoomSDKMeetingActionController *ctrl = action_controller();
         if (ctrl && ctrl.delegate == self) ctrl.delegate = nil;
         g_roster.clear();
@@ -519,6 +528,7 @@ static void send_roster()
         break;
     }
     case ZoomSDKMeetingStatus_Failed: {
+        handle_stop_media("meeting_failed");
         ZoomSDKMeetingActionController *ctrl = action_controller();
         if (ctrl && ctrl.delegate == self) ctrl.delegate = nil;
         g_roster.clear();
@@ -727,6 +737,785 @@ static void handle_leave()
     if (svc) [svc leaveMeetingWithCmd:LeaveMeetingCmd_Leave];
 }
 
+// ── Raw media: shared helpers ────────────────────────────────────────────────
+// Same validators as engine/src/main.cpp. A source uuid becomes part of a POSIX
+// shm object name, so the character set is deliberately narrow.
+static uint32_t json_uint(const std::string &json, const std::string &key)
+{
+    const std::string needle = "\"" + key + "\":";
+    auto pos = json.find(needle);
+    if (pos == std::string::npos) return 0;
+    pos += needle.size();
+    try {
+        return static_cast<uint32_t>(std::stoul(json.substr(pos)));
+    } catch (...) {
+        return 0;
+    }
+}
+
+static bool is_valid_source_uuid(const std::string &uuid)
+{
+    if (uuid.empty() || uuid.size() > 64) return false;
+    return std::all_of(uuid.begin(), uuid.end(), [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+               (c >= '0' && c <= '9') || c == '-' || c == '_';
+    });
+}
+
+static ZoomSDKRawDataController *raw_data_controller()
+{
+    return [[ZoomSDK sharedSDK] getRawDataController];
+}
+
+// Seqlock write, byte-identical to the Windows engine's: bump the sequence to an
+// odd value, publish the header, copy the payload, then bump it to even. The
+// plugin's reader spins until it sees a stable even sequence, so an odd value
+// means "a write is in flight, discard".
+static uint32_t shm_seq_begin(uint32_t current)
+{
+    uint32_t seq = current + 1;
+    if ((seq & 1u) == 0) ++seq;
+    return seq;
+}
+
+// ── Raw video ────────────────────────────────────────────────────────────────
+// One ZoomSDKRenderer per participant, fanned out to every source uuid bound to
+// that participant — the same shape as ParticipantSubscription in
+// engine/src/engine-video.cpp, and for the same reason: two OBS sources showing
+// the same participant must not cost two Zoom subscriptions.
+//
+// The SDK delivers onRawDataReceived: on its own thread, so unlike the roster
+// this state IS mutex-guarded. CVRenderer deliberately holds only a POD ivar and
+// forwards into C++ — keeping the containers at file scope avoids non-trivial
+// C++ ivars inside an ObjC class.
+struct VideoTarget {
+    ShmRegion shm;
+    uint64_t  frame_count = 0;
+    uint32_t  shm_gen = 0;          // bumped per region (re)create; sent per frame
+    bool      shm_fail_reported = false;
+};
+
+struct VideoSubscription {
+    uint32_t participant_id = 0;
+    uint32_t resolution = 1;
+    ZoomSDKRenderer *renderer = nil;
+    id delegate = nil;              // CVRenderer, retained for the renderer's life
+    std::unordered_map<std::string, VideoTarget> targets;
+};
+
+static std::mutex g_video_mtx;
+static std::unordered_map<uint32_t, VideoSubscription> g_video;      // by participant
+static std::unordered_map<std::string, uint32_t> g_source_participant;
+static bool g_raw_media_active = false;
+
+static void video_on_frame(uint32_t participant_id, ZoomSDKYUVRawDataI420 *data);
+
+@interface CVRenderer : NSObject <ZoomSDKRendererDelegate>
+{
+    uint32_t _participantId;
+}
+- (instancetype)initWithParticipant:(uint32_t)participantId;
+@end
+
+@implementation CVRenderer
+
+- (instancetype)initWithParticipant:(uint32_t)participantId
+{
+    if ((self = [super init])) _participantId = participantId;
+    return self;
+}
+
+- (void)onRawDataReceived:(ZoomSDKYUVRawDataI420 *)data
+{
+    video_on_frame(_participantId, data);
+}
+
+- (void)onSubscribedUserDataOn
+{
+    EngineIpc::write(R"({"cmd":"debug","stage":"video_raw_status","participant_id":)" +
+                     std::to_string(_participantId) + R"(,"status":1})");
+}
+
+- (void)onSubscribedUserDataOff
+{
+    EngineIpc::write(R"({"cmd":"debug","stage":"video_raw_status","participant_id":)" +
+                     std::to_string(_participantId) + R"(,"status":0})");
+}
+
+- (void)onSubscribedUserLeft {}
+
+- (void)onRendererBeDestroyed
+{
+    // The SDK is tearing the renderer down under us; drop our pointer so no
+    // later unSubscribe/destroyRender touches freed memory.
+    std::lock_guard<std::mutex> lock(g_video_mtx);
+    auto it = g_video.find(_participantId);
+    if (it != g_video.end()) it->second.renderer = nil;
+}
+
+@end
+
+static ZoomSDKResolution sdk_resolution(uint32_t resolution)
+{
+    switch (resolution) {
+    case 0:  return ZoomSDKResolution_360P;
+    case 2:  return ZoomSDKResolution_1080P;
+    case 1:
+    default: return ZoomSDKResolution_720P;
+    }
+}
+
+// Mirrors valid_i420_frame() in engine-video.cpp: reject anything whose Y plane
+// length we would compute wrongly, rather than memcpy'ing a bad size.
+static bool valid_i420_frame(ZoomSDKYUVRawDataI420 *data, uint32_t w, uint32_t h,
+                             size_t &y_len)
+{
+    if (w == 0 || h == 0) return false;
+    if (w > 8192 || h > 8192) return false;
+    if ((w & 1) != 0 || (h & 1) != 0) return false;
+    if (![data getYBuffer] || ![data getUBuffer] || ![data getVBuffer]) return false;
+    y_len = static_cast<size_t>(w) * static_cast<size_t>(h);
+    return true;
+}
+
+static bool video_ensure_shm(VideoTarget &target, const std::string &source_uuid,
+                             size_t y_len)
+{
+    const size_t total = sizeof(ShmFrameHeader) + y_len + y_len / 4 + y_len / 4;
+    if (total < y_len) return false;
+    if (target.shm.ptr && target.shm.size >= total) return true;
+
+    const std::string region_name = IPC_SHM_PREFIX + source_uuid;
+    if (!shm_region_create(target.shm, region_name, total)) return false;
+    ++target.shm_gen; // new region — any plugin-side mapping is now stale
+    return true;
+}
+
+static void video_on_frame(uint32_t participant_id, ZoomSDKYUVRawDataI420 *data)
+{
+    if (!data) return;
+    const uint32_t w = [data getStreamWidth];
+    const uint32_t h = [data getStreamHeight];
+    size_t y_len = 0;
+    if (!valid_i420_frame(data, w, h, y_len)) {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"video_frame_invalid","participant_id":)" +
+            std::to_string(participant_id) + R"(,"w":)" + std::to_string(w) +
+            R"(,"h":)" + std::to_string(h) + "}");
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(g_video_mtx);
+    auto sub = g_video.find(participant_id);
+    if (sub == g_video.end()) return;
+
+    for (auto &entry : sub->second.targets) {
+        const std::string &source_uuid = entry.first;
+        VideoTarget &target = entry.second;
+
+        if (!video_ensure_shm(target, source_uuid, y_len) || !target.shm.ptr) {
+            // Once per failure episode, not once per frame.
+            if (!target.shm_fail_reported) {
+                target.shm_fail_reported = true;
+                EngineIpc::write(
+                    R"({"cmd":"debug","stage":"video_shm_create_failed","source_uuid":")" +
+                    source_uuid + R"(","participant_id":)" +
+                    std::to_string(participant_id) + R"(,"w":)" + std::to_string(w) +
+                    R"(,"h":)" + std::to_string(h) + "}");
+                EngineIpc::write(
+                    R"({"cmd":"error","msg":"shm_create_failed","source_uuid":")" +
+                    source_uuid + R"(","participant_id":)" +
+                    std::to_string(participant_id) + R"(,"w":)" + std::to_string(w) +
+                    R"(,"h":)" + std::to_string(h) + "}");
+            }
+            continue;
+        }
+        if (target.shm_fail_reported) {
+            target.shm_fail_reported = false;
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"video_shm_recovered","source_uuid":")" +
+                source_uuid + R"(","participant_id":)" +
+                std::to_string(participant_id) + "}");
+        }
+
+        auto *hdr    = static_cast<ShmFrameHeader *>(target.shm.ptr);
+        auto *pixels = static_cast<char *>(target.shm.ptr) + sizeof(ShmFrameHeader);
+        const uint32_t seq = shm_seq_begin(hdr->sequence);
+        hdr->sequence = seq;
+        std::atomic_thread_fence(std::memory_order_release);
+        hdr->width  = w;
+        hdr->height = h;
+        hdr->y_len  = static_cast<uint32_t>(y_len);
+
+        std::memcpy(pixels,                     [data getYBuffer], y_len);
+        std::memcpy(pixels + y_len,             [data getUBuffer], y_len / 4);
+        std::memcpy(pixels + y_len + y_len / 4, [data getVBuffer], y_len / 4);
+        std::atomic_thread_fence(std::memory_order_release);
+        hdr->sequence = seq + 1;
+
+        ++target.frame_count;
+        if (target.frame_count == 1 || target.frame_count % 120 == 0) {
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"video_frame_received","source_uuid":")" +
+                source_uuid + R"(","participant_id":)" +
+                std::to_string(participant_id) + R"(,"count":)" +
+                std::to_string(target.frame_count) + R"(,"w":)" + std::to_string(w) +
+                R"(,"h":)" + std::to_string(h) + "}");
+        }
+
+        EngineIpc::write(
+            R"({"cmd":"frame","source_uuid":")" + source_uuid +
+            R"(","participant_id":)" + std::to_string(participant_id) +
+            R"(,"w":)" + std::to_string(w) + R"(,"h":)" + std::to_string(h) +
+            R"(,"shm_gen":)" + std::to_string(target.shm_gen) + "}");
+    }
+}
+
+// Caller must hold g_video_mtx.
+static void video_teardown_locked(uint32_t participant_id)
+{
+    auto it = g_video.find(participant_id);
+    if (it == g_video.end()) return;
+    if (it->second.renderer) {
+        [it->second.renderer unSubscribe];
+        ZoomSDKRawDataController *rdc = raw_data_controller();
+        if (rdc) [rdc destroyRender:it->second.renderer];
+        it->second.renderer = nil;
+    }
+    [it->second.delegate release];
+    it->second.delegate = nil;
+    for (auto &t : it->second.targets) shm_region_destroy(t.second.shm);
+    g_video.erase(it);
+}
+
+static void video_subscribe(uint32_t participant_id, const std::string &source_uuid,
+                            uint32_t resolution)
+{
+    if (participant_id == 0) {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"video_subscribe_skipped","source_uuid":")" +
+            source_uuid + R"(","participant_id":0,"reason":"missing_participant"})");
+        return;
+    }
+    if (resolution > 2) resolution = 1;
+
+    std::lock_guard<std::mutex> lock(g_video_mtx);
+
+    // Rebinding a source to a different participant must release the old one.
+    auto bound = g_source_participant.find(source_uuid);
+    if (bound != g_source_participant.end() && bound->second != participant_id) {
+        auto old = g_video.find(bound->second);
+        if (old != g_video.end()) {
+            auto t = old->second.targets.find(source_uuid);
+            if (t != old->second.targets.end()) {
+                shm_region_destroy(t->second.shm);
+                old->second.targets.erase(t);
+            }
+            if (old->second.targets.empty()) video_teardown_locked(bound->second);
+        }
+    }
+    g_source_participant[source_uuid] = participant_id;
+
+    auto existing = g_video.find(participant_id);
+    if (existing != g_video.end()) {
+        existing->second.targets.emplace(source_uuid, VideoTarget{});
+        return;                     // one renderer already serves this participant
+    }
+
+    if (!g_raw_media_active) {
+        // Remember the binding; the renderer is created when raw media starts.
+        VideoSubscription pending;
+        pending.participant_id = participant_id;
+        pending.resolution = resolution;
+        pending.targets.emplace(source_uuid, VideoTarget{});
+        g_video.emplace(participant_id, std::move(pending));
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"video_subscribe_deferred","source_uuid":")" +
+            source_uuid + R"(","participant_id":)" +
+            std::to_string(participant_id) + "}");
+        return;
+    }
+
+    ZoomSDKRawDataController *rdc = raw_data_controller();
+    if (!rdc) {
+        EngineIpc::write(
+            R"({"cmd":"error","msg":"raw_data_controller_unavailable","source_uuid":")" +
+            source_uuid + R"(","participant_id":)" +
+            std::to_string(participant_id) + "}");
+        return;
+    }
+
+    // Walk the requested resolution down on failure, exactly as the Windows
+    // engine does — a 1080p subscription that the account or link will not carry
+    // should degrade, not drop the participant entirely.
+    for (int candidate = static_cast<int>(resolution); candidate >= 0; --candidate) {
+        ZoomSDKRenderer *renderer = nil;
+        const ZoomSDKError create_err = [rdc createRender:&renderer];
+        if (create_err != ZoomSDKError_Success || !renderer) {
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"create_renderer_failed","source_uuid":")" +
+                source_uuid + R"(","participant_id":)" +
+                std::to_string(participant_id) + R"(,"code":)" +
+                std::to_string(static_cast<int>(create_err)) + R"(,"resolution":)" +
+                std::to_string(candidate) + "}");
+            continue;
+        }
+
+        CVRenderer *delegate = [[CVRenderer alloc] initWithParticipant:participant_id];
+        renderer.delegate = delegate;
+
+        const ZoomSDKError res_err =
+            [renderer setResolution:sdk_resolution(static_cast<uint32_t>(candidate))];
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"set_resolution","source_uuid":")" +
+            source_uuid + R"(","participant_id":)" +
+            std::to_string(participant_id) + R"(,"code":)" +
+            std::to_string(static_cast<int>(res_err)) + R"(,"resolution":)" +
+            std::to_string(candidate) + "}");
+
+        const ZoomSDKError sub_err =
+            [renderer subscribe:participant_id rawDataType:ZoomSDKRawDataType_Video];
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"video_subscribe","source_uuid":")" +
+            source_uuid + R"(","participant_id":)" +
+            std::to_string(participant_id) + R"(,"code":)" +
+            std::to_string(static_cast<int>(sub_err)) + R"(,"resolution":)" +
+            std::to_string(candidate) + "}");
+
+        if (sub_err == ZoomSDKError_Success) {
+            VideoSubscription sub;
+            sub.participant_id = participant_id;
+            sub.resolution = static_cast<uint32_t>(candidate);
+            sub.renderer = renderer;
+            sub.delegate = delegate;
+            sub.targets.emplace(source_uuid, VideoTarget{});
+            g_video.emplace(participant_id, std::move(sub));
+            if (static_cast<uint32_t>(candidate) != resolution) {
+                EngineIpc::write(
+                    R"({"cmd":"debug","stage":"video_resolution_downgraded","source_uuid":")" +
+                    source_uuid + R"(","participant_id":)" +
+                    std::to_string(participant_id) + R"(,"requested":)" +
+                    std::to_string(resolution) + R"(,"actual":)" +
+                    std::to_string(candidate) + "}");
+            }
+            return;
+        }
+
+        renderer.delegate = nil;
+        [delegate release];
+        [rdc destroyRender:renderer];
+    }
+
+    EngineIpc::write(
+        R"({"cmd":"debug","stage":"video_subscribe_failed_all","source_uuid":")" +
+        source_uuid + R"(","participant_id":)" + std::to_string(participant_id) +
+        R"(,"requested":)" + std::to_string(resolution) + "}");
+    EngineIpc::write(
+        R"({"cmd":"error","msg":"video_subscribe_failed","source_uuid":")" +
+        source_uuid + R"(","participant_id":)" + std::to_string(participant_id) + "}");
+}
+
+static void video_unsubscribe(const std::string &source_uuid)
+{
+    std::lock_guard<std::mutex> lock(g_video_mtx);
+    auto bound = g_source_participant.find(source_uuid);
+    if (bound == g_source_participant.end()) return;
+    const uint32_t participant_id = bound->second;
+    g_source_participant.erase(bound);
+
+    auto sub = g_video.find(participant_id);
+    if (sub == g_video.end()) return;
+    auto t = sub->second.targets.find(source_uuid);
+    if (t != sub->second.targets.end()) {
+        shm_region_destroy(t->second.shm);
+        sub->second.targets.erase(t);
+    }
+    if (sub->second.targets.empty()) video_teardown_locked(participant_id);
+}
+
+// ── Raw audio ────────────────────────────────────────────────────────────────
+// One subscription to the shared audio helper, fanned out per source. Routing
+// matches engine/src/engine-audio.cpp: isolate → that participant's one-way
+// audio only; audience → every non-isolated participant's one-way audio;
+// neither → the full meeting mix.
+struct AudioTarget {
+    uint32_t participant_id = 0;
+    bool     isolate_audio = false;
+    bool     audience_audio = false;
+    ShmRegion shm;
+    uint64_t frame_count = 0;
+    bool     shm_fail_reported = false;
+};
+
+static std::mutex g_audio_mtx;
+static std::unordered_map<std::string, AudioTarget> g_audio;
+static bool g_audio_subscribed = false;
+
+static bool audio_ensure_shm(AudioTarget &target, const std::string &source_uuid,
+                             uint32_t byte_len)
+{
+    const size_t total = sizeof(ShmAudioHeader) + byte_len;
+    if (target.shm.ptr && target.shm.size >= total) return true;
+    const std::string region_name = IPC_SHM_PREFIX + source_uuid + "_audio";
+    return shm_region_create(target.shm, region_name, total);
+}
+
+// Caller must hold g_audio_mtx.
+static void audio_output_frame(AudioTarget &target, const std::string &source_uuid,
+                               ZoomSDKAudioRawData *data, const char *stage)
+{
+    const uint32_t byte_len = [data getBufferLen];
+    if (byte_len == 0) return;
+
+    if (!audio_ensure_shm(target, source_uuid, byte_len) || !target.shm.ptr) {
+        if (!target.shm_fail_reported) {
+            target.shm_fail_reported = true;
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"audio_shm_create_failed","source_uuid":")" +
+                source_uuid + R"(","byte_len":)" + std::to_string(byte_len) + "}");
+            EngineIpc::write(
+                R"({"cmd":"error","msg":"shm_create_failed","source_uuid":")" +
+                source_uuid + R"(","byte_len":)" + std::to_string(byte_len) + "}");
+        }
+        return;
+    }
+    if (target.shm_fail_reported) {
+        target.shm_fail_reported = false;
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"audio_shm_recovered","source_uuid":")" +
+            source_uuid + "\"}");
+    }
+
+    auto *hdr = static_cast<ShmAudioHeader *>(target.shm.ptr);
+    const uint32_t seq = shm_seq_begin(hdr->sequence);
+    hdr->sequence = seq;
+    std::atomic_thread_fence(std::memory_order_release);
+    hdr->sample_rate = [data getSampleRate];
+    hdr->channels    = static_cast<uint16_t>([data getChannelNum]);
+    hdr->reserved    = 0;
+    hdr->byte_len    = byte_len;
+    std::memcpy(static_cast<char *>(target.shm.ptr) + sizeof(ShmAudioHeader),
+                [data getBuffer], byte_len);
+    std::atomic_thread_fence(std::memory_order_release);
+    hdr->sequence = seq + 1;
+
+    ++target.frame_count;
+    if (target.frame_count == 1 || target.frame_count % 250 == 0) {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":")" + std::string(stage) +
+            R"(","source_uuid":")" + source_uuid + R"(","count":)" +
+            std::to_string(target.frame_count) + R"(,"sample_rate":)" +
+            std::to_string([data getSampleRate]) + R"(,"channels":)" +
+            std::to_string([data getChannelNum]) + R"(,"byte_len":)" +
+            std::to_string(byte_len) + R"(,"participant_id":)" +
+            std::to_string(target.participant_id) + "}");
+    }
+
+    EngineIpc::write(
+        R"({"cmd":"audio","source_uuid":")" + source_uuid +
+        R"(","participant_id":)" + std::to_string(target.participant_id) +
+        R"(,"byte_len":)" + std::to_string(byte_len) + "}");
+}
+
+@interface CVAudioDelegate : NSObject <ZoomSDKAudioRawDataDelegate>
+@end
+
+@implementation CVAudioDelegate
+
+- (void)onMixedAudioRawDataReceived:(ZoomSDKAudioRawData *)data
+{
+    if (!data || [data getBufferLen] == 0) return;
+    std::lock_guard<std::mutex> lock(g_audio_mtx);
+    for (auto &entry : g_audio) {
+        // isolate and audience targets both take one-way audio only.
+        if (entry.second.isolate_audio || entry.second.audience_audio) continue;
+        audio_output_frame(entry.second, entry.first, data, "audio_frame_received");
+    }
+}
+
+- (void)onOneWayAudioRawDataReceived:(ZoomSDKAudioRawData *)data userID:(unsigned int)userID
+{
+    if (!data || [data getBufferLen] == 0) return;
+    std::lock_guard<std::mutex> lock(g_audio_mtx);
+
+    bool claimed_by_isolate = false;
+    for (auto &entry : g_audio) {
+        if (!entry.second.isolate_audio) continue;
+        if (entry.second.participant_id != userID) continue;
+        claimed_by_isolate = true;
+        audio_output_frame(entry.second, entry.first, data,
+                           "audio_one_way_frame_received");
+    }
+    if (claimed_by_isolate) return;
+
+    for (auto &entry : g_audio) {
+        if (!entry.second.audience_audio) continue;
+        audio_output_frame(entry.second, entry.first, data,
+                           "audio_audience_frame_received");
+    }
+}
+
+- (void)onOneWayAudioRawDataReceived:(ZoomSDKAudioRawData *)data nodeID:(unsigned int)nodeID {}
+- (void)onShareAudioRawDataReceived:(ZoomSDKAudioRawData *)data {}
+- (void)onShareAudioRawDataReceived:(ZoomSDKAudioRawData *)data userID:(unsigned int)userID {}
+- (void)onOneWayInterpreterAudioRawDataReceived:(ZoomSDKAudioRawData *)data
+                                strLanguageName:(NSString *)languageName {}
+
+@end
+
+static CVAudioDelegate *g_audio_delegate = nil;
+
+static bool audio_subscribe_if_needed(const std::string &source_uuid,
+                                      const char *stage)
+{
+    if (g_audio_subscribed) return true;
+    if (!g_raw_media_active) return false;
+
+    ZoomSDKRawDataController *rdc = raw_data_controller();
+    if (!rdc) return false;
+    ZoomSDKAudioRawDataHelper *helper = nil;
+    const ZoomSDKError get_err = [rdc getAudioRawDataHelper:&helper];
+    if (get_err != ZoomSDKError_Success || !helper) {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"audio_helper_unavailable","source_uuid":")" +
+            source_uuid + R"(","code":)" +
+            std::to_string(static_cast<int>(get_err)) + "}");
+        return false;
+    }
+
+    if (!g_audio_delegate) g_audio_delegate = [[CVAudioDelegate alloc] init];
+    helper.delegate = g_audio_delegate;
+    const ZoomSDKError err = [helper subscribe];
+    EngineIpc::write(
+        R"({"cmd":"debug","stage":")" + std::string(stage) +
+        R"(","source_uuid":")" + source_uuid + R"(","code":)" +
+        std::to_string(static_cast<int>(err)) + "}");
+    if (err != ZoomSDKError_Success) return false;
+
+    g_audio_subscribed = true;
+    return true;
+}
+
+static void audio_init(const std::string &source_uuid, uint32_t participant_id,
+                       bool isolate_audio, bool audience_audio)
+{
+    {
+        std::lock_guard<std::mutex> lock(g_audio_mtx);
+        AudioTarget &target = g_audio[source_uuid];
+        target.participant_id = participant_id;
+        // Both set is treated as isolate, matching engine-audio.cpp.
+        target.isolate_audio = isolate_audio;
+        target.audience_audio = isolate_audio ? false : audience_audio;
+    }
+    audio_subscribe_if_needed(source_uuid, "audio_subscribe");
+}
+
+static void audio_remove(const std::string &source_uuid)
+{
+    std::lock_guard<std::mutex> lock(g_audio_mtx);
+    auto it = g_audio.find(source_uuid);
+    if (it == g_audio.end()) return;
+    shm_region_destroy(it->second.shm);
+    g_audio.erase(it);
+    EngineIpc::write(
+        R"({"cmd":"debug","stage":"audio_target_removed","source_uuid":")" +
+        source_uuid + "\"}");
+}
+
+// ── start / stop raw media ───────────────────────────────────────────────────
+// Raw data requires raw recording to be running. Subscriptions requested before
+// that are held as pending bindings and created here, so the plugin can assign
+// sources in any order relative to start_media.
+static void resubscribe_raw_media(const char *reason)
+{
+    std::vector<std::tuple<uint32_t, std::string, uint32_t>> pending;
+    {
+        std::lock_guard<std::mutex> lock(g_video_mtx);
+        for (auto &entry : g_video) {
+            if (entry.second.renderer) continue;   // already live
+            for (auto &t : entry.second.targets) {
+                pending.emplace_back(entry.first, t.first, entry.second.resolution);
+            }
+        }
+        // video_subscribe re-creates these entries; drop the placeholders first
+        // so it does not short-circuit on "a subscription already exists".
+        for (auto &p : pending) g_video.erase(std::get<0>(p));
+    }
+
+    EngineIpc::write(R"({"cmd":"debug","stage":"raw_media_resubscribe","reason":")" +
+                     std::string(reason ? reason : "") + R"(","count":)" +
+                     std::to_string(pending.size()) + "}");
+
+    for (auto &p : pending)
+        video_subscribe(std::get<0>(p), std::get<1>(p), std::get<2>(p));
+
+    std::vector<std::string> audio_sources;
+    {
+        std::lock_guard<std::mutex> lock(g_audio_mtx);
+        for (auto &entry : g_audio) audio_sources.push_back(entry.first);
+    }
+    if (!audio_sources.empty())
+        audio_subscribe_if_needed(audio_sources.front(), "audio_resubscribe");
+}
+
+// Guards the privilege-request retry loop: without it, a host who denies the
+// request would have us re-ask on every callback.
+static bool g_privilege_requested = false;
+
+// Defined below; the record delegate retries the start once the host grants
+// local-recording permission.
+static void handle_start_media(const char *reason);
+
+@interface CVRecordDelegate : NSObject <ZoomSDKMeetingRecordDelegate>
+@end
+
+@implementation CVRecordDelegate
+
+- (void)onLocalRecordingPrivilegeRequestStatus:(ZoomSDKRequestLocalRecordingStatus)status
+{
+    EngineIpc::write(
+        R"({"cmd":"debug","stage":"local_recording_privilege_status","status":)" +
+        std::to_string(static_cast<int>(status)) + "}");
+    if (status == ZoomSDKRequestLocalRecordingStatus_Granted) {
+        handle_start_media("privilege_granted");
+        return;
+    }
+    EngineIpc::write(
+        R"({"cmd":"error","msg":"raw_media_start_failed","reason":"local_recording_privilege_denied","status":)" +
+        std::to_string(static_cast<int>(status)) + "}");
+}
+
+- (void)onRecordPrivilegeChange:(BOOL)canRec
+{
+    EngineIpc::write(R"({"cmd":"debug","stage":"record_privilege_change","can_record":)" +
+                     std::string(canRec ? "true" : "false") + "}");
+    if (canRec && !g_raw_media_active) handle_start_media("privilege_changed");
+}
+
+- (void)onRecord2MP4Done:(BOOL)success Path:(NSString *)recordPath {}
+- (void)onRecord2MP4Progressing:(int)percentage {}
+- (void)onCloudRecordingStatus:(ZoomSDKRecordingStatus)status {}
+- (void)onCustomizedRecordingSourceReceived:(CustomizedRecordingLayoutHelper *)helper {}
+- (void)onLocalRecordStatus:(ZoomSDKRecordingStatus)status userID:(unsigned int)userID {}
+- (void)onLocalRecordingPrivilegeRequested:(ZoomSDKRequestLocalRecordingPrivilegeHandler *)handler {}
+- (void)onCloudRecordingStorageFull:(time_t)gracePeriodDate {}
+- (void)onRequestCloudRecordingResponse:(ZoomSDKRequestStartCloudRecordingStatus)status {}
+- (void)onStartCloudRecordingRequested:(ZoomSDKRequestStartCloudRecordingHandler *)handler {}
+- (void)onEnableAndStartSmartRecordingRequested:(ZoomSDKRequestEnableAndStartSmartRecordingHandler *)handler {}
+- (void)onSmartRecordingEnableActionCallback:(ZoomSDKSmartRecordingEnableActionHandler *)handler {}
+
+@end
+
+static CVRecordDelegate *g_record_delegate = nil;
+
+static void handle_start_media(const char *reason)
+{
+    ZoomSDKMeetingService *svc = meeting_service();
+    if (!svc) {
+        EngineIpc::write(
+            R"({"cmd":"error","msg":"raw_media_start_failed","reason":"not_in_meeting"})");
+        return;
+    }
+    ZoomSDKMeetingRecordController *rec = [svc getRecordController];
+    if (!rec) {
+        EngineIpc::write(R"({"cmd":"debug","stage":"recording_controller","code":-1})");
+        EngineIpc::write(
+            R"({"cmd":"error","msg":"raw_media_start_failed",)"
+            R"("reason":"recording_controller_unavailable"})");
+        return;
+    }
+
+    // Attach before asking: the grant arrives asynchronously on this delegate.
+    if (!g_record_delegate) g_record_delegate = [[CVRecordDelegate alloc] init];
+    rec.delegate = g_record_delegate;
+
+    const ZoomSDKError can_raw = [rec canStartRawRecording];
+    EngineIpc::write(R"({"cmd":"debug","stage":"can_start_raw_recording","code":)" +
+                     std::to_string(static_cast<int>(can_raw)) + "}");
+    if (can_raw != ZoomSDKError_Success && g_privilege_requested) {
+        // Already asked once this meeting; do not re-prompt the host on every
+        // retry. Report and stop.
+        EngineIpc::write(
+            R"({"cmd":"error","msg":"raw_media_start_failed","reason":"cannot_start_raw_recording",)"
+            R"("code":)" + std::to_string(static_cast<int>(can_raw)) +
+            R"(,"privilege_requested":true,"detail":"Local-recording permission was )"
+            R"(already requested and has not been granted."})");
+        return;
+    }
+    if (can_raw != ZoomSDKError_Success) {
+        // Usually NoPermission(6): the engine joined as a participant and the
+        // host has not granted local recording. Ask for it rather than giving
+        // up — same fallback as main.cpp. The host sees a prompt; when they
+        // accept, onLocalRecordingPrivilegeRequestStatus fires and we retry.
+        const ZoomSDKError support_req = [rec isSupportRequestLocalRecordingPrivilege];
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"support_recording_privilege_request","code":)" +
+            std::to_string(static_cast<int>(support_req)) + "}");
+        const ZoomSDKError req = [rec requestLocalRecordingPrivilege];
+        g_privilege_requested = true;
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"request_recording_privilege","code":)" +
+            std::to_string(static_cast<int>(req)) + "}");
+        EngineIpc::write(
+            R"({"cmd":"error","msg":"raw_media_start_failed","reason":"cannot_start_raw_recording",)"
+            R"("code":)" + std::to_string(static_cast<int>(can_raw)) +
+            R"(,"privilege_requested":)" +
+            std::string(req == ZoomSDKError_Success ? "true" : "false") +
+            R"(,"detail":"Raw recording needs local-recording permission. )"
+            R"(The meeting host must allow this participant to record."})");
+        return;
+    }
+
+    const ZoomSDKError start_raw = [rec startRawRecording];
+    EngineIpc::write(R"({"cmd":"debug","stage":"start_raw_recording","code":)" +
+                     std::to_string(static_cast<int>(start_raw)) + "}");
+    if (start_raw != ZoomSDKError_Success) {
+        EngineIpc::write(
+            R"({"cmd":"error","msg":"raw_media_start_failed","reason":"start_raw_recording_failed","code":)" +
+            std::to_string(static_cast<int>(start_raw)) + "}");
+        return;
+    }
+
+    g_raw_media_active = true;
+    resubscribe_raw_media(reason);
+}
+
+static void handle_stop_media(const char *reason)
+{
+    g_raw_media_active = false;
+    // Per-meeting state: a fresh meeting should be allowed to ask again.
+    g_privilege_requested = false;
+    {
+        std::lock_guard<std::mutex> lock(g_video_mtx);
+        std::vector<uint32_t> ids;
+        ids.reserve(g_video.size());
+        for (auto &entry : g_video) ids.push_back(entry.first);
+        for (uint32_t id : ids) video_teardown_locked(id);
+        g_source_participant.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_audio_mtx);
+        for (auto &entry : g_audio) shm_region_destroy(entry.second.shm);
+        g_audio.clear();
+    }
+    if (g_audio_subscribed) {
+        ZoomSDKRawDataController *rdc = raw_data_controller();
+        ZoomSDKAudioRawDataHelper *helper = nil;
+        if (rdc && [rdc getAudioRawDataHelper:&helper] == ZoomSDKError_Success && helper)
+            [helper unSubscribe];
+        g_audio_subscribed = false;
+    }
+    ZoomSDKMeetingService *svc = meeting_service();
+    ZoomSDKMeetingRecordController *rec = svc ? [svc getRecordController] : nil;
+    if (rec) {
+        const ZoomSDKError err = [rec stopRawRecording];
+        EngineIpc::write(R"({"cmd":"debug","stage":"stop_raw_recording","code":)" +
+                         std::to_string(static_cast<int>(err)) + "}");
+    }
+    EngineIpc::write(R"({"cmd":"debug","stage":"raw_media_stopped","reason":")" +
+                     std::string(reason ? reason : "") + "\"}");
+}
+
 // Anything not yet ported fails loudly and never silently pretends.
 static void handle_unimplemented(const char *stage)
 {
@@ -841,15 +1630,51 @@ int main()
                 dispatch_async(dispatch_get_main_queue(), ^{ handle_join(msg); });
             } else if (msg.find(IPC_CMD_LEAVE) != std::string::npos) {
                 dispatch_async(dispatch_get_main_queue(), ^{ handle_leave(); });
-            } else if (msg.find(IPC_CMD_SUBSCRIBE_AUDIO) != std::string::npos) {
-                dispatch_async(dispatch_get_main_queue(),
-                               ^{ handle_unimplemented("subscribe_audio"); });
-            } else if (msg.find(IPC_CMD_SUBSCRIBE) != std::string::npos) {
-                dispatch_async(dispatch_get_main_queue(),
-                               ^{ handle_unimplemented("subscribe"); });
             } else if (msg.find(IPC_CMD_START_MEDIA) != std::string::npos) {
                 dispatch_async(dispatch_get_main_queue(),
-                               ^{ handle_unimplemented("start_media"); });
+                               ^{ handle_start_media("manual_start"); });
+            } else if (msg.find(IPC_CMD_STOP_MEDIA) != std::string::npos) {
+                dispatch_async(dispatch_get_main_queue(),
+                               ^{ handle_stop_media("manual_stop"); });
+            } else if (msg.find(IPC_CMD_SUBSCRIBE_AUDIO) != std::string::npos) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    const std::string uuid = json_str(msg, "source_uuid");
+                    if (!is_valid_source_uuid(uuid)) return;
+                    audio_init(uuid, json_uint(msg, "participant_id"),
+                               msg.find(R"("isolate_audio":true)") != std::string::npos,
+                               msg.find(R"("audience_audio":true)") != std::string::npos);
+                });
+            // Checked BEFORE subscribe: "unsubscribe" contains "subscribe", so the
+            // reverse order routes an unsubscribe into the subscribe branch. (The
+            // Windows engine has that ordering and gets away with it only because
+            // participant_id parses as 0 there, which its subscribe path treats as
+            // an unsubscribe — but it never drops the audio target.)
+            } else if (msg.find(IPC_CMD_UNSUBSCRIBE) != std::string::npos) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    const std::string uuid = json_str(msg, "source_uuid");
+                    if (!is_valid_source_uuid(uuid)) return;
+                    video_unsubscribe(uuid);
+                    audio_remove(uuid);
+                });
+            } else if (msg.find(IPC_CMD_SUBSCRIBE) != std::string::npos) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    const std::string uuid = json_str(msg, "source_uuid");
+                    if (!is_valid_source_uuid(uuid)) return;
+                    if (json_str(msg, "mode") == "screenshare") {
+                        // Screen share needs its own share-source subscription;
+                        // not ported yet, so say so rather than silently binding
+                        // it to a participant renderer that shows the wrong feed.
+                        handle_unimplemented("subscribe_screenshare");
+                        return;
+                    }
+                    uint32_t res = json_uint(msg, "resolution");
+                    if (res > 2) res = 1;
+                    const uint32_t pid = json_uint(msg, "participant_id");
+                    video_subscribe(pid, uuid, res);
+                    audio_init(uuid, pid,
+                               msg.find(R"("isolate_audio":true)") != std::string::npos,
+                               msg.find(R"("audience_audio":true)") != std::string::npos);
+                });
             }
         }
 

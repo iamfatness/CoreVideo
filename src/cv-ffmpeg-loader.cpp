@@ -9,23 +9,21 @@
 
 #include <string>
 
-// OBS 32.2+ bundles FFmpeg 8 under the same DLL names we ship (avfilter-11,
-// avutil-60, ...). Loose copies of those names in obs-plugins/64bit made
-// OBS's own obs-ffmpeg module bind our build and fail to load, breaking OBS
-// outright (and our plugin with it). The runtime therefore lives in the
-// private corevideo-ffmpeg/ subdirectory and resolves through the delay-load
-// hook below:
-//   - if the process already holds avfilter/avutil (OBS 32.2+), bind those —
-//     the Windows loader dedups modules by base name, so a second same-named
-//     copy can never be kept isolated from the first;
-//   - otherwise (OBS <= 32.1 ships avcodec-61-era names, no overlap) load our
-//     bundled runtime by absolute path so nothing else resolves into it.
+// OBS bundles FFmpeg under the standard DLL names, and the Windows loader
+// dedups modules by base name — a same-named private runtime can never be
+// kept isolated from OBS's inside one process (that collision is exactly how
+// OBS 32.2 broke pre-v0.1.30 installs). Our runtime is therefore renamed to
+// cv-prefixed DLLs (cvfilter-11.dll, cvutil-60.dll, ... — see
+// scripts/New-PrivateFfmpeg.ps1), shipped in the private corevideo-ffmpeg/
+// subdirectory, and delay-loaded by absolute path through the hook below.
+// Unique names mean the full-featured build (scale_cuda/vpp_qsv) is always
+// ours, on every OBS version, and OBS's own FFmpeg never sees it.
 
 #ifndef COREVIDEO_AVFILTER_DLL
-#define COREVIDEO_AVFILTER_DLL "avfilter-11.dll"
+#define COREVIDEO_AVFILTER_DLL "cvfilter-11.dll"
 #endif
 #ifndef COREVIDEO_AVUTIL_DLL
-#define COREVIDEO_AVUTIL_DLL "avutil-60.dll"
+#define COREVIDEO_AVUTIL_DLL "cvutil-60.dll"
 #endif
 
 static CvFfmpegRuntime g_runtime = CvFfmpegRuntime::Unavailable;
@@ -60,8 +58,8 @@ static std::wstring plugin_directory()
 
 static bool is_delayed_ffmpeg_dll(const char *name)
 {
-    return _strnicmp(name, "avfilter", 8) == 0 ||
-           _strnicmp(name, "avutil", 6) == 0;
+    return _strnicmp(name, "cvfilter", 8) == 0 ||
+           _strnicmp(name, "cvutil", 6) == 0;
 }
 
 static FARPROC WINAPI cv_delayload_hook(unsigned event, DelayLoadInfo *info)
@@ -138,35 +136,25 @@ CvFfmpegRuntime cv_ffmpeg_loader_init()
              "installer (or delete av*-*.dll / sw*-*.dll from "
              "obs-plugins\\64bit) to fix this.");
 
-    bool filter_loaded = GetModuleHandleA(COREVIDEO_AVFILTER_DLL) != nullptr;
-    bool util_loaded = GetModuleHandleA(COREVIDEO_AVUTIL_DLL) != nullptr;
-
-    if (filter_loaded && util_loaded) {
+    // cv* names are globally unique, so a resident copy can only be one we
+    // (or a second CoreVideo init) loaded earlier — reuse it.
+    if (GetModuleHandleA(COREVIDEO_AVFILTER_DLL) &&
+        GetModuleHandleA(COREVIDEO_AVUTIL_DLL)) {
         g_runtime = CvFfmpegRuntime::ProcessCopies;
-    } else if (filter_loaded != util_loaded) {
-        // One half of the pair is mapped without the other (e.g. obs-ffmpeg
-        // failed mid-load). Binding across builds is how crashes start —
-        // refuse and stay on the CPU path.
-        blog(LOG_ERROR,
-             "[obs-zoom-plugin] Inconsistent FFmpeg runtime in process "
-             "(%s loaded, %s not) — hardware acceleration disabled",
-             filter_loaded ? COREVIDEO_AVFILTER_DLL : COREVIDEO_AVUTIL_DLL,
-             filter_loaded ? COREVIDEO_AVUTIL_DLL : COREVIDEO_AVFILTER_DLL);
-        g_runtime = CvFfmpegRuntime::Unavailable;
+        return g_runtime;
+    }
+
+    g_private_dir = plugin_dir + L"corevideo-ffmpeg\\";
+    DWORD attrs = GetFileAttributesW(
+        (g_private_dir + widen(COREVIDEO_AVFILTER_DLL)).c_str());
+    if (attrs != INVALID_FILE_ATTRIBUTES) {
+        g_runtime = CvFfmpegRuntime::PrivateCopies;
     } else {
-        g_private_dir = plugin_dir + L"corevideo-ffmpeg\\";
-        DWORD attrs =
-            GetFileAttributesW((g_private_dir + widen(COREVIDEO_AVFILTER_DLL))
-                                   .c_str());
-        if (attrs != INVALID_FILE_ATTRIBUTES) {
-            g_runtime = CvFfmpegRuntime::PrivateCopies;
-        } else {
-            blog(LOG_ERROR,
-                 "[obs-zoom-plugin] Bundled FFmpeg runtime missing at "
-                 "corevideo-ffmpeg\\%s — hardware acceleration disabled",
-                 COREVIDEO_AVFILTER_DLL);
-            g_runtime = CvFfmpegRuntime::Unavailable;
-        }
+        blog(LOG_ERROR,
+             "[obs-zoom-plugin] Bundled FFmpeg runtime missing at "
+             "corevideo-ffmpeg\\%s — hardware acceleration disabled",
+             COREVIDEO_AVFILTER_DLL);
+        g_runtime = CvFfmpegRuntime::Unavailable;
     }
     return g_runtime;
 }
@@ -181,7 +169,7 @@ const char *cv_ffmpeg_runtime_describe()
 {
     switch (g_runtime) {
     case CvFfmpegRuntime::ProcessCopies:
-        return "using FFmpeg runtime already loaded by OBS (OBS 32.2+)";
+        return "using bundled FFmpeg runtime (already resident)";
     case CvFfmpegRuntime::PrivateCopies:
         return "using bundled FFmpeg runtime from corevideo-ffmpeg/";
     case CvFfmpegRuntime::SystemLinked:

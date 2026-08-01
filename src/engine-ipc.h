@@ -213,6 +213,29 @@ struct ShmAudioHeader {
        shm_region_destroy(r);
        r.name = shm_platform_name(name);
        r.owner = true;
+
+       // A POSIX shm object can be sized exactly once: ftruncate on an object
+       // that already exists fails with EINVAL on macOS (verified empirically --
+       // fresh object ftruncate succeeds, reopening the same object and
+       // ftruncating to a new size does not, and unlinking first makes it work
+       // again). So an object left behind by a previous run -- an engine that
+       // crashed or was killed before shm_region_destroy could unlink it -- can
+       // never be resized, and every create against that name fails until
+       // something removes it.
+       //
+       // That bit for real: the first frame after a resolution change (or after
+       // an engine restart) failed with "could not allocate shared memory", the
+       // failure path unlinked the region as it tore down, and the NEXT frame
+       // then succeeded -- a self-healing error that still raised an operator
+       // alert mid-show. Unlink first so the create is against a fresh object
+       // every time and the transient never happens.
+       //
+       // Harmless on Linux (which allows repeated ftruncate): unlinking a name
+       // the caller is about to recreate is a no-op there. The read side is
+       // unaffected either way -- an existing mapping stays valid against the
+       // old object until the shm_gen bump tells the plugin to remap.
+       shm_unlink(r.name.c_str());
+
        r.fd   = shm_open(r.name.c_str(), O_CREAT | O_RDWR, 0600);
        if (r.fd < 0) return false;
        if (ftruncate(r.fd, static_cast<off_t>(size)) < 0) { shm_region_destroy(r); return false; }

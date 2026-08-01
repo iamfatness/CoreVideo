@@ -193,6 +193,28 @@ static void test_shm_platform_name()
         shm_region_destroy(reader);
     }
     shm_region_destroy(writer);
+
+    // Regression: a POSIX shm object can be sized exactly once, so a region left
+    // behind by a crashed engine could never be resized and every subsequent
+    // create against that name failed (macOS ftruncate -> EINVAL). Simulate the
+    // leak by creating a region and dropping the handle WITHOUT unlinking, the
+    // way a killed process does, then create again at a larger size.
+    {
+        ShmRegion leaked;
+        if (check(shm_region_create(leaked, video, 4096),
+                  "leak simulation: first create succeeds")) {
+            // Abandon the name exactly as a killed process would: close and
+            // unmap, but never shm_unlink.
+            if (leaked.ptr) munmap(leaked.ptr, leaked.size);
+            if (leaked.fd >= 0) close(leaked.fd);
+            leaked = ShmRegion{};
+        }
+
+        ShmRegion grown;
+        check(shm_region_create(grown, video, 65536),
+              "create over a leaked region succeeds at a larger size");
+        shm_region_destroy(grown);
+    }
 }
 #endif // !WIN32
 

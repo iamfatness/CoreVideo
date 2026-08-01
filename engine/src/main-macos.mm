@@ -1477,6 +1477,12 @@ static void handle_start_media(const char *reason)
     }
 
     g_raw_media_active = true;
+    // The plugin flips its media-active flag on this exact debug stage
+    // (zoom-engine-client.cpp). Without it every output stays labelled
+    // "Raw media not ready" in the Output Manager while frames are visibly
+    // arriving — health that contradicts the picture on screen.
+    EngineIpc::write(R"({"cmd":"debug","stage":"raw_media_ready","reason":")" +
+                     std::string(reason ? reason : "") + "\"}");
     resubscribe_raw_media(reason);
 }
 

@@ -128,7 +128,6 @@ if [ -f "$BUILD_DIR/ZoomObsEngine" ]; then
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleVersion</key><string>$VERSION</string>
     <key>LSMinimumSystemVersion</key><string>12.0</string>
-    <key>LSUIElement</key><true/>
     <key>NSCameraUsageDescription</key><string>CoreVideo captures Zoom meeting video for OBS.</string>
     <key>NSMicrophoneUsageDescription</key><string>CoreVideo captures Zoom meeting audio for OBS.</string>
 </dict>

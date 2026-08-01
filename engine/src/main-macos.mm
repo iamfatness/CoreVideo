@@ -242,7 +242,13 @@ static void handle_init(const std::string &line)
     ZoomSDK *sdk = [ZoomSDK sharedSDK];
 
     ZoomSDKInitParams *params = [[ZoomSDKInitParams alloc] init];
-    params.needCustomizedUI = YES;   // headless helper: never show Zoom's own UI
+    // Match the Windows engine, which leaves InitParam's customized-UI flag at
+    // its default and therefore runs with the SDK's own UI available. An earlier
+    // revision of this file forced customized UI on "headless helper" grounds;
+    // that was a macOS-only divergence with no counterpart on Windows, and it
+    // removed the operator's only view of what the engine is actually sending
+    // back into the meeting.
+    params.needCustomizedUI = NO;
     params.enableLog = YES;
     params.zoomDomain = @"https://zoom.us";
 
@@ -479,6 +485,85 @@ static void send_roster()
     EngineIpc::write(msg);
 }
 
+// ── Return video (OBS program back into the meeting) ─────────────────────────
+// The return feed is not something the engine renders: OBS's own Virtual Camera
+// publishes the program feed as a system capture device, and the engine's
+// participant simply uses it as its camera. That is how the Windows build does
+// it too — engine/src/main.cpp has no camera code at all, it joins with
+// isVideoOff=false and lets the SDK take the system default device.
+//
+// Relying on "the system default" is the part that does not survive a move to
+// macOS: the default here is whatever camera macOS feels like (FaceTime HD on
+// this machine), so the engine would helpfully send a webcam shot of the
+// operator's room into the meeting instead of the program feed. So pick the
+// device explicitly by name, and say plainly which one was chosen.
+static void start_return_video(ZoomSDKMeetingActionController *ctrl)
+{
+    ZoomSDKSettingService *settings = [[ZoomSDK sharedSDK] getSettingService];
+    ZoomSDKVideoSetting *video = settings ? [settings getVideoSetting] : nil;
+    if (!video) {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"return_video_unavailable","reason":"no_video_setting"})");
+        return;
+    }
+
+    NSArray *cameras = [video getCameraList];
+    std::string names;
+    NSString *chosen_id = nil;
+    NSString *chosen_name = nil;
+    for (SDKDeviceInfo *dev in cameras) {
+        const std::string name = to_utf8([dev getDeviceName]);
+        if (!names.empty()) names += ", ";
+        names += name;
+        // Match OBS's virtual camera by name. Substring rather than equality so
+        // an OBS version that renames it slightly still matches.
+        if (!chosen_id && name.find("OBS Virtual Camera") != std::string::npos) {
+            chosen_id = [dev getDeviceID];
+            chosen_name = [dev getDeviceName];
+        }
+    }
+    EngineIpc::write(R"({"cmd":"debug","stage":"camera_list","cameras":")" +
+                     json_escape(names) + R"(","count":)" +
+                     std::to_string(cameras.count) + "}");
+
+    if (!chosen_id) {
+        // Loud, and specific about the fix: the operator has to start the
+        // virtual camera in OBS before the device exists at all.
+        EngineIpc::write(
+            R"({"cmd":"error","msg":"return_video_unavailable",)"
+            R"("reason":"obs_virtual_camera_not_found","detail":"No OBS Virtual )"
+            R"(Camera device is present, so the program feed cannot be returned )"
+            R"(to the meeting. Start the Virtual Camera in OBS (Controls -> Start )"
+            R"(Virtual Camera), then rejoin.","cameras":")" +
+            json_escape(names) + "\"}");
+        return;
+    }
+
+    const ZoomSDKError sel = [video selectCamera:chosen_id];
+    EngineIpc::write(R"({"cmd":"debug","stage":"select_camera","name":")" +
+                     json_escape(to_utf8(chosen_name)) + R"(","code":)" +
+                     std::to_string(static_cast<int>(sel)) + "}");
+    if (sel != ZoomSDKError_Success) {
+        EngineIpc::write(
+            R"({"cmd":"error","msg":"return_video_unavailable","reason":"select_camera_failed","code":)" +
+            std::to_string(static_cast<int>(sel)) + "}");
+        return;
+    }
+
+    ZoomSDKUserInfo *me = ctrl ? [ctrl getMyself] : nil;
+    if (!me) {
+        EngineIpc::write(
+            R"({"cmd":"error","msg":"return_video_unavailable","reason":"no_self_user"})");
+        return;
+    }
+    const ZoomSDKError unmute = [ctrl actionMeetingWithCmd:ActionMeetingCmd_UnMuteVideo
+                                                   userID:[me getUserID]
+                                                 onScreen:ScreenType_First];
+    EngineIpc::write(R"({"cmd":"debug","stage":"return_video_started","camera":")" +
+                     json_escape(to_utf8(chosen_name)) + R"(","code":)" +
+                     std::to_string(static_cast<int>(unmute)) + "}");
+}
+
 // ── Meeting + roster delegate ────────────────────────────────────────────────
 // Reproduces onMeetingStatusChanged / the participants-controller callbacks from
 // engine/src/main.cpp. Every method of ZoomSDKMeetingActionControllerDelegate is
@@ -515,6 +600,7 @@ static void send_roster()
         ctrl.delegate = self;
         rebuild_roster();
         send_roster();
+        start_return_video(ctrl);
         break;
     }
     case ZoomSDKMeetingStatus_Disconnecting:
@@ -1703,11 +1789,14 @@ int main()
     //
     // A bare [[NSRunLoop currentRunLoop] run] is NOT sufficient: the SDK is an
     // AppKit client (its own sample is built on NSApplicationMain), so an
-    // NSApplication instance must exist. Accessory activation policy keeps this
-    // helper out of the Dock and gives it no menu bar, which is what we want for
-    // a process OBS launches in the background.
+    // NSApplication instance must exist.
+    //
+    // Regular activation policy, not Accessory: the SDK's meeting UI is enabled
+    // (matching Windows), and an Accessory app has no menu bar and cannot make
+    // its windows properly key — the meeting window would appear but behave
+    // badly. The cost is a Dock icon for the engine while it runs.
     [NSApplication sharedApplication];
-    [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
     [NSApp run];
     return 0;
 }

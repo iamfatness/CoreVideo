@@ -442,6 +442,10 @@ if(BUILD_ZOOM_ENGINE)
             "-F${ZOOM_SDK_ACTIVE_DIR}"
             "-framework ZoomSDK"
             "-framework Foundation"
+            # The engine hosts an NSApplication: the Zoom macOS SDK is an AppKit
+            # client (its own sample is built on NSApplicationMain), so a bare
+            # NSRunLoop is not enough to service its delegate callbacks.
+            "-framework AppKit"
         )
         # rpath so the linker/loader can resolve ZoomSDK.framework from where the
         # SDK was fetched (CI compile/link validation only; not a shippable rpath).

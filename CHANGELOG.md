@@ -7,6 +7,19 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+### Fixed
+- **Hardware-accelerated video conversion works on OBS 32.2+ again.** v0.1.30
+  avoided the OBS 32.2 FFmpeg collision by binding the FFmpeg build OBS
+  already had in the process — but OBS's slim build has no `scale_cuda` or
+  `vpp_qsv`, so hardware conversion silently fell back to the CPU path. The
+  bundled runtime is now renamed to globally unique DLL names
+  (`cvfilter-11.dll`, `cvutil-60.dll`, …, patched in the PE name strings —
+  the same effect as an FFmpeg `--build-suffix` build), so CoreVideo always
+  loads its own full-featured FFmpeg on every OBS version with zero
+  possibility of colliding with OBS's. A new automated test loads the
+  renamed runtime, asserts `scale_cuda`/`vpp_qsv` are present, and asserts
+  no original-named FFmpeg module leaks into the process.
+
 ## [0.1.30] - 2026-07-31
 
 ### Fixed

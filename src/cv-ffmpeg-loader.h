@@ -5,7 +5,7 @@
 // Must run before the first HwVideoPipeline use. See cv-ffmpeg-loader.cpp.
 enum class CvFfmpegRuntime {
     SystemLinked,  // non-Windows: normal dynamic linking, nothing to resolve
-    ProcessCopies, // binding the avfilter/avutil OBS already loaded (OBS 32.2+)
+    ProcessCopies, // our cv*-named runtime is already resident in the process
     PrivateCopies, // loading our bundled runtime from corevideo-ffmpeg/
     Unavailable,   // no usable runtime: hardware acceleration must stay off
 };

@@ -27,6 +27,27 @@
 // interleaved writes from the reader thread and the main thread stay
 // line-atomic.
 //
+// ── The SDK runtime must live in the app bundle (hard-won) ───────────────────
+// ZoomSDK.framework is not self-contained. At auth time the SDK loads a set of
+// sibling *bundles* (ssb_sdk, zNet, zPTUIEx, ZoomSDKChatUI, ...) and it finds
+// them through the MAIN BUNDLE's Frameworks directory — NOT through the linker's
+// rpath and NOT relative to ZoomSDK.framework's own location. Linking and
+// loading the framework therefore proves nothing about whether auth can work.
+//
+// When those bundles are missing the failure is silent and misleading:
+// initSDKWithParams still returns Success, getAuthService still returns a live
+// object, and then sdkAuth returns ZoomSDKError_Failed(1) *synchronously* with
+// no delegate callback ever firing — because the internal auth manager has no
+// web-service module to hand the request to. Disassembling -[ZoomSDKAuthService
+// sdkAuth:] confirms the auth context itself parses fine (an empty context
+// returns InvalidParameter(5), which we never saw); the Failed(1) comes from an
+// internal manager returning false before anything reaches the network.
+//
+// So the engine must ship as ZoomObsEngine.app with the SDK runtime in
+// Contents/Frameworks (see scripts/make-macos-bundle.sh). preflight_sdk_runtime
+// below turns that requirement into one explicit IPC error instead of a
+// synchronous auth failure with no explanation.
+//
 // ── Implemented so far ───────────────────────────────────────────────────────
 //   init  -> SDK init + sdkAuth, emitting auth_ok / auth_fail
 // Everything else (join, roster, raw media) still fails loudly over IPC rather
@@ -160,6 +181,24 @@ static std::string g_current_auth_mode = "jwt";
 
 static CVAuthDelegate *g_auth_delegate = nil;
 
+// ── SDK runtime preflight ────────────────────────────────────────────────────
+// See the header note: the SDK resolves its runtime bundles through the main
+// bundle's Frameworks directory, and their absence surfaces only as a
+// synchronous sdkAuth failure with no callback. Check it up front so the cause
+// is stated instead of inferred. Returns the directory it checked so the error
+// can name it.
+static bool preflight_sdk_runtime(std::string &frameworks_dir)
+{
+    NSString *frameworks = [[NSBundle mainBundle] privateFrameworksPath];
+    if (!frameworks) {
+        frameworks_dir = "(no main bundle: the engine is not running from a .app)";
+        return false;
+    }
+    frameworks_dir = frameworks.UTF8String ? frameworks.UTF8String : "";
+    NSString *sdk = [frameworks stringByAppendingPathComponent:@"ZoomSDK.framework"];
+    return [[NSFileManager defaultManager] fileExistsAtPath:sdk];
+}
+
 // ── init / auth ──────────────────────────────────────────────────────────────
 // Runs on the main queue. Mirrors the init branch of main.cpp's command loop,
 // including the debug breadcrumbs, which are what make a hung auth diagnosable.
@@ -168,6 +207,20 @@ static void handle_init(const std::string &line)
     std::string jwt = json_str(line, "jwt");
     const std::string public_app_key = json_str(line, "public_app_key");
     EngineIpc::write(R"({"cmd":"debug","stage":"init_received"})");
+
+    std::string frameworks_dir;
+    if (!preflight_sdk_runtime(frameworks_dir)) {
+        EngineIpc::write(
+            std::string(R"({"cmd":"auth_fail","stage":"sdk_runtime_missing","code":0,)"
+                        R"("name":"AUTHRET_UNKNOWN","auth_mode":")") +
+            json_escape(public_app_key.empty() ? "jwt" : "public_app_key") +
+            R"(","reason":"ZoomSDK.framework is not in the engine app's )"
+            R"(Frameworks directory. The macOS Zoom SDK loads its runtime )"
+            R"(bundles from there, so authentication cannot work without it. )"
+            R"(Rebuild the bundle with scripts/make-macos-bundle.sh. Looked in: )" +
+            json_escape(frameworks_dir) + "\"}");
+        return;
+    }
 
     ZoomSDK *sdk = [ZoomSDK sharedSDK];
 

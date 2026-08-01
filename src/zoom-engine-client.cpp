@@ -181,7 +181,23 @@ static std::string engine_executable_path()
         const size_t slash = module_path.find_last_of('/');
         if (slash != std::string::npos) {
             const std::string module_dir = module_path.substr(0, slash + 1);
+#if defined(__APPLE__)
+            // Preferred macOS layout, and the only one where authentication can
+            // work: the engine ships as an .app whose Contents/Frameworks holds
+            // the Zoom SDK runtime, because the SDK loads its runtime bundles
+            // through the main bundle rather than through rpath. A bare
+            // executable beside the module still launches and still authenticates
+            // *nothing* -- see engine/src/main-macos.mm. Checked first so a stale
+            // loose binary from an older install cannot win.
+            std::string candidate =
+                module_dir + "ZoomObsEngine.app/Contents/MacOS/ZoomObsEngine";
+            if (access(candidate.c_str(), X_OK) == 0)
+                return candidate;
+
+            candidate = module_dir + "zoom-runtime/ZoomObsEngine";
+#else
             std::string candidate = module_dir + "zoom-runtime/ZoomObsEngine";
+#endif
             if (access(candidate.c_str(), X_OK) == 0)
                 return candidate;
 

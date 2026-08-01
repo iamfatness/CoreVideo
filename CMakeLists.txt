@@ -456,10 +456,18 @@ if(BUILD_ZOOM_ENGINE)
         # own. Without this the binary is emitted with ZERO LC_RPATH entries and
         # dyld aborts at launch with "no LC_RPATH's found" -- a link-clean build
         # that cannot run. CI never caught it because it only compiles and links.
+        #
+        # INSTALL_RPATH targets the shipped layout: the engine runs as
+        # ZoomObsEngine.app/Contents/MacOS/ZoomObsEngine with the Zoom SDK
+        # runtime in Contents/Frameworks, so "@executable_path/../Frameworks"
+        # resolves it. That layout is not a packaging preference -- the SDK
+        # loads its runtime bundles through the main bundle's Frameworks dir,
+        # and without them sdkAuth fails synchronously with no callback. See the
+        # header note in engine/src/main-macos.mm.
         set_target_properties(ZoomObsEngine PROPERTIES
             BUILD_WITH_INSTALL_RPATH OFF
             BUILD_RPATH "${ZOOM_SDK_ACTIVE_DIR}"
-            INSTALL_RPATH "@loader_path/zoom-runtime"
+            INSTALL_RPATH "@executable_path/../Frameworks"
         )
         # Relative DESTINATION (resolved against the install prefix). An
         # absolute "${CMAKE_INSTALL_PREFIX}/..." expands to the configure-time

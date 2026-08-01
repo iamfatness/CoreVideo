@@ -53,9 +53,18 @@ Keep the loud-fail discipline: any path you haven't implemented emits a clear er
 and never silently pretends. **Do not fake frames.**
 
 ## Runtime verification (this is why you're on a Mac — do all of it)
-- Build locally against OBS.app + `brew qt@6` (mirror the CI Configure step in
-  `.github/workflows/build.yml` build-macos job). Install the plugin bundle + `ZoomObsEngine`
-  + `CoreVideoOAuthCallback.app` into your OBS plugins dir.
+- Build locally against OBS.app. Do **not** follow CI's `brew install cmake qt@6`: the dev Mac
+  has no Homebrew and cannot get one (`/opt` is root-owned, no sudo). The working toolchain is
+  cmake/ninja/ctest via `pip --user`, `gh` from a release tarball, and Qt **6.8.3** via
+  `aqtinstall` — 6.8 because OBS.app bundles Qt 6.8 (its Info.plist says 6.8 even though the
+  shipped Qt is newer, so match at load time, not by reading the plist). macOS 26's SDK also
+  dropped `AGL.framework` while Qt's `FindWrapOpenGL` still links it unconditionally; pass
+  `-DWrapOpenGL_AGL=$(xcrun --show-sdk-path)/System/Library/Frameworks/OpenGL.framework`.
+  That is an environment issue, so keep it a configure flag and never commit it.
+- Assemble and install with `scripts/make-macos-bundle.sh --build-dir build --install`.
+  Never hand-assemble the bundle — that is how the Qt double-load and missing-TLS-backend
+  bugs kept coming back. Add `--link-sdk` for fast local iteration (symlinks the 612 MB Zoom
+  SDK instead of copying it; not distributable).
 - Load in OBS.app: confirm the source/dock/dialogs appear and the plugin logs cleanly.
 - **Real join**: join an actual Zoom meeting; verify the roster populates, live video renders
   in the OBS source, audio works, and active-speaker + spotlight + screenshare work. This is
@@ -74,9 +83,23 @@ and never silently pretends. **Do not fake frames.**
   compile-only zip.
 
 ## Gotchas (already known)
-- macOS POSIX shm names are limited to ~31 chars (`PSHMNAMLEN`); `IPC_SHM_PREFIX` + a 64-char
-  source UUID overflows. Fix the shm naming (hash/shorten the UUID) on **both** sides of
-  `engine-ipc.h` — this only bites once real frames flow, which is exactly now.
+- **The Zoom SDK runtime must be inside the engine's app bundle.** `ZoomSDK.framework` is not
+  self-contained: at auth time it loads sibling *bundles* (`ssb_sdk`, `zNet`, `zPTUIEx`, …)
+  which it locates through the **main bundle's `Contents/Frameworks`** — not through rpath and
+  not relative to the framework itself. Miss them and the failure lies to you: `initSDK`
+  returns Success, `getAuthService` returns a live object, then `sdkAuth` returns
+  `ZoomSDKError_Failed(1)` *synchronously* and no delegate ever fires. The engine therefore
+  ships as `ZoomObsEngine.app` with the SDK in `Contents/Frameworks`;
+  `preflight_sdk_runtime()` in `main-macos.mm` now reports this as `sdk_runtime_missing`
+  instead of leaving it to be re-diagnosed. **Verified 2026-08-01**: with the bundle correct,
+  a well-formed bogus-signature JWT returns `auth_fail code 7 AUTHRET_JWTTOKENWRONG` — a real
+  server verdict, so the ObjC++ auth path and the `AUTHRET_*` mapping both work end to end.
+- macOS POSIX shm names are limited to 31 chars including the leading `/` (`PSHMNAMLEN`),
+  verified empirically. The cause is **not** a "64-char source UUID" as earlier drafts of this
+  doc claimed: `make_source_uuid()` emits only ~22 chars, and the `ZoomObsPlugin_` prefix eats
+  14 of the 31 by itself, so shortening the UUID could never have fixed it. Fixed in `c009250`
+  by hashing the whole name inside `shm_region_create`/`shm_region_open_read` on the Apple
+  branch only, so both sides agree and Windows/Linux wire behavior is untouched.
 - `-undefined dynamic_lookup` must be passed via CMake `SHELL:` (already fixed) — don't
   regress it.
 - The mac engine links `-F<sdk_dir> -framework ZoomSDK`; `-F` must be on both compile and

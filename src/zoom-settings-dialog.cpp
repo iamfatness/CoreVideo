@@ -20,6 +20,9 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QGuiApplication>
+#include <QScreen>
+#include <QScrollArea>
 
 ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     : QDialog(parent)
@@ -192,16 +195,45 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     version_label->setAlignment(Qt::AlignRight);
     version_label->setTextInteractionFlags(Qt::TextSelectableByMouse);
 
+    // The six sections stacked directly in the dialog made it taller than the
+    // screen, so the buttons below them were pushed off-screen and the dialog
+    // could not be saved or cancelled. Put the sections in a scroll area and
+    // keep the version label and the button box outside it, so Save/Cancel stay
+    // visible no matter how many sections there are or how large the user's
+    // font is.
+    auto *content = new QWidget;
+    auto *content_layout = new QVBoxLayout(content);
+    content_layout->setContentsMargins(0, 0, 0, 0);
+    content_layout->setSpacing(8);
+    content_layout->addWidget(oauth_group);
+    content_layout->addWidget(ctrl_group);
+    content_layout->addWidget(osc_group);
+    content_layout->addWidget(hw_group);
+    content_layout->addWidget(updates_group);
+    content_layout->addWidget(rc_group);
+    content_layout->addStretch();
+
+    auto *scroll = new QScrollArea(this);
+    scroll->setWidget(content);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    // Sections are form layouts that wrap poorly; scroll vertically only.
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+
     auto *layout = new QVBoxLayout(this);
     layout->setSpacing(8);
-    layout->addWidget(oauth_group);
-    layout->addWidget(ctrl_group);
-    layout->addWidget(osc_group);
-    layout->addWidget(hw_group);
-    layout->addWidget(updates_group);
-    layout->addWidget(rc_group);
+    layout->addWidget(scroll, 1);
     layout->addWidget(version_label);
     layout->addWidget(buttons);
+
+    // Open at a comfortable size rather than the full natural height of the
+    // content, and never exceed the usable screen area (menu bar / Dock
+    // excluded) on a small display.
+    const QScreen *scr = screen() ? screen() : QGuiApplication::primaryScreen();
+    const QRect avail = scr ? scr->availableGeometry() : QRect(0, 0, 1280, 800);
+    resize(qMin(620, avail.width() - 80),
+           qMin(660, avail.height() - 80));
+    setSizeGripEnabled(true);
 
     // Apply stylesheet last so all widget properties are already set
     setStyleSheet(cv_stylesheet());

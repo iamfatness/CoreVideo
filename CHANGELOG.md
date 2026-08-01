@@ -7,6 +7,8 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.30] - 2026-07-31
+
 ### Fixed
 - **OBS 32.2 compatibility: OBS no longer breaks after installing CoreVideo.**
   OBS Studio 32.2 upgraded its bundled FFmpeg to major version 8, which uses

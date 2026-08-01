@@ -508,6 +508,33 @@ if(COREVIDEO_BUILD_PLUGIN)
             DESTINATION "obs-plugins/64bit/plugins/tls"
         )
     endif()
+    # macOS counterpart of the Windows TLS-backend install above. OBS.app bundles
+    # Qt but ships NO Qt TLS backend plugin (there is no PlugIns/tls directory),
+    # so QtNetwork in the OBS process has no TLS provider and every https request
+    # fails with "TLS initialization failed" -- which broke the OAuth broker
+    # redeem. securetransport is the native backend and needs no OpenSSL dylib;
+    # certonly is Qt's no-TLS fallback and is what it loads when nothing else is
+    # present. plugin-main.cpp adds this directory to the Qt library paths.
+    if(APPLE AND COREVIDEO_QT_PLUGIN_DIR AND EXISTS "${COREVIDEO_QT_PLUGIN_DIR}/tls")
+        set(_cv_macos_tls_backends "")
+        foreach(_cv_tls_lib
+            "libqsecuretransportbackend.dylib"
+            "libqcertonlybackend.dylib")
+            if(EXISTS "${COREVIDEO_QT_PLUGIN_DIR}/tls/${_cv_tls_lib}")
+                list(APPEND _cv_macos_tls_backends
+                    "${COREVIDEO_QT_PLUGIN_DIR}/tls/${_cv_tls_lib}")
+            else()
+                message(WARNING
+                    "Qt TLS backend not found: ${COREVIDEO_QT_PLUGIN_DIR}/tls/${_cv_tls_lib}. "
+                    "https requests (OAuth broker redeem, update check) will fail at runtime.")
+            endif()
+        endforeach()
+        if(_cv_macos_tls_backends)
+            install(FILES ${_cv_macos_tls_backends}
+                DESTINATION "obs-plugins/64bit/plugins/tls"
+            )
+        endif()
+    endif()
     if(WIN32 AND COREVIDEO_QT_PLUGIN_DIR AND EXISTS "${COREVIDEO_QT_PLUGIN_DIR}/platforms/qwindows.dll")
         install(FILES
             "${COREVIDEO_QT_PLUGIN_DIR}/platforms/qwindows.dll"

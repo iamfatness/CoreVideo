@@ -7,6 +7,8 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.31] - 2026-08-01
+
 ### Fixed
 - **Hardware-accelerated video conversion works on OBS 32.2+ again.** v0.1.30
   avoided the OBS 32.2 FFmpeg collision by binding the FFmpeg build OBS

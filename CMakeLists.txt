@@ -367,8 +367,16 @@ if(BUILD_ZOOM_ENGINE)
         )
         # rpath so the linker/loader can resolve ZoomSDK.framework from where the
         # SDK was fetched (CI compile/link validation only; not a shippable rpath).
+        #
+        # BUILD_RPATH is required, not optional: the framework is linked through
+        # raw "-F<dir>"/"-framework ZoomSDK" flags rather than an imported target
+        # with a known location, so CMake cannot infer any build-tree rpath on its
+        # own. Without this the binary is emitted with ZERO LC_RPATH entries and
+        # dyld aborts at launch with "no LC_RPATH's found" -- a link-clean build
+        # that cannot run. CI never caught it because it only compiles and links.
         set_target_properties(ZoomObsEngine PROPERTIES
             BUILD_WITH_INSTALL_RPATH OFF
+            BUILD_RPATH "${ZOOM_SDK_ACTIVE_DIR}"
             INSTALL_RPATH "@loader_path/zoom-runtime"
         )
         # Relative DESTINATION (resolved against the install prefix). An

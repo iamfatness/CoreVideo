@@ -11,12 +11,15 @@
 
 static int g_failures = 0;
 
-static void check(bool ok, const char *what)
+// Returns the result so a caller can skip dependent assertions when a
+// precondition (e.g. creating the region) already failed.
+static bool check(bool ok, const char *what)
 {
     if (!ok) {
         std::cerr << "FAIL: " << what << "\n";
         ++g_failures;
     }
+    return ok;
 }
 
 // ── Heartbeat timeout decision (used by ZoomEngineClient::monitor_loop) ──────
@@ -151,11 +154,56 @@ static void test_win_invalid_fd()
 }
 #endif // WIN32
 
+#if !defined(WIN32)
+// ── POSIX SHM object naming ──────────────────────────────────────────────────
+// Regression guard for the macOS PSHMNAMLEN limit: shm_open rejects names longer
+// than 31 characters INCLUDING the leading '/', which is shorter than every
+// logical name the plugin and engine build. If this regresses, no SHM region can
+// be opened on macOS and no frame is ever delivered.
+static void test_shm_platform_name()
+{
+    // A realistic logical name: IPC_SHM_PREFIX + make_source_uuid() output.
+    const std::string video = IPC_SHM_PREFIX "source_1234567890123456_0";
+    const std::string audio = video + "_audio";
+
+    const std::string video_name = shm_platform_name(video);
+    const std::string audio_name = shm_platform_name(audio);
+
+    check(video_name.size() <= 31, "video SHM name fits POSIX limit (31 incl '/')");
+    check(audio_name.size() <= 31, "audio SHM name fits POSIX limit (31 incl '/')");
+    check(!video_name.empty() && video_name[0] == '/', "SHM name has leading '/'");
+    check(!audio_name.empty() && audio_name[0] == '/', "audio SHM name has leading '/'");
+
+    // Deterministic: both sides derive the name independently and must agree.
+    check(shm_platform_name(video) == video_name, "SHM name is deterministic");
+
+    // Distinct logical names must not collide onto one region, or the audio and
+    // video paths would trample each other.
+    check(video_name != audio_name, "video and audio names stay distinct");
+    check(shm_platform_name(IPC_SHM_PREFIX "source_1234567890123456_1") != video_name,
+          "different source uuids stay distinct");
+
+    // End-to-end: the name must actually be accepted by the kernel, and the
+    // read side must resolve the same region the write side created.
+    ShmRegion writer;
+    if (check(shm_region_create(writer, video, 4096), "shm_region_create succeeds")) {
+        ShmRegion reader;
+        check(shm_region_open_read(reader, video, 4096),
+              "shm_region_open_read resolves the same region");
+        shm_region_destroy(reader);
+    }
+    shm_region_destroy(writer);
+}
+#endif // !WIN32
+
 int main()
 {
     test_heartbeat_expiry();
     test_shm_mapping_stale();
     test_shm_source_cap();
+#if !defined(WIN32)
+    test_shm_platform_name();
+#endif
 #if defined(WIN32)
     test_win_line_io();
     test_win_broken_pipe();

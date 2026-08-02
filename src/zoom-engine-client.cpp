@@ -751,6 +751,10 @@ void ZoomEngineClient::handle_event(const std::string &line)
     }
     if (cmd == "joined") {
         m_state.store(MeetingState::InMeeting, std::memory_order_release);
+        // A successful join supersedes whatever failed before it; without
+        // this the dock keeps showing "Connection failed" from a previous
+        // attempt over a perfectly healthy meeting.
+        clear_last_error();
         ZoomReconnectManager::instance().on_join_success();
         return;
     }
@@ -799,6 +803,51 @@ void ZoomEngineClient::handle_event(const std::string &line)
                 m_last_error = error_message;
                 for (const auto &entry : m_error_callbacks)
                     if (entry.second) error_callbacks.push_back(entry.second);
+            }
+            for (const auto &cb : error_callbacks) cb(error_message);
+            return;
+        }
+        // Another media-path error: sources keep their participant binding
+        // across meetings, but Zoom mints user ids per join, so after a
+        // rejoin a saved id often refers to nobody until the operator
+        // reassigns the source or that participant comes back. Subscribing
+        // to an absent participant is therefore a waiting state, not an
+        // error — stay quiet and let the recovery loop keep retrying. If the
+        // participant IS in the roster the failure is real and stays loud,
+        // but either way the meeting itself is healthy: never route this
+        // into the join-failure / reconnect machinery below (doing so
+        // flipped the session to "Connection failed" mid-meeting).
+        if (emsg == "video_subscribe_failed") {
+            const uint32_t participant_id =
+                static_cast<uint32_t>(obj.value("participant_id").toInt());
+            const std::string uuid =
+                obj.value("source_uuid").toString().toStdString();
+            bool known = false;
+            std::string error_message;
+            std::vector<ErrorCallback> error_callbacks;
+            {
+                std::lock_guard<std::mutex> lk(m_mtx);
+                for (const auto &p : m_roster) {
+                    if (p.user_id == participant_id) {
+                        known = true;
+                        break;
+                    }
+                }
+                if (known) {
+                    error_message =
+                        "Zoom engine could not subscribe to video for source " +
+                        (uuid.empty() ? std::string("(unknown)") : uuid);
+                    m_last_error = error_message;
+                    for (const auto &entry : m_error_callbacks)
+                        if (entry.second)
+                            error_callbacks.push_back(entry.second);
+                }
+            }
+            if (!known) {
+                blog(LOG_INFO,
+                     "[obs-zoom-plugin] Video subscribe for absent participant %u (source %s) - waiting for them to join",
+                     participant_id, uuid.c_str());
+                return;
             }
             for (const auto &cb : error_callbacks) cb(error_message);
             return;

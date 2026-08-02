@@ -1282,6 +1282,10 @@ int main()
                 p.isVideoOff                = false;
                 p.isAudioOff                = false;
                 p.isMyVoiceInMix            = true;
+                // Stereo raw audio (default is mono). Stereo senders arrive
+                // as two real channels, mono senders duplicated; every
+                // consumer reads the channel count from the frame header.
+                p.isAudioRawDataStereo      = true;
                 p.eAudioRawdataSamplingRate = ZOOMSDK::AudioRawdataSamplingRate_48K;
                 p.eVideoRawdataColorspace   = ZOOMSDK::VideoRawdataColorspace_BT709_F;
                 ZOOMSDK::SDKError err = meeting_svc->Join(jp);

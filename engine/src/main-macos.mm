@@ -730,6 +730,13 @@ static void handle_join(const std::string &line)
     // read side assumes 48 kHz PCM and full-range BT.709 I420.
     g_join_ctx.audioRawdataSamplingRate = ZoomSDKAudioRawdataSamplingRate_48K;
     g_join_ctx.videoRawdataColorspace   = ZoomSDKVideoRawdataColorspace_BT709_F;
+    // Stereo raw audio (default is mono). When the sender provides stereo
+    // (Original Sound with stereo enabled) the SDK delivers two real
+    // channels; mono senders arrive duplicated to both. The whole pipeline
+    // reads the channel count from the frame header, and mono-preference
+    // sources downmix in the plugin, so requesting stereo costs only
+    // bandwidth on an all-mono meeting.
+    g_join_ctx.isAudioRawDataStereo = YES;
 
     const ZoomSDKError err = [svc joinMeeting:g_join_ctx];
     EngineIpc::write(R"({"cmd":"debug","stage":"after_join","code":)" +

@@ -169,8 +169,16 @@ static void test_shm_platform_name()
     const std::string video_name = shm_platform_name(video);
     const std::string audio_name = shm_platform_name(audio);
 
+#ifdef __APPLE__
+    // Only Apple collapses the name: PSHMNAMLEN caps shm names at 31 bytes
+    // there. Other platforms deliberately keep the legacy long name so the
+    // wire format never changes for Windows/Linux.
     check(video_name.size() <= 31, "video SHM name fits POSIX limit (31 incl '/')");
     check(audio_name.size() <= 31, "audio SHM name fits POSIX limit (31 incl '/')");
+#else
+    check(video_name == "/" + video, "non-Apple SHM name is the legacy '/'+name");
+    check(audio_name == "/" + audio, "non-Apple audio SHM name is the legacy '/'+name");
+#endif
     check(!video_name.empty() && video_name[0] == '/', "SHM name has leading '/'");
     check(!audio_name.empty() && audio_name[0] == '/', "audio SHM name has leading '/'");
 

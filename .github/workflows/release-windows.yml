@@ -26,7 +26,7 @@ jobs:
           ref: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref }}"
 
       - name: Set up MSVC tools
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
           arch: x64
 
@@ -271,7 +271,7 @@ jobs:
 
       - name: Publish GitHub Release
         if: env.COREVIDEO_HAS_ZOOM_RUNTIME == 'true'
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           tag_name: ${{ steps.release.outputs.tag }}
           name: ${{ steps.release.outputs.name }}

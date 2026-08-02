@@ -87,6 +87,14 @@ static void share_teardown();
 // outlives any narrower scope.
 static std::atomic<bool> g_running{true};
 
+// False until initSDKWithParams returns. That call legitimately blocks the
+// main thread for 10-15s (longer after a killed engine), and pings routed
+// through the blocked main queue made the plugin's 10s watchdog kill every
+// join at "before_init_sdk". Until init completes the heartbeat thread writes
+// pings directly (same blind spot the pre-main-queue heartbeat always had);
+// afterwards pings go via the main queue so a hung main thread is detected.
+static std::atomic<bool> g_heartbeat_via_main_queue{false};
+
 // ── JSON helpers ─────────────────────────────────────────────────────────────
 // Deliberately identical to the ones in main.cpp so both engines parse the
 // plugin's messages the same way. The plugin emits flat, well-formed objects;
@@ -267,6 +275,9 @@ static void handle_init(const std::string &line)
     ZoomSDKError err = [sdk initSDKWithParams:params];
     EngineIpc::write(R"({"cmd":"debug","stage":"after_init_sdk","code":)" +
                      std::to_string(static_cast<int>(err)) + "}");
+    // SDK init is done — from here on, heartbeat pings must prove the main
+    // thread is alive (see the heartbeat thread in main()).
+    g_heartbeat_via_main_queue.store(true, std::memory_order_release);
     if (err != ZoomSDKError_Success) {
         EngineIpc::write(R"({"cmd":"auth_fail","stage":"init","code":)" +
                          std::to_string(static_cast<int>(err)) +
@@ -2120,10 +2131,14 @@ int main()
             for (int i = 0; i < 20 && g_running.load(std::memory_order_acquire); ++i)
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             if (!g_running.load(std::memory_order_acquire)) break;
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (g_running.load(std::memory_order_acquire))
-                    EngineIpc::write(R"({"cmd":"ping"})");
-            });
+            if (g_heartbeat_via_main_queue.load(std::memory_order_acquire)) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (g_running.load(std::memory_order_acquire))
+                        EngineIpc::write(R"({"cmd":"ping"})");
+                });
+            } else if (!EngineIpc::write(R"({"cmd":"ping"})")) {
+                break;
+            }
         }
     });
     heartbeat.detach();

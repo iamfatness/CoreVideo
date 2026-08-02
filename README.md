@@ -60,7 +60,7 @@ Changelog: **[Release notes & version history ->](CHANGELOG.md)**
 - **SDK 5.17.x and 7.x** - auto-detects flat and subfolder header layouts
 - **Hardened security** - constant-time token comparison, validated IPC input, sanitised participant IDs, SIGPIPE handling
 - **Modern UI** - CoreVideo stylesheet with dark theme, animated `CvStatusDot`, `CvBanner` first-run notices, and button role variants (primary / danger)
-- **Platform support** - Windows 10/11 x64 is the only supported, packaged, and CI-released target. The same CMake project also configures on Windows arm64, macOS, and Linux, so source builds are possible there, but they are unsupported/experimental: no official installers or ZIPs are published for them today. See [Platform Support](#platform-support) below.
+- **Platform support** - Windows 10/11 x64 (supported) and macOS on Apple Silicon (public beta) are the packaged, CI-released targets. Intel Macs are not supported. The same CMake project also configures on Windows arm64 and Linux, but those are unsupported/experimental source builds. See [Platform Support](#platform-support) below.
 
 ## Requirements
 
@@ -80,17 +80,21 @@ Changelog: **[Release notes & version history ->](CHANGELOG.md)**
 |---|---|
 | **Windows 10/11 x64** | **Supported.** The only platform with a maintained release pipeline (`.github/workflows/release-windows.yml`): checksummed ZIP and NSIS installer, published to GitHub Releases. This is the only configuration the maintainers build, test, and run in production. |
 | Windows arm64 | Source build only, untested. `CMakeLists.txt` auto-detects an arm64 Zoom SDK layout under `third_party/zoom-sdk/arm64` if present, but there is no arm64 CI job, no arm64 release artifact, and no maintainer testing on arm64 hardware. Treat it as "may compile," not "known to work." |
-| macOS (arm64 / x86_64) | Source build only, unsupported - **no official packages**. CI (`build.yml`, macOS job) only compiles the cross-platform engine/plugin sources with `-DCOREVIDEO_BUILD_PLUGIN=OFF -DCOREVIDEO_BUILD_ENGINE=OFF` to catch portability regressions; it does not build, link, or package the actual OBS plugin, and the CI artifact it produces is a compile-validation ZIP, not an installable macOS build (see below). There is no macOS Keychain-backed token storage yet (see Security), no notarization/signing, and no macOS QA. |
+| **macOS (Apple Silicon)** | **Public beta.** Maintained release pipeline (`.github/workflows/release-macos.yml`) publishes an installable plugin bundle to GitHub Releases with the full engine: auth, join, roster, active speaker, participant video/audio, and remote screen share are live-verified. The beta bundle is not yet notarized — the zip's `INSTALL.txt` documents the one-time quarantine-clear step. **Apple Silicon only by policy**: no Intel (x86_64) or universal builds are published or planned. |
+| macOS (Intel) | Not supported. Source builds may configure but are untested and will not be packaged. |
 | Linux | Source build only, unsupported - **no official packages**. CI (`build.yml`, Linux job) compiles and unit-tests only the cross-platform C++ (`BUILD_TESTING`) with the plugin/engine/sidecar all `OFF`; it never links against Qt6, OBS, or the Zoom SDK on Linux. There is no Linux packaging, no distro integration, and no libsecret-backed token storage yet (see Security). |
 
 The CMake project genuinely supports configuring on all of the above (see `buildspec/macos.cmake`, the Unix-socket IPC path in `engine-ipc.h`, and `oauth-callback-helper-macos.mm`), so a source build is *possible* on macOS/Linux/Windows-arm64 - it is just not something the project packages, tests, or supports today. If you get one working, bug reports and PRs are welcome, but expect to do your own SDK/Qt/OBS wiring.
 
 ## Beta Status
 
-CoreVideo is in **public beta**. The only supported, packaged release target is
-**Windows x64** (installer or ZIP - see [Platform Support](#platform-support)
-above); the beta installer is not yet code-signed, so Windows SmartScreen will
-flag it on first run (see [Troubleshooting](https://corevideo.io/documentation/#troubleshooting)).
+CoreVideo is in **public beta**. Packaged release targets are **Windows x64**
+(installer or ZIP) and **macOS on Apple Silicon** (plugin bundle ZIP) - see
+[Platform Support](#platform-support) above. The Windows beta installer is not
+yet code-signed, so Windows SmartScreen will flag it on first run (see
+[Troubleshooting](https://corevideo.io/documentation/#troubleshooting)); the
+macOS beta bundle is not yet notarized, so a one-time quarantine-clear step is
+required (documented in the zip's `INSTALL.txt`).
 Known limitations and what's planned next are tracked in the
 **[Roadmap](docs/ROADMAP.md)**. To report a bug or request a feature, open a
 [GitHub issue](https://github.com/iamfatness/CoreVideo/issues/new/choose) -

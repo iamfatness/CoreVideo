@@ -148,15 +148,24 @@ jobs:
           curl.exe -sSfL -H "Authorization: Bearer $env:GH_TOKEN" -H "Accept: application/octet-stream" "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$assetId" -o zoom-sdk.zip
           if ((Get-Item zoom-sdk.zip).Length -lt 100MB) { throw "Downloaded SDK archive is implausibly small." }
           Expand-Archive zoom-sdk.zip third_party/zoom-sdk-extracted -Force
-          # Find the directory that actually holds the SDK rather than trusting
-          # archive nesting: "first directory" broke when extraction layout
-          # shifted and CMake then quietly skipped the engine.
-          $sdkRoot = Get-ChildItem third_party/zoom-sdk-extracted -Directory -Recurse -Depth 3 |
-            Where-Object { Test-Path (Join-Path $_.FullName "h\zoom_sdk.h") } |
-            Select-Object -First 1
+          # Find the directory that actually holds the x64 SDK. The archive
+          # has shifted nesting before and carries x86 and x64 trees that both
+          # contain h/zoom_sdk.h - and an x86 sdk.lib links like it is absent
+          # (every SDK symbol unresolved). Require header AND import lib,
+          # prefer the x64 tree, and print what was considered so the next
+          # layout change diagnoses itself from the log.
+          $candidates = @(Get-ChildItem third_party/zoom-sdk-extracted -Directory -Recurse -Depth 3 |
+            Where-Object { (Test-Path (Join-Path $_.FullName "h\zoom_sdk.h")) -and (Test-Path (Join-Path $_.FullName "lib\sdk.lib")) })
+          Write-Host "SDK candidate roots:"
+          $candidates | ForEach-Object { Write-Host "  $($_.FullName)" }
+          $sdkRoot = $candidates | Where-Object { $_.FullName -match "x64" } | Select-Object -First 1
+          if (-not $sdkRoot) { $sdkRoot = $candidates | Select-Object -First 1 }
           if (-not $sdkRoot) {
-            throw "h/zoom_sdk.h not found anywhere in $assetName"
+            Write-Host "Archive layout (2 levels):"
+            Get-ChildItem third_party/zoom-sdk-extracted -Directory -Recurse -Depth 2 | ForEach-Object { Write-Host "  $($_.FullName)" }
+            throw "No directory with h/zoom_sdk.h + lib/sdk.lib found in $assetName"
           }
+          Write-Host "Using SDK root: $($sdkRoot.FullName)"
           if (Test-Path third_party/zoom-sdk) {
             Remove-Item third_party/zoom-sdk -Recurse -Force
           }

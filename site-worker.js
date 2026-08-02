@@ -251,6 +251,53 @@ function callbackPage(returnUrl) {
   }));
 }
 
+function sharedAuthorizationPage(zoomError) {
+  const failed = Boolean(zoomError);
+  const safeError = failed
+    ? zoomError.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;")
+    : "";
+  const title = failed ? "Zoom authorization failed" : "CoreVideo is authorized on your Zoom account";
+  const body = failed
+    ? `<p>Zoom reported: <code>${safeError}</code>. Close this tab and open the share link again, or ask the person who sent it for a fresh one.</p>`
+    : `<p>Thanks - Zoom has recorded your authorization. To start using CoreVideo:</p>
+    <ol>
+      <li>Download and install CoreVideo from the
+        <a class="plain" href="https://github.com/iamfatness/CoreVideo/releases">latest release</a>
+        (Windows x64, or macOS on Apple Silicon).</li>
+      <li>Open OBS Studio, show the <strong>Zoom Control</strong> dock (View &gt; Docks), and click
+        <strong>Zoom sign-in</strong>.</li>
+    </ol>
+    <p>The sign-in inside OBS is what connects your Zoom account to CoreVideo - this page is only
+    the app authorization step, so there is nothing else to do here.</p>`;
+  return withHeaders(new Response(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${title}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; min-height: 100vh; display: grid; place-items: center; background: #090b12; color: #f7f8ff; }
+    main { width: min(560px, calc(100vw - 32px)); }
+    p, li { color: #b9c0d4; line-height: 1.5; }
+    a.plain { color: #7db4ff; }
+    code { color: #ffb4b4; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>${title}</h1>
+    ${body}
+  </main>
+</body>
+</html>`, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+    },
+  }));
+}
+
 function zoomFailureMessage(prefix, exchanged) {
   let zoomError = exchanged.text;
   try {
@@ -314,7 +361,12 @@ async function handleOauthCallback(request, env) {
   const zoomError = requestUrl.searchParams.get("error");
   const stateToken = requestUrl.searchParams.get("state");
   if (!stateToken) {
-    return jsonResponse({ error: "Missing OAuth state." }, 400);
+    // No state means this visit did not start inside OBS. The Zoom
+    // Marketplace "Share this app" authorization URL lands testers here
+    // after they approve the app - Zoom records their authorization the
+    // moment they click Allow, so greet them and point at the install steps
+    // instead of returning a bare error for a flow that actually worked.
+    return sharedAuthorizationPage(zoomError);
   }
 
   let state;

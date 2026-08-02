@@ -61,6 +61,20 @@ jobs:
           Copy-Item "C:\obs-source\libobs\*" "$sdk\include\obs\" -Recurse -Force
           Copy-Item "C:\obs-source\UI\obs-frontend-api\obs-frontend-api.h" "$sdk\include\obs\"
 
+          # Import libs from the PE export directory via pefile, not dumpbin
+          # text scraping - a runner-image update changed dumpbin's output
+          # enough that the regex matched nothing and lib.exe built EMPTY
+          # import libraries; every obs_* symbol then failed to resolve.
+          python -m pip install --quiet pefile
+          $py = @'
+          import sys, pefile
+          pe = pefile.PE(sys.argv[1], fast_load=True)
+          pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_EXPORT']])
+          print('\n'.join(e.name.decode() for e in pe.DIRECTORY_ENTRY_EXPORT.symbols if e.name))
+          '@
+          $py = ($py -split "`n" | ForEach-Object { $_.TrimStart() }) -join "`n"
+          Set-Content -Path "$sdk\export-names.py" -Value $py -Encoding ASCII
+
           New-Item -Force -ItemType Directory "$sdk\lib" | Out-Null
           foreach ($name in @("obs", "obs-frontend-api")) {
             $dll = "$obs\bin\64bit\$name.dll"
@@ -70,14 +84,15 @@ jobs:
 
             $def = "$sdk\lib\$name.def"
             $lib = "$sdk\lib\$name.lib"
-            $exports = @("EXPORTS")
-            (dumpbin /nologo /exports $dll) | ForEach-Object {
-              if ($_ -match "^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)\s*$") {
-                $exports += "  $($Matches[1])"
-              }
+            $names = @(python "$sdk\export-names.py" $dll)
+            if ($LASTEXITCODE -ne 0) { throw "pefile export parse failed for $dll" }
+            Write-Host "$name.dll exports: $($names.Count)"
+            if ($names.Count -lt 10) {
+              throw "Only $($names.Count) exports parsed from $dll - refusing to build an empty import library."
             }
-            $exports | Set-Content $def -Encoding ASCII
+            @("EXPORTS") + ($names | ForEach-Object { "  $_" }) | Set-Content $def -Encoding ASCII
             lib /nologo /def:$def /out:$lib /machine:x64
+            if ($LASTEXITCODE -ne 0) { throw "lib.exe failed for $def" }
           }
 
           $sdkFwd = $sdk -replace '\\', '/'
@@ -133,14 +148,19 @@ jobs:
           curl.exe -sSfL -H "Authorization: Bearer $env:GH_TOKEN" -H "Accept: application/octet-stream" "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$assetId" -o zoom-sdk.zip
           if ((Get-Item zoom-sdk.zip).Length -lt 100MB) { throw "Downloaded SDK archive is implausibly small." }
           Expand-Archive zoom-sdk.zip third_party/zoom-sdk-extracted -Force
-          $inner = Get-ChildItem third_party/zoom-sdk-extracted -Directory | Select-Object -First 1
-          if (-not $inner) {
-            throw "Zoom SDK archive did not contain an extracted SDK directory."
+          # Find the directory that actually holds the SDK rather than trusting
+          # archive nesting: "first directory" broke when extraction layout
+          # shifted and CMake then quietly skipped the engine.
+          $sdkRoot = Get-ChildItem third_party/zoom-sdk-extracted -Directory -Recurse -Depth 3 |
+            Where-Object { Test-Path (Join-Path $_.FullName "h\zoom_sdk.h") } |
+            Select-Object -First 1
+          if (-not $sdkRoot) {
+            throw "h/zoom_sdk.h not found anywhere in $assetName"
           }
           if (Test-Path third_party/zoom-sdk) {
             Remove-Item third_party/zoom-sdk -Recurse -Force
           }
-          Move-Item $inner.FullName third_party/zoom-sdk
+          Move-Item $sdkRoot.FullName third_party/zoom-sdk
           "COREVIDEO_HAS_ZOOM_RUNTIME=true" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "has_zoom_runtime=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 

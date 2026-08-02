@@ -76,8 +76,11 @@
 #include <vector>
 
 // Defined with the raw-media code further down; the meeting delegate has to
-// release renderers and SHM regions when the meeting ends.
+// release renderers and SHM regions when the meeting ends, and attach the
+// screen-share controller once the meeting is up.
 static void handle_stop_media(const char *reason);
+static void share_attach();
+static void share_teardown();
 
 // Set false during teardown so the heartbeat thread stops before the IPC
 // sockets close. File scope because the heartbeat thread is detached and
@@ -399,6 +402,11 @@ struct ParticipantInfo {
 static std::vector<ParticipantInfo> g_roster;
 static uint32_t g_active_speaker = 0;
 
+// Who is currently screen sharing, or 0. Written by the share delegate (main
+// queue) and read by user_to_info, which also runs there; atomic because the
+// share renderer's frame callback reads it from an SDK thread.
+static std::atomic<uint32_t> g_active_share_user{0};
+
 static ZoomSDKMeetingService *meeting_service()
 {
     return [[ZoomSDK sharedSDK] getMeetingService];
@@ -433,11 +441,8 @@ static ParticipantInfo user_to_info(ZoomSDKUserInfo *u)
                      audio == ZoomSDKAudioStatus_MutedByHost ||
                      audio == ZoomSDKAudioStatus_MutedAllByHost);
 
-    // Screen share is not ported yet. Reporting false is the honest answer for
-    // an unimplemented path; it is NOT a guess that nobody is sharing. When the
-    // share controller lands, set this from the active share user id the way
-    // main.cpp does.
-    info.is_sharing_screen = false;
+    info.is_sharing_screen =
+        info.user_id == g_active_share_user.load(std::memory_order_acquire);
     return info;
 }
 
@@ -519,6 +524,7 @@ static void send_roster()
             break;
         }
         ctrl.delegate = self;
+        share_attach();
         rebuild_roster();
         send_roster();
         break;
@@ -871,17 +877,75 @@ static ZoomSDKResolution sdk_resolution(uint32_t resolution)
     }
 }
 
-// Mirrors valid_i420_frame() in engine-video.cpp: reject anything whose Y plane
-// length we would compute wrongly, rather than memcpy'ing a bad size.
-static bool valid_i420_frame(ZoomSDKYUVRawDataI420 *data, uint32_t w, uint32_t h,
+// Validate a frame and CROP it to even dimensions, reporting the cropped size
+// through w/h.
+//
+// The SHM payload is laid out as y_len + y_len/4 + y_len/4, which only describes
+// an I420 frame whose width and height are both even — for odd dimensions the
+// real chroma planes are ceil(w/2) x ceil(h/2), which is larger than y_len/4.
+// engine-video.cpp and engine-share.cpp handle that by REJECTING odd frames.
+// That is fine for camera video, which is always even, and quietly fatal for
+// screen share: a shared window is whatever size the window happens to be, and
+// on macOS that is routinely odd (observed 1728x1117), so every single share
+// frame was discarded as invalid and the source stayed black.
+//
+// Cropping one row/column is imperceptible and keeps the wire format and the
+// plugin's reader exactly as they are, so that is what we do instead. The
+// caller must keep the ORIGINAL width for stride arithmetic — see
+// copy_i420_even.
+static bool valid_i420_frame(ZoomSDKYUVRawDataI420 *data, uint32_t &w, uint32_t &h,
                              size_t &y_len)
 {
     if (w == 0 || h == 0) return false;
     if (w > 8192 || h > 8192) return false;
-    if ((w & 1) != 0 || (h & 1) != 0) return false;
     if (![data getYBuffer] || ![data getUBuffer] || ![data getVBuffer]) return false;
+
+    w &= ~1u;
+    h &= ~1u;
+    if (w == 0 || h == 0) return false;
+
     y_len = static_cast<size_t>(w) * static_cast<size_t>(h);
     return true;
+}
+
+// Copy an I420 frame into the SHM payload, cropping to the even dimensions
+// valid_i420_frame settled on. `src_w` is the frame's real width, which sets the
+// source strides: the macOS SDK exposes no stride accessors on
+// ZoomSDKYUVRawDataI420, so planes are assumed tightly packed at w and
+// ceil(w/2). When nothing was cropped this degenerates to the same three plain
+// memcpys the Windows engine does.
+static void copy_i420_even(char *dst, ZoomSDKYUVRawDataI420 *data,
+                           uint32_t w, uint32_t h, uint32_t src_w)
+{
+    const char *sy = [data getYBuffer];
+    const char *su = [data getUBuffer];
+    const char *sv = [data getVBuffer];
+    const size_t y_len = static_cast<size_t>(w) * static_cast<size_t>(h);
+
+    if (w == src_w) {
+        std::memcpy(dst, sy, y_len);
+    } else {
+        for (uint32_t r = 0; r < h; ++r)
+            std::memcpy(dst + static_cast<size_t>(r) * w,
+                        sy + static_cast<size_t>(r) * src_w, w);
+    }
+
+    const uint32_t src_cstride = (src_w + 1) / 2;
+    const uint32_t cw = w / 2;
+    const uint32_t ch = h / 2;
+    char *du = dst + y_len;
+    char *dv = du + static_cast<size_t>(cw) * ch;
+    if (cw == src_cstride) {
+        std::memcpy(du, su, static_cast<size_t>(cw) * ch);
+        std::memcpy(dv, sv, static_cast<size_t>(cw) * ch);
+    } else {
+        for (uint32_t r = 0; r < ch; ++r) {
+            std::memcpy(du + static_cast<size_t>(r) * cw,
+                        su + static_cast<size_t>(r) * src_cstride, cw);
+            std::memcpy(dv + static_cast<size_t>(r) * cw,
+                        sv + static_cast<size_t>(r) * src_cstride, cw);
+        }
+    }
 }
 
 static bool video_ensure_shm(VideoTarget &target, const std::string &source_uuid,
@@ -900,18 +964,25 @@ static bool video_ensure_shm(VideoTarget &target, const std::string &source_uuid
 static void video_on_frame(uint32_t participant_id, ZoomSDKYUVRawDataI420 *data)
 {
     if (!data) return;
-    const uint32_t w = [data getStreamWidth];
-    const uint32_t h = [data getStreamHeight];
+    const uint32_t src_w = [data getStreamWidth];
+    const uint32_t src_h = [data getStreamHeight];
+    uint32_t w = src_w, h = src_h;
     size_t y_len = 0;
     if (!valid_i420_frame(data, w, h, y_len)) {
         EngineIpc::write(
             R"({"cmd":"debug","stage":"video_frame_invalid","participant_id":)" +
-            std::to_string(participant_id) + R"(,"w":)" + std::to_string(w) +
-            R"(,"h":)" + std::to_string(h) + "}");
+            std::to_string(participant_id) + R"(,"w":)" + std::to_string(src_w) +
+            R"(,"h":)" + std::to_string(src_h) + "}");
         return;
     }
 
-    std::lock_guard<std::mutex> lock(g_video_mtx);
+    // try_lock, never block: this runs on an SDK raw-data thread, and the SDK
+    // may wait for in-flight callbacks inside unSubscribe/destroyRender — which
+    // the main thread calls while holding g_video_mtx. Blocking here would
+    // recreate the renderer-teardown deadlock as an ABBA variant. Losing one
+    // frame under contention is invisible at 25–30 fps.
+    std::unique_lock<std::mutex> lock(g_video_mtx, std::try_to_lock);
+    if (!lock.owns_lock()) return;
     auto sub = g_video.find(participant_id);
     if (sub == g_video.end()) return;
 
@@ -953,13 +1024,18 @@ static void video_on_frame(uint32_t participant_id, ZoomSDKYUVRawDataI420 *data)
         hdr->height = h;
         hdr->y_len  = static_cast<uint32_t>(y_len);
 
-        std::memcpy(pixels,                     [data getYBuffer], y_len);
-        std::memcpy(pixels + y_len,             [data getUBuffer], y_len / 4);
-        std::memcpy(pixels + y_len + y_len / 4, [data getVBuffer], y_len / 4);
+        copy_i420_even(pixels, data, w, h, src_w);
         std::atomic_thread_fence(std::memory_order_release);
         hdr->sequence = seq + 1;
 
         ++target.frame_count;
+        if (target.frame_count == 1 && (w != src_w || h != src_h)) {
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"video_frame_cropped_to_even","source_uuid":")" +
+                source_uuid + R"(","src_w":)" + std::to_string(src_w) +
+                R"(,"src_h":)" + std::to_string(src_h) + R"(,"w":)" +
+                std::to_string(w) + R"(,"h":)" + std::to_string(h) + "}");
+        }
         if (target.frame_count == 1 || target.frame_count % 120 == 0) {
             EngineIpc::write(
                 R"({"cmd":"debug","stage":"video_frame_received","source_uuid":")" +
@@ -983,6 +1059,13 @@ static void video_teardown_locked(uint32_t participant_id)
     auto it = g_video.find(participant_id);
     if (it == g_video.end()) return;
     if (it->second.renderer) {
+        // Detach the delegate FIRST: destroyRender invokes
+        // onRendererBeDestroyed synchronously on this thread, and that
+        // callback locks g_video_mtx — which the caller already holds.
+        // Verified live: this exact cycle deadlocked the main thread
+        // (sample: video_teardown_locked → ZoomSDK → onRendererBeDestroyed
+        // → mutex::lock), freezing the SDK UI and all video for hours.
+        it->second.renderer.delegate = nil;
         [it->second.renderer unSubscribe];
         ZoomSDKRawDataController *rdc = raw_data_controller();
         if (rdc) [rdc destroyRender:it->second.renderer];
@@ -1137,6 +1220,414 @@ static void video_unsubscribe(const std::string &source_uuid)
         sub->second.targets.erase(t);
     }
     if (sub->second.targets.empty()) video_teardown_locked(participant_id);
+}
+
+// ── Raw screen share ─────────────────────────────────────────────────────────
+// Share differs from participant video in one structural way: there is a single
+// renderer for whatever share is currently viewable, not one per source. The
+// share source id is chosen by the SDK and changes whenever someone starts,
+// stops, or switches what they are sharing, so the renderer is torn down and
+// rebuilt on those transitions while the SHM targets (one per OBS source bound
+// in screenshare mode) persist across them.
+struct ShareTarget {
+    ShmRegion shm;
+    uint64_t  frame_count = 0;
+    uint32_t  shm_gen = 0;
+    bool      shm_fail_reported = false;
+};
+
+static std::mutex g_share_mtx;
+static std::unordered_map<std::string, ShareTarget> g_share_targets;
+static ZoomSDKRenderer *g_share_renderer = nil;
+static id g_share_renderer_delegate = nil;
+static uint32_t g_share_source_id = 0;
+
+static ZoomSDKASController *as_controller()
+{
+    ZoomSDKMeetingService *svc = meeting_service();
+    return svc ? [svc getASController] : nil;
+}
+
+static void share_on_frame(ZoomSDKYUVRawDataI420 *data);
+
+@interface CVShareRenderer : NSObject <ZoomSDKRendererDelegate>
+@end
+
+@implementation CVShareRenderer
+
+- (void)onRawDataReceived:(ZoomSDKYUVRawDataI420 *)data { share_on_frame(data); }
+
+- (void)onSubscribedUserDataOn
+{
+    EngineIpc::write(R"({"cmd":"debug","stage":"share_raw_status","status":1})");
+}
+
+- (void)onSubscribedUserDataOff
+{
+    EngineIpc::write(R"({"cmd":"debug","stage":"share_raw_status","status":0})");
+}
+
+- (void)onSubscribedUserLeft {}
+
+- (void)onRendererBeDestroyed
+{
+    std::lock_guard<std::mutex> lock(g_share_mtx);
+    g_share_renderer = nil;
+    g_share_source_id = 0;
+}
+
+@end
+
+static bool share_ensure_shm(ShareTarget &target, const std::string &source_uuid,
+                             size_t y_len)
+{
+    const size_t total = sizeof(ShmFrameHeader) + y_len + y_len / 4 + y_len / 4;
+    if (total < y_len) return false;
+    if (target.shm.ptr && target.shm.size >= total) return true;
+
+    const std::string region_name = IPC_SHM_PREFIX + source_uuid;
+    if (!shm_region_create(target.shm, region_name, total)) return false;
+    ++target.shm_gen;
+    return true;
+}
+
+static void share_on_frame(ZoomSDKYUVRawDataI420 *data)
+{
+    if (!data) return;
+    const uint32_t src_w = [data getStreamWidth];
+    const uint32_t src_h = [data getStreamHeight];
+    uint32_t w = src_w, h = src_h;
+    size_t y_len = 0;
+    if (!valid_i420_frame(data, w, h, y_len)) {
+        EngineIpc::write(R"({"cmd":"debug","stage":"share_frame_invalid","w":)" +
+                         std::to_string(src_w) + R"(,"h":)" +
+                         std::to_string(src_h) + "}");
+        return;
+    }
+
+    // The plugin keys share frames by the SHARING participant, matching the
+    // Windows engine, so an operator sees the share attributed to a person.
+    const uint32_t share_user_id = g_active_share_user.load(std::memory_order_acquire);
+
+    // try_lock for the same reason as video_on_frame: never block an SDK
+    // callback thread on a mutex the main thread holds across SDK teardown
+    // calls. A dropped share frame at 1-30 fps is repainted by the next one.
+    std::unique_lock<std::mutex> lock(g_share_mtx, std::try_to_lock);
+    if (!lock.owns_lock()) return;
+    for (auto &entry : g_share_targets) {
+        const std::string &source_uuid = entry.first;
+        ShareTarget &target = entry.second;
+
+        if (!share_ensure_shm(target, source_uuid, y_len) || !target.shm.ptr) {
+            if (!target.shm_fail_reported) {
+                target.shm_fail_reported = true;
+                EngineIpc::write(
+                    R"({"cmd":"debug","stage":"share_shm_create_failed","source_uuid":")" +
+                    source_uuid + R"(","w":)" + std::to_string(w) +
+                    R"(,"h":)" + std::to_string(h) + "}");
+                EngineIpc::write(
+                    R"({"cmd":"error","msg":"shm_create_failed","source_uuid":")" +
+                    source_uuid + R"(","w":)" + std::to_string(w) +
+                    R"(,"h":)" + std::to_string(h) + "}");
+            }
+            continue;
+        }
+        if (target.shm_fail_reported) {
+            target.shm_fail_reported = false;
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"share_shm_recovered","source_uuid":")" +
+                source_uuid + "\"}");
+        }
+
+        auto *hdr    = static_cast<ShmFrameHeader *>(target.shm.ptr);
+        auto *pixels = static_cast<char *>(target.shm.ptr) + sizeof(ShmFrameHeader);
+        const uint32_t seq = shm_seq_begin(hdr->sequence);
+        hdr->sequence = seq;
+        std::atomic_thread_fence(std::memory_order_release);
+        hdr->width  = w;
+        hdr->height = h;
+        hdr->y_len  = static_cast<uint32_t>(y_len);
+
+        copy_i420_even(pixels, data, w, h, src_w);
+        std::atomic_thread_fence(std::memory_order_release);
+        hdr->sequence = seq + 1;
+
+        ++target.frame_count;
+        if (target.frame_count == 1 && (w != src_w || h != src_h)) {
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"share_frame_cropped_to_even","source_uuid":")" +
+                source_uuid + R"(","src_w":)" + std::to_string(src_w) +
+                R"(,"src_h":)" + std::to_string(src_h) + R"(,"w":)" +
+                std::to_string(w) + R"(,"h":)" + std::to_string(h) + "}");
+        }
+        if (target.frame_count == 1 || target.frame_count % 120 == 0) {
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"share_frame_received","source_uuid":")" +
+                source_uuid + R"(","share_source_id":)" +
+                std::to_string(g_share_source_id) + R"(,"count":)" +
+                std::to_string(target.frame_count) + R"(,"w":)" + std::to_string(w) +
+                R"(,"h":)" + std::to_string(h) + "}");
+        }
+
+        EngineIpc::write(
+            R"({"cmd":"frame","source_uuid":")" + source_uuid +
+            R"(","participant_id":)" + std::to_string(share_user_id) +
+            R"(,"w":)" + std::to_string(w) + R"(,"h":)" + std::to_string(h) +
+            R"(,"shm_gen":)" + std::to_string(target.shm_gen) + "}");
+    }
+}
+
+// Caller must hold g_share_mtx.
+static void share_unsubscribe_renderer_locked()
+{
+    ZoomSDKRenderer *renderer = g_share_renderer;
+    g_share_renderer = nil;
+    g_share_source_id = 0;
+    if (!renderer) return;
+    // Same synchronous-callback deadlock as video_teardown_locked: detach the
+    // delegate before destroyRender or onRendererBeDestroyed relocks
+    // g_share_mtx on this thread.
+    renderer.delegate = nil;
+    [renderer unSubscribe];
+    ZoomSDKRawDataController *rdc = raw_data_controller();
+    if (rdc) [rdc destroyRender:renderer];
+    [g_share_renderer_delegate release];
+    g_share_renderer_delegate = nil;
+}
+
+// Caller must hold g_share_mtx.
+static bool share_subscribe_to_locked(uint32_t share_source_id, const char *reason)
+{
+    if (share_source_id == 0) return false;
+    if (g_share_renderer && g_share_source_id == share_source_id) return true;
+
+    share_unsubscribe_renderer_locked();
+
+    ZoomSDKRawDataController *rdc = raw_data_controller();
+    if (!rdc) return false;
+    ZoomSDKRenderer *renderer = nil;
+    const ZoomSDKError create_err = [rdc createRender:&renderer];
+    if (create_err != ZoomSDKError_Success || !renderer) {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"share_create_renderer_failed","code":)" +
+            std::to_string(static_cast<int>(create_err)) +
+            R"(,"share_source_id":)" + std::to_string(share_source_id) + "}");
+        return false;
+    }
+
+    CVShareRenderer *delegate = [[CVShareRenderer alloc] init];
+    renderer.delegate = delegate;
+
+    const ZoomSDKError res_err = [renderer setResolution:ZoomSDKResolution_1080P];
+    EngineIpc::write(R"({"cmd":"debug","stage":"share_set_resolution","code":)" +
+                     std::to_string(static_cast<int>(res_err)) +
+                     R"(,"share_source_id":)" + std::to_string(share_source_id) + "}");
+
+    const ZoomSDKError err =
+        [renderer subscribe:share_source_id rawDataType:ZoomSDKRawDataType_Share];
+    EngineIpc::write(R"({"cmd":"debug","stage":"share_subscribe","code":)" +
+                     std::to_string(static_cast<int>(err)) +
+                     R"(,"share_source_id":)" + std::to_string(share_source_id) +
+                     R"(,"reason":")" + std::string(reason ? reason : "unknown") + "\"}");
+    if (err != ZoomSDKError_Success) {
+        renderer.delegate = nil;
+        [delegate release];
+        [rdc destroyRender:renderer];
+        return false;
+    }
+
+    g_share_renderer = renderer;
+    g_share_renderer_delegate = delegate;
+    g_share_source_id = share_source_id;
+    return true;
+}
+
+// Find whatever share is currently viewable and subscribe to it. Caller must
+// hold g_share_mtx.
+static void share_subscribe_active_locked(const char *reason)
+{
+    ZoomSDKASController *as = as_controller();
+    if (!as) {
+        EngineIpc::write(R"({"cmd":"debug","stage":"share_controller","code":-1})");
+        return;
+    }
+    NSArray<NSNumber *> *sharers = [as getViewableSharingUserList];
+    for (NSNumber *uid in sharers) {
+        const unsigned int user_id = uid.unsignedIntValue;
+        NSArray<ZoomSDKSharingSourceInfo *> *sources =
+            [as getSharingSourceInfoList:user_id];
+        for (ZoomSDKSharingSourceInfo *info in sources) {
+            if (info.shareSourceID == 0) continue;
+            g_active_share_user.store(user_id, std::memory_order_release);
+            share_subscribe_to_locked(info.shareSourceID, reason);
+            return;
+        }
+    }
+    // Nobody is sharing. Drop any renderer we still hold (mirrors the Windows
+    // engine's share_unavailable branch) — a subscription to a share that no
+    // longer exists is exactly the state that crashed the SDK in live testing.
+    share_unsubscribe_renderer_locked();
+    g_active_share_user.store(0, std::memory_order_release);
+    EngineIpc::write(R"({"cmd":"debug","stage":"share_none_active","reason":")" +
+                     std::string(reason ? reason : "unknown") + R"(","sharers":)" +
+                     std::to_string(sharers.count) + "}");
+}
+
+static void share_subscribe(const std::string &source_uuid)
+{
+    std::lock_guard<std::mutex> lock(g_share_mtx);
+    const bool present = g_share_targets.find(source_uuid) != g_share_targets.end();
+    if (shm_source_over_cap(g_share_targets.size(), present)) {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"share_subscribe_rejected_capacity","source_uuid":")" +
+            source_uuid + R"(","limit":)" + std::to_string(kMaxShmSources) + "}");
+        EngineIpc::write(
+            R"({"cmd":"error","msg":"subscribe_rejected","reason":"shm_capacity","source_uuid":")" +
+            source_uuid + R"(","limit":)" + std::to_string(kMaxShmSources) + "}");
+        return;
+    }
+    g_share_targets.emplace(source_uuid, ShareTarget{});
+    if (!g_raw_media_active) {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"share_subscribe_deferred","source_uuid":")" +
+            source_uuid + "\"}");
+        return;
+    }
+    share_subscribe_active_locked("share_subscribe");
+}
+
+static void share_unsubscribe(const std::string &source_uuid)
+{
+    std::lock_guard<std::mutex> lock(g_share_mtx);
+    auto it = g_share_targets.find(source_uuid);
+    if (it == g_share_targets.end()) return;
+    shm_region_destroy(it->second.shm);
+    g_share_targets.erase(it);
+    // Last consumer gone: drop the Zoom subscription too rather than decoding a
+    // share nobody is showing.
+    if (g_share_targets.empty()) share_unsubscribe_renderer_locked();
+}
+
+static void share_teardown()
+{
+    std::lock_guard<std::mutex> lock(g_share_mtx);
+    share_unsubscribe_renderer_locked();
+    for (auto &entry : g_share_targets) shm_region_destroy(entry.second.shm);
+    g_share_targets.clear();
+    g_active_share_user.store(0, std::memory_order_release);
+}
+
+@interface CVShareDelegate : NSObject <ZoomSDKASControllerDelegate>
+@end
+
+// The SDK does not support raw-data subscriptions to the local user's own
+// share: a self share never appears in getViewableSharingUserList, delivers at
+// most one frame, and a renderer left bound to it after SelfEnd crashed the
+// SDK in live testing (engine killed by signal ~16s later). The Windows engine
+// is immune by construction — its Sharing_Self_* enum values fall through the
+// event switch — but on macOS onShareContentChanged fires for self shares with
+// the same signature as everyone else's, so filter by user id.
+static bool share_is_self(unsigned int user_id)
+{
+    ZoomSDKMeetingActionController *ctrl = action_controller();
+    ZoomSDKUserInfo *me = ctrl ? [ctrl getMyself] : nil;
+    return me && user_id != 0 && [me getUserID] == user_id;
+}
+
+@implementation CVShareDelegate
+
+- (void)onSharingStatusChanged:(ZoomSDKSharingSourceInfo *)shareInfo
+{
+    if (!shareInfo) return;
+    const bool self_share = share_is_self(shareInfo.userID);
+    EngineIpc::write(R"({"cmd":"debug","stage":"share_status","user_id":)" +
+                     std::to_string(shareInfo.userID) +
+                     R"(,"share_source_id":)" + std::to_string(shareInfo.shareSourceID) +
+                     R"(,"status":)" +
+                     std::to_string(static_cast<int>(shareInfo.status)) +
+                     R"(,"self":)" + (self_share ? "true" : "false") + "}");
+
+    // Scoped: rebuild_roster below calls back into the SDK (getUserList), and
+    // SDK calls must not run under g_share_mtx — the SDK's own callbacks take
+    // that mutex from its threads.
+    {
+    std::lock_guard<std::mutex> lock(g_share_mtx);
+    switch (shareInfo.status) {
+    case ZoomSDKShareStatus_OtherBegin:
+    case ZoomSDKShareStatus_ViewOther:
+    case ZoomSDKShareStatus_Resume:
+        if (self_share) break;
+        if (shareInfo.userID != 0)
+            g_active_share_user.store(shareInfo.userID, std::memory_order_release);
+        if (shareInfo.shareSourceID != 0)
+            share_subscribe_to_locked(shareInfo.shareSourceID, "share_status");
+        else
+            share_subscribe_active_locked("share_status");
+        break;
+    case ZoomSDKShareStatus_SelfEnd:
+        // Safety net only: we never subscribe to a self share, so tear down
+        // solely if a renderer is somehow bound to this exact source.
+        if (shareInfo.shareSourceID != 0 &&
+            shareInfo.shareSourceID == g_share_source_id) {
+            share_unsubscribe_renderer_locked();
+            share_subscribe_active_locked("self_share_end");
+        }
+        break;
+    case ZoomSDKShareStatus_OtherEnd:
+        if (shareInfo.shareSourceID == 0 ||
+            shareInfo.shareSourceID == g_share_source_id) {
+            share_unsubscribe_renderer_locked();
+            g_active_share_user.store(0, std::memory_order_release);
+            // Someone else may still be sharing — re-evaluate rather than
+            // assuming the meeting has no share left.
+            share_subscribe_active_locked("share_end");
+        }
+        break;
+    default:
+        break;
+    }
+    } // release g_share_mtx before touching the SDK again
+    rebuild_roster();
+    send_roster();
+}
+
+- (void)onShareContentChanged:(ZoomSDKSharingSourceInfo *)shareInfo
+{
+    if (!shareInfo) return;
+    const bool self_share = share_is_self(shareInfo.userID);
+    EngineIpc::write(
+        R"({"cmd":"debug","stage":"share_content_changed","user_id":)" +
+        std::to_string(shareInfo.userID) + R"(,"share_source_id":)" +
+        std::to_string(shareInfo.shareSourceID) +
+        R"(,"self":)" + (self_share ? "true" : "false") + "}");
+    if (self_share) return; // see share_is_self
+    std::lock_guard<std::mutex> lock(g_share_mtx);
+    if (shareInfo.userID != 0)
+        g_active_share_user.store(shareInfo.userID, std::memory_order_release);
+    if (shareInfo.shareSourceID != 0)
+        share_subscribe_to_locked(shareInfo.shareSourceID, "share_content_changed");
+}
+
+- (void)onFailedToStartShare
+{
+    EngineIpc::write(R"({"cmd":"debug","stage":"share_failed_to_start"})");
+}
+
+@end
+
+static CVShareDelegate *g_share_delegate = nil;
+
+static void share_attach()
+{
+    ZoomSDKASController *as = as_controller();
+    if (!as) {
+        EngineIpc::write(R"({"cmd":"debug","stage":"share_controller","code":-1})");
+        return;
+    }
+    if (!g_share_delegate) g_share_delegate = [[CVShareDelegate alloc] init];
+    as.delegate = g_share_delegate;
+    std::lock_guard<std::mutex> lock(g_share_mtx);
+    if (g_raw_media_active) share_subscribe_active_locked("meeting_joined");
 }
 
 // ── Raw audio ────────────────────────────────────────────────────────────────
@@ -1362,6 +1853,14 @@ static void resubscribe_raw_media(const char *reason)
     }
     if (!audio_sources.empty())
         audio_subscribe_if_needed(audio_sources.front(), "audio_resubscribe");
+
+    // Share targets bound before raw media started are deferred the same way
+    // video subscriptions are; pick up whatever is being shared now.
+    {
+        std::lock_guard<std::mutex> lock(g_share_mtx);
+        if (!g_share_targets.empty())
+            share_subscribe_active_locked(reason);
+    }
 }
 
 // Guards the privilege-request retry loop: without it, a host who denies the
@@ -1510,6 +2009,7 @@ static void handle_stop_media(const char *reason)
         for (auto &entry : g_audio) shm_region_destroy(entry.second.shm);
         g_audio.clear();
     }
+    share_teardown();
     if (g_audio_subscribed) {
         ZoomSDKRawDataController *rdc = raw_data_controller();
         ZoomSDKAudioRawDataHelper *helper = nil;
@@ -1608,12 +2108,22 @@ int main()
     // cosmetic — zoom-engine-client.cpp declares the engine dead after 10s of
     // IPC silence, so the macOS engine was reported as "stopped responding"
     // after every idle stretch, including a perfectly healthy sit in a meeting.
+    // The ping is written from the MAIN QUEUE, not from this thread: every SDK
+    // delegate and every subscribe/teardown runs on the main thread, so a ping
+    // from a side thread vouches for an engine that may no longer be able to do
+    // any work. A renderer-teardown deadlock froze the main thread for hours
+    // while a detached-thread heartbeat kept the plugin convinced all was well.
+    // Routed through the main queue, a hung main thread silences the heartbeat
+    // and the plugin's 10 s watchdog kills and recovers the engine.
     std::thread heartbeat([]() {
         while (g_running.load(std::memory_order_acquire)) {
             for (int i = 0; i < 20 && g_running.load(std::memory_order_acquire); ++i)
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             if (!g_running.load(std::memory_order_acquire)) break;
-            if (!EngineIpc::write(R"({"cmd":"ping"})")) break;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (g_running.load(std::memory_order_acquire))
+                    EngineIpc::write(R"({"cmd":"ping"})");
+            });
         }
     });
     heartbeat.detach();
@@ -1665,7 +2175,11 @@ int main()
                 dispatch_async(dispatch_get_main_queue(), ^{
                     const std::string uuid = json_str(msg, "source_uuid");
                     if (!is_valid_source_uuid(uuid)) return;
+                    // The plugin does not say which kind the source was, so
+                    // clear it from all three paths; each is a no-op if the
+                    // source was never bound there.
                     video_unsubscribe(uuid);
+                    share_unsubscribe(uuid);
                     audio_remove(uuid);
                 });
             } else if (msg.find(IPC_CMD_SUBSCRIBE) != std::string::npos) {
@@ -1673,10 +2187,7 @@ int main()
                     const std::string uuid = json_str(msg, "source_uuid");
                     if (!is_valid_source_uuid(uuid)) return;
                     if (json_str(msg, "mode") == "screenshare") {
-                        // Screen share needs its own share-source subscription;
-                        // not ported yet, so say so rather than silently binding
-                        // it to a participant renderer that shows the wrong feed.
-                        handle_unimplemented("subscribe_screenshare");
+                        share_subscribe(uuid);
                         return;
                     }
                     uint32_t res = json_uint(msg, "resolution");

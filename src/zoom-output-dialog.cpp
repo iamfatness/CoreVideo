@@ -677,9 +677,8 @@ void ZoomOutputDialog::refresh()
                 audio_role->currentData(),
             };
         }
+        m_table->setUpdatesEnabled(false);
     }
-
-    if (m_table) m_table->setUpdatesEnabled(false);
     if (m_participant_table) m_participant_table->setUpdatesEnabled(false);
 
     refresh_participants();

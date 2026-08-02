@@ -1,0 +1,60 @@
+name: Feature Request
+description: Suggest a new capability or improvement for CoreVideo.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. Please check the
+        [Roadmap](https://github.com/iamfatness/CoreVideo/blob/main/docs/ROADMAP.md)
+        first — your idea may already be planned under Now / Next / Later.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: What are you trying to do today that CoreVideo doesn't support, or only supports awkwardly?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would the feature look like? A new source type, dock control, TCP/OSC command, config option, etc.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds you've tried
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area (best guess is fine)
+      options:
+        - Video / audio capture pipeline
+        - Assignment modes (Spotlight, Active Speaker, Screen Share)
+        - Zoom Control dock / Output Manager UI
+        - Sign-in / OAuth
+        - TCP / OSC control API
+        - ISO recording
+        - Diagnostics / support bundle
+        - Installer / packaging
+        - Documentation
+        - Something else
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Screenshots, mockups, or links to similar features in other tools are welcome.
+    validations:
+      required: false

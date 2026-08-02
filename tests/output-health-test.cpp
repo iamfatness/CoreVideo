@@ -37,7 +37,7 @@ static ZoomOutputInfo output(uint32_t participant_id = 1)
 
 static bool expect_reason(const char *name,
                           ZoomOutputInfo output_info,
-                          std::vector<ParticipantInfo> roster,
+                          const std::vector<ParticipantInfo> &roster,
                           bool raw_media_active,
                           ZoomOutputHealthReason expected)
 {
@@ -232,6 +232,30 @@ int main()
     bad.observed_width = 0;
     if (!expect_reason("raw media not ready overrides stale", bad, {participant(1)}, false,
                        ZoomOutputHealthReason::RawMediaNotReady))
+        return 1;
+
+    // Unassigned outputs ("None": participant mode, id 0, not active-speaker)
+    // expect no media and must never be graded waiting/stale or offered
+    // recovery — regression test for None rows showing phantom warnings.
+    ZoomOutputInfo unassigned;
+    unassigned.assignment = AssignmentMode::Participant;
+    unassigned.participant_id = 0;
+    unassigned.active_speaker = false;
+    unassigned.observed_width = 0;
+    unassigned.observed_height = 0;
+    if (!expect_reason("unassigned with no frames is Ok", unassigned,
+                       {participant(1)}, true, ZoomOutputHealthReason::Ok))
+        return 1;
+    unassigned.observed_width = 1920;
+    unassigned.observed_height = 1080;
+    unassigned.video_stale = true;
+    if (!expect_reason("unassigned with latched stale stats is Ok", unassigned,
+                       {participant(1)}, true, ZoomOutputHealthReason::Ok))
+        return 1;
+    // Raw media inactive must also not flag an unassigned output.
+    unassigned.video_stale = false;
+    if (!expect_reason("unassigned ignores raw media inactive", unassigned,
+                       {participant(1)}, false, ZoomOutputHealthReason::Ok))
         return 1;
 
     // Duplicate + participant missing combination (duplicate should win in current logic order)

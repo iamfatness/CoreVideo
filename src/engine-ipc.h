@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cerrno>
+#include <cstdio>
 
 // ── IPC command / event tokens ────────────────────────────────────────────────
 #define IPC_CMD_INIT        "init"
@@ -173,11 +174,68 @@ struct ShmAudioHeader {
        r.owner = false;
    }
 
+   // Map a caller's logical region name onto the actual POSIX object name.
+   //
+   // macOS caps shared-memory names at PSHMNAMLEN (31) characters INCLUDING the
+   // leading '/', and shm_open fails with ENAMETOOLONG past that. The logical
+   // names callers build -- IPC_SHM_PREFIX + source uuid, plus an optional
+   // "_audio" suffix -- run ~37-43 characters, so on macOS EVERY region fails to
+   // open and no frame can ever be delivered. Note that shortening the uuid alone
+   // cannot fix this: the "ZoomObsPlugin_" prefix eats 14 of the 31 by itself,
+   // leaving 16 for the uuid and the suffix combined.
+   //
+   // So on Apple collapse the whole logical name to a fixed 20-char form:
+   // '/' + "ZOP" + 16 hex digits of an FNV-1a 64 hash. It is deterministic and
+   // applied inside shm_region_create/shm_region_open_read, so the plugin and the
+   // engine derive byte-identical names from the same logical name without either
+   // side knowing -- a call site cannot forget to apply it, and the two cannot
+   // drift apart. Linux (NAME_MAX 255) and Windows keep their existing names
+   // untouched, so their wire behavior is unchanged.
+   inline std::string shm_platform_name(const std::string &logical)
+   {
+#  if defined(__APPLE__)
+       uint64_t hash = 1469598103934665603ULL;   // FNV-1a 64 offset basis
+       for (unsigned char c : logical) {
+           hash ^= static_cast<uint64_t>(c);
+           hash *= 1099511628211ULL;             // FNV-1a 64 prime
+       }
+       char buf[24];
+       std::snprintf(buf, sizeof(buf), "/ZOP%016llx",
+                     static_cast<unsigned long long>(hash));
+       return std::string(buf);
+#  else
+       return "/" + logical;                     // shm_open requires a leading '/'
+#  endif
+   }
+
    inline bool shm_region_create(ShmRegion &r, const std::string &name, size_t size)
    {
        shm_region_destroy(r);
-       r.name = "/" + name; // shm_open requires a leading '/'
+       r.name = shm_platform_name(name);
        r.owner = true;
+
+       // A POSIX shm object can be sized exactly once: ftruncate on an object
+       // that already exists fails with EINVAL on macOS (verified empirically --
+       // fresh object ftruncate succeeds, reopening the same object and
+       // ftruncating to a new size does not, and unlinking first makes it work
+       // again). So an object left behind by a previous run -- an engine that
+       // crashed or was killed before shm_region_destroy could unlink it -- can
+       // never be resized, and every create against that name fails until
+       // something removes it.
+       //
+       // That bit for real: the first frame after a resolution change (or after
+       // an engine restart) failed with "could not allocate shared memory", the
+       // failure path unlinked the region as it tore down, and the NEXT frame
+       // then succeeded -- a self-healing error that still raised an operator
+       // alert mid-show. Unlink first so the create is against a fresh object
+       // every time and the transient never happens.
+       //
+       // Harmless on Linux (which allows repeated ftruncate): unlinking a name
+       // the caller is about to recreate is a no-op there. The read side is
+       // unaffected either way -- an existing mapping stays valid against the
+       // old object until the shm_gen bump tells the plugin to remap.
+       shm_unlink(r.name.c_str());
+
        r.fd   = shm_open(r.name.c_str(), O_CREAT | O_RDWR, 0600);
        if (r.fd < 0) return false;
        if (ftruncate(r.fd, static_cast<off_t>(size)) < 0) { shm_region_destroy(r); return false; }
@@ -190,7 +248,7 @@ struct ShmAudioHeader {
    inline bool shm_region_open_read(ShmRegion &r, const std::string &name, size_t size)
    {
        shm_region_destroy(r);
-       r.name = "/" + name;
+       r.name = shm_platform_name(name);
        r.owner = false;
        r.fd = shm_open(r.name.c_str(), O_RDONLY, 0600);
        if (r.fd < 0) return false;

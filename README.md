@@ -85,6 +85,21 @@ Changelog: **[Release notes & version history ->](CHANGELOG.md)**
 
 The CMake project genuinely supports configuring on all of the above (see `buildspec/macos.cmake`, the Unix-socket IPC path in `engine-ipc.h`, and `oauth-callback-helper-macos.mm`), so a source build is *possible* on macOS/Linux/Windows-arm64 - it is just not something the project packages, tests, or supports today. If you get one working, bug reports and PRs are welcome, but expect to do your own SDK/Qt/OBS wiring.
 
+## Beta Status
+
+CoreVideo is in **public beta**. The only supported, packaged release target is
+**Windows x64** (installer or ZIP - see [Platform Support](#platform-support)
+above); the beta installer is not yet code-signed, so Windows SmartScreen will
+flag it on first run (see [Troubleshooting](https://corevideo.io/documentation/#troubleshooting)).
+Known limitations and what's planned next are tracked in the
+**[Roadmap](docs/ROADMAP.md)**. To report a bug or request a feature, open a
+[GitHub issue](https://github.com/iamfatness/CoreVideo/issues/new/choose) -
+the bug report template walks you through attaching a redacted support bundle
+from the Zoom Diagnostics dock. New releases are announced through a
+dismissible in-app update banner in the Zoom Control dock (a plain,
+unauthenticated check against the public GitHub Releases API, once per OBS
+session) and on the [Releases page](https://github.com/iamfatness/CoreVideo/releases).
+
 ## Quick Start
 
 1. **For source builds, get the Zoom SDK** - download from the [Zoom Developer Portal](https://developers.zoom.us/docs/meeting-sdk/releases/) and place it at `third_party/zoom-sdk/`. CMake auto-detects x64/arm64/x86 sub-layouts on Windows. End users installing an official Windows release do not need to download or provide SDK files.
@@ -147,9 +162,12 @@ The CMake project genuinely supports configuring on all of the above (see `build
 
 GitHub Actions can validate the Windows build without the restricted Zoom
 runtime, but public client releases must include `ZoomObsEngine.exe`,
-`zoom-runtime\sdk.dll`, Qt TLS plugins, and the other bundled runtime files. If
-`ZOOM_SDK_WINDOWS_URL` is not configured as a GitHub repository secret, CI skips
-publishing a GitHub Release instead of shipping an incomplete package.
+`zoom-runtime\sdk.dll`, Qt TLS plugins, and the other bundled runtime files.
+CI fetches the license-restricted Zoom SDK from an asset on a **draft** GitHub
+release in this repository (draft releases are not publicly visible; the
+workflow token downloads the asset at build time). If the asset is missing, CI
+skips publishing a GitHub Release instead of shipping an incomplete package.
+Keep that release a draft — publishing it would make the SDK public.
 
 For fast local releases from a machine that already has the Zoom runtime, use:
 

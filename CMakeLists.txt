@@ -15,7 +15,11 @@ set(ZOOM_EMBED_SDK_KEY          "" CACHE STRING "Pre-embedded Zoom SDK key")
 set(ZOOM_EMBED_SDK_SECRET       "" CACHE STRING "Pre-embedded Zoom SDK secret")
 set(ZOOM_EMBED_JWT_TOKEN        "" CACHE STRING "Pre-embedded Zoom JWT token")
 set(ZOOM_EMBED_OAUTH_CLIENT_ID  "y6sIWSwiTZe1JygMx4C9EQ" CACHE STRING "Pre-embedded Zoom OAuth public client ID")
-set(ZOOM_EMBED_OAUTH_AUTHORIZATION_URL "" CACHE STRING "Pre-embedded Zoom OAuth authorization URL")
+# Default to the production broker start URL so every build — including local
+# release builds — carries the full production OAuth identity. A blank broker
+# URL makes the plugin honor developer credential overrides from local OBS
+# config, which is how dev credentials leaked into tester sessions.
+set(ZOOM_EMBED_OAUTH_AUTHORIZATION_URL "https://corevideo.iamfatness.us/oauth/start" CACHE STRING "Pre-embedded Zoom OAuth authorization URL")
 set(ZOOM_EMBED_MEETING_SDK_PUBLIC_APP_KEY "y6sIWSwiTZe1JygMx4C9EQ" CACHE STRING "Pre-embedded Zoom Meeting SDK public app key")
 configure_file(src/zoom-credentials.h.in
                "${CMAKE_CURRENT_BINARY_DIR}/zoom-credentials.h" @ONLY)
@@ -94,10 +98,72 @@ if(ENABLE_FFMPEG_HW_ACCEL)
         add_library(corevideo_ffmpeg INTERFACE)
         target_include_directories(corevideo_ffmpeg INTERFACE
             "${COREVIDEO_AVFILTER_INC}")
-        target_link_libraries(corevideo_ffmpeg INTERFACE
-            "${COREVIDEO_AVFILTER_LIB}" "${COREVIDEO_AVUTIL_LIB}")
-        set(COREVIDEO_FFMPEG_TARGET corevideo_ffmpeg)
         set(COREVIDEO_FFMPEG_BIN_DIR "${FFMPEG_ROOT}/bin")
+        if(WIN32 AND MSVC)
+            # OBS bundles FFmpeg under the standard DLL names and the Windows
+            # loader dedups modules by base name, so a same-named private
+            # runtime can never be isolated from OBS's. Rename our runtime to
+            # cv-prefixed names (avfilter-11.dll -> cvfilter-11.dll, patched
+            # in the PE name strings — see scripts/New-PrivateFfmpeg.ps1) so
+            # the plugin always loads its own full-featured build.
+            set(COREVIDEO_FFMPEG_RUNTIME_DIR
+                "${CMAKE_CURRENT_BINARY_DIR}/cv-ffmpeg-runtime")
+            file(GLOB _cv_patched_check "${COREVIDEO_FFMPEG_RUNTIME_DIR}/cvfilter-*.dll")
+            if(NOT _cv_patched_check)
+                execute_process(
+                    COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                        -File "${CMAKE_CURRENT_SOURCE_DIR}/scripts/New-PrivateFfmpeg.ps1"
+                        -FfmpegBinDir "${COREVIDEO_FFMPEG_BIN_DIR}"
+                        -OutDir "${COREVIDEO_FFMPEG_RUNTIME_DIR}"
+                    RESULT_VARIABLE _cv_patch_result
+                    OUTPUT_VARIABLE _cv_patch_output
+                    ERROR_VARIABLE _cv_patch_output)
+                if(NOT _cv_patch_result EQUAL 0)
+                    message(FATAL_ERROR "Private FFmpeg runtime generation "
+                        "failed:\n${_cv_patch_output}")
+                endif()
+            endif()
+
+            file(GLOB _cv_avfilter_bin "${COREVIDEO_FFMPEG_RUNTIME_DIR}/cvfilter-*.dll")
+            file(GLOB _cv_avutil_bin "${COREVIDEO_FFMPEG_RUNTIME_DIR}/cvutil-*.dll")
+            if(NOT _cv_avfilter_bin OR NOT _cv_avutil_bin)
+                message(FATAL_ERROR "ENABLE_FFMPEG_HW_ACCEL: cvfilter/cvutil "
+                    "DLL not found in ${COREVIDEO_FFMPEG_RUNTIME_DIR}")
+            endif()
+            list(GET _cv_avfilter_bin 0 _cv_avfilter_bin)
+            list(GET _cv_avutil_bin 0 _cv_avutil_bin)
+            # The prebuilt import libs are dlltool-style long-format archives,
+            # which /DELAYLOAD cannot match (LNK4199 leaves the imports
+            # static) — and they reference the original DLL names anyway.
+            # Generate short-format import libs from the renamed DLLs'
+            # export tables so the delayed imports resolve to cv* names.
+            get_filename_component(_cv_msvc_bin "${CMAKE_LINKER}" DIRECTORY)
+            set(_cv_delaylib_dir "${CMAKE_CURRENT_BINARY_DIR}/ffmpeg-delay-libs")
+            file(MAKE_DIRECTORY "${_cv_delaylib_dir}")
+            foreach(_cv_dll IN ITEMS "${_cv_avfilter_bin}" "${_cv_avutil_bin}")
+                get_filename_component(_cv_dll_we "${_cv_dll}" NAME_WE)
+                set(_cv_out_lib "${_cv_delaylib_dir}/${_cv_dll_we}.lib")
+                execute_process(
+                    COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                        -File "${CMAKE_CURRENT_SOURCE_DIR}/scripts/New-DelayImportLib.ps1"
+                        -DllPath "${_cv_dll}"
+                        -DumpbinExe "${_cv_msvc_bin}/dumpbin.exe"
+                        -LibExe "${_cv_msvc_bin}/lib.exe"
+                        -OutLib "${_cv_out_lib}"
+                    RESULT_VARIABLE _cv_gen_result
+                    OUTPUT_VARIABLE _cv_gen_output
+                    ERROR_VARIABLE _cv_gen_output)
+                if(NOT _cv_gen_result EQUAL 0)
+                    message(FATAL_ERROR "Import library regeneration failed "
+                        "for ${_cv_dll}:\n${_cv_gen_output}")
+                endif()
+                target_link_libraries(corevideo_ffmpeg INTERFACE "${_cv_out_lib}")
+            endforeach()
+        else()
+            target_link_libraries(corevideo_ffmpeg INTERFACE
+                "${COREVIDEO_AVFILTER_LIB}" "${COREVIDEO_AVUTIL_LIB}")
+        endif()
+        set(COREVIDEO_FFMPEG_TARGET corevideo_ffmpeg)
         message(STATUS "FFmpeg HW accel: using FFMPEG_ROOT=${FFMPEG_ROOT}")
     else()
         find_package(PkgConfig REQUIRED)
@@ -216,6 +282,7 @@ if(COREVIDEO_BUILD_PLUGIN)
         src/zoom-osc-server.cpp
         src/obs-utils.cpp
         src/hw-video-pipeline.cpp
+        src/cv-ffmpeg-loader.cpp
         src/cv-widgets.cpp
         src/cv-onboarding.cpp
         src/cv-update-check.cpp
@@ -264,21 +331,32 @@ if(COREVIDEO_BUILD_PLUGIN)
     if(ENABLE_FFMPEG_HW_ACCEL)
         target_link_libraries(obs-zoom-plugin PRIVATE ${COREVIDEO_FFMPEG_TARGET})
         target_compile_definitions(obs-zoom-plugin PRIVATE COREVIDEO_HW_ACCEL)
-        # Ship the FFmpeg runtime DLLs alongside the plugin on Windows so
-        # OBS's plugin loader can resolve avfilter / avutil / avcodec /
-        # swscale / swresample without polluting PATH.
-        if(WIN32 AND COREVIDEO_FFMPEG_BIN_DIR AND EXISTS "${COREVIDEO_FFMPEG_BIN_DIR}")
-            file(GLOB COREVIDEO_FFMPEG_DLLS "${COREVIDEO_FFMPEG_BIN_DIR}/*.dll")
-            if(COREVIDEO_FFMPEG_DLLS)
-                add_custom_command(TARGET obs-zoom-plugin POST_BUILD
-                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                        ${COREVIDEO_FFMPEG_DLLS}
-                        "$<TARGET_FILE_DIR:obs-zoom-plugin>"
-                    COMMENT "Copying FFmpeg runtime DLLs for obs-zoom-plugin")
-            endif()
-            install(DIRECTORY "${COREVIDEO_FFMPEG_BIN_DIR}/"
-                DESTINATION "obs-plugins/64bit"
-                FILES_MATCHING PATTERN "*.dll")
+        # Ship the FFmpeg runtime in the private corevideo-ffmpeg/ subdirectory
+        # and delay-load it. OBS 32.2+ bundles FFmpeg 8 under the same DLL
+        # names; loose copies in obs-plugins/64bit made OBS's own obs-ffmpeg
+        # module bind our build and fail to load. cv-ffmpeg-loader.cpp resolves
+        # the delayed imports (in-process copies first, else the private dir).
+        if(WIN32 AND MSVC AND COREVIDEO_FFMPEG_RUNTIME_DIR)
+            file(GLOB COREVIDEO_FFMPEG_DLLS "${COREVIDEO_FFMPEG_RUNTIME_DIR}/*")
+            add_custom_command(TARGET obs-zoom-plugin POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "$<TARGET_FILE_DIR:obs-zoom-plugin>/corevideo-ffmpeg"
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${COREVIDEO_FFMPEG_DLLS}
+                    "$<TARGET_FILE_DIR:obs-zoom-plugin>/corevideo-ffmpeg"
+                COMMENT "Copying private FFmpeg runtime for obs-zoom-plugin")
+            install(DIRECTORY "${COREVIDEO_FFMPEG_RUNTIME_DIR}/"
+                DESTINATION "obs-plugins/64bit/corevideo-ffmpeg")
+
+            get_filename_component(_cv_avfilter_dll "${_cv_avfilter_bin}" NAME)
+            get_filename_component(_cv_avutil_dll "${_cv_avutil_bin}" NAME)
+            target_compile_definitions(obs-zoom-plugin PRIVATE
+                "COREVIDEO_AVFILTER_DLL=\"${_cv_avfilter_dll}\""
+                "COREVIDEO_AVUTIL_DLL=\"${_cv_avutil_dll}\"")
+            target_link_options(obs-zoom-plugin PRIVATE
+                "/DELAYLOAD:${_cv_avfilter_dll}"
+                "/DELAYLOAD:${_cv_avutil_dll}")
+            target_link_libraries(obs-zoom-plugin PRIVATE delayimp)
         endif()
     endif()
 
@@ -364,12 +442,32 @@ if(BUILD_ZOOM_ENGINE)
             "-F${ZOOM_SDK_ACTIVE_DIR}"
             "-framework ZoomSDK"
             "-framework Foundation"
+            # The engine hosts an NSApplication: the Zoom macOS SDK is an AppKit
+            # client (its own sample is built on NSApplicationMain), so a bare
+            # NSRunLoop is not enough to service its delegate callbacks.
+            "-framework AppKit"
         )
         # rpath so the linker/loader can resolve ZoomSDK.framework from where the
         # SDK was fetched (CI compile/link validation only; not a shippable rpath).
+        #
+        # BUILD_RPATH is required, not optional: the framework is linked through
+        # raw "-F<dir>"/"-framework ZoomSDK" flags rather than an imported target
+        # with a known location, so CMake cannot infer any build-tree rpath on its
+        # own. Without this the binary is emitted with ZERO LC_RPATH entries and
+        # dyld aborts at launch with "no LC_RPATH's found" -- a link-clean build
+        # that cannot run. CI never caught it because it only compiles and links.
+        #
+        # INSTALL_RPATH targets the shipped layout: the engine runs as
+        # ZoomObsEngine.app/Contents/MacOS/ZoomObsEngine with the Zoom SDK
+        # runtime in Contents/Frameworks, so "@executable_path/../Frameworks"
+        # resolves it. That layout is not a packaging preference -- the SDK
+        # loads its runtime bundles through the main bundle's Frameworks dir,
+        # and without them sdkAuth fails synchronously with no callback. See the
+        # header note in engine/src/main-macos.mm.
         set_target_properties(ZoomObsEngine PROPERTIES
             BUILD_WITH_INSTALL_RPATH OFF
-            INSTALL_RPATH "@loader_path/zoom-runtime"
+            BUILD_RPATH "${ZOOM_SDK_ACTIVE_DIR}"
+            INSTALL_RPATH "@executable_path/../Frameworks"
         )
         # Relative DESTINATION (resolved against the install prefix). An
         # absolute "${CMAKE_INSTALL_PREFIX}/..." expands to the configure-time
@@ -418,6 +516,33 @@ if(COREVIDEO_BUILD_PLUGIN)
             DESTINATION "obs-plugins/64bit/plugins/tls"
         )
     endif()
+    # macOS counterpart of the Windows TLS-backend install above. OBS.app bundles
+    # Qt but ships NO Qt TLS backend plugin (there is no PlugIns/tls directory),
+    # so QtNetwork in the OBS process has no TLS provider and every https request
+    # fails with "TLS initialization failed" -- which broke the OAuth broker
+    # redeem. securetransport is the native backend and needs no OpenSSL dylib;
+    # certonly is Qt's no-TLS fallback and is what it loads when nothing else is
+    # present. plugin-main.cpp adds this directory to the Qt library paths.
+    if(APPLE AND COREVIDEO_QT_PLUGIN_DIR AND EXISTS "${COREVIDEO_QT_PLUGIN_DIR}/tls")
+        set(_cv_macos_tls_backends "")
+        foreach(_cv_tls_lib
+            "libqsecuretransportbackend.dylib"
+            "libqcertonlybackend.dylib")
+            if(EXISTS "${COREVIDEO_QT_PLUGIN_DIR}/tls/${_cv_tls_lib}")
+                list(APPEND _cv_macos_tls_backends
+                    "${COREVIDEO_QT_PLUGIN_DIR}/tls/${_cv_tls_lib}")
+            else()
+                message(WARNING
+                    "Qt TLS backend not found: ${COREVIDEO_QT_PLUGIN_DIR}/tls/${_cv_tls_lib}. "
+                    "https requests (OAuth broker redeem, update check) will fail at runtime.")
+            endif()
+        endforeach()
+        if(_cv_macos_tls_backends)
+            install(FILES ${_cv_macos_tls_backends}
+                DESTINATION "obs-plugins/64bit/plugins/tls"
+            )
+        endif()
+    endif()
     if(WIN32 AND COREVIDEO_QT_PLUGIN_DIR AND EXISTS "${COREVIDEO_QT_PLUGIN_DIR}/platforms/qwindows.dll")
         install(FILES
             "${COREVIDEO_QT_PLUGIN_DIR}/platforms/qwindows.dll"
@@ -454,6 +579,15 @@ if(BUILD_TESTING)
     )
     add_test(NAME CoreVideoOutputHealth
              COMMAND CoreVideoOutputHealthTest)
+
+    if(WIN32 AND MSVC AND COREVIDEO_FFMPEG_RUNTIME_DIR AND COREVIDEO_BUILD_PLUGIN)
+        add_executable(CoreVideoFfmpegRuntimeTest
+            tests/ffmpeg-runtime-test.cpp
+        )
+        add_dependencies(CoreVideoFfmpegRuntimeTest obs-zoom-plugin)
+        add_test(NAME CoreVideoFfmpegRuntime
+                 COMMAND CoreVideoFfmpegRuntimeTest)
+    endif()
 
     add_executable(CoreVideoSpeakerDirectorTest
         tests/speaker-director-test.cpp

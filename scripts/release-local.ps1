@@ -369,6 +369,15 @@ try {
         if (-not (Test-Path -LiteralPath $ObsInstallPath)) {
             throw "OBS install path does not exist: $ObsInstallPath"
         }
+        # Pre-v0.1.30 installs left the FFmpeg runtime loose in obs-plugins\64bit,
+        # which collides with OBS 32.2+'s same-named FFmpeg 8 DLLs and stops
+        # OBS's own obs-ffmpeg module from loading. Sweep before copying.
+        $legacyDir = Join-Path $ObsInstallPath "obs-plugins\64bit"
+        if (Test-Path -LiteralPath $legacyDir) {
+            Get-ChildItem -LiteralPath $legacyDir -File |
+                Where-Object { $_.Name -match '^(avcodec|avdevice|avfilter|avformat|avutil|swresample|swscale)-\d+\.dll$' } |
+                Remove-Item -Force
+        }
         Copy-Item -Path (Join-Path $installPath "*") -Destination $ObsInstallPath -Recurse -Force
         & (Join-Path $PSScriptRoot "Test-CoreVideoPackage.ps1") `
             -PackageRoot $ObsInstallPath `

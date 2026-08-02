@@ -1,5 +1,6 @@
 #include "zoom-reconnect-backoff.h"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 
@@ -58,6 +59,44 @@ int main()
     // backoff policy) still follows the same formula.
     expect_near("multiplier 1.5, attempt 2",
                 compute_backoff_delay_ms(2, 1000, 1.5, 60000, 1.0), 2250);
+
+    // Bounds invariant: for every jitter factor the production RNG can draw
+    // (std::uniform_real_distribution<double>(0.8, 1.2)), the delay must stay
+    // within [0.8 * capped, 1.2 * capped] AND never exceed max_delay_ms. Sweep
+    // the [0.8, 1.2] range across several attempts (both below and at the cap)
+    // to assert the clamp-then-jitter-then-clamp contract holds at the edges.
+    {
+        const double base = 2000, mult = 2.0, cap = 30000;
+        for (int attempt = 0; attempt <= 8; ++attempt) {
+            const double unjittered =
+                compute_backoff_delay_ms(attempt, base, mult, cap, 1.0);
+            for (int k = 0; k <= 40; ++k) {
+                const double jf = 0.8 + (0.4 * k) / 40.0; // walk 0.8 -> 1.2
+                const double d = compute_backoff_delay_ms(attempt, base, mult, cap, jf);
+                if (d < 0.8 * unjittered - 1e-6) {
+                    std::cerr << "jitter bounds: attempt " << attempt
+                              << " factor " << jf << " -> " << d
+                              << " below 0.8x floor " << (0.8 * unjittered) << "\n";
+                    ++g_failures;
+                }
+                // Upper bound is the tighter of (1.2 * pre-jitter delay) and the
+                // cap, since the second clamp re-applies max_delay_ms.
+                const double upper = std::min(1.2 * unjittered, cap);
+                if (d > upper + 1e-6) {
+                    std::cerr << "jitter bounds: attempt " << attempt
+                              << " factor " << jf << " -> " << d
+                              << " above upper bound " << upper << "\n";
+                    ++g_failures;
+                }
+                if (d > cap + 1e-6) {
+                    std::cerr << "jitter bounds: attempt " << attempt
+                              << " factor " << jf << " -> " << d
+                              << " exceeds cap " << cap << "\n";
+                    ++g_failures;
+                }
+            }
+        }
+    }
 
     return g_failures == 0 ? 0 : 1;
 }

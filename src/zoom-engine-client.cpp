@@ -126,12 +126,14 @@ static std::string zoom_error_message(const QJsonObject &obj)
 #if defined(WIN32)
 #include <windows.h>
 #else
+#include <dlfcn.h>
 #include <signal.h>
 #include <spawn.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <cstring>
 extern char **environ;
 #endif
 
@@ -166,6 +168,54 @@ static std::string engine_executable_path()
         return candidate;
     return "ZoomObsEngine.exe";
 #else
+    // Resolve the engine next to the loaded plugin binary, mirroring the Windows
+    // branch above. Returning a bare "ZoomObsEngine" is not sufficient: the
+    // launcher uses posix_spawnp, which for a name containing no slash performs
+    // a PATH search, and the engine ships inside the plugin bundle
+    // (Contents/MacOS on macOS) which is never on PATH -- so the spawn failed
+    // with ENOENT and the plugin could never start a meeting.
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<const void *>(&engine_executable_path), &info) &&
+        info.dli_fname) {
+        const std::string module_path(info.dli_fname);
+        const size_t slash = module_path.find_last_of('/');
+        if (slash != std::string::npos) {
+            const std::string module_dir = module_path.substr(0, slash + 1);
+#if defined(__APPLE__)
+            // Preferred macOS layout, and the only one where authentication can
+            // work: the engine ships as an .app whose Contents/Frameworks holds
+            // the Zoom SDK runtime, because the SDK loads its runtime bundles
+            // through the main bundle rather than through rpath. A bare
+            // executable beside the module still launches and still authenticates
+            // *nothing* -- see engine/src/main-macos.mm. Checked first so a stale
+            // loose binary from an older install cannot win.
+            std::string candidate =
+                module_dir + "ZoomObsEngine.app/Contents/MacOS/ZoomObsEngine";
+            if (access(candidate.c_str(), X_OK) == 0)
+                return candidate;
+
+            candidate = module_dir + "zoom-runtime/ZoomObsEngine";
+#else
+            std::string candidate = module_dir + "zoom-runtime/ZoomObsEngine";
+#endif
+            if (access(candidate.c_str(), X_OK) == 0)
+                return candidate;
+
+            candidate = module_dir + "ZoomObsEngine";
+            if (access(candidate.c_str(), X_OK) == 0)
+                return candidate;
+        }
+    }
+
+    char *obs_path = obs_module_file("ZoomObsEngine");
+    if (obs_path) {
+        const std::string candidate(obs_path);
+        bfree(obs_path);
+        if (access(candidate.c_str(), X_OK) == 0)
+            return candidate;
+    }
+    // Last resort: let posix_spawnp search PATH, so a developer build with the
+    // engine on PATH still works rather than failing outright.
     return "ZoomObsEngine";
 #endif
 }
@@ -448,6 +498,12 @@ void ZoomEngineClient::leave()
     if (!m_running.load(std::memory_order_acquire)) return;
     m_user_leaving.store(true, std::memory_order_release);
     ZoomReconnectManager::instance().cancel(); // suppress any in-progress recovery
+    // Explicit user leave is a deliberate end of participation: drop the stored
+    // recovery session so sensitive join credentials (ZAK / on-behalf /
+    // app-privilege tokens) are wiped from memory rather than lingering until
+    // the next join() or stop(). Mirrors stop(); a subsequent rejoin re-stores
+    // a fresh session via join().
+    ZoomReconnectManager::instance().clear_session();
     m_state.store(MeetingState::Leaving, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lk(m_mtx);
@@ -546,11 +602,18 @@ bool ZoomEngineClient::launch_engine()
     return true;
 #else
     const std::string path = engine_executable_path();
+    blog(LOG_INFO, "[obs-zoom-plugin] Launching ZoomObsEngine: %s", path.c_str());
     char *const argv[] = {const_cast<char *>(path.c_str()), nullptr};
     pid_t pid = -1;
+    // posix_spawnp returns the error number directly; it does not set errno.
     const int rc = posix_spawnp(&pid, path.c_str(), nullptr, nullptr, argv, environ);
     if (rc != 0) {
-        set_last_error("Failed to launch ZoomObsEngine process.");
+        // Name the path and the reason: "failed to launch" alone gives no way to
+        // tell a missing engine from a non-executable one.
+        const std::string message = "Failed to launch ZoomObsEngine at '" + path +
+                                    "': " + strerror(rc);
+        set_last_error(message);
+        blog(LOG_ERROR, "[obs-zoom-plugin] %s", message.c_str());
         return false;
     }
     m_pid = pid;

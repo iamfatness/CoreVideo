@@ -25,11 +25,19 @@ static QByteArray raw_osc_string(const std::string &s)
 
 int main()
 {
-    // pad4 boundary values.
+    // pad4 boundary values. osc_pad4() is a pure function of a literal
+    // argument, so cppcheck's value-flow analysis correctly proves each of
+    // these comparisons is always true -- that is exactly what a regression
+    // assertion on a pure function's known output is supposed to do.
+    // cppcheck-suppress knownConditionTrueFalse
     expect("pad4(0) == 0", osc_pad4(0) == 0);
+    // cppcheck-suppress knownConditionTrueFalse
     expect("pad4(1) == 4", osc_pad4(1) == 4);
+    // cppcheck-suppress knownConditionTrueFalse
     expect("pad4(3) == 4", osc_pad4(3) == 4);
+    // cppcheck-suppress knownConditionTrueFalse
     expect("pad4(4) == 4", osc_pad4(4) == 4);
+    // cppcheck-suppress knownConditionTrueFalse
     expect("pad4(5) == 8", osc_pad4(5) == 8);
 
     // ── Address matching / no-type-tag messages ─────────────────────────
@@ -130,9 +138,6 @@ int main()
     // ── Unsupported type tags ────────────────────────────────────────────
     {
         // 'd' (double) is not a supported tag in this implementation.
-        std::vector<OscArg> in(1);
-        in[0].type = OscArg::Int32;
-        in[0].i = 7;
         // Hand-build so the unsupported tag doesn't trip up osc_build_message
         // (which only knows how to encode 'i' and 's').
         QByteArray pkt = raw_osc_string("/zoom/bad") + raw_osc_string(",id");

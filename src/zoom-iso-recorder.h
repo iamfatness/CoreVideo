@@ -80,6 +80,9 @@ private:
         uint32_t width = 0;
         uint32_t height = 0;
         uint32_t video_frames = 0;
+        uint64_t video_frames_dropped = 0;
+        uint64_t last_drop_ns = 0;
+        bool backlog_reported = false;
         uint32_t audio_chunks = 0;
         uint64_t started_ns = 0;
         uint64_t last_video_ns = 0;

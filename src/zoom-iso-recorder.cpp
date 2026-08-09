@@ -564,6 +564,8 @@ QJsonObject ZoomIsoRecorder::session_status_json_locked(Session &s,
     obj["width"] = static_cast<int>(s.width);
     obj["height"] = static_cast<int>(s.height);
     obj["video_frames"] = static_cast<int>(s.video_frames);
+    obj["video_frames_dropped"] =
+        static_cast<double>(s.video_frames_dropped);
     obj["audio_chunks"] = static_cast<int>(s.audio_chunks);
     const uint64_t now_ns = os_gettime_ns();
     obj["elapsed_ms"] = s.started_ns > 0 && now_ns >= s.started_ns
@@ -587,6 +589,10 @@ QJsonObject ZoomIsoRecorder::session_status_json_locked(Session &s,
         QString::fromStdString(s.requested_video_encoder);
     obj["video_encoder"] = QString::fromStdString(s.video_encoder);
     obj["encoder_fallback"] = s.encoder_fallback;
+    const uint64_t health_now_ns = os_gettime_ns();
+    const bool dropping_recently = s.last_drop_ns > 0 &&
+        health_now_ns >= s.last_drop_ns &&
+        health_now_ns - s.last_drop_ns < 5000000000ULL;
     QString session_health = QStringLiteral("recording");
     if (s.disk_full) {
         session_health = QStringLiteral("disk_full");
@@ -596,6 +602,8 @@ QJsonObject ZoomIsoRecorder::session_status_json_locked(Session &s,
         session_health = QStringLiteral("encoder_error");
     } else if (!ffmpeg_running) {
         session_health = QStringLiteral("encoder_stopped");
+    } else if (dropping_recently) {
+        session_health = QStringLiteral("encoder_behind");
     } else if (s.video_frames == 0) {
         session_health = QStringLiteral("waiting_for_video");
     } else if (s.audio_chunks == 0) {
@@ -740,6 +748,37 @@ void ZoomIsoRecorder::record_video_frame(const ZoomOutputInfo &info,
             mark_ffmpeg_failure_locked(
                 session, QStringLiteral("FFmpeg is not running."));
         return;
+    }
+
+    // Realtime backpressure: if FFmpeg consumes slower than frames arrive
+    // (typically an oversubscribed hardware encoder), QProcess buffers the
+    // pipe writes in RAM without bound. Drop whole frames past a small
+    // backlog instead — memory stays flat, EOF at stop drains quickly, and
+    // the operator sees the drop count instead of a mystery hang/kill.
+    const qint64 frame_bytes =
+        static_cast<qint64>(width) * height * 3 / 2;
+    const qint64 backlog = session.ffmpeg->bytesToWrite();
+    if (backlog > frame_bytes * 4) {
+        ++session.video_frames_dropped;
+        session.last_drop_ns = timestamp_ns;
+        if (!session.backlog_reported) {
+            session.backlog_reported = true;
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] ISO encoder for %s is falling behind "
+                 "(write backlog %lld bytes) — dropping frames to protect "
+                 "memory and the meeting. Hardware encoder session limit?",
+                 session.source_name.c_str(),
+                 static_cast<long long>(backlog));
+        }
+        return;
+    }
+    if (session.backlog_reported) {
+        session.backlog_reported = false;
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] ISO encoder for %s caught up after dropping "
+             "%llu frames",
+             session.source_name.c_str(),
+             static_cast<unsigned long long>(session.video_frames_dropped));
     }
 
     const std::string source_uuid = session.source_uuid;

@@ -689,6 +689,15 @@ void ZoomSource::configure_output_ex(AssignmentMode mode,
     if (m_subscribed) subscribe();
 }
 
+bool ZoomSource::wants_subscription() const
+{
+    if (!m_active.load(std::memory_order_acquire))
+        return false;
+    return source_wants_subscription(
+        assignment.load(std::memory_order_acquire),
+        participant_id.load(std::memory_order_acquire));
+}
+
 void ZoomSource::subscribe()
 {
     if (source_uuid.empty()) source_uuid = make_source_uuid();
@@ -816,13 +825,26 @@ void ZoomSource::clear_subscription_state()
 
 bool ZoomSource::recover_stale_video(uint64_t now_ns, bool force)
 {
-    if (!m_active.load(std::memory_order_acquire) ||
-        !m_subscribed.load(std::memory_order_acquire))
+    if (!m_active.load(std::memory_order_acquire))
         return false;
     if (!ZoomEngineClient::instance().is_running() ||
         ZoomEngineClient::instance().state() != MeetingState::InMeeting ||
         !ZoomEngineClient::instance().is_media_active())
         return false;
+    // A source that wants a feed but lost its subscription (engine
+    // reconnect, a cleared flag) has no other automatic way back — the
+    // periodic recovery must be able to re-establish it, not just refresh
+    // an already-subscribed one. Otherwise only a manual Apply/Recover
+    // restored video (2026-08-09).
+    if (!m_subscribed.load(std::memory_order_acquire)) {
+        if (!wants_subscription())
+            return false;
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] Recovery re-subscribing dropped source: source=%s uuid=%s",
+             output_name().c_str(), source_uuid.c_str());
+        subscribe();
+        return true;
+    }
 
     const uint64_t last_frame_ns =
         m_last_frame_ns.load(std::memory_order_acquire);

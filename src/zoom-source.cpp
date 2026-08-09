@@ -52,6 +52,20 @@ static constexpr uint64_t kPreviewIntervalNs = 200'000'000ULL;
 static constexpr uint64_t kStaleVideoNs = 3'000'000'000ULL;
 static constexpr uint64_t kNoSignalRecoverNs = 5'000'000'000ULL;
 static constexpr uint64_t kStaleRecoverCooldownNs = 10'000'000'000ULL;
+// After this many consecutive failed recovery attempts a feed is treated as
+// "stalled": recovery keeps trying but at the slow max cadence, and the
+// operator sees a clear status instead of an invisible retry storm (a feed
+// once retried 128x every 10s — 2026-08-09). A frame arriving resets this.
+static constexpr uint32_t kStaleRecoverStalledAfter = 6;
+
+// Exponential backoff for stale recovery: 10s, 20s, 40s, 80s, capped at
+// ~2.5 min, so a feed that cannot come back (camera off, phone-only) stops
+// hammering the SDK while still retrying periodically if it recovers.
+static uint64_t stale_recover_cooldown_ns(uint32_t attempts)
+{
+    const uint32_t shift = std::min<uint32_t>(attempts, 4);
+    return kStaleRecoverCooldownNs << shift;
+}
 static constexpr uint64_t kQualityUpgradeStableNs = 20'000'000'000ULL;
 static constexpr uint64_t kQualityUpgradeBaseCooldownNs = 60'000'000'000ULL;
 
@@ -567,9 +581,11 @@ ZoomOutputInfo ZoomSource::output_info() const
         if (last_recover_ns != 0) {
             const uint64_t recover_age_ns =
                 now_ns > last_recover_ns ? now_ns - last_recover_ns : 0;
-            if (recover_age_ns < kStaleRecoverCooldownNs) {
+            const uint64_t recover_cooldown_ns = stale_recover_cooldown_ns(
+                m_stale_recover_attempts.load(std::memory_order_relaxed));
+            if (recover_age_ns < recover_cooldown_ns) {
                 info.stale_recovery_cooldown_ms =
-                    (kStaleRecoverCooldownNs - recover_age_ns) / 1'000'000ULL;
+                    (recover_cooldown_ns - recover_age_ns) / 1'000'000ULL;
             }
         }
         const uint64_t last_upgrade_ns =
@@ -591,6 +607,8 @@ ZoomOutputInfo ZoomSource::output_info() const
         info.subscribed_age_ms = (now_ns - last_subscribe_ns) / 1'000'000ULL;
     info.stale_recovery_attempts =
         m_stale_recover_attempts.load(std::memory_order_relaxed);
+    info.recovery_stalled =
+        info.stale_recovery_attempts >= kStaleRecoverStalledAfter;
     info.quality_upgrade_attempts =
         m_quality_upgrade_attempts.load(std::memory_order_relaxed);
     info.assignment = mode;
@@ -866,8 +884,10 @@ bool ZoomSource::recover_stale_video(uint64_t now_ns, bool force)
 
     const uint64_t last_recover_ns =
         m_last_stale_recover_ns.load(std::memory_order_acquire);
+    const uint64_t cooldown_ns = stale_recover_cooldown_ns(
+        m_stale_recover_attempts.load(std::memory_order_relaxed));
     if (!force && last_recover_ns != 0 &&
-        now_ns - last_recover_ns < kStaleRecoverCooldownNs)
+        now_ns - last_recover_ns < cooldown_ns)
         return false;
 
     uint64_t expected = last_recover_ns;

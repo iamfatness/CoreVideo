@@ -245,8 +245,9 @@ bool ZoomIsoRecorder::start(const ZoomIsoRecordConfig &config,
     {
         std::lock_guard<std::mutex> lock(m_mtx);
         for (auto &entry : m_sessions)
-            close_session(entry.second);
+            begin_finishing_locked(std::move(entry.second));
         m_sessions.clear();
+        reap_finishing_locked();
         m_config = normalized;
         m_requested_video_encoder = requested_encoder;
         m_encoder_avail = avail;
@@ -281,11 +282,17 @@ void ZoomIsoRecorder::stop()
     // frames) blocked for ~40 s, the engine's pipe backed up until its
     // heartbeat write stalled, and the plugin declared the engine dead and
     // tore the meeting down (2026-08-08 incident).
-    std::unordered_map<std::string, Session> finishing;
+    std::vector<Session> finishing;
     bool stop_program = false;
     {
         std::lock_guard<std::mutex> lock(m_mtx);
-        finishing.swap(m_sessions);
+        finishing.reserve(m_sessions.size() + m_finishing.size());
+        for (auto &entry : m_sessions)
+            finishing.push_back(std::move(entry.second));
+        m_sessions.clear();
+        for (auto &pending : m_finishing)
+            finishing.push_back(std::move(pending));
+        m_finishing.clear();
         stop_program = m_started_program_recording &&
                        obs_frontend_recording_active();
         m_started_program_recording = false;
@@ -295,8 +302,7 @@ void ZoomIsoRecorder::stop()
 
     // Phase 1: signal EOF to every encoder at once so they all finalize
     // their MP4s in parallel instead of serially.
-    for (auto &entry : finishing) {
-        Session &session = entry.second;
+    for (Session &session : finishing) {
         session.wav.close();
         if (session.ffmpeg) {
             refresh_ffmpeg_status_locked(session);
@@ -310,8 +316,7 @@ void ZoomIsoRecorder::stop()
     QElapsedTimer deadline;
     deadline.start();
     constexpr qint64 kShutdownBudgetMs = 15000;
-    for (auto &entry : finishing) {
-        Session &session = entry.second;
+    for (Session &session : finishing) {
         if (!session.ffmpeg)
             continue;
         qint64 remaining = kShutdownBudgetMs - deadline.elapsed();
@@ -343,14 +348,16 @@ void ZoomIsoRecorder::stop()
 
     {
         std::lock_guard<std::mutex> lock(m_mtx);
-        for (auto &entry : finishing) {
+        for (Session &session : finishing) {
             QJsonObject completed =
-                session_status_json_locked(entry.second, true);
+                session_status_json_locked(session, true);
             completed["completed_at"] =
                 QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
             m_completed_sessions.insert(m_completed_sessions.begin(),
                                         completed);
         }
+        if (m_completed_sessions.size() > kMaxCompletedIsoSessions)
+            m_completed_sessions.resize(kMaxCompletedIsoSessions);
     }
     blog(LOG_INFO, "[obs-zoom-plugin] ISO recording stopped");
 }
@@ -359,9 +366,13 @@ QJsonArray ZoomIsoRecorder::status_json()
 {
     QJsonArray arr;
     std::lock_guard<std::mutex> lock(m_mtx);
+    reap_finishing_locked();
+    sweep_unresolved_locked();
     for (auto &entry : m_sessions) {
         arr.append(session_status_json_locked(entry.second, false));
     }
+    for (auto &finishing : m_finishing)
+        arr.append(session_status_json_locked(finishing, false));
     for (const QJsonObject &completed : m_completed_sessions)
         arr.append(completed);
     return arr;
@@ -406,8 +417,23 @@ void ZoomIsoRecorder::on_output_updated(const ZoomOutputInfo &info)
     std::lock_guard<std::mutex> lock(m_mtx);
     if (info.source_uuid.empty()) return;
     m_outputs[info.source_uuid] = info;
-    if (!should_record(info, info.participant_id))
+    auto it = m_sessions.find(info.source_uuid);
+    if (it == m_sessions.end())
+        return;
+    if (should_record(info, info.participant_id)) {
+        it->second.unresolved_since_ns = 0;
+        return;
+    }
+    if (info.assignment == AssignmentMode::ScreenShare) {
+        // Assignment changed away from a recordable mode — final.
         close_session_locked(info.source_uuid);
+        return;
+    }
+    // Unresolved participant: often transient (engine reconnect, camera
+    // toggle). Start the grace clock instead of finalizing the file;
+    // sweep_unresolved_locked() closes it if this persists.
+    if (it->second.unresolved_since_ns == 0)
+        it->second.unresolved_since_ns = os_gettime_ns();
 }
 
 void ZoomIsoRecorder::on_output_removed(const std::string &source_uuid)
@@ -445,7 +471,9 @@ ZoomIsoRecorder::ensure_session_locked(const ZoomOutputInfo &info,
     if (!needs_new) return it->second;
 
     if (it != m_sessions.end()) {
-        close_session(it->second);
+        // Resolution or participant change: finalize the old segment
+        // without blocking (we are on the frame-dispatch thread).
+        begin_finishing_locked(std::move(it->second));
         m_sessions.erase(it);
     }
 
@@ -554,42 +582,97 @@ void ZoomIsoRecorder::close_session_locked(const std::string &source_uuid)
 {
     auto it = m_sessions.find(source_uuid);
     if (it == m_sessions.end()) return;
-    close_session(it->second);
+    begin_finishing_locked(std::move(it->second));
     m_sessions.erase(it);
 }
 
-void ZoomIsoRecorder::close_session(Session &session)
+// Mid-recording closes must never wait on an encoder: they run on the
+// frame-dispatch thread, and a blocked dispatch thread starves the engine's
+// IPC pipe (the 2026-08-08 engine-"death" incidents). Signal EOF, park the
+// session, and let reap_finishing_locked() finalize it from status polls.
+void ZoomIsoRecorder::begin_finishing_locked(Session &&session)
 {
     session.wav.close();
     if (session.ffmpeg) {
         refresh_ffmpeg_status_locked(session);
         session.ffmpeg->closeWriteChannel();
-        if (!session.ffmpeg->waitForFinished(5000)) {
-            session.ffmpeg->kill();
-            // After kill() we must wait again so QProcess reaps the child
-            // (waitpid on POSIX); otherwise it can linger as a zombie.
-            if (!session.ffmpeg->waitForFinished(2000) &&
-                session.ffmpeg->state() != QProcess::NotRunning) {
-                blog(LOG_WARNING,
-                     "[obs-zoom-plugin] ISO ffmpeg for %s did not exit after "
-                     "kill(); process may not be reaped (pid=%lld)",
-                     session.source_name.c_str(),
-                     static_cast<long long>(session.ffmpeg->processId()));
+    }
+    session.finishing_since_ns = os_gettime_ns();
+    m_finishing.push_back(std::move(session));
+}
+
+void ZoomIsoRecorder::reap_finishing_locked()
+{
+    constexpr uint64_t kFinishingKillNs = 15000000000ULL;
+    const uint64_t now_ns = os_gettime_ns();
+    for (auto it = m_finishing.begin(); it != m_finishing.end();) {
+        Session &session = *it;
+        bool done = true;
+        if (session.ffmpeg &&
+            session.ffmpeg->state() != QProcess::NotRunning) {
+            const uint64_t age_ns =
+                now_ns >= session.finishing_since_ns
+                    ? now_ns - session.finishing_since_ns
+                    : 0;
+            if (age_ns > kFinishingKillNs) {
+                mark_ffmpeg_failure_locked(
+                    session,
+                    QStringLiteral(
+                        "FFmpeg did not exit within the shutdown budget "
+                        "and was terminated — the recording may be missing "
+                        "its final index (moov)."));
+                session.ffmpeg->kill();
+                session.ffmpeg->waitForFinished(100);
+            } else {
+                // Give it another poll interval to exit on its own.
+                session.ffmpeg->waitForFinished(0);
             }
+            done = session.ffmpeg->state() == QProcess::NotRunning;
+        }
+        if (!done) {
+            ++it;
+            continue;
         }
         refresh_ffmpeg_status_locked(session);
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] ISO session closed: source=%s participant=%u frames=%u audio_chunks=%u",
+             session.source_name.c_str(), session.resolved_participant_id,
+             session.video_frames, session.audio_chunks);
+        QJsonObject completed = session_status_json_locked(session, true);
+        completed["completed_at"] =
+            QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+        m_completed_sessions.insert(m_completed_sessions.begin(), completed);
+        if (m_completed_sessions.size() > kMaxCompletedIsoSessions)
+            m_completed_sessions.resize(kMaxCompletedIsoSessions);
+        it = m_finishing.erase(it);
     }
-    QJsonObject completed = session_status_json_locked(session, true);
-    completed["completed_at"] =
-        QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
-    m_completed_sessions.insert(m_completed_sessions.begin(), completed);
-    if (m_completed_sessions.size() > kMaxCompletedIsoSessions)
-        m_completed_sessions.resize(kMaxCompletedIsoSessions);
-    blog(LOG_INFO,
-         "[obs-zoom-plugin] ISO session closed: source=%s participant=%u frames=%u audio_chunks=%u",
-         session.source_name.c_str(), session.resolved_participant_id,
-         session.video_frames, session.audio_chunks);
 }
+
+// Closes sessions whose participant has stayed unresolved past the grace
+// window. Transient unresolves (engine reconnect, camera toggles) must NOT
+// finalize the file — that was fragmenting recordings into segments.
+void ZoomIsoRecorder::sweep_unresolved_locked()
+{
+    constexpr uint64_t kUnresolvedGraceNs = 60000000000ULL;
+    const uint64_t now_ns = os_gettime_ns();
+    std::vector<std::string> to_close;
+    for (auto &entry : m_sessions) {
+        Session &session = entry.second;
+        if (session.unresolved_since_ns == 0 ||
+            now_ns < session.unresolved_since_ns)
+            continue;
+        if (now_ns - session.unresolved_since_ns > kUnresolvedGraceNs)
+            to_close.push_back(entry.first);
+    }
+    for (const std::string &uuid : to_close) {
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] ISO session %s unresolved for over 60s; "
+             "finalizing its recording",
+             uuid.c_str());
+        close_session_locked(uuid);
+    }
+}
+
 
 QJsonObject ZoomIsoRecorder::session_status_json_locked(Session &s,
                                                         bool completed)
@@ -785,6 +868,7 @@ void ZoomIsoRecorder::record_video_frame(const ZoomOutputInfo &info,
     if (!should_record(info, resolved_participant_id)) return;
     Session &session = ensure_session_locked(info, resolved_participant_id,
                                              width, height, timestamp_ns);
+    session.unresolved_since_ns = 0; // frames flowing == resolved
     refresh_ffmpeg_status_locked(session);
     if (!session.ffmpeg ||
         session.ffmpeg->state() != QProcess::Running) {

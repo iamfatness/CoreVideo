@@ -28,6 +28,11 @@ public:
     uint32_t participant_id() const { return m_participant_id; }
     uint32_t resolution() const { return m_resolution; }
     bool active() const { return m_renderer != nullptr; }
+    // Change the raw-data resolution on the LIVE renderer, in place. Avoids
+    // destroy+recreate of the renderer (which races the SDK's async release
+    // of the participant and returns SDKERR_WRONG_USAGE on the recreate —
+    // the "switching to Active Speaker kills a mapped source" failure).
+    bool set_resolution(uint32_t resolution);
     size_t target_count() const;
     void add_source(const std::string &source_uuid, IpcFd e2p_fd);
     void remove_source(const std::string &source_uuid);

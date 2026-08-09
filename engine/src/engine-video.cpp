@@ -106,6 +106,27 @@ ParticipantSubscription::ParticipantSubscription(uint32_t participant_id,
         std::to_string(resolution) + "}");
 }
 
+bool ParticipantSubscription::set_resolution(uint32_t resolution)
+{
+    if (resolution > 2) resolution = 1;
+    if (!m_renderer)
+        return false;
+    if (resolution == m_resolution)
+        return true;
+    const ZOOMSDK::SDKError err =
+        m_renderer->setRawDataResolution(sdk_resolution(resolution));
+    EngineIpc::write(
+        R"({"cmd":"debug","stage":"set_resolution_inplace","participant_id":)" +
+        std::to_string(m_participant_id) + R"(,"code":)" +
+        std::to_string(static_cast<int>(err)) + R"(,"from":)" +
+        std::to_string(m_resolution) + R"(,"to":)" +
+        std::to_string(resolution) + "}");
+    if (err != ZOOMSDK::SDKERR_SUCCESS)
+        return false;
+    m_resolution = resolution;
+    return true;
+}
+
 ParticipantSubscription::~ParticipantSubscription()
 {
     if (m_renderer) {
@@ -354,38 +375,17 @@ void EngineVideo::subscribe(uint32_t participant_id,
     if (it != m_subs.end() && it->second) {
         if (it->second->active()) {
             if (resolution > it->second->resolution()) {
-                auto targets = it->second->sources();
-                const auto already_targeted =
-                    std::find_if(targets.begin(), targets.end(),
-                                 [&source_uuid](const auto &target) {
-                                     return target.first == source_uuid;
-                                 }) != targets.end();
-                if (!already_targeted)
-                    targets.emplace_back(source_uuid, e2p_fd);
-                EngineIpc::write(
-                    R"({"cmd":"debug","stage":"video_upgrade_subscription","source_uuid":")" +
-                    source_uuid + R"(","participant_id":)" +
-                    std::to_string(participant_id) + R"(,"requested":)" +
-                    std::to_string(resolution) + R"(,"previous":)" +
-                    std::to_string(it->second->resolution()) + R"(,"active_targets":)" +
-                    std::to_string(targets.size()) + "}");
-
-                m_subs.erase(it);
-                for (const auto &target : targets)
-                    m_source_participants.erase(target.first);
-
-                it = m_subs.emplace(
-                    participant_id,
-                    std::make_unique<ParticipantSubscription>(
-                        participant_id, targets.front().first,
-                        targets.front().second, resolution)).first;
-                if (!it->second || it->second->empty()) {
-                    m_subs.erase(it);
-                    return;
-                }
-                for (size_t i = 1; i < targets.size(); ++i)
-                    it->second->add_source(targets[i].first, targets[i].second);
-                for (const auto &target : targets) {
+                // Raise the resolution on the LIVE renderer. The old path
+                // destroyed and recreated the renderer, which races the
+                // SDK's async participant release and returns WRONG_USAGE on
+                // the recreate — killing every source sharing this
+                // participant (the "switch to Active Speaker kills a mapped
+                // source, Apply restores it" report). Change it in place and
+                // just attach the new source as another target.
+                const uint32_t previous = it->second->resolution();
+                const bool raised = it->second->set_resolution(resolution);
+                it->second->add_source(source_uuid, e2p_fd);
+                for (const auto &target : it->second->sources()) {
                     m_source_participants[target.first] = {
                         participant_id,
                         it->second->resolution(),
@@ -396,8 +396,11 @@ void EngineVideo::subscribe(uint32_t participant_id,
                     R"({"cmd":"debug","stage":"video_subscription_upgraded","source_uuid":")" +
                     source_uuid + R"(","participant_id":)" +
                     std::to_string(participant_id) + R"(,"requested":)" +
-                    std::to_string(resolution) + R"(,"actual":)" +
-                    std::to_string(it->second->resolution()) + R"(,"active_targets":)" +
+                    std::to_string(resolution) + R"(,"previous":)" +
+                    std::to_string(previous) + R"(,"actual":)" +
+                    std::to_string(it->second->resolution()) +
+                    R"(,"in_place":)" + (raised ? "true" : "false") +
+                    R"(,"active_targets":)" +
                     std::to_string(it->second->target_count()) + "}");
                 return;
             }

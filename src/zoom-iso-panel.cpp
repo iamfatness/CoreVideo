@@ -650,6 +650,8 @@ void ZoomIsoPanel::refresh_status()
         const QString ffmpeg_output = s.value("ffmpeg_output_tail").toString();
         const QString session_health = s.value("session_health").toString();
         const int video_frames = s.value("video_frames").toInt();
+        const double frames_dropped =
+            s.value("video_frames_dropped").toDouble(0.0);
         const int audio_chunks = s.value("audio_chunks").toInt();
         const double last_video_age_ms =
             s.value("last_video_age_ms").toDouble(-1.0);
@@ -660,12 +662,19 @@ void ZoomIsoPanel::refresh_status()
             : (ffmpeg_running ? QStringLiteral("Recording") : QStringLiteral("Encoder stopped"));
         if (!ffmpeg_error.isEmpty())
             status = QStringLiteral("Encoder error");
+        else if (session_health == QLatin1String("encoder_behind"))
+            status = QString("Encoder falling behind (%1 dropped)")
+                .arg(static_cast<qint64>(frames_dropped));
         else if (video_frames == 0)
             status = QString("Waiting for video (%1)")
                 .arg(age_text(static_cast<double>(elapsed_ms)));
         else if (!completed && audio_chunks == 0)
             status += QString(" / no audio (%1)")
                 .arg(age_text(static_cast<double>(elapsed_ms)));
+        if (frames_dropped > 0 &&
+            session_health != QLatin1String("encoder_behind"))
+            status += QString(" (%1 dropped)")
+                .arg(static_cast<qint64>(frames_dropped));
         QString participant = s.value("display_name").toString();
         const int participant_id =
             static_cast<int>(s.value("resolved_participant_id").toDouble());

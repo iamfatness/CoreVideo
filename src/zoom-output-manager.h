@@ -39,6 +39,10 @@ struct ZoomOutputInfo {
     bool video_stale = false;
     uint32_t stale_recovery_attempts = 0;
     uint64_t stale_recovery_cooldown_ms = 0;
+    // True once recovery has failed repeatedly: the feed is still retried at
+    // the slow backoff cadence, but the operator should be told it can't
+    // currently be subscribed (participant likely camera-off / phone-only).
+    bool recovery_stalled = false;
     uint32_t quality_upgrade_attempts = 0;
     uint64_t quality_upgrade_cooldown_ms = 0;
     uint64_t subscribed_age_ms = 0;

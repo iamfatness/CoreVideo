@@ -143,7 +143,9 @@ static QString signal_text(const ZoomOutputInfo &output)
     if (output.health_reason == ZoomOutputHealthReason::SpotlightUnavailable)
         return QString("Spotlight %1\nunavailable").arg(output.spotlight_slot);
     if (output.observed_width == 0 || output.observed_height == 0)
-        return QStringLiteral("No signal");
+        return output.recovery_stalled
+            ? QStringLiteral("! Can't\nsubscribe")
+            : QStringLiteral("No signal");
     if (output.video_stale)
         return QString("! Stale\n%1.%2s")
             .arg(output.last_frame_age_ms / 1000)

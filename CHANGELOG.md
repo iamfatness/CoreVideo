@@ -8,6 +8,16 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 ## [Unreleased]
 
 ### Fixed
+- **Rapid scene switching no longer risks killing the Zoom engine — and
+  scene cuts are instant now.** Zoom subscriptions were torn down whenever a
+  scene hid a CoreVideo source and rebuilt when one appeared, so every scene
+  jump churned the Zoom SDK's raw-data pipeline for all sources at once;
+  fast switching could drive the SDK into an internal fatal that closed the
+  engine (all video dropping to color bars), and every cut briefly showed
+  placeholders while feeds resubscribed. Subscriptions now follow the
+  assignment, not scene visibility: feeds stay warm across scene switches.
+
+### Fixed
 - **The Active Speaker output now always keeps the last speaker on screen.**
   When the current speaker muted, turned their camera off, or blipped out of
   the roster during a reconnect, the director dethroned them immediately —

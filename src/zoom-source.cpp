@@ -1377,7 +1377,8 @@ bool ZoomSource::output_video_from_shared_memory(
         m_fps_window_start_ns = ts;
         m_fps_window_frames = 0;
     }
-    if (m_frame_count == 1 || m_frame_count % 120 == 0) {
+    if (cv_zoom_verbose_logging() &&
+        (m_frame_count == 1 || m_frame_count % 120 == 0)) {
         blog(LOG_INFO,
              "[obs-zoom-plugin] Output Zoom video frame: source=%s uuid=%s count=%llu w=%u h=%u fmt=%d y_center=%u y_tl=%u",
              output_name().c_str(), source_uuid.c_str(),
@@ -1493,7 +1494,8 @@ void ZoomSource::on_engine_audio(uint32_t event_byte_len,
         output_info(), resolved_participant_id, m_audio_buf.data(), byte_len,
         sample_rate, channels, ts);
     ++m_audio_frame_count;
-    if (m_audio_frame_count == 1 || m_audio_frame_count % 250 == 0) {
+    if (cv_zoom_verbose_logging() &&
+        (m_audio_frame_count == 1 || m_audio_frame_count % 250 == 0)) {
         int peak = 0;
         const uint32_t sample_count = byte_len / kZoomBytesPerSample;
         for (uint32_t i = 0; i < sample_count; ++i)

@@ -11,6 +11,14 @@
 #include <unordered_map>
 #include <vector>
 
+// Verbose logging gate. Per-frame / per-roster-tick telemetry (frame
+// received, audio target churn, resolution noops) produced ~27 MB of OBS
+// log in a 90-minute meeting, bloating support bundles and adding hot-path
+// I/O. Those lines are suppressed from the OBS log by default and only
+// emitted when CV_ZOOM_VERBOSE_LOG is set; they are still captured in the
+// in-memory diagnostics ring buffer regardless. Read once, cached.
+bool cv_zoom_verbose_logging();
+
 class ZoomEngineClient {
 public:
     struct DebugEvent {

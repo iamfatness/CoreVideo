@@ -85,6 +85,8 @@ private:
         uint64_t last_drop_ns = 0;
         bool backlog_reported = false;
         uint64_t ffmpeg_started_ns = 0;
+        uint64_t finishing_since_ns = 0;
+        uint64_t unresolved_since_ns = 0;
         uint32_t audio_chunks = 0;
         uint64_t started_ns = 0;
         uint64_t last_video_ns = 0;
@@ -111,7 +113,12 @@ private:
                                    uint32_t height,
                                    uint64_t timestamp_ns);
     void close_session_locked(const std::string &source_uuid);
-    void close_session(Session &session);
+    // Non-blocking close for mid-recording paths (frame-dispatch thread must
+    // never wait on an encoder): signals EOF and parks the session on
+    // m_finishing; reap_finishing_locked() finalizes it from status polls.
+    void begin_finishing_locked(Session &&session);
+    void reap_finishing_locked();
+    void sweep_unresolved_locked();
     QJsonObject session_status_json_locked(Session &session, bool completed);
     void refresh_ffmpeg_status_locked(Session &session);
     void mark_ffmpeg_failure_locked(Session &session, const QString &message);
@@ -138,5 +145,6 @@ private:
     QString m_status_warning;
     std::unordered_map<std::string, ZoomOutputInfo> m_outputs;
     std::unordered_map<std::string, Session> m_sessions;
+    std::vector<Session> m_finishing;
     std::vector<QJsonObject> m_completed_sessions;
 };

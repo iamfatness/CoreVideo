@@ -95,6 +95,10 @@ struct ZoomSource {
     uint32_t width() const;
     uint32_t height() const;
     bool is_subscribed() const { return m_subscribed; }
+    // True when the source's assignment means it SHOULD have a live feed
+    // (regardless of whether it currently does). Used by reconnect/recovery
+    // to re-establish feeds by intent instead of by a possibly-stale flag.
+    bool wants_subscription() const;
     void set_preview_cb(ZoomPreviewCallback cb);
     void clear_preview_cb();
     void release_shared_memory();

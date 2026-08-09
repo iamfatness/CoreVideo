@@ -230,8 +230,13 @@ bool ZoomOutputManager::configure_output_ex(const std::string &source_name,
 void ZoomOutputManager::resubscribe_all()
 {
     std::lock_guard<std::mutex> lk(m_mtx);
+    // Re-subscribe by INTENT, not by the current flag. After an engine
+    // crash/reconnect the engine is brand new and knows nothing, yet a
+    // source's stale m_subscribed flag may be either true or false; gating
+    // on is_subscribed() left feeds dark until the operator hit Apply/Recover
+    // by hand (2026-08-09). Every source that wants a feed re-subscribes.
     for (auto *src : m_sources)
-        if (src && src->is_subscribed()) src->subscribe();
+        if (src && src->wants_subscription()) src->subscribe();
 }
 
 uint32_t ZoomOutputManager::recover_stale_sources(bool force)

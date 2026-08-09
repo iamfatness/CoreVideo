@@ -1638,6 +1638,12 @@ static void *zoom_source_create_common(obs_data_t *settings, obs_source_t *sourc
     ctx->source = source;
     ctx->source_uuid = make_source_uuid();
     ctx->dedicated_active_speaker_source = dedicated_active_speaker;
+    // Render each frame the instant it arrives instead of buffering. A
+    // buffered async source discards and rebuilds its frame buffer every
+    // time a scene reactivates it, holding the last frame frozen until the
+    // buffer refills — the per-scene-switch freeze/stutter operators saw.
+    // Unbuffered also cuts latency, which is the point of this product.
+    obs_source_set_async_unbuffered(source, true);
     if (dedicated_active_speaker) {
         ctx->m_director_preview_uuid = make_source_uuid();
         obs_data_set_int(settings, PROP_ASSIGNMENT_MODE,

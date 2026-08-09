@@ -7,26 +7,48 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
-### Fixed
-- **Rapid scene switching no longer risks killing the Zoom engine — and
-  scene cuts are instant now.** Zoom subscriptions were torn down whenever a
-  scene hid a CoreVideo source and rebuilt when one appeared, so every scene
-  jump churned the Zoom SDK's raw-data pipeline for all sources at once;
-  fast switching could drive the SDK into an internal fatal that closed the
-  engine (all video dropping to color bars), and every cut briefly showed
-  placeholders while feeds resubscribed. Subscriptions now follow the
-  assignment, not scene visibility: feeds stay warm across scene switches.
+## [0.1.36] - 2026-08-09
 
 ### Fixed
-- **The Active Speaker output now always keeps the last speaker on screen.**
-  When the current speaker muted, turned their camera off, or blipped out of
-  the roster during a reconnect, the director dethroned them immediately —
-  dropping the video until somebody else spoke. The incumbent speaker now
-  holds through mute, video-off, silence, and roster blips; only an explicit
-  exclusion, a genuine departure (gone for over a minute), or another
-  participant speaking replaces them. Candidate vetting (mute/video/exclusion
-  rules) is unchanged for new speakers, and manual Take pins hold the same
-  way.
+- **Switching a source to Active Speaker no longer kills other feeds.** When
+  the active speaker resolved to a participant already shown at a lower
+  resolution, the engine tore down and recreated that participant's video
+  renderer to raise the resolution — and the Zoom SDK's asynchronous release
+  made the recreate fail (`WRONG_USAGE`), blanking every source sharing that
+  participant until you hit Apply. Resolution is now raised in place on the
+  live renderer, so nothing is torn down.
+- **Video no longer freezes/stutters on scene switches.** CoreVideo sources
+  render unbuffered, so a scene cut shows the current frame immediately
+  instead of holding the last frame while OBS rebuilds a frame buffer. Also
+  lowers latency.
+- **Mapped feeds stay live like a webcam.** Subscriptions follow the
+  assignment, not scene visibility — feeds stay warm across scene switches
+  and fades instead of being torn down and rebuilt (which could also drive
+  the Zoom SDK into a fatal that closed the engine). Dropped feeds now
+  re-establish automatically by intent, so recovering video no longer needs
+  a manual Apply/Recover.
+- **The Active Speaker output keeps the last speaker on screen.** Muting,
+  turning off video, silence, or a brief roster blip no longer dethrones the
+  current speaker; only an explicit exclusion, a real departure (gone > 1
+  min), or another participant speaking replaces them.
+- **Stuck feeds recover sanely.** A feed that cannot subscribe (camera-off /
+  phone-only participant) now backs off exponentially and shows "Can't
+  subscribe" instead of retrying every 10 seconds forever.
+- Speaker-director exclusions now persist correctly for participants with
+  large Zoom user IDs (they were truncated through a 32-bit field).
+- A revoked Zoom refresh token now clears itself and prompts a fresh
+  sign-in instead of an endlessly failing Refresh.
+- Hardware-accelerated conversion retries after a transient filter-graph
+  build failure instead of permanently falling back to CPU for the session.
+
+### Added
+- Output Manager rows are sorted sensibly (Participant, Participant 2 …
+  Participant 8, then Active Speaker, then Slots) instead of load order.
+
+### Changed
+- Per-frame debug telemetry is suppressed from the OBS log unless
+  `CV_ZOOM_VERBOSE_LOG` is set (a 90-minute meeting was producing a 27 MB
+  log); support bundles still capture it in memory.
 
 ## [0.1.35] - 2026-08-09
 

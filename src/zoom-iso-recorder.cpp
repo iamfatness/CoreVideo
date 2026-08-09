@@ -1,4 +1,5 @@
 #include "zoom-iso-recorder.h"
+#include "iso-encoder-plan.h"
 #include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
@@ -14,6 +15,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <set>
 
 static constexpr qint64 kIsoMinimumFreeBytes = 2ll * 1024ll * 1024ll * 1024ll;
 static constexpr qint64 kIsoWarningFreeBytes = 10ll * 1024ll * 1024ll * 1024ll;
@@ -61,6 +63,7 @@ static QString bytes_text(qint64 bytes)
 }
 
 static std::string normalized_video_encoder(const std::string &encoder);
+static int count_obs_nvenc_encoders();
 static bool is_hardware_encoder(const std::string &encoder);
 static bool ffmpeg_encoder_available(const QString &ffmpeg_path,
                                      const std::string &encoder,
@@ -176,8 +179,23 @@ bool ZoomIsoRecorder::start(const ZoomIsoRecordConfig &config,
     }
     std::string encoder_error;
     QString status_warning;
-    if (!ffmpeg_encoder_available(ffmpegProgram, normalized.video_encoder,
-                                  &encoder_error)) {
+    // Probe which hardware encoder families this FFmpeg build offers; the
+    // per-session placement logic (iso-encoder-plan.h) uses this to spread
+    // sessions across NVENC/QSV/AMF/x264 within hardware session budgets.
+    IsoEncoderAvailability avail;
+    avail.nvenc = ffmpeg_encoder_available(ffmpegProgram, "h264_nvenc", nullptr);
+    avail.qsv = ffmpeg_encoder_available(ffmpegProgram, "h264_qsv", nullptr);
+    avail.amf = ffmpeg_encoder_available(ffmpegProgram, "h264_amf", nullptr);
+    if (normalized.video_encoder == "auto") {
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] ISO encoder placement: automatic "
+             "(nvenc=%d qsv=%d amf=%d, NVENC session limit %d, "
+             "OBS NVENC encoders active %d)",
+             avail.nvenc, avail.qsv, avail.amf,
+             iso_nvenc_default_session_limit(), count_obs_nvenc_encoders());
+    } else if (!ffmpeg_encoder_available(ffmpegProgram,
+                                         normalized.video_encoder,
+                                         &encoder_error)) {
         if (is_hardware_encoder(normalized.video_encoder) &&
             ffmpeg_encoder_available(ffmpegProgram, "libx264", nullptr)) {
             status_warning = QString("Requested hardware encoder '%1' was not "
@@ -231,6 +249,9 @@ bool ZoomIsoRecorder::start(const ZoomIsoRecordConfig &config,
         m_sessions.clear();
         m_config = normalized;
         m_requested_video_encoder = requested_encoder;
+        m_encoder_avail = avail;
+        m_nvenc_session_limit = iso_nvenc_default_session_limit();
+        m_encoder_demotions.clear();
         m_status_warning = status_warning;
         m_started_program_recording = false;
         m_completed_sessions.clear();
@@ -458,7 +479,28 @@ ZoomIsoRecorder::ensure_session_locked(const ZoomOutputInfo &info,
     session.requested_video_encoder = m_requested_video_encoder.empty()
         ? normalized_video_encoder(m_config.video_encoder)
         : m_requested_video_encoder;
-    session.video_encoder = normalized_video_encoder(m_config.video_encoder);
+    // Encoder placement: hardware sessions are a shared, finite budget
+    // (OBS's own outputs included), so each ISO session is placed
+    // individually — NVENC while the budget lasts, then QSV/AMF/x264.
+    // A session that already failed once on a hardware encoder was demoted
+    // and stays demoted for this run.
+    const auto demoted = m_encoder_demotions.find(session.source_uuid);
+    if (demoted != m_encoder_demotions.end()) {
+        session.video_encoder = demoted->second;
+    } else {
+        int nvenc_in_use_iso = 0;
+        for (const auto &other : m_sessions) {
+            if (other.second.video_encoder == "h264_nvenc" &&
+                other.second.ffmpeg &&
+                other.second.ffmpeg->state() == QProcess::Running)
+                ++nvenc_in_use_iso;
+        }
+        const int remaining = m_nvenc_session_limit -
+                              count_obs_nvenc_encoders() - nvenc_in_use_iso;
+        session.video_encoder = iso_choose_session_encoder(
+            normalized_video_encoder(m_config.video_encoder), remaining,
+            m_encoder_avail);
+    }
     session.encoder_fallback =
         session.requested_video_encoder != session.video_encoder;
 
@@ -493,6 +535,8 @@ ZoomIsoRecorder::ensure_session_locked(const ZoomOutputInfo &info,
              "[obs-zoom-plugin] ISO ffmpeg failed to start for %s: %s",
              session.source_name.c_str(),
              session.ffmpeg->errorString().toUtf8().constData());
+    } else {
+        session.ffmpeg_started_ns = os_gettime_ns();
     }
 
     blog(LOG_INFO,
@@ -744,6 +788,28 @@ void ZoomIsoRecorder::record_video_frame(const ZoomOutputInfo &info,
     refresh_ffmpeg_status_locked(session);
     if (!session.ffmpeg ||
         session.ffmpeg->state() != QProcess::Running) {
+        // Startup-time death of a hardware encoder usually means the
+        // session-budget estimate was wrong for this GPU (driver caps
+        // vary). Demote this source one tier and recreate on the next
+        // frame instead of surfacing a dead "Encoder error" row.
+        const uint64_t now_ns = os_gettime_ns();
+        if (session.video_encoder != "libx264" &&
+            session.ffmpeg_started_ns != 0 &&
+            now_ns - session.ffmpeg_started_ns < 10000000000ULL &&
+            m_encoder_demotions.find(session.source_uuid) ==
+                m_encoder_demotions.end()) {
+            const std::string next =
+                iso_demote_encoder(session.video_encoder, m_encoder_avail);
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] ISO encoder %s failed at startup for "
+                 "%s; retrying with %s",
+                 session.video_encoder.c_str(),
+                 session.source_name.c_str(), next.c_str());
+            const std::string uuid = session.source_uuid;
+            m_encoder_demotions[uuid] = next;
+            close_session_locked(uuid);
+            return;
+        }
         if (session.ffmpeg_error.isEmpty())
             mark_ffmpeg_failure_locked(
                 session, QStringLiteral("FFmpeg is not running."));
@@ -847,11 +913,40 @@ void ZoomIsoRecorder::record_audio_frame(const ZoomOutputInfo &info,
 
 static std::string normalized_video_encoder(const std::string &encoder)
 {
-    if (encoder == "h264_nvenc" || encoder == "h264_qsv" ||
-        encoder == "h264_amf" || encoder == "libx264") {
+    if (encoder == "auto" || encoder == "h264_nvenc" ||
+        encoder == "h264_qsv" || encoder == "h264_amf" ||
+        encoder == "libx264") {
         return encoder;
     }
-    return "libx264";
+    return "auto";
+}
+
+// Number of distinct hardware NVENC encoders OBS itself has active right
+// now (program recording, streaming, vertical canvas, replay buffer, ...).
+// These share the GPU's session budget with our ISO FFmpeg children.
+static int count_obs_nvenc_encoders()
+{
+    struct Census {
+        std::set<obs_encoder_t *> seen;
+    } census;
+    obs_enum_outputs(
+        [](void *param, obs_output_t *output) -> bool {
+            auto *c = static_cast<Census *>(param);
+            if (!obs_output_active(output))
+                return true;
+            for (size_t i = 0; i < MAX_OUTPUT_VIDEO_ENCODERS; ++i) {
+                obs_encoder_t *enc =
+                    obs_output_get_video_encoder2(output, i);
+                if (!enc)
+                    continue;
+                const char *id = obs_encoder_get_id(enc);
+                if (id && strstr(id, "nvenc"))
+                    c->seen.insert(enc);
+            }
+            return true;
+        },
+        &census);
+    return static_cast<int>(census.seen.size());
 }
 
 static bool is_hardware_encoder(const std::string &encoder)

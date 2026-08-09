@@ -2,6 +2,7 @@
 
 #include "zoom-output-manager.h"
 #include "zoom-types.h"
+#include "iso-encoder-plan.h"
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QProcess>
@@ -83,6 +84,7 @@ private:
         uint64_t video_frames_dropped = 0;
         uint64_t last_drop_ns = 0;
         bool backlog_reported = false;
+        uint64_t ffmpeg_started_ns = 0;
         uint32_t audio_chunks = 0;
         uint64_t started_ns = 0;
         uint64_t last_video_ns = 0;
@@ -122,6 +124,11 @@ private:
                              uint32_t byte_len);
     bool should_record(const ZoomOutputInfo &info,
                        uint32_t resolved_participant_id) const;
+
+    IsoEncoderAvailability m_encoder_avail;
+    int m_nvenc_session_limit = 8;
+    // source_uuid -> encoder to use after a startup failure demoted it.
+    std::unordered_map<std::string, std::string> m_encoder_demotions;
 
     mutable std::mutex m_mtx;
     std::atomic<bool> m_active{false};

@@ -425,6 +425,25 @@ static void select_assignment_value(QComboBox *combo, const QString &data)
     combo->setCurrentIndex(idx);
 }
 
+// The periodic rebuild preserves only combos the user actually touched (or
+// is mid-interaction with); everything else re-reads live source state, so
+// changes made elsewhere — e.g. in the source's Properties dialog — appear
+// in the Output Manager instead of being overwritten by a stale snapshot.
+static void mark_dirty_on_user_change(QComboBox *combo)
+{
+    QObject::connect(combo, QOverload<int>::of(&QComboBox::activated), combo,
+                     [combo](int) { combo->setProperty("user_dirty", true); });
+}
+
+static bool combo_has_user_edit(QComboBox *combo)
+{
+    if (!combo)
+        return false;
+    if (combo->property("user_dirty").toBool())
+        return true;
+    return combo->view() && combo->view()->isVisible();
+}
+
 static AssignmentMode assignment_mode_from_data(const QString &data,
                                                 uint32_t &participant_id,
                                                 uint32_t &spotlight_slot)
@@ -690,12 +709,23 @@ void ZoomOutputDialog::refresh()
             if (!name_item || !assignment || !resolution || !audio || !audio_role)
                 continue;
 
-            pending[name_item->data(Qt::UserRole).toString().toStdString()] = {
-                assignment->currentData(),
-                resolution->currentData(),
-                audio->currentData(),
-                audio_role->currentData(),
-            };
+            // Preserve only unapplied USER edits across the rebuild; an
+            // invalid QVariant means "take live state". Snapshotting every
+            // displayed value hid Properties-dialog changes forever and
+            // once turned a transient misdisplay into a mass reassignment.
+            PendingPick pick;
+            if (combo_has_user_edit(assignment))
+                pick.assignment = assignment->currentData();
+            if (combo_has_user_edit(resolution))
+                pick.resolution = resolution->currentData();
+            if (combo_has_user_edit(audio))
+                pick.audio = audio->currentData();
+            if (combo_has_user_edit(audio_role))
+                pick.audio_role = audio_role->currentData();
+            if (pick.assignment.isValid() || pick.resolution.isValid() ||
+                pick.audio.isValid() || pick.audio_role.isValid())
+                pending[name_item->data(Qt::UserRole).toString()
+                            .toStdString()] = pick;
         }
         m_table->setUpdatesEnabled(false);
     }
@@ -779,6 +809,7 @@ void ZoomOutputDialog::refresh()
             assignment->addItem(participant_label(p), QString("user:%1").arg(p.user_id));
         const QString current_assignment = assignment_data_for_output(output);
         select_assignment_value(assignment, current_assignment);
+        mark_dirty_on_user_change(assignment);
         m_table->setCellWidget(row, ColumnAssignment,
             center_in_cell(assignment, Qt::AlignVCenter, 6));
 
@@ -787,6 +818,7 @@ void ZoomOutputDialog::refresh()
         audio->addItem("Mono", static_cast<int>(AudioChannelMode::Mono));
         audio->addItem("Stereo", static_cast<int>(AudioChannelMode::Stereo));
         audio->setCurrentIndex(output.audio_mode == AudioChannelMode::Stereo ? 1 : 0);
+        mark_dirty_on_user_change(audio);
 
         auto *resolution = new QComboBox(m_table);
         resolution->setMinimumWidth(96);
@@ -796,6 +828,7 @@ void ZoomOutputDialog::refresh()
         resolution->setCurrentIndex(
             output.video_resolution == VideoResolution::P360 ? 0 :
             output.video_resolution == VideoResolution::P1080 ? 2 : 1);
+        mark_dirty_on_user_change(resolution);
         m_table->setCellWidget(row, ColumnResolution,
             center_in_cell(resolution, Qt::AlignVCenter, 6));
 
@@ -848,19 +881,37 @@ void ZoomOutputDialog::refresh()
             audio_role->findData(audio_role_data_for_output(output));
         if (role_index >= 0)
             audio_role->setCurrentIndex(role_index);
+        mark_dirty_on_user_change(audio_role);
         m_table->setCellWidget(row, ColumnAudioRole,
             center_in_cell(audio_role, Qt::AlignVCenter, 6));
 
         const auto pit = pending.find(output.source_name);
         if (pit != pending.end()) {
-            select_assignment_value(assignment,
-                                    pit->second.assignment.toString());
-            int idx = resolution->findData(pit->second.resolution);
-            if (idx >= 0) resolution->setCurrentIndex(idx);
-            idx = audio->findData(pit->second.audio);
-            if (idx >= 0) audio->setCurrentIndex(idx);
-            idx = audio_role->findData(pit->second.audio_role);
-            if (idx >= 0) audio_role->setCurrentIndex(idx);
+            // Restore the user's unapplied edits and keep them marked dirty
+            // so they continue to survive rebuilds until Apply.
+            if (pit->second.assignment.isValid()) {
+                select_assignment_value(assignment,
+                                        pit->second.assignment.toString());
+                assignment->setProperty("user_dirty", true);
+            }
+            int idx = pit->second.resolution.isValid()
+                ? resolution->findData(pit->second.resolution) : -1;
+            if (idx >= 0) {
+                resolution->setCurrentIndex(idx);
+                resolution->setProperty("user_dirty", true);
+            }
+            idx = pit->second.audio.isValid()
+                ? audio->findData(pit->second.audio) : -1;
+            if (idx >= 0) {
+                audio->setCurrentIndex(idx);
+                audio->setProperty("user_dirty", true);
+            }
+            idx = pit->second.audio_role.isValid()
+                ? audio_role->findData(pit->second.audio_role) : -1;
+            if (idx >= 0) {
+                audio_role->setCurrentIndex(idx);
+                audio_role->setProperty("user_dirty", true);
+            }
         }
     }
 
@@ -1020,17 +1071,23 @@ void ZoomOutputDialog::load_profile()
             auto *audio_role = cell_combo(m_table, row, ColumnAudioRole);
             if (!assignment || !resolution || !audio || !audio_role) continue;
 
-            const QString ad = assignment_data_for_output(o);
-            const int idx = assignment->findData(ad);
-            if (idx >= 0) assignment->setCurrentIndex(idx);
+            // Profile values are staged, unapplied edits: select them
+            // faithfully (inserting missing participants rather than
+            // falling back to index 0) and mark them dirty so they
+            // survive rebuilds until the operator hits Apply.
+            select_assignment_value(assignment, assignment_data_for_output(o));
+            assignment->setProperty("user_dirty", true);
             const int res_idx = resolution->findData(
                 static_cast<int>(o.video_resolution));
             if (res_idx >= 0) resolution->setCurrentIndex(res_idx);
+            resolution->setProperty("user_dirty", true);
             audio->setCurrentIndex(o.audio_mode == AudioChannelMode::Stereo ? 1 : 0);
+            audio->setProperty("user_dirty", true);
             const int role_idx =
                 audio_role->findData(audio_role_data_for_output(o));
             if (role_idx >= 0)
                 audio_role->setCurrentIndex(role_idx);
+            audio_role->setProperty("user_dirty", true);
             found = true;
             ++matched;
             break;

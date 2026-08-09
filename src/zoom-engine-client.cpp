@@ -867,7 +867,8 @@ void ZoomEngineClient::handle_event(const std::string &line)
     if (cmd == "audio" && callbacks.on_audio) {
         callbacks.on_audio(static_cast<uint32_t>(obj.value("byte_len").toInt()),
                            static_cast<uint32_t>(
-                               obj.value("participant_id").toInt()));
+                               obj.value("participant_id").toInt()),
+                           static_cast<uint32_t>(obj.value("shm_gen").toInt()));
     }
 }
 

@@ -55,6 +55,7 @@ struct CoreVideoAudioSource {
     std::atomic<bool> active{false};
     std::mutex mtx;
     ShmRegion audio_shm;
+    uint32_t audio_shm_gen = 0;
     std::vector<uint8_t> audio_buf;
     std::vector<int16_t> stereo_buf;
     uint64_t frame_count = 0;
@@ -134,22 +135,34 @@ static void maybe_resubscribe_for_roster(CoreVideoAudioSource *ctx)
 
 static void output_audio_frame(CoreVideoAudioSource *ctx,
                                uint32_t event_byte_len,
-                               uint32_t resolved_participant_id)
+                               uint32_t resolved_participant_id,
+                               uint32_t event_shm_gen)
 {
     if (!ctx || event_byte_len == 0) return;
 
     std::lock_guard<std::mutex> lk(ctx->mtx);
-    const std::string shm_name = IPC_SHM_PREFIX + ctx->source_uuid + "_audio";
+    const std::string audio_base = IPC_SHM_PREFIX + ctx->source_uuid + "_audio";
+    const std::string shm_name = shm_region_name(audio_base, event_shm_gen);
     const size_t audio_bytes = sizeof(ShmAudioHeader) + event_byte_len;
-    if ((!ctx->audio_shm.ptr || ctx->audio_shm.size < audio_bytes) &&
-        !shm_region_open_read(ctx->audio_shm, shm_name, audio_bytes)) {
-        if (ctx->frame_count == 0) {
-            blog(LOG_WARNING,
-                 "[obs-zoom-plugin] Failed to open CoreVideo audio shared memory: source=%s uuid=%s bytes=%zu",
-                 obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
-                 audio_bytes);
+    const bool gen_changed = event_shm_gen != 0 &&
+                             event_shm_gen != ctx->audio_shm_gen;
+    if (ctx->audio_shm.ptr && gen_changed)
+        shm_region_destroy(ctx->audio_shm);
+    if (!ctx->audio_shm.ptr || ctx->audio_shm.size < audio_bytes) {
+        if (!shm_region_open_read(ctx->audio_shm, shm_name, audio_bytes) &&
+            // Engines predating suffixed names recreate the legacy name for
+            // every generation — fall back to it.
+            (event_shm_gen <= 1 ||
+             !shm_region_open_read(ctx->audio_shm, audio_base, audio_bytes))) {
+            if (ctx->frame_count == 0) {
+                blog(LOG_WARNING,
+                     "[obs-zoom-plugin] Failed to open CoreVideo audio shared memory: source=%s uuid=%s bytes=%zu gen=%u",
+                     obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
+                     audio_bytes, event_shm_gen);
+            }
+            return;
         }
-        return;
+        ctx->audio_shm_gen = event_shm_gen;
     }
 
     auto *hdr = static_cast<const ShmAudioHeader *>(ctx->audio_shm.ptr);
@@ -250,10 +263,11 @@ static void *audio_create_common(obs_data_t *settings, obs_source_t *source,
     ZoomEngineClient::instance().register_source(ctx->source_uuid, {
         {},
         [ctx, gate = ctx->callback_gate](uint32_t byte_len,
-                                         uint32_t participant_id) {
+                                         uint32_t participant_id,
+                                         uint32_t shm_gen) {
             std::lock_guard<std::mutex> callback_lock(gate->mtx);
             if (!gate->alive) return;
-            output_audio_frame(ctx, byte_len, participant_id);
+            output_audio_frame(ctx, byte_len, participant_id, shm_gen);
         }
     });
     ZoomEngineClient::instance().add_roster_callback(ctx,

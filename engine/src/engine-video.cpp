@@ -168,9 +168,14 @@ bool ParticipantSubscription::ensure_shm(SourceTarget &target,
     if (total < y_len) return false;
     if (target.shm.ptr && target.shm.size >= total) return true;
 
-    const std::string region_name = IPC_SHM_PREFIX + source_uuid;
+    // Bump the generation BEFORE creating and bake it into the name: a
+    // resize under the old name deadlocks while the plugin still maps the
+    // old (smaller) section (see shm_region_name in engine-ipc.h).
+    const uint32_t next_gen = target.shm_gen + 1;
+    const std::string region_name =
+        shm_region_name(IPC_SHM_PREFIX + source_uuid, next_gen);
     if (!shm_region_create(target.shm, region_name, total)) return false;
-    ++target.shm_gen; // new region — old plugin-side mappings are now stale
+    target.shm_gen = next_gen; // old plugin-side mappings are now stale
     return true;
 }
 
@@ -203,7 +208,9 @@ void ParticipantSubscription::onRawDataFrameReceived(YUVRawDataI420 *data)
                     R"({"cmd":"debug","stage":"video_shm_create_failed","source_uuid":")" +
                     source_uuid + R"(","participant_id":)" +
                     std::to_string(m_participant_id) + R"(,"w":)" +
-                    std::to_string(w) + R"(,"h":)" + std::to_string(h) + "}");
+                    std::to_string(w) + R"(,"h":)" + std::to_string(h) +
+                    R"(,"last_error":)" +
+                    std::to_string(target.shm.last_error) + "}");
                 EngineIpc::write(
                     R"({"cmd":"error","msg":"shm_create_failed","source_uuid":")" +
                     source_uuid + R"(","participant_id":)" +

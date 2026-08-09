@@ -60,6 +60,7 @@ private:
         bool isolate_audio = false;
         bool audience_audio = false;
         ShmRegion shm;
+        uint32_t shm_gen = 0; // region generation; part of the name from gen 2
         uint64_t frame_count = 0;
         // True after an ensure_shm() failure has been surfaced as an error —
         // avoids re-emitting once per audio callback while the failure persists.

@@ -7,6 +7,17 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+### Fixed
+- **The Active Speaker output now always keeps the last speaker on screen.**
+  When the current speaker muted, turned their camera off, or blipped out of
+  the roster during a reconnect, the director dethroned them immediately —
+  dropping the video until somebody else spoke. The incumbent speaker now
+  holds through mute, video-off, silence, and roster blips; only an explicit
+  exclusion, a genuine departure (gone for over a minute), or another
+  participant speaking replaces them. Candidate vetting (mute/video/exclusion
+  rules) is unchanged for new speakers, and manual Take pins hold the same
+  way.
+
 ## [0.1.35] - 2026-08-09
 
 ### Added

@@ -43,6 +43,13 @@ private:
 
     bool promote_locked(uint32_t participant_id, uint64_t now_ms);
     bool participant_allowed_locked(uint32_t participant_id) const;
+    bool participant_excluded_locked(uint32_t participant_id) const;
+    bool participant_in_roster_locked(uint32_t participant_id) const;
+    // Dethrones the incumbent/manual speaker only on exclusion or on
+    // absence from the roster beyond the grace window; mute, video-off,
+    // and momentary roster blips never dethrone (the Active Speaker output
+    // must keep showing the last speaker until someone else takes over).
+    void enforce_incumbent_eligibility_locked(uint64_t now_ms);
     uint32_t choose_candidate_locked(uint32_t raw_speaker_id) const;
     bool tick_locked(uint64_t now_ms);
 
@@ -50,6 +57,8 @@ private:
     std::vector<ParticipantInfo> m_roster;
     uint32_t m_raw_speaker_id = 0;
     uint32_t m_directed_speaker_id = 0;
+    uint64_t m_directed_missing_since_ms = 0;
+    uint64_t m_manual_missing_since_ms = 0;
     uint32_t m_candidate_speaker_id = 0;
     uint32_t m_last_speaker_id = 0;
     uint32_t m_manual_speaker_id = 0;

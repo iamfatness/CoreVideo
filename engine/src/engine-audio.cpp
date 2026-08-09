@@ -63,9 +63,9 @@ bool EngineAudio::subscribe_if_needed(const std::string &source_uuid,
 {
     std::lock_guard<std::mutex> subscribe_lock(m_subscribe_mtx);
     if (m_subscribed) {
-        EngineIpc::write(
-            R"({"cmd":"debug","stage":"audio_target_added","source_uuid":")" +
-            source_uuid + "\"}");
+        // Already subscribed to the single mixed-audio stream; this call is
+        // a no-op share. Emitting a debug line on every roster tick / source
+        // added ~2300 lines to a 90-minute log for no signal — stay quiet.
         return true;
     }
 

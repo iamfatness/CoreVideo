@@ -9,8 +9,33 @@
 #include <obs-module.h>
 #include <util/platform.h>
 #include <chrono>
+#include <cstdlib>
 #include <thread>
 #include <unordered_map>
+
+bool cv_zoom_verbose_logging()
+{
+    static const bool verbose = [] {
+        const char *v = std::getenv("CV_ZOOM_VERBOSE_LOG");
+        return v && *v && !(v[0] == '0' && v[1] == '\0');
+    }();
+    return verbose;
+}
+
+// Stages emitted per video/audio frame or per roster tick — the bulk of the
+// log volume. Kept out of the OBS log unless verbose; always still recorded
+// in the diagnostics ring buffer.
+static bool is_high_frequency_stage(const QString &stage)
+{
+    return stage == QLatin1String("video_frame_received") ||
+           stage == QLatin1String("audio_frame_received") ||
+           stage == QLatin1String("audio_one_way_frame_received") ||
+           stage == QLatin1String("audio_target_added") ||
+           stage == QLatin1String("share_frame_received") ||
+           stage == QLatin1String("set_resolution") ||
+           stage == QLatin1String("video_subscribe_noop_existing") ||
+           stage == QLatin1String("video_raw_status");
+}
 
 static bool is_permanent_meeting_failure(int code)
 {
@@ -671,8 +696,10 @@ void ZoomEngineClient::handle_event(const std::string &line)
         return;
     }
     if (cmd == "debug") {
-        blog(LOG_INFO, "[obs-zoom-plugin] Zoom engine debug: %s", line.c_str());
         const QString stage = obj.value("stage").toString();
+        if (cv_zoom_verbose_logging() || !is_high_frequency_stage(stage))
+            blog(LOG_INFO, "[obs-zoom-plugin] Zoom engine debug: %s",
+                 line.c_str());
         {
             std::lock_guard<std::mutex> lk(m_mtx);
             DebugEvent event;
@@ -850,7 +877,8 @@ void ZoomEngineClient::handle_event(const std::string &line)
             static std::unordered_map<std::string, uint64_t> frame_counts;
             frame_count = ++frame_counts[uuid];
         }
-        if (frame_count == 1 || frame_count % 120 == 0) {
+        if (cv_zoom_verbose_logging() &&
+            (frame_count == 1 || frame_count % 120 == 0)) {
             blog(LOG_INFO,
                  "[obs-zoom-plugin] Dispatching Zoom video frame: source_uuid=%s count=%llu w=%d h=%d",
                  uuid.c_str(), static_cast<unsigned long long>(frame_count),

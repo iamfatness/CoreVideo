@@ -7,11 +7,7 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
-### Fixed
-- A revoked Zoom refresh token (e.g. superseded by a newer sign-in on
-  another install) no longer produces an endlessly failing Refresh button:
-  the plugin clears the dead credentials on `invalid_grant` and tells you
-  plainly to sign in with Zoom again.
+## [0.1.35] - 2026-08-09
 
 ### Added
 - **Automatic ISO encoder placement (new default).** Hardware encoders have
@@ -26,7 +22,30 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
   automatically retries on the next encoder down.
 - ISO sessions that fall behind the encoder now drop frames (bounded
   memory) and show "Encoder falling behind (N dropped)" instead of
-  failing opaquely. *(shipped in the code with 0.1.35; see PR #193)*
+  failing opaquely.
+
+### Fixed
+- **ISO recordings no longer end "randomly" mid-run.** A transient
+  participant unresolve (engine reconnect, camera toggle) finalized the
+  file immediately and started a new segment; unresolved participants now
+  get a 60-second grace window before their recording is finalized. Only
+  genuine resolution changes still cut (labeled) segments.
+- Mid-recording session closes (resolution changes, participant departures,
+  disk-full) no longer block frame delivery — with 8 feeds upgrading
+  resolution together, the old blocking closes could starve the engine the
+  same way the fixed stop() path once did.
+- **The Output Manager always displays the truth now.** A participant
+  assignment that momentarily couldn't be matched (e.g. during a roster
+  refresh) displayed as "Active speaker" — and the refresh cycle then
+  persisted that misdisplay, flipping every row's real assignment at once.
+  Unmatched assignments now display faithfully ("Participant N (not in
+  meeting)"), and refreshes preserve only edits you actually made — so
+  assignments made in a source's Properties dialog finally show up in the
+  Output Manager instead of being overwritten by a stale snapshot.
+- A revoked Zoom refresh token (e.g. superseded by a newer sign-in on
+  another install) no longer produces an endlessly failing Refresh button:
+  the plugin clears the dead credentials on `invalid_grant` and tells you
+  plainly to sign in with Zoom again.
 
 ## [0.1.34] - 2026-08-08
 

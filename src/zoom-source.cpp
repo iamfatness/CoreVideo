@@ -922,11 +922,22 @@ bool ZoomSource::upgrade_low_quality_video(uint64_t now_ns, bool force)
     return true;
 }
 
+// Subscriptions belong to the ASSIGNMENT (the Output Manager row), not to
+// scene visibility. Tearing the Zoom subscription down on every scene exit
+// and rebuilding it on entry meant a scene jump churned the SDK's raw-data
+// pipeline for every CoreVideo source at once — rapid scene switching
+// (2026-08-09) drove the SDK into an internal fatal that killed the engine
+// process (exit code 1), and every cut showed placeholder frames while
+// feeds resubscribed. Feeds now stay warm while the source exists and is
+// assigned; only assignment changes, source destruction, or engine
+// teardown end a subscription.
 void ZoomSource::activate()
 {
     m_active.store(true, std::memory_order_release);
     if (m_width.load(std::memory_order_relaxed) == 0)
         output_placeholder_frame(true);
+    if (m_subscribed.load(std::memory_order_acquire))
+        return; // feed already warm — a scene switch must not touch it
     const AssignmentMode mode = assignment.load(std::memory_order_acquire);
     if (source_wants_subscription(mode, participant_id.load(std::memory_order_acquire)))
         subscribe();
@@ -935,7 +946,7 @@ void ZoomSource::activate()
 void ZoomSource::deactivate()
 {
     m_active.store(false, std::memory_order_release);
-    unsubscribe();
+    // Intentionally NOT unsubscribing: the feed stays warm for the next cut.
 }
 
 void ZoomSource::on_roster_changed()

@@ -89,7 +89,8 @@ struct ZoomSource {
                                    uint32_t resolved_participant_id,
                                    uint32_t shm_generation);
     void on_engine_audio(uint32_t byte_len,
-                         uint32_t resolved_participant_id);
+                         uint32_t resolved_participant_id,
+                         uint32_t shm_generation);
 
     uint32_t width() const;
     uint32_t height() const;
@@ -123,6 +124,7 @@ private:
     ShmRegion m_video_shm;
     ShmRegion m_director_preview_shm;
     ShmRegion m_audio_shm;
+    uint32_t m_audio_shm_gen = 0;
     // Engine-reported SHM generation each mapping was opened against. Used to
     // detect a recreated (orphaned) region so we re-open instead of reading a
     // frozen frame forever. 0 = opened without a generation (older engine).

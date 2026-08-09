@@ -254,9 +254,14 @@ bool EngineShare::ensure_shm(ShareTarget &target,
     if (total < y_len) return false;
     if (target.shm.ptr && target.shm.size >= total) return true;
 
-    const std::string region_name = IPC_SHM_PREFIX + source_uuid;
+    // Bump the generation BEFORE creating and bake it into the name: a
+    // resize under the old name deadlocks while the plugin still maps the
+    // old (smaller) section (see shm_region_name in engine-ipc.h).
+    const uint32_t next_gen = target.shm_gen + 1;
+    const std::string region_name =
+        shm_region_name(IPC_SHM_PREFIX + source_uuid, next_gen);
     if (!shm_region_create(target.shm, region_name, total)) return false;
-    ++target.shm_gen; // new region — old plugin-side mappings are now stale
+    target.shm_gen = next_gen; // old plugin-side mappings are now stale
     return true;
 }
 
@@ -304,7 +309,9 @@ void EngineShare::onRawDataFrameReceived(YUVRawDataI420 *data)
             if (!target.shm_fail_reported) {
                 target.shm_fail_reported = true;
                 EngineIpc::write(
-                    R"({"cmd":"debug","stage":"share_shm_create_failed","source_uuid":")" +
+                    R"({"cmd":"debug","stage":"share_shm_create_failed","last_error":)" +
+                    std::to_string(target.shm.last_error) +
+                    R"(,"source_uuid":")" +
                     source_uuid + R"(","w":)" + std::to_string(w) +
                     R"(,"h":)" + std::to_string(h) + "}");
                 EngineIpc::write(

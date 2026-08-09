@@ -112,11 +112,25 @@ struct ShmAudioHeader {
 #endif
 
 // ── Shared-memory region ──────────────────────────────────────────────────────
+
+// A region's name carries its generation from the second generation on.
+// A Windows named section cannot be recreated at a larger size while any
+// process still maps the old one (CreateFileMapping returns the existing
+// smaller section and the larger MapViewOfFile fails forever), so a resize
+// must move to a fresh name. Generations 0/1 keep the legacy unsuffixed
+// name so engines that never resize interoperate with older plugins.
+inline std::string shm_region_name(const std::string &base, uint32_t gen)
+{
+    if (gen <= 1) return base;
+    return base + "_g" + std::to_string(gen);
+}
+
 #if defined(WIN32)
    struct ShmRegion {
        HANDLE  map_handle = nullptr;
        void   *ptr        = nullptr;
        size_t  size       = 0;
+       uint32_t last_error = 0; // GetLastError() of the most recent failure
    };
 
    inline void shm_region_destroy(ShmRegion &r)
@@ -132,10 +146,15 @@ struct ShmAudioHeader {
        r.map_handle = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr,
                                          PAGE_READWRITE, 0,
                                          static_cast<DWORD>(size), name.c_str());
-       if (!r.map_handle) return false;
+       if (!r.map_handle) { r.last_error = GetLastError(); return false; }
        r.ptr  = MapViewOfFile(r.map_handle, FILE_MAP_WRITE, 0, 0, size);
        r.size = r.ptr ? size : 0;
-       if (!r.ptr) { shm_region_destroy(r); return false; }
+       if (!r.ptr) {
+           r.last_error = GetLastError();
+           shm_region_destroy(r);
+           return false;
+       }
+       r.last_error = 0;
        return true;
    }
 
@@ -158,6 +177,7 @@ struct ShmAudioHeader {
        size_t      size = 0;
        std::string name; // stored so we can shm_unlink on destroy
        bool        owner = false;
+       uint32_t    last_error = 0; // errno of the most recent failure
    };
 
    inline void shm_region_destroy(ShmRegion &r)
@@ -179,11 +199,21 @@ struct ShmAudioHeader {
        r.name = "/" + name; // shm_open requires a leading '/'
        r.owner = true;
        r.fd   = shm_open(r.name.c_str(), O_CREAT | O_RDWR, 0600);
-       if (r.fd < 0) return false;
-       if (ftruncate(r.fd, static_cast<off_t>(size)) < 0) { shm_region_destroy(r); return false; }
+       if (r.fd < 0) { r.last_error = static_cast<uint32_t>(errno); return false; }
+       if (ftruncate(r.fd, static_cast<off_t>(size)) < 0) {
+           r.last_error = static_cast<uint32_t>(errno);
+           shm_region_destroy(r);
+           return false;
+       }
        r.ptr  = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, r.fd, 0);
        r.size = (r.ptr != MAP_FAILED) ? size : 0;
-       if (r.ptr == MAP_FAILED) { r.ptr = nullptr; shm_region_destroy(r); return false; }
+       if (r.ptr == MAP_FAILED) {
+           r.last_error = static_cast<uint32_t>(errno);
+           r.ptr = nullptr;
+           shm_region_destroy(r);
+           return false;
+       }
+       r.last_error = 0;
        return true;
    }
 

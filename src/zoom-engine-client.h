@@ -29,7 +29,8 @@ public:
                            uint32_t participant_id,
                            uint32_t shm_generation)> on_frame;
         std::function<void(uint32_t byte_len,
-                           uint32_t participant_id)> on_audio;
+                           uint32_t participant_id,
+                           uint32_t shm_generation)> on_audio;
     };
 
     static ZoomEngineClient &instance();

@@ -163,8 +163,15 @@ bool EngineAudio::ensure_shm(AudioTarget &target,
     const size_t total = sizeof(ShmAudioHeader) + byte_len;
     if (target.shm.ptr && target.shm.size >= total) return true;
 
-    const std::string region_name = IPC_SHM_PREFIX + source_uuid + "_audio";
-    return shm_region_create(target.shm, region_name, total);
+    // Bump the generation BEFORE creating and bake it into the name: a
+    // resize under the old name deadlocks while the plugin still maps the
+    // old (smaller) section (see shm_region_name in engine-ipc.h).
+    const uint32_t next_gen = target.shm_gen + 1;
+    const std::string region_name =
+        shm_region_name(IPC_SHM_PREFIX + source_uuid + "_audio", next_gen);
+    if (!shm_region_create(target.shm, region_name, total)) return false;
+    target.shm_gen = next_gen;
+    return true;
 }
 
 void EngineAudio::output_audio_frame(AudioTarget &target,
@@ -183,7 +190,8 @@ void EngineAudio::output_audio_frame(AudioTarget &target,
             EngineIpc::write(
                 R"({"cmd":"debug","stage":"audio_shm_create_failed","source_uuid":")" +
                 source_uuid + R"(","byte_len":)" +
-                std::to_string(byte_len) + "}");
+                std::to_string(byte_len) + R"(,"last_error":)" +
+                std::to_string(target.shm.last_error) + "}");
             EngineIpc::write(
                 R"({"cmd":"error","msg":"shm_create_failed","source_uuid":")" +
                 source_uuid + R"(","byte_len":)" +
@@ -227,7 +235,8 @@ void EngineAudio::output_audio_frame(AudioTarget &target,
     EngineIpc::write(
         R"({"cmd":"audio","source_uuid":")" + source_uuid +
         R"(","participant_id":)" + std::to_string(target.participant_id) +
-        R"(,"byte_len":)" + std::to_string(byte_len) + "}");
+        R"(,"byte_len":)" + std::to_string(byte_len) +
+        R"(,"shm_gen":)" + std::to_string(target.shm_gen) + "}");
 }
 
 void EngineAudio::onMixedAudioRawDataReceived(AudioRawData *data)

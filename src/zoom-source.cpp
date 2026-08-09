@@ -795,6 +795,10 @@ void ZoomSource::clear_subscription_state()
     ZoomEngineClient::instance().unsubscribe(source_uuid);
     if (!m_director_preview_uuid.empty())
         ZoomEngineClient::instance().unsubscribe(m_director_preview_uuid);
+    // Drop our SHM mappings: a held mapping keeps the named section alive,
+    // which blocks the engine from ever recreating it at a larger size —
+    // and makes clearing the assignment an operator recovery tool.
+    release_shared_memory();
     m_subscribed = false;
     m_current_subscription_id = 0;
     m_director_preview_subscription_id = 0;
@@ -1126,15 +1130,20 @@ bool ZoomSource::output_video_from_shared_memory(
     uint32_t event_shm_gen,
     bool commit_director_cut)
 {
-    const std::string shm_name = IPC_SHM_PREFIX + uuid;
+    // From generation 2 on, the engine creates the region under a
+    // generation-suffixed name so a resize is never blocked by our old
+    // mapping (see shm_region_name in engine-ipc.h).
+    const std::string shm_name =
+        shm_region_name(IPC_SHM_PREFIX + uuid, event_shm_gen);
     if (event_width == 0 || event_height == 0) return false;
     const size_t frame_bytes = sizeof(ShmFrameHeader) +
         static_cast<size_t>(event_width) * event_height * 3 / 2;
     if (shm_mapping_stale(video_shm.ptr, video_shm.size, frame_bytes,
                           event_shm_gen, video_shm_gen)) {
         // A generation change means the engine recreated the region (e.g.
-        // after a restart) — our old mapping points at an orphaned region
-        // that will never update again, so drop it and re-open by name.
+        // after a restart or a resolution increase) — our old mapping points
+        // at an orphaned region that will never update again, so drop it and
+        // re-open by name.
         if (video_shm.ptr && event_shm_gen != 0 &&
             event_shm_gen != video_shm_gen) {
             blog(LOG_INFO,
@@ -1143,12 +1152,17 @@ bool ZoomSource::output_video_from_shared_memory(
                  event_shm_gen);
             shm_region_destroy(video_shm);
         }
-        if (!shm_region_open_read(video_shm, shm_name, frame_bytes)) {
+        if (!shm_region_open_read(video_shm, shm_name, frame_bytes) &&
+            // Engines predating suffixed names recreate the legacy name for
+            // every generation — fall back to it.
+            (event_shm_gen <= 1 ||
+             !shm_region_open_read(video_shm, IPC_SHM_PREFIX + uuid,
+                                   frame_bytes))) {
             if (m_frame_count == 0) {
                 blog(LOG_WARNING,
-                     "[obs-zoom-plugin] Failed to open video shared memory: source=%s uuid=%s w=%u h=%u bytes=%zu",
+                     "[obs-zoom-plugin] Failed to open video shared memory: source=%s uuid=%s w=%u h=%u bytes=%zu gen=%u",
                      output_name().c_str(), uuid.c_str(), event_width,
-                     event_height, frame_bytes);
+                     event_height, frame_bytes, event_shm_gen);
             }
             return false;
         }
@@ -1339,20 +1353,33 @@ bool ZoomSource::output_video_from_shared_memory(
 }
 
 void ZoomSource::on_engine_audio(uint32_t event_byte_len,
-                                 uint32_t resolved_participant_id)
+                                 uint32_t resolved_participant_id,
+                                 uint32_t event_shm_gen)
 {
     std::lock_guard<std::mutex> lk(m_mtx);
-    const std::string shm_name = IPC_SHM_PREFIX + source_uuid + "_audio";
+    const std::string audio_base = IPC_SHM_PREFIX + source_uuid + "_audio";
+    const std::string shm_name = shm_region_name(audio_base, event_shm_gen);
     if (event_byte_len == 0) return;
     const size_t audio_bytes = sizeof(ShmAudioHeader) + event_byte_len;
-    if ((!m_audio_shm.ptr || m_audio_shm.size < audio_bytes) &&
-        !shm_region_open_read(m_audio_shm, shm_name, audio_bytes)) {
-        if (m_audio_frame_count == 0) {
-            blog(LOG_WARNING,
-                 "[obs-zoom-plugin] Failed to open audio shared memory: source=%s uuid=%s bytes=%zu",
-                 output_name().c_str(), source_uuid.c_str(), audio_bytes);
+    const bool gen_changed = event_shm_gen != 0 &&
+                             event_shm_gen != m_audio_shm_gen;
+    if (m_audio_shm.ptr && gen_changed)
+        shm_region_destroy(m_audio_shm);
+    if (!m_audio_shm.ptr || m_audio_shm.size < audio_bytes) {
+        if (!shm_region_open_read(m_audio_shm, shm_name, audio_bytes) &&
+            // Engines predating suffixed names recreate the legacy name for
+            // every generation — fall back to it.
+            (event_shm_gen <= 1 ||
+             !shm_region_open_read(m_audio_shm, audio_base, audio_bytes))) {
+            if (m_audio_frame_count == 0) {
+                blog(LOG_WARNING,
+                     "[obs-zoom-plugin] Failed to open audio shared memory: source=%s uuid=%s bytes=%zu gen=%u",
+                     output_name().c_str(), source_uuid.c_str(), audio_bytes,
+                     event_shm_gen);
+            }
+            return;
         }
-        return;
+        m_audio_shm_gen = event_shm_gen;
     }
 
     auto *hdr = static_cast<const ShmAudioHeader *>(m_audio_shm.ptr);
@@ -1531,6 +1558,7 @@ void ZoomSource::release_shared_memory()
     shm_region_destroy(m_audio_shm);
     m_video_shm_gen = 0;
     m_director_preview_shm_gen = 0;
+    m_audio_shm_gen = 0;
 }
 
 static const char *zoom_source_get_name(void *)
@@ -1573,10 +1601,11 @@ static void *zoom_source_create_common(obs_data_t *settings, obs_source_t *sourc
             ctx->on_engine_frame(w, h, participant_id, shm_gen);
         },
         [ctx, gate = ctx->m_callback_gate](uint32_t byte_len,
-                                           uint32_t participant_id) {
+                                           uint32_t participant_id,
+                                           uint32_t shm_gen) {
             std::lock_guard<std::mutex> callback_lock(gate->mtx);
             if (!gate->alive) return;
-            ctx->on_engine_audio(byte_len, participant_id);
+            ctx->on_engine_audio(byte_len, participant_id, shm_gen);
         }
     });
     if (dedicated_active_speaker) {
@@ -1588,7 +1617,7 @@ static void *zoom_source_create_common(obs_data_t *settings, obs_source_t *sourc
                 if (!gate->alive) return;
                 ctx->on_director_preview_frame(w, h, participant_id, shm_gen);
             },
-            [gate = ctx->m_callback_gate](uint32_t, uint32_t) {
+            [gate = ctx->m_callback_gate](uint32_t, uint32_t, uint32_t) {
                 std::lock_guard<std::mutex> callback_lock(gate->mtx);
                 if (!gate->alive) return;
                 // Audio cuts follow the committed current slot. The preview

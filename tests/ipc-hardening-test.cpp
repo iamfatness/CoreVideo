@@ -151,15 +151,68 @@ static void test_win_invalid_fd()
 }
 #endif // WIN32
 
+// ── Generation-suffixed region names (resize deadlock, live incident fix) ────
+static void test_shm_region_name()
+{
+    // Generations 0/1 keep the legacy unsuffixed name (compat with engines
+    // that never resize and with pre-suffix plugin binaries).
+    check(shm_region_name("ZoomObsPlugin_abc", 0) == "ZoomObsPlugin_abc",
+          "gen 0 uses the legacy name");
+    check(shm_region_name("ZoomObsPlugin_abc", 1) == "ZoomObsPlugin_abc",
+          "gen 1 uses the legacy name");
+    check(shm_region_name("ZoomObsPlugin_abc", 2) == "ZoomObsPlugin_abc_g2",
+          "gen 2 is suffixed");
+    check(shm_region_name("ZoomObsPlugin_abc_audio", 3) ==
+              "ZoomObsPlugin_abc_audio_g3",
+          "audio base names suffix the same way");
+}
+
+#if defined(WIN32)
+// Pins the OS behavior behind the 2026-08-08 live incident: a named section
+// cannot be recreated at a larger size while another mapping keeps it alive
+// (CreateFileMapping returns the old smaller section; the larger view fails),
+// but a generation-suffixed fresh name succeeds immediately.
+static void test_win_shm_resize_requires_new_name()
+{
+    const std::string base = "CoreVideoShmResizeTest_" +
+        std::to_string(GetCurrentProcessId());
+
+    ShmRegion writer;
+    check(shm_region_create(writer, shm_region_name(base, 1), 4096),
+          "initial region creates");
+
+    ShmRegion reader; // simulates the plugin holding a mapping
+    check(shm_region_open_read(reader, shm_region_name(base, 1), 4096),
+          "reader maps the initial region");
+
+    // The engine's old behavior: recreate LARGER under the SAME name while
+    // the reader still maps it — must fail (this was the deadlock).
+    ShmRegion resized;
+    check(!shm_region_create(resized, shm_region_name(base, 1), 65536),
+          "larger recreate under the same live name fails");
+
+    // The fix: a generation-suffixed fresh name succeeds immediately.
+    check(shm_region_create(resized, shm_region_name(base, 2), 65536),
+          "larger recreate under the gen-suffixed name succeeds");
+    check(resized.size == 65536, "suffixed region has the requested size");
+
+    shm_region_destroy(resized);
+    shm_region_destroy(reader);
+    shm_region_destroy(writer);
+}
+#endif // WIN32
+
 int main()
 {
     test_heartbeat_expiry();
     test_shm_mapping_stale();
     test_shm_source_cap();
+    test_shm_region_name();
 #if defined(WIN32)
     test_win_line_io();
     test_win_broken_pipe();
     test_win_invalid_fd();
+    test_win_shm_resize_requires_new_name();
 #endif
 
     if (g_failures == 0)

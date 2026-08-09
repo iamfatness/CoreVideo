@@ -7,6 +7,26 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.33] - 2026-08-08
+
+### Fixed
+- **Participant feeds no longer freeze permanently when Zoom raises a feed's
+  quality mid-meeting.** When a participant's video resolution increased, the
+  engine had to grow that feed's shared-memory region — but Windows does not
+  allow recreating a named section at a larger size while the plugin still
+  maps the old one, so the allocation failed on every frame ("Zoom engine
+  could not allocate shared memory … frames are being dropped") and never
+  recovered. Regions now use generation-suffixed names, so a resize always
+  lands on a fresh name that nothing stale can block. Audio regions got the
+  same protection ahead of stereo support.
+- Clearing an output's assignment ("None") now releases the plugin's
+  shared-memory mappings, making None → reassign an effective operator
+  recovery action.
+- Shared-memory allocation failures now include the underlying OS error code
+  in the engine log and support bundle.
+- Zoom Marketplace share-link visitors hitting the OAuth broker are now
+  greeted with guidance instead of a "Missing OAuth state" error.
+
 ## [0.1.31] - 2026-08-01
 
 ### Fixed

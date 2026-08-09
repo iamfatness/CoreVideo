@@ -126,6 +126,55 @@ static QString screen_share_assignment_label(const std::vector<ParticipantInfo> 
     return QStringLiteral("Screen share - unavailable");
 }
 
+// Presentation order for Output Manager rows. Sources arrive in OBS load
+// order (effectively random); operators expect Participant, Participant 2 …
+// Participant 8, then Active Speaker, then Slots. Sort by a category rank
+// then a natural number so "Participant 2" precedes "Participant 10".
+static void output_sort_key(const ZoomOutputInfo &o, int &category, int &number,
+                            QString &tiebreak)
+{
+    QString name = QString::fromStdString(
+        o.source_name.empty() ? o.display_name : o.source_name).trimmed();
+    if (name.startsWith(QLatin1String("CoreVideo "), Qt::CaseInsensitive))
+        name = name.mid(10).trimmed();
+
+    tiebreak = name.toLower();
+    number = 0;
+    // Trailing integer, if any (bare "Participant" sorts as 1).
+    QString base = name;
+    int i = name.size();
+    while (i > 0 && name[i - 1].isDigit())
+        --i;
+    if (i < name.size()) {
+        number = name.mid(i).toInt();
+        base = name.left(i).trimmed();
+    } else if (name.compare(QLatin1String("Participant"),
+                            Qt::CaseInsensitive) == 0) {
+        number = 1;
+    }
+
+    if (base.compare(QLatin1String("Participant"), Qt::CaseInsensitive) == 0)
+        category = 0;
+    else if (base.compare(QLatin1String("Active Speaker"),
+                          Qt::CaseInsensitive) == 0)
+        category = 1;
+    else if (base.compare(QLatin1String("Slot"), Qt::CaseInsensitive) == 0)
+        category = 2;
+    else
+        category = 3;
+}
+
+static bool output_sort_less(const ZoomOutputInfo &a, const ZoomOutputInfo &b)
+{
+    int ca, na, cb, nb;
+    QString ta, tb;
+    output_sort_key(a, ca, na, ta);
+    output_sort_key(b, cb, nb, tb);
+    if (ca != cb) return ca < cb;
+    if (na != nb) return na < nb;
+    return ta < tb;
+}
+
 static QString signal_text(const ZoomOutputInfo &output)
 {
     if (output.health_reason == ZoomOutputHealthReason::RawMediaNotReady)
@@ -738,7 +787,8 @@ void ZoomOutputDialog::refresh()
     // Clear any existing preview callbacks before rebuilding rows.
     ZoomOutputManager::instance().clear_all_preview_cbs();
 
-    const auto outputs = ZoomOutputManager::instance().outputs();
+    auto outputs = ZoomOutputManager::instance().outputs();
+    std::sort(outputs.begin(), outputs.end(), output_sort_less);
     const std::vector<ParticipantInfo> roster = ZoomEngineClient::instance().roster();
     if (m_output_summary) {
         const bool has_warning = std::any_of(

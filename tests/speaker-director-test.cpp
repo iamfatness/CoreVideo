@@ -104,11 +104,16 @@ int main()
     director.update_roster(roster({p(401, true, true), p(402, true, false)}), 401, t);
     if (!check_directed(402)) fail("manual speaker was stolen by raw speaker");
 
-    // Make the manual speaker invalid (leaves / video off) while manual is active.
-    // The director should auto-clear manual and fall back.
+    // The manual speaker leaving the roster is treated as a possible
+    // transient blip: the pin HOLDS through the absence grace window (the
+    // program output keeps showing the last speaker) and only falls back
+    // once they have been gone for over a minute.
     t += 50;
     director.update_roster(roster({p(401, true, true)}), 401, t);  // 402 no longer in roster
-    if (!check_directed(401)) fail("did not auto-fallback when manual speaker became invalid");
+    if (!check_directed(402)) fail("manual pin should hold through a roster blip");
+    t += 61000; // past the absence grace window
+    director.update_roster(roster({p(401, true, true)}), 401, t);
+    if (!check_directed(401)) fail("did not fall back after manual speaker was gone past grace");
 
     // --- Manual release (when still valid) keeps current directed (no unnecessary cut) ---
     director.reset();
@@ -160,7 +165,7 @@ int main()
     director.update_roster(excluded_update_roster, 711, t + 10);
     if (!check_directed(712)) fail("dynamic exclusion did not move away from directed speaker");
 
-    // --- Current directed speaker becomes invalid -> fallback ---
+    // --- Departed speaker: hold through the grace window, then clear ---
     director.reset();
     director.configure(100, 1000, true, {});
     t = 53000;
@@ -168,14 +173,37 @@ int main()
     if (!check_directed(801)) fail("initial 801");
 
     t += 50;
-    // 801 leaves
+    // 801 leaves the roster: could be a reconnect blip — the incumbent
+    // holds (the output keeps showing the last speaker during silence).
     director.update_roster(roster({p(802, true, false)}), 0, t);
-    if (!check_directed(0)) fail("should have cleared directed when speaker left");
+    if (!check_directed(801)) fail("incumbent should hold through a roster blip");
 
-    // Next talking person should be promoted
-    t += 100;
+    // A new talker still takes over through the normal candidate flow —
+    // the hold never delays a genuine handover.
+    t += 2000;
+    director.update_roster(roster({p(802, true, true)}), 802, t);
+    t += 2000;
     director.update_roster(roster({p(802, true, true)}), 802, t);
     if (!check_directed(802)) fail("did not promote fallback speaker");
+
+    // --- Incumbent holds through mute and video-off (the report that
+    // motivated this: 'when the source stops talking, active speaker
+    // unsubscribes the last speaker') ---
+    director.reset();
+    director.configure(100, 1000, true, {});
+    t = 55000;
+    director.update_roster(roster({p(811, true, true), p(812, true, true)}), 811, t);
+    if (!check_directed(811)) fail("initial 811");
+    t += 500;
+    // 811 mutes and turns video off; nobody else is talking.
+    director.update_roster(roster({p(811, false, false, true), p(812, true, false)}), 0, t);
+    if (!check_directed(811))
+        fail("incumbent must hold after muting / stopping video");
+    t += 5000;
+    if (director.tick(t))
+        fail("tick must not dethrone a muted incumbent during silence");
+    if (!check_directed(811))
+        fail("incumbent must keep holding through silence");
 
     // --- Snapshot reports reasonable timing values ---
     director.reset();

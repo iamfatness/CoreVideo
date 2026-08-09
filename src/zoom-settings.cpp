@@ -1,5 +1,6 @@
 #include "zoom-settings.h"
 #include "zoom-credentials.h"
+#include <cstdint>
 #include <QByteArray>
 #include <QDateTime>
 #include <QJsonDocument>
@@ -378,16 +379,16 @@ ZoomPluginSettings ZoomPluginSettings::load()
     if (config_has_user_value(cfg, SECTION, "SpeakerRequireVideo"))
         s.speaker_require_video =
             config_get_int(cfg, SECTION, "SpeakerRequireVideo") != 0;
-    const int speaker_exclude_1 =
+    const int64_t speaker_exclude_1 =
         config_get_int(cfg, SECTION, "SpeakerExcludeParticipant1");
     if (config_has_user_value(cfg, SECTION, "SpeakerExcludeParticipant1") &&
-        speaker_exclude_1 >= 0)
+        speaker_exclude_1 >= 0 && speaker_exclude_1 <= UINT32_MAX)
         s.speaker_exclude_participant_1 =
             static_cast<uint32_t>(speaker_exclude_1);
-    const int speaker_exclude_2 =
+    const int64_t speaker_exclude_2 =
         config_get_int(cfg, SECTION, "SpeakerExcludeParticipant2");
     if (config_has_user_value(cfg, SECTION, "SpeakerExcludeParticipant2") &&
-        speaker_exclude_2 >= 0)
+        speaker_exclude_2 >= 0 && speaker_exclude_2 <= UINT32_MAX)
         s.speaker_exclude_participant_2 =
             static_cast<uint32_t>(speaker_exclude_2);
 
@@ -518,9 +519,12 @@ void ZoomPluginSettings::save() const
                       static_cast<int>(speaker_hold_ms));
     config_set_int   (cfg, SECTION, "SpeakerRequireVideo",
                       speaker_require_video ? 1 : 0);
+    // Zoom user IDs are uint32 and routinely exceed INT_MAX; store the full
+    // 64-bit value so high-ID participants persist (a signed-int cast made
+    // their exclusion silently fail to save).
     config_set_int   (cfg, SECTION, "SpeakerExcludeParticipant1",
-                      static_cast<int>(speaker_exclude_participant_1));
+                      static_cast<int64_t>(speaker_exclude_participant_1));
     config_set_int   (cfg, SECTION, "SpeakerExcludeParticipant2",
-                      static_cast<int>(speaker_exclude_participant_2));
+                      static_cast<int64_t>(speaker_exclude_participant_2));
     config_save_safe(cfg, "tmp", nullptr);
 }

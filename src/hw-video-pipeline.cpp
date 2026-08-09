@@ -10,6 +10,7 @@ extern "C" {
 #include <libavutil/frame.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
+#include <libavutil/error.h>
 }
 
 #include <media-io/video-io.h>
@@ -106,11 +107,33 @@ bool HwVideoPipeline::process(const uint8_t *y, const uint8_t *u, const uint8_t 
         return false;
 
     if (w != m_last_w || h != m_last_h || !m_graph) {
+        // Back off between retries so a momentary contention spike doesn't
+        // rebuild every frame; permanently latch (CPU path) only after
+        // repeated failures, so a transient failure self-heals.
+        constexpr int kMaxBuildFailures = 8;
+        constexpr int kRetryFrameGap = 30;
+        if (!m_graph && m_build_failures > 0 &&
+            ++m_frames_since_build_fail < kRetryFrameGap)
+            return false; // recently failed — use CPU this frame, retry later
+
         if (!build_filter_graph(w, h)) {
-            m_broken = true;
-            blog(LOG_ERROR, "[obs-zoom-plugin] HW accel: filter graph build failed (%dx%d)", w, h);
+            ++m_build_failures;
+            m_frames_since_build_fail = 0;
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] HW accel: filter graph build failed "
+                 "(%dx%d), attempt %d/%d — using CPU path for now",
+                 w, h, m_build_failures, kMaxBuildFailures);
+            if (m_build_failures >= kMaxBuildFailures) {
+                m_broken = true;
+                blog(LOG_ERROR,
+                     "[obs-zoom-plugin] HW accel: giving up after %d failed "
+                     "graph builds; staying on CPU conversion for this source",
+                     m_build_failures);
+            }
             return false;
         }
+        m_build_failures = 0;
+        m_frames_since_build_fail = 0;
     }
 
     // Release the previous sink frame before acquiring a new one.
@@ -232,6 +255,11 @@ bool HwVideoPipeline::build_filter_graph(int w, int h)
     avfilter_inout_free(&inputs);
     avfilter_inout_free(&outputs);
     if (ret < 0) {
+        char errbuf[128] = {0};
+        av_strerror(ret, errbuf, sizeof(errbuf));
+        blog(LOG_WARNING,
+             "[obs-zoom-plugin] HW accel: graph parse failed: %s (chain: %s)",
+             errbuf, chain.c_str());
         teardown_graph();
         return false;
     }
@@ -242,7 +270,11 @@ bool HwVideoPipeline::build_filter_graph(int w, int h)
         return false;
     }
 
-    if (avfilter_graph_config(m_graph, nullptr) < 0) {
+    if (int cfg = avfilter_graph_config(m_graph, nullptr); cfg < 0) {
+        char errbuf[128] = {0};
+        av_strerror(cfg, errbuf, sizeof(errbuf));
+        blog(LOG_WARNING,
+             "[obs-zoom-plugin] HW accel: graph config failed: %s", errbuf);
         teardown_graph();
         return false;
     }

@@ -57,6 +57,11 @@ private:
     int              m_last_w         = 0;
     int              m_last_h         = 0;
     bool             m_broken         = false;
+    // Transient graph-build failures (GPU/encoder contention during a
+    // resolution change) must not permanently disable HW accel. Retry a
+    // bounded number of times with a frame-count backoff before latching.
+    int              m_build_failures = 0;
+    int              m_frames_since_build_fail = 0;
     HwAccelMode      m_active_mode    = HwAccelMode::None;
 };
 

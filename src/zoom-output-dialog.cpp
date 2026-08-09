@@ -405,6 +405,26 @@ static QString assignment_data_for_output(const ZoomOutputInfo &output)
     }
 }
 
+// Selects `data` in the assignment combo, inserting a representative item
+// if it is not present. A combo left at its default index silently displays
+// "Active speaker" (index 0) for every unmatched assignment — and because
+// refresh snapshots displayed values and re-applies them, that misdisplay
+// became the real assignment one refresh later (all rows flipped to Active
+// Speaker after a roster blip, 2026-08-09 report). The true value must
+// always be representable, e.g. a participant who has left the roster.
+static void select_assignment_value(QComboBox *combo, const QString &data)
+{
+    int idx = combo->findData(data);
+    if (idx < 0) {
+        QString label = data;
+        if (data.startsWith(QStringLiteral("user:")))
+            label = QString("Participant %1 (not in meeting)").arg(data.mid(5));
+        combo->addItem(label, data);
+        idx = combo->count() - 1;
+    }
+    combo->setCurrentIndex(idx);
+}
+
 static AssignmentMode assignment_mode_from_data(const QString &data,
                                                 uint32_t &participant_id,
                                                 uint32_t &spotlight_slot)
@@ -745,6 +765,9 @@ void ZoomOutputDialog::refresh()
 
         auto *assignment = new QComboBox(m_table);
         assignment->setMinimumWidth(280);
+        // NOTE: "Active speaker" sits at index 0 — never leave a combo at
+        // its default index when the real assignment can't be matched (see
+        // select_assignment_value).
         assignment->addItem("Active speaker", "active");
         assignment->addItem(screen_share_assignment_label(roster), "screenshare");
         assignment->addItem("None", "user:0");
@@ -755,8 +778,7 @@ void ZoomOutputDialog::refresh()
         for (const auto &p : roster)
             assignment->addItem(participant_label(p), QString("user:%1").arg(p.user_id));
         const QString current_assignment = assignment_data_for_output(output);
-        const int assignment_index = assignment->findData(current_assignment);
-        if (assignment_index >= 0) assignment->setCurrentIndex(assignment_index);
+        select_assignment_value(assignment, current_assignment);
         m_table->setCellWidget(row, ColumnAssignment,
             center_in_cell(assignment, Qt::AlignVCenter, 6));
 
@@ -831,9 +853,9 @@ void ZoomOutputDialog::refresh()
 
         const auto pit = pending.find(output.source_name);
         if (pit != pending.end()) {
-            int idx = assignment->findData(pit->second.assignment);
-            if (idx >= 0) assignment->setCurrentIndex(idx);
-            idx = resolution->findData(pit->second.resolution);
+            select_assignment_value(assignment,
+                                    pit->second.assignment.toString());
+            int idx = resolution->findData(pit->second.resolution);
             if (idx >= 0) resolution->setCurrentIndex(idx);
             idx = audio->findData(pit->second.audio);
             if (idx >= 0) audio->setCurrentIndex(idx);

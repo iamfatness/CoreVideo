@@ -7,6 +7,12 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+### Fixed
+- A revoked Zoom refresh token (e.g. superseded by a newer sign-in on
+  another install) no longer produces an endlessly failing Refresh button:
+  the plugin clears the dead credentials on `invalid_grant` and tells you
+  plainly to sign in with Zoom again.
+
 ### Added
 - **Automatic ISO encoder placement (new default).** Hardware encoders have
   a shared session budget (GeForce NVENC allows 8 concurrent sessions,

@@ -455,6 +455,32 @@ bool ZoomOAuthManager::handle_redirect_url(const QString &url, QString *error)
     return ok;
 }
 
+// Zoom rotates refresh tokens on every use and revokes superseded
+// generations (e.g. after a newer sign-in on another install). When a
+// refresh comes back invalid_grant, retrying can never succeed — clear the
+// dead credentials so the UI immediately offers a fresh browser sign-in
+// instead of a Refresh button that fails forever.
+static bool handle_dead_refresh_grant(const QByteArray &response,
+                                      QString *error)
+{
+    if (!response.contains("invalid_grant"))
+        return false;
+    ZoomPluginSettings s = ZoomPluginSettings::load();
+    s.oauth_access_token.clear();
+    s.oauth_refresh_token.clear();
+    s.oauth_expires_at = 0;
+    s.save();
+    blog(LOG_WARNING,
+         "[obs-zoom-plugin] Zoom refresh token was revoked (invalid_grant) — "
+         "cleared stored credentials; a new sign-in is required");
+    if (error) {
+        *error = "Your Zoom sign-in has expired (the refresh token was "
+                 "revoked — this happens when a newer sign-in supersedes "
+                 "it). Please click \"Sign in with Zoom\" to sign in again.";
+    }
+    return true;
+}
+
 bool ZoomOAuthManager::refresh_access_token_blocking(QString *error)
 {
     const ZoomPluginSettings s = ZoomPluginSettings::load();
@@ -474,14 +500,16 @@ bool ZoomOAuthManager::refresh_access_token_blocking(QString *error)
             QJsonObject{{"refresh_token",
                          QString::fromStdString(s.oauth_refresh_token)}});
         if (!token_attempt_succeeded(result)) {
+            if (!result.response.isEmpty()) {
+                blog(LOG_WARNING, "[obs-zoom-plugin] Zoom OAuth broker refresh response: %s",
+                     QString::fromUtf8(result.response.left(512)).toUtf8().constData());
+            }
+            if (handle_dead_refresh_grant(result.response, error))
+                return false;
             if (error) {
                 *error = "Zoom broker token refresh failed: " +
                          oauth_error_message(result.response,
                                              result.net_error_string);
-            }
-            if (!result.response.isEmpty()) {
-                blog(LOG_WARNING, "[obs-zoom-plugin] Zoom OAuth broker refresh response: %s",
-                     QString::fromUtf8(result.response.left(512)).toUtf8().constData());
             }
             return false;
         }
@@ -497,13 +525,15 @@ bool ZoomOAuthManager::refresh_access_token_blocking(QString *error)
         manager, fields, client_id, "public token refresh");
 
     if (!token_attempt_succeeded(result)) {
-        if (error) {
-            *error = "Zoom token refresh failed: " +
-                     oauth_error_message(result.response, result.net_error_string);
-        }
         if (!result.response.isEmpty()) {
             blog(LOG_WARNING, "[obs-zoom-plugin] Zoom OAuth token refresh response: %s",
                  QString::fromUtf8(result.response.left(512)).toUtf8().constData());
+        }
+        if (handle_dead_refresh_grant(result.response, error))
+            return false;
+        if (error) {
+            *error = "Zoom token refresh failed: " +
+                     oauth_error_message(result.response, result.net_error_string);
         }
         return false;
     }

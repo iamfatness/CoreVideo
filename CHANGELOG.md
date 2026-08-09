@@ -7,6 +7,26 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.34] - 2026-08-08
+
+### Fixed
+- **Stopping ISO recording no longer risks freezing the Zoom engine and
+  dropping the meeting.** Stopping many simultaneous ISO sessions blocked
+  frame delivery for up to 5 seconds per session while each encoder shut
+  down; with 8 sessions that starved the engine's IPC channel long enough
+  for the plugin to declare the engine dead and tear the session down.
+  Session shutdown now signals all encoders at once and waits outside the
+  frame path against a single 15-second budget.
+- **ISO recordings now survive crashes and power loss.** ISO MP4s are
+  written as fragmented MP4, so a recording is playable up to the last
+  written moment even if FFmpeg is killed mid-write. Finalizing a recording
+  no longer rewrites the whole file (which could take long enough on
+  cloud-synced folders — e.g. OneDrive — to hit the old shutdown timeout).
+  Tip: keep the ISO output folder on a local, non-synced drive for best
+  performance.
+- Terminated ISO encoders now report an accurate status ("did not exit
+  within the shutdown budget") instead of "FFmpeg crashed."
+
 ## [0.1.33] - 2026-08-08
 
 ### Fixed

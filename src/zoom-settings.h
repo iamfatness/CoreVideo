@@ -36,7 +36,7 @@ struct ZoomPluginSettings {
     // ISO recorder panel defaults.
     std::string         iso_output_dir;
     std::string         iso_ffmpeg_path = "ffmpeg";
-    std::string         iso_video_encoder = "libx264";
+    std::string         iso_video_encoder = "auto";
     bool                iso_record_program = true;
 
     // Active speaker director defaults.

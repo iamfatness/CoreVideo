@@ -220,6 +220,14 @@ static bool ffmpeg_has_encoder(const QString &path, const QString &encoder)
 
 static QString encoder_guidance_text(const QString &encoder)
 {
+    if (encoder == QStringLiteral("auto")) {
+        return QStringLiteral(
+            "Automatic places each ISO feed on the best available encoder "
+            "within hardware session limits: NVENC first (counting OBS's own "
+            "program/stream encoders against the GPU budget), then Intel "
+            "Quick Sync, then CPU x264. The Encoder column shows each feed's "
+            "placement.");
+    }
     if (encoder == QStringLiteral("libx264")) {
         return QStringLiteral(
             "CPU x264 avoids GPU encoder session limits but can be heavy with 8 ISO feeds plus program streaming. Use veryfast/fast CPU presets and monitor OBS CPU load.");
@@ -338,6 +346,7 @@ ZoomIsoPanel::ZoomIsoPanel(QWidget *parent)
     auto *encoder_row = new QHBoxLayout;
     encoder_row->setSpacing(6);
     m_video_encoder = new QComboBox(config_group);
+    m_video_encoder->addItem("Automatic (recommended)", "auto");
     m_video_encoder->addItem("CPU - x264 (safe fallback)", "libx264");
     m_video_encoder->addItem("NVIDIA NVENC - H.264", "h264_nvenc");
     m_video_encoder->addItem("Intel Quick Sync - H.264", "h264_qsv");

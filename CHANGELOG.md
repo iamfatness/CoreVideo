@@ -7,6 +7,21 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+### Added
+- **Automatic ISO encoder placement (new default).** Hardware encoders have
+  a shared session budget (GeForce NVENC allows 8 concurrent sessions,
+  shared with OBS's own program/stream outputs) — so instead of letting an
+  8-feed NVENC configuration oversubscribe the GPU, CoreVideo now places
+  each ISO feed itself: NVENC while the budget lasts (counting OBS's active
+  NVENC encoders), then Intel Quick Sync, then CPU x264. The per-row
+  Encoder column shows each feed's placement. Explicit encoder choices are
+  still honored, but overflow beyond the session budget is placed down the
+  same chain instead of failing. A feed whose encoder fails at startup
+  automatically retries on the next encoder down.
+- ISO sessions that fall behind the encoder now drop frames (bounded
+  memory) and show "Encoder falling behind (N dropped)" instead of
+  failing opaquely. *(shipped in the code with 0.1.35; see PR #193)*
+
 ## [0.1.34] - 2026-08-08
 
 ### Fixed

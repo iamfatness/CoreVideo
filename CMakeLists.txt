@@ -542,6 +542,15 @@ if(BUILD_TESTING)
                  COMMAND CoreVideoFfmpegRuntimeTest)
     endif()
 
+    add_executable(CoreVideoIsoEncoderPlanTest
+        tests/iso-encoder-plan-test.cpp
+    )
+    target_include_directories(CoreVideoIsoEncoderPlanTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoIsoEncoderPlan
+             COMMAND CoreVideoIsoEncoderPlanTest)
+
     add_executable(CoreVideoSpeakerDirectorTest
         tests/speaker-director-test.cpp
         src/speaker-director.cpp

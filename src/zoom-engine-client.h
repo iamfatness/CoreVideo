@@ -92,11 +92,22 @@ public:
     void unregister_source(const std::string &source_uuid);
     using RosterCallback = std::function<void()>;
     // Roster callbacks are invoked on the engine reader thread with this
-    // client's internal lock RELEASED, so a callback may safely call back into
-    // the client (roster(), raw_active_speaker_id(), subscribe(), ...). It must
-    // not assume it runs on the Qt main thread — marshal there yourself if you
-    // touch UI — and it should return promptly, since it blocks the reader
-    // thread that also dispatches frame and audio events for every source.
+    // client's internal lock RELEASED, so a callback may call back into the
+    // client to read state (roster(), raw_active_speaker_id(), last_error())
+    // or to change subscriptions (subscribe(), subscribe_spotlight(),
+    // unsubscribe()). Those re-enter m_mtx and are safe precisely because the
+    // lock is not held during dispatch.
+    //
+    // It may NOT call start(), stop() or stop_for_reconnect(). All three join
+    // the reader thread, and the callback is running ON that thread, so the
+    // join is a self-join and throws std::system_error
+    // (resource_deadlock_would_occur). Anything that stops or restarts the
+    // engine must be marshalled off this thread first.
+    //
+    // A callback must also not assume it runs on the Qt main thread — marshal
+    // there yourself if you touch UI — and it should return promptly, since it
+    // blocks the reader thread that also dispatches frame and audio events for
+    // every source.
     void add_roster_callback(void *key, RosterCallback cb);
     void remove_roster_callback(void *key);
     using ErrorCallback = std::function<void(const std::string &message)>;
@@ -128,11 +139,24 @@ private:
     // reader thread, which stops frame and audio dispatch for every source in
     // the plugin until the heartbeat monitor kills the engine.
     //
-    // Every roster-state change dispatches through here so that this reasoning
-    // lives in one place and a new call site cannot reintroduce the deadlock by
-    // hand-rolling the pattern. `mutate` runs with m_mtx held: it may touch
-    // m_roster / m_active_speaker_id freely, but it must not call any public
-    // method of this client.
+    // Every roster-state change that NOTIFIES callbacks goes through here, so
+    // that this reasoning lives in one place. One site deliberately does not:
+    // the cmd == "left" handler in handle_event() clears m_roster, zeroes
+    // m_active_speaker_id and calls SpeakerDirector::reset() under m_mtx
+    // without notifying anyone. That is intentional — routing it through here
+    // would add a roster-callback dispatch on every leave, which is a behavior
+    // change. Leave it alone.
+    //
+    // Being private makes the correct path the shortest one, but it cannot
+    // force a future site to take it. The same snapshot-then-dispatch shape is
+    // still hand-rolled for *error* callbacks, in the "error"/"auth_fail"
+    // handling in handle_event() and in clear_last_error(), so that copy-paste
+    // template remains in this file. If you extend those, factor them into a
+    // sibling helper rather than open-coding the pattern a fourth time.
+    //
+    // `mutate` runs with m_mtx held: it may touch m_roster /
+    // m_active_speaker_id freely, but it must not call any public method of
+    // this client.
     template <typename Mutate>
     void update_roster_state_and_notify(Mutate &&mutate)
     {

@@ -12,8 +12,7 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cerrno>
-#include <cstdlib>
+#include <cstddef>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -109,8 +108,11 @@ struct tiles_source {
     // engine IPC happens outside `mutex` yet still in a well-defined order.
     std::mutex engine_mutex;
 
-    std::mutex mutex;  // guards participants, feeds and visible
+    std::mutex mutex;  // guards participants, feeds, fill_params and visible
     std::vector<uint32_t> participants;
+    // The settings the resolver needs. Cached because the roster callback runs
+    // with no obs_data_t in hand — it only knows the participants changed.
+    TileFillParams fill_params;
     std::vector<TileFeedPtr> feeds;  // parallel to participants, slot for slot
     bool visible = false;
     // Distinguishes this source's slot uuids from any other tiles source.
@@ -604,31 +606,76 @@ static const char *tiles_source_get_name(void *)
     return "CoreVideo Tiles";
 }
 
+// Property keys. Tile and exclude slots are numbered from 1 to match their
+// labels, so scene files stay readable. Declared here rather than beside the
+// properties builder because tiles_source_update reads the same keys.
+static constexpr const char *PROP_FILL_MODE = "fill_mode";
+static constexpr const char *PROP_MAX_TILES = "max_tiles";
+static constexpr std::size_t kMaxTileSlots  = 9;
+static constexpr std::size_t kMaxExcludes   = 3;
+
+static std::string tile_prop_name(std::size_t slot)
+{
+    return "tile_" + std::to_string(slot);
+}
+
+static std::string exclude_prop_name(std::size_t slot)
+{
+    return "exclude_" + std::to_string(slot);
+}
+
+// Recomputes the wall from the cached settings plus the live roster, and
+// performs whatever engine work the change implies. Safe to call from the
+// settings path and from the roster callback.
+static void apply_assignments(tiles_source *ctx)
+{
+    std::lock_guard<std::mutex> engine_lock(ctx->engine_mutex);
+
+    // Fetched before ctx->mutex: roster() takes the engine client's lock, and
+    // taking them in the other order anywhere would invite a deadlock.
+    const std::vector<ParticipantInfo> roster =
+        ZoomEngineClient::instance().roster();
+
+    FeedPlan plan;
+    {
+        std::lock_guard<std::mutex> lock(ctx->mutex);
+        std::vector<uint32_t> next =
+            resolve_tile_assignments(ctx->participants, roster, ctx->fill_params);
+        if (ctx->participants == next) return;
+        ctx->participants.swap(next);
+        plan = plan_feeds_locked(ctx);
+    }
+    execute_feed_plan(plan);
+}
+
 static void tiles_source_update(void *data, obs_data_t *settings)
 {
     auto *ctx = static_cast<tiles_source *>(data);
 
-    std::vector<uint32_t> parsed;
-    obs_data_array_t *list = obs_data_get_array(settings, "participants");
-    const size_t entries = obs_data_array_count(list);
-    for (size_t i = 0; i < entries; ++i) {
-        obs_data_t *item = obs_data_array_item(list, i);
-        const char *value = obs_data_get_string(item, "value");
-        if (value && *value && !std::strchr(value, '-')) {
-            char *end = nullptr;
-            errno = 0;
-            const unsigned long id = std::strtoul(value, &end, 10);
-            // Accept only a clean positive value that fits uint32_t: reject
-            // parse failures, trailing junk, ERANGE overflow, and anything
-            // above the 32-bit Zoom id range (unsigned long is 64-bit on
-            // LP64 targets, where the narrowing cast would otherwise wrap).
-            if (errno == 0 && end && end != value && *end == '\0' && id > 0 &&
-                static_cast<unsigned long long>(id) <= 0xFFFFFFFFull)
-                parsed.push_back(static_cast<uint32_t>(id));
-        }
-        obs_data_release(item);
-    }
-    obs_data_array_release(list);
+    TileFillParams params;
+    params.mode = obs_data_get_int(settings, PROP_FILL_MODE) ==
+                          static_cast<long long>(TileFillMode::Manual)
+                      ? TileFillMode::Manual
+                      : TileFillMode::Auto;
+
+    // Clamp: scene files are hand-editable and obs_data_get_int returns int64.
+    const int64_t raw_max = obs_data_get_int(settings, PROP_MAX_TILES);
+    params.max_tiles = static_cast<std::size_t>(
+        std::min<int64_t>(std::max<int64_t>(raw_max, 1),
+                          static_cast<int64_t>(kMaxTileSlots)));
+
+    // A chooser value outside the 32-bit Zoom id range cannot name a real
+    // participant, so it is dropped rather than wrapped by the cast.
+    const auto read_id = [settings](const std::string &key) -> uint32_t {
+        const int64_t raw = obs_data_get_int(settings, key.c_str());
+        if (raw <= 0 || raw > 0xFFFFFFFFll) return 0;
+        return static_cast<uint32_t>(raw);
+    };
+
+    for (std::size_t i = 1; i <= kMaxExcludes; ++i)
+        params.excluded.push_back(read_id(exclude_prop_name(i)));
+    for (std::size_t i = 1; i <= kMaxTileSlots; ++i)
+        params.manual.push_back(read_id(tile_prop_name(i)));
 
     // Clamp before the parity mask. The properties UI already bounds these, but
     // scene files are hand-editable and obs_data_get_int returns int64: an
@@ -643,15 +690,11 @@ static void tiles_source_update(void *data, obs_data_t *settings)
     ctx->canvas_width.store(width, std::memory_order_release);
     ctx->canvas_height.store(height, std::memory_order_release);
 
-    std::lock_guard<std::mutex> engine_lock(ctx->engine_mutex);
-    FeedPlan plan;
     {
         std::lock_guard<std::mutex> lock(ctx->mutex);
-        if (ctx->participants == parsed) return;
-        ctx->participants.swap(parsed);
-        plan = plan_feeds_locked(ctx);
+        ctx->fill_params = std::move(params);
     }
-    execute_feed_plan(plan);
+    apply_assignments(ctx);
 }
 
 static void *tiles_source_create(obs_data_t *settings, obs_source_t *source)
@@ -666,6 +709,10 @@ static void *tiles_source_create(obs_data_t *settings, obs_source_t *source)
         [ctx, gate = ctx->gate]() {
             std::lock_guard<std::mutex> callback_lock(gate->mtx);
             if (!gate->alive) return;
+            // Someone joined, left, or toggled their camera: in Auto mode the
+            // wall's membership may have changed. Reflow first, then retry any
+            // slot that is still silent under its current assignment.
+            apply_assignments(ctx);
             resubscribe_silent_feeds(ctx);
         });
     return ctx;
@@ -741,23 +788,6 @@ static uint32_t tiles_source_get_height(void *data)
 {
     auto *ctx = static_cast<tiles_source *>(data);
     return ctx->canvas_height.load(std::memory_order_acquire);
-}
-
-// Property keys. Tile and exclude slots are numbered from 1 to match their
-// labels, so scene files stay readable.
-static constexpr const char *PROP_FILL_MODE = "fill_mode";
-static constexpr const char *PROP_MAX_TILES = "max_tiles";
-static constexpr std::size_t kMaxTileSlots  = 9;
-static constexpr std::size_t kMaxExcludes   = 3;
-
-static std::string tile_prop_name(std::size_t slot)
-{
-    return "tile_" + std::to_string(slot);
-}
-
-static std::string exclude_prop_name(std::size_t slot)
-{
-    return "exclude_" + std::to_string(slot);
 }
 
 // One participant chooser, built the same way every other CoreVideo source

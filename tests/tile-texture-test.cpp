@@ -24,6 +24,16 @@ int main()
                tile_texture_needs_realloc(640, 360, 1280, 360), true)) return 1;
     if (!check("height change needs realloc",
                tile_texture_needs_realloc(640, 360, 640, 720), true)) return 1;
+    // Shrinking must reallocate too. Without this case a grow-only rule
+    // (have_w < want_w || have_h < want_h) would pass every other assertion
+    // here while leaving an oversized texture behind: the engine lowers a
+    // participant's resolution mid-call as often as it raises it, and the
+    // upload would then write 640x360 of pixels into a 1280x720 texture at a
+    // 640-byte stride, smearing the tile.
+    if (!check("shrink needs realloc",
+               tile_texture_needs_realloc(1280, 720, 640, 360), true)) return 1;
+    if (!check("width shrink needs realloc",
+               tile_texture_needs_realloc(1280, 720, 640, 720), true)) return 1;
     // A texture that does not exist yet reports 0x0 and must allocate.
     if (!check("unallocated needs realloc",
                tile_texture_needs_realloc(0, 0, 640, 360), true)) return 1;

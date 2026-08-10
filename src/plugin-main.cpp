@@ -3,6 +3,7 @@
 #include <util/platform.h>
 #include "zoom-source.h"
 #include "zoom-participant-audio-source.h"
+#include "zoom-supersource.h"
 #include "zoom-engine-client.h"
 #include "zoom-reconnect.h"
 #include "zoom-settings.h"
@@ -367,6 +368,7 @@ bool obs_module_load(void)
 
     zoom_source_register();
     zoom_participant_audio_source_register();
+    zoom_supersource_register();
     blog(LOG_INFO, "[obs-zoom-plugin] Registered CoreVideo source kinds");
 
     ZoomPluginSettings s = ZoomPluginSettings::load();

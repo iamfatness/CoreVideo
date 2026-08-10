@@ -265,6 +265,8 @@ if(COREVIDEO_BUILD_PLUGIN)
         src/plugin-main.cpp
         src/zoom-source.cpp
         src/zoom-participant-audio-source.cpp
+        src/zoom-supersource.cpp
+        src/zoom-tile-grid.cpp
         src/zoom-engine-client.cpp
         src/speaker-director.cpp
         src/zoom-reconnect.cpp
@@ -591,6 +593,24 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoIpcHardening
              COMMAND CoreVideoIpcHardeningTest)
 
+    # The shared seqlock frame reader: tear-free copies plus the region
+    # generation handling that keeps a resized feed from freezing. Uses real
+    # shared memory and a concurrent writer thread, so it needs Threads (and
+    # librt for shm_open on Linux).
+    find_package(Threads REQUIRED)
+    add_executable(CoreVideoShmFrameReaderTest
+        tests/shm-frame-reader-test.cpp
+    )
+    target_include_directories(CoreVideoShmFrameReaderTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    target_link_libraries(CoreVideoShmFrameReaderTest PRIVATE Threads::Threads)
+    if(NOT WIN32 AND NOT APPLE)
+        target_link_libraries(CoreVideoShmFrameReaderTest PRIVATE rt)
+    endif()
+    add_test(NAME CoreVideoShmFrameReader
+             COMMAND CoreVideoShmFrameReaderTest)
+
     # Centralized Zoom auth/join decision path + error catalog (issue #89).
     # Header-only logic; no Qt/OBS/SDK dependencies, no secrets.
     add_executable(CoreVideoJoinDecisionTest
@@ -634,6 +654,39 @@ if(BUILD_TESTING)
     )
     add_test(NAME CoreVideoReconnectSchedule
              COMMAND CoreVideoReconnectScheduleTest)
+
+    # CoreVideo Tiles: the pure units behind the tile wall. None of these link
+    # Qt, OBS, or the Zoom SDK, so they run in every job.
+    add_executable(CoreVideoTileClockProbeTest
+        tests/tile-clock-probe-test.cpp
+        src/tile-clock-probe.cpp
+    )
+    target_include_directories(CoreVideoTileClockProbeTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTileClockProbe
+             COMMAND CoreVideoTileClockProbeTest)
+
+    add_executable(CoreVideoTileGridTest
+        tests/tile-grid-test.cpp
+        src/zoom-tile-grid.cpp
+    )
+    target_include_directories(CoreVideoTileGridTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTileGrid
+             COMMAND CoreVideoTileGridTest)
+
+    # Tile-slot reassignment ordering — exercised with concurrent threads.
+    add_executable(CoreVideoTileSlotTest
+        tests/tile-slot-test.cpp
+    )
+    target_include_directories(CoreVideoTileSlotTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    target_link_libraries(CoreVideoTileSlotTest PRIVATE Threads::Threads)
+    add_test(NAME CoreVideoTileSlot
+             COMMAND CoreVideoTileSlotTest)
 
     # OSC wire-format and TCP control-request parsing. These use QByteArray /
     # QJsonObject / QString, so they only build where Qt6::Core is available

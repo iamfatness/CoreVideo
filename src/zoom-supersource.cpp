@@ -664,6 +664,19 @@ static void tiles_source_update(void *data, obs_data_t *settings)
         std::min<int64_t>(std::max<int64_t>(raw_max, 1),
                           static_cast<int64_t>(kMaxTileSlots)));
 
+    // Max Tiles is an Auto-only control, and the properties dialog hides it in
+    // Manual mode — so a value the operator lowered while in Auto must not go
+    // on quietly capping a Manual wall from behind a hidden control. In Manual,
+    // casting a tile is an explicit operator decision and the software does not
+    // override it; the only bound is the nine physical tile slots. Same
+    // principle that already keeps a cast participant whose camera is off.
+    //
+    // Deliberately applied here rather than in resolve_tile_assignments: the
+    // resolver stays a pure function with one uniform rule, and this
+    // mode-specific policy lives beside the UI that owns the control. That is
+    // why the assignment below looks redundant with the clamp above.
+    if (params.mode == TileFillMode::Manual) params.max_tiles = kMaxTileSlots;
+
     // A chooser value outside the 32-bit Zoom id range cannot name a real
     // participant, so it is dropped rather than wrapped by the cast.
     const auto read_id = [settings](const std::string &key) -> uint32_t {

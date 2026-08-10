@@ -109,9 +109,10 @@ std::vector<uint32_t> resolve_tile_assignments(
 4. Truncate to `max_tiles`.
 
 **Manual rules:** return `params.manual` with zeros (`None`) and duplicates
-removed. `max_tiles` is an Auto-only control and is not shown in Manual mode;
-the resolver still applies it as a bound so the contract is uniform, but with
-only nine tile slots the clamp is a no-op in practice. The roster is not
+removed. `max_tiles` is an Auto-only control and is not shown in Manual mode,
+and Manual does not honour it: the wall is bounded solely by the nine tile
+slots. A value the operator lowered while in Auto must never go on capping a
+Manual wall from behind a hidden control. The roster is not
 consulted — an operator who
 cast a tile keeps it even if that participant's camera is currently off, so a
 deliberate assignment is never silently dropped. Manual mode is a casting

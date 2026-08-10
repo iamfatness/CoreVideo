@@ -1223,9 +1223,12 @@ bool ZoomSource::output_video_from_shared_memory(
                      video_shm.size);
                 break;
             default:
+                // `uuid`, the parameter, not the source_uuid member: this
+                // helper also serves the director-preview feed, whose uuid is
+                // m_director_preview_uuid. Matches both sibling branches.
                 blog(LOG_WARNING,
                      "[obs-zoom-plugin] Incomplete video frame skipped: source=%s uuid=%s w=%u h=%u y_len=%u",
-                     output_name().c_str(), source_uuid.c_str(), w, h, y_len);
+                     output_name().c_str(), uuid.c_str(), w, h, y_len);
                 break;
             }
         }

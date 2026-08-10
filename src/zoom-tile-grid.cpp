@@ -149,6 +149,12 @@ std::vector<TileRect> solve_tile_grid(std::size_t count, const TileGridParams &p
     rects.reserve(count);
     for (std::size_t row = 0; row < best_rows; ++row) {
         const std::size_t placed = row * best_cols;
+        // Defensive: `count - placed` is unsigned, so a row selection that
+        // over-committed would underflow to a huge value and std::min would
+        // then happily return best_cols, placing phantom tiles. The row
+        // heuristic above cannot currently produce that, but the guard costs
+        // one line and the failure mode is silent.
+        if (placed >= count) break;
         const std::size_t in_row = std::min(best_cols, count - placed);
         if (in_row == 0) break;
 

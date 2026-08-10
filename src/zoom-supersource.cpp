@@ -944,10 +944,17 @@ static uint32_t tiles_source_get_height(void *data)
 
 // One participant chooser, built the same way every other CoreVideo source
 // builds one: a "none" entry at 0, then the live roster.
-static void add_roster_entries(obs_property_t *list)
+//
+// The roster is passed in rather than fetched here. A properties page builds
+// twelve of these choosers, and fetching per chooser took the engine client's
+// lock and copied the roster twelve times — worse, a roster event landing
+// mid-build produced a dialog where Tile 4's dropdown listed a participant
+// Tile 5's did not. One snapshot for the whole page keeps it self-consistent.
+static void add_roster_entries(obs_property_t *list,
+                               const std::vector<ParticipantInfo> &roster)
 {
     obs_property_list_add_int(list, obs_module_text("CoreVideoTiles.NoParticipant"), 0);
-    for (const auto &p : ZoomEngineClient::instance().roster()) {
+    for (const auto &p : roster) {
         std::string label = p.display_name.empty()
             ? "ID " + std::to_string(p.user_id)
             : p.display_name + " (" + std::to_string(p.user_id) + ")";
@@ -998,6 +1005,10 @@ static obs_properties_t *tiles_source_get_properties(void *data)
     auto *ctx = static_cast<tiles_source *>(data);
     obs_properties_t *props = obs_properties_create();
 
+    // One snapshot for every chooser on this page — see add_roster_entries().
+    const std::vector<ParticipantInfo> roster =
+        ZoomEngineClient::instance().roster();
+
     obs_property_t *mode = obs_properties_add_list(props, PROP_FILL_MODE,
         obs_module_text("CoreVideoTiles.FillMode"),
         OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
@@ -1017,7 +1028,7 @@ static obs_properties_t *tiles_source_get_properties(void *data)
             std::string(obs_module_text("CoreVideoTiles.Exclude")) + " " +
             std::to_string(i);
         add_roster_entries(obs_properties_add_list(props, name.c_str(),
-            label.c_str(), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT));
+            label.c_str(), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT), roster);
     }
 
     for (std::size_t i = 1; i <= kMaxTileSlots; ++i) {
@@ -1026,7 +1037,7 @@ static obs_properties_t *tiles_source_get_properties(void *data)
             std::string(obs_module_text("CoreVideoTiles.Tile")) + " " +
             std::to_string(i);
         add_roster_entries(obs_properties_add_list(props, name.c_str(),
-            label.c_str(), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT));
+            label.c_str(), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT), roster);
     }
 
     obs_properties_add_int(props, "canvas_width",

@@ -524,7 +524,9 @@ static void tiles_source_render(void *data, gs_effect_t *)
         std::lock_guard<std::mutex> lock(ctx->mutex);
         feeds = ctx->feeds;
     }
-    if (feeds.empty()) return;
+    // Deliberately NO `if (feeds.empty()) return;` — the CPU compositor still
+    // emitted a full neutral canvas with nobody assigned, so an early return
+    // would make an empty wall disappear instead of going grey.
 
     // Byte-for-byte the CPU path's parameters, including the even-snapping
     // pass. Use the named constants, not literals: substituting 16.0/9.0 or
@@ -540,14 +542,25 @@ static void tiles_source_render(void *data, gs_effect_t *)
     const std::vector<SnappedTileRect> rects =
         snap_tile_grid_even(solve_tile_grid(feeds.size(), params), params);
 
+    // Bind BEFORE begin_pass: libobs uploads parameters inside
+    // gs_technique_begin_pass and never re-uploads them for later draws.
     gs_technique_t *tech = s_tiles_effect.tech_i420;
-    gs_technique_begin(tech);
-    gs_technique_begin_pass(tech, 0);
     gs_effect_set_texture(s_tiles_effect.param_y, s_neutral_y);
     gs_effect_set_texture(s_tiles_effect.param_u, s_neutral_u);
     gs_effect_set_texture(s_tiles_effect.param_v, s_neutral_v);
+    gs_technique_begin(tech);
+    gs_technique_begin_pass(tech, 0);
 
-    for (const TileRect &r : rects) {
+    // The CPU path memset the WHOLE canvas to neutral before drawing tiles, so
+    // gutters and margins were grey, and an empty wall was a grey canvas rather
+    // than nothing. Paint it here through the same technique and the same 0x80
+    // textures, so it is bit-identical by construction. Do not add an
+    // `if (feeds.empty()) return;` above — that would make an empty wall vanish.
+    gs_matrix_push();
+    gs_draw_sprite(s_neutral_y, 0, canvas_w, canvas_h);
+    gs_matrix_pop();
+
+    for (const SnappedTileRect &r : rects) {
         gs_matrix_push();
         gs_matrix_translate3f(static_cast<float>(r.x), static_cast<float>(r.y), 0.0f);
         gs_draw_sprite(s_neutral_y, 0, static_cast<uint32_t>(r.width),

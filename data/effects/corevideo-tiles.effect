@@ -31,9 +31,14 @@ VertInOut VSDefault(VertInOut vert_in)
 
 float4 PSI420(VertInOut vert_in) : TARGET
 {
+    // Chroma offset is 128/255, not a flat 0.5: libobs builds its YUV matrix
+    // from black_levels = {0, 128, 128} (media-io/video-matrices.c,
+    // initialize_matrix), and format_conversion.effect offsets chroma by the
+    // same 128/255 (~0.5019608). Using 0.5 here would leave a systematic
+    // ~1-LSB tint versus the CPU path that this shader must match exactly.
     float y = image.Sample(def_sampler, vert_in.uv).r;
-    float u = tex_u.Sample(def_sampler, vert_in.uv).r - 0.5;
-    float v = tex_v.Sample(def_sampler, vert_in.uv).r - 0.5;
+    float u = tex_u.Sample(def_sampler, vert_in.uv).r - 128.0 / 255.0;
+    float v = tex_v.Sample(def_sampler, vert_in.uv).r - 128.0 / 255.0;
 
     float r = y + 1.5748 * v;
     float g = y - 0.1873 * u - 0.4681 * v;

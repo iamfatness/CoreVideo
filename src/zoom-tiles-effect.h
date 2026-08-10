@@ -22,5 +22,9 @@ struct TilesEffect {
 // source with no explanation, which is the worst possible symptom.
 bool tiles_effect_load(TilesEffect &out);
 
-// Releases the effect. Safe to call on an unloaded/failed TilesEffect.
+// Drops our reference to the effect and resets the struct. Safe to call on
+// an unloaded/failed TilesEffect. Note: libobs caches effects created from a
+// file, so gs_effect_destroy() here is effectively a no-op until graphics
+// shutdown rather than an immediate release — not a leak, just not the
+// literal "release" the name suggests.
 void tiles_effect_destroy(TilesEffect &fx);

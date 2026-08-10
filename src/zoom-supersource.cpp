@@ -1,6 +1,7 @@
 #include "zoom-supersource.h"
 #include "engine-ipc.h"
 #include "zoom-engine-client.h"
+#include "zoom-tile-fill.h"
 #include "zoom-tile-grid.h"
 #include "zoom-tile-slot.h"
 
@@ -742,24 +743,119 @@ static uint32_t tiles_source_get_height(void *data)
     return ctx->canvas_height.load(std::memory_order_acquire);
 }
 
+// Property keys. Tile and exclude slots are numbered from 1 to match their
+// labels, so scene files stay readable.
+static constexpr const char *PROP_FILL_MODE = "fill_mode";
+static constexpr const char *PROP_MAX_TILES = "max_tiles";
+static constexpr std::size_t kMaxTileSlots  = 9;
+static constexpr std::size_t kMaxExcludes   = 3;
+
+static std::string tile_prop_name(std::size_t slot)
+{
+    return "tile_" + std::to_string(slot);
+}
+
+static std::string exclude_prop_name(std::size_t slot)
+{
+    return "exclude_" + std::to_string(slot);
+}
+
+// One participant chooser, built the same way every other CoreVideo source
+// builds one: a "none" entry at 0, then the live roster.
+static void add_roster_entries(obs_property_t *list)
+{
+    obs_property_list_add_int(list, obs_module_text("CoreVideoTiles.NoParticipant"), 0);
+    for (const auto &p : ZoomEngineClient::instance().roster()) {
+        std::string label = p.display_name.empty()
+            ? "ID " + std::to_string(p.user_id)
+            : p.display_name + " (" + std::to_string(p.user_id) + ")";
+        if (p.has_video) label += " [video]";
+        obs_property_list_add_int(list, label.c_str(),
+                                  static_cast<long long>(p.user_id));
+    }
+}
+
+// Only one of the two control groups is ever relevant, so hide the other
+// rather than leaving dead dropdowns on screen.
+static bool tiles_fill_mode_modified(obs_properties_t *props, obs_property_t *,
+                                     obs_data_t *settings)
+{
+    const bool manual = obs_data_get_int(settings, PROP_FILL_MODE) ==
+                        static_cast<long long>(TileFillMode::Manual);
+
+    obs_property_set_visible(obs_properties_get(props, PROP_MAX_TILES), !manual);
+    for (std::size_t i = 1; i <= kMaxExcludes; ++i) {
+        obs_property_set_visible(
+            obs_properties_get(props, exclude_prop_name(i).c_str()), !manual);
+    }
+    for (std::size_t i = 1; i <= kMaxTileSlots; ++i) {
+        obs_property_set_visible(
+            obs_properties_get(props, tile_prop_name(i).c_str()), manual);
+    }
+    return true;  // properties changed: redraw the dialog
+}
+
 static void tiles_source_get_defaults(obs_data_t *settings)
 {
     obs_data_set_default_int(settings, "canvas_width",  1920);
     obs_data_set_default_int(settings, "canvas_height", 1080);
+    obs_data_set_default_int(settings, PROP_FILL_MODE,
+                             static_cast<long long>(TileFillMode::Auto));
+    obs_data_set_default_int(settings, PROP_MAX_TILES,
+                             static_cast<long long>(kMaxTileSlots));
+    // Every chooser defaults to "none"; Auto mode fills the wall on its own.
+    for (std::size_t i = 1; i <= kMaxExcludes; ++i)
+        obs_data_set_default_int(settings, exclude_prop_name(i).c_str(), 0);
+    for (std::size_t i = 1; i <= kMaxTileSlots; ++i)
+        obs_data_set_default_int(settings, tile_prop_name(i).c_str(), 0);
 }
 
 static obs_properties_t *tiles_source_get_properties(void *)
 {
     obs_properties_t *props = obs_properties_create();
-    obs_properties_add_editable_list(props, "participants",
-                                     "Participants (Zoom user ids, in tile order)",
-                                     OBS_EDITABLE_LIST_TYPE_STRINGS, nullptr, nullptr);
-    obs_properties_add_int(props, "canvas_width",  "Canvas width",
-                           static_cast<int>(kMinCanvasW),
-                           static_cast<int>(kMaxCanvasW), 2);
-    obs_properties_add_int(props, "canvas_height", "Canvas height",
-                           static_cast<int>(kMinCanvasH),
-                           static_cast<int>(kMaxCanvasH), 2);
+
+    obs_property_t *mode = obs_properties_add_list(props, PROP_FILL_MODE,
+        obs_module_text("CoreVideoTiles.FillMode"),
+        OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(mode, obs_module_text("CoreVideoTiles.FillModeAuto"),
+                              static_cast<long long>(TileFillMode::Auto));
+    obs_property_list_add_int(mode, obs_module_text("CoreVideoTiles.FillModeManual"),
+                              static_cast<long long>(TileFillMode::Manual));
+    obs_property_set_modified_callback(mode, tiles_fill_mode_modified);
+
+    obs_properties_add_int(props, PROP_MAX_TILES,
+        obs_module_text("CoreVideoTiles.MaxTiles"), 1,
+        static_cast<int>(kMaxTileSlots), 1);
+
+    for (std::size_t i = 1; i <= kMaxExcludes; ++i) {
+        const std::string name = exclude_prop_name(i);
+        const std::string label =
+            std::string(obs_module_text("CoreVideoTiles.Exclude")) + " " +
+            std::to_string(i);
+        add_roster_entries(obs_properties_add_list(props, name.c_str(),
+            label.c_str(), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT));
+    }
+
+    for (std::size_t i = 1; i <= kMaxTileSlots; ++i) {
+        const std::string name = tile_prop_name(i);
+        const std::string label =
+            std::string(obs_module_text("CoreVideoTiles.Tile")) + " " +
+            std::to_string(i);
+        add_roster_entries(obs_properties_add_list(props, name.c_str(),
+            label.c_str(), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT));
+    }
+
+    obs_properties_add_int(props, "canvas_width",
+        obs_module_text("CoreVideoTiles.CanvasWidth"),
+        kMinCanvasW, kMaxCanvasW, 2);
+    obs_properties_add_int(props, "canvas_height",
+        obs_module_text("CoreVideoTiles.CanvasHeight"),
+        kMinCanvasH, kMaxCanvasH, 2);
+
+    obs_properties_add_button(props, "btn_refresh",
+        obs_module_text("CoreVideoTiles.RefreshParticipants"),
+        [](obs_properties_t *, obs_property_t *, void *) -> bool { return true; });
+
     return props;
 }
 

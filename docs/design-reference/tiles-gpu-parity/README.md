@@ -107,3 +107,46 @@ All scratch scripts were written under the session scratchpad directory (`C:\Use
 - Did not fabricate or substitute a still image for the live baseline — both `before-live-*.png` are genuine `GetSourceScreenshot` captures of the live running sources.
 - Actively investigated and disclosed a contradiction between the task's stated ground truth and direct observation, rather than silently trusting either the stale premise or the surprising live data.
 - Left open, and explicitly flagged, the one thing I could not verify from the tools available to me: whether the live content is an organic owner-run human meeting (as Step 2 of the brief specifies) or a synthetic/automated test rig. This is a judgment call for the owner, not something an agent without rig/meeting access can resolve conclusively.
+
+---
+
+## Phase A parity verification (2026-08-10, GPU build `bdf3918`)
+
+Performed by the controller directly, on the owner's machine, against the
+mimoLive test room with 8 participants sending video.
+
+**After images**
+- `after-corevideo-tiles-2.png` — 8-tile Auto wall, source *showing* in the
+  preview scene. This is the image to compare against `before-live-8.png`.
+- `after-corevideo-tiles-verify-.png` — 10 KB, a flat neutral canvas. This is
+  **not a failure**: that source is hidden (`showing=false`), and a hidden wall
+  correctly renders the neutral grey canvas rather than transparency. It is
+  evidence for check 6 below.
+
+**Checks, with what was actually observed**
+
+| # | Check | Result |
+|---|---|---|
+| 1 | Tile positions and sizes identical | Pass — no difference detectable comparing the two images at full resolution |
+| 2 | Gutters and margins identical | Pass — visually identical, and separately measured at RGB `128,128,128,255` across the whole canvas |
+| 3 | Short-row centering identical | Pass — both render 3-3-2 with the bottom row centered |
+| 4 | Crop framing identical | Pass — each participant sits the same way within their tile |
+| 5 | Skin tones and background colours match | Pass by visual comparison. See the caveat below |
+| 6 | Neutral placeholder is the same grey | Pass — measured `128,128,128,255`, matching the CPU fill's `0x80` |
+
+**Caveat on check 5, stated plainly.** This was a side-by-side visual
+comparison at full resolution, not a numeric per-pixel difference. A systematic
+sub-LSB colour error would not be visible this way. The specific risk that
+motivated the check — a wrong chroma offset — was independently closed by
+reading the shader against libobs's own matrices (`media-io/video-matrices.c`,
+full-range `black_levels = {0, 128, 128}`), and the offset is `128.0/255.0`.
+A numeric diff would still be stronger evidence and is not done.
+
+**Also not done:** the render-time measurement at 6+ tiles (plan Task 6 step 3).
+That number was to decide whether the GPU path was worth doing and to inform any
+future 4K work; it is still owed.
+
+**Known bounded difference to expect.** The GPU path divides the draw scale by
+the truncated integer crop passed to `gs_draw_sprite_subregion`, and truncates
+the crop to whole rather than even source pixels. This is a sub-canvas-pixel
+difference from the CPU path by construction, not a defect.

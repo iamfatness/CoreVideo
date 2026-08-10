@@ -5,6 +5,7 @@
 #include "zoom-tile-grid.h"
 #include "zoom-tile-retry.h"
 #include "zoom-tile-slot.h"
+#include "zoom-tile-texture.h"
 #include "zoom-tiles-effect.h"
 
 #include <media-io/video-io.h>
@@ -90,6 +91,19 @@ struct TileFeed {
     uint64_t last_retry_ns = 0;
     uint32_t retry_attempts = 0;
     bool retry_exhausted_logged = false;
+
+    // Graphics-thread-only state. Never touched by the engine reader thread,
+    // so deliberately outside the mutex above: video_render is the only writer
+    // and the only reader, and teardown (tile_feed_retire) reaches it only
+    // after entering the graphics context, which the graphics thread holds for
+    // the whole of video_render. Adding a lock here would put the engine
+    // reader thread and the graphics thread on the same mutex for no reason.
+    gs_texture_t *tex_y = nullptr;
+    gs_texture_t *tex_u = nullptr;
+    gs_texture_t *tex_v = nullptr;
+    uint32_t      tex_w = 0;   // luma dimensions the textures were created for
+    uint32_t      tex_h = 0;
+    uint64_t      uploaded_generation = 0;
 };
 using TileFeedPtr = std::shared_ptr<TileFeed>;
 
@@ -149,6 +163,12 @@ struct tiles_source {
     // rather than constructed per frame: allocation churn on a 60 Hz draw path
     // is the documented root cause of the operator-stutter incident.
     std::vector<TileFeedPtr> render_feeds;
+    // The draw path's own scratch buffers, one per slot. Deliberately not
+    // shared with `scratches` above: while the CPU compositor still runs, two
+    // threads calling tile_take_snapshot() on the same TileScratch would be a
+    // data race, not merely contention. Grow-only, so a slot that comes back
+    // reuses its buffer instead of allocating on the draw path.
+    std::vector<TileScratch> render_scratches;
     uint64_t    rendered_frames = 0;
 
     std::thread       worker;
@@ -347,6 +367,10 @@ static void tile_feed_release_mapping(const TileFeedPtr &feed)
     feed->shm_gen = 0;
 }
 
+// Defined with the rest of the draw path below; declared here because teardown
+// has to free the feed's plane textures.
+static void tile_destroy_textures(TileFeed &feed);
+
 static void tile_feed_retire(const TileFeedPtr &feed)
 {
     if (!feed) return;
@@ -354,11 +378,28 @@ static void tile_feed_retire(const TileFeedPtr &feed)
     ZoomEngineClient::instance().unregister_source(feed->uuid);
     blog(LOG_INFO, "[obs-zoom-plugin] Tile slot retired: uuid=%s participant_id=%u",
          feed->uuid.c_str(), feed->slot.participant_id());
-    // A callback dispatched before unregister_source() may still be running; it
-    // holds feed->mtx, so this blocks until it finishes and then locks it out.
-    std::lock_guard<std::mutex> lock(feed->mtx);
-    feed->alive = false;
-    shm_region_destroy(feed->shm);
+    {
+        // A callback dispatched before unregister_source() may still be
+        // running; it holds feed->mtx, so this blocks until it finishes and
+        // then locks it out.
+        std::lock_guard<std::mutex> lock(feed->mtx);
+        feed->alive = false;
+        shm_region_destroy(feed->shm);
+    }
+
+    // Retiring runs off the graphics thread, so the plane textures have to be
+    // freed with the context entered. Leaking three textures per repointed slot
+    // would accumulate GPU memory for the length of a show.
+    //
+    // OUTSIDE feed->mtx, DELIBERATELY. video_render() runs with the graphics
+    // context already held and takes feed->mtx inside it (tile_take_snapshot),
+    // so acquiring the two in the opposite order here would be an ABBA
+    // deadlock. Entering the context is also what makes this safe without a
+    // lock: it blocks until the graphics thread is out of video_render, and the
+    // feed is already gone from ctx->feeds, so no later frame can pick it up.
+    obs_enter_graphics();
+    tile_destroy_textures(*feed);
+    obs_leave_graphics();
 }
 
 // The engine work implied by a change to the assignment list. Computing it is
@@ -810,13 +851,127 @@ static bool ensure_neutral_textures()
     return false;
 }
 
+// Both logged once rather than once per vsync: these failures are persistent
+// (a broken graphics device, or a technique with no pass 0), so at the frame
+// rate they would bury every other line in the log. Once is still essential —
+// a wall that silently will not draw is the worst symptom there is.
+static bool s_tile_texture_failed_logged = false;
+static bool s_tile_pass_failed_logged = false;
+
+// Frees one feed's plane textures and forgets what they held. The caller must
+// already hold the graphics context.
+static void tile_destroy_textures(TileFeed &feed)
+{
+    gs_texture_destroy(feed.tex_y);  // null-safe (libobs graphics.c:2418)
+    gs_texture_destroy(feed.tex_u);
+    gs_texture_destroy(feed.tex_v);
+    feed.tex_y = feed.tex_u = feed.tex_v = nullptr;
+    feed.tex_w = 0;
+    feed.tex_h = 0;
+    feed.uploaded_generation = 0;
+}
+
+// Brings one feed's three plane textures in line with the pixels just taken
+// into `scratch`. Runs on the graphics thread with the context already entered.
+// Returns false when there is nothing usable to draw, leaving the caller to
+// paint the neutral placeholder instead of binding a null plane.
+static bool tile_upload_frame(const TileFeedPtr &feed, const TileScratch &scratch)
+{
+    const uint32_t w = scratch.width;
+    const uint32_t h = scratch.height;
+
+    // Reallocate only when this participant's stream size actually changed.
+    // The engine raises and lowers a participant's resolution during a call, so
+    // this is not a one-off — but it is rare, and recreating three textures per
+    // frame would be a real cost on a nine-tile wall.
+    if (tile_texture_needs_realloc(feed->tex_w, feed->tex_h, w, h)) {
+        tile_destroy_textures(*feed);
+        feed->tex_y = gs_texture_create(w, h, GS_R8, 1, nullptr, GS_DYNAMIC);
+        feed->tex_u = gs_texture_create(w / 2, h / 2, GS_R8, 1, nullptr, GS_DYNAMIC);
+        feed->tex_v = gs_texture_create(w / 2, h / 2, GS_R8, 1, nullptr, GS_DYNAMIC);
+        if (!feed->tex_y || !feed->tex_u || !feed->tex_v) {
+            // All three or none, exactly as with the neutral set: a half-built
+            // set binds a null plane and samples whatever the previous pass
+            // left there. Resetting tex_w/tex_h to 0 also means the next frame
+            // retries rather than treating the failure as a valid allocation.
+            tile_destroy_textures(*feed);
+            if (!s_tile_texture_failed_logged) {
+                s_tile_texture_failed_logged = true;
+                blog(LOG_ERROR,
+                     "[obs-zoom-plugin] Tiles: could not create the %ux%u plane "
+                     "textures for a tile; it will stay grey", w, h);
+            }
+            return false;
+        }
+        feed->tex_w = w;
+        feed->tex_h = h;
+        feed->uploaded_generation = 0;  // new textures hold nothing
+    }
+    if (!feed->tex_y || !feed->tex_u || !feed->tex_v) return false;
+
+    // Skip the upload entirely when the feed has produced no new frame. An idle
+    // wall must not re-upload unchanged pixels every vsync — a nine-tile 720p
+    // wall at 60 Hz would be ~150 MB/s of PCIe traffic for no visible change.
+    if (tile_texture_needs_upload(feed->uploaded_generation, scratch.generation)) {
+        // tile_take_snapshot() has already checked that the buffer holds a full
+        // I420 frame of these dimensions, so these offsets are in bounds.
+        const uint8_t *y = scratch.pixels.data();
+        const uint8_t *u = y + static_cast<size_t>(w) * h;
+        const uint8_t *v = u + (static_cast<size_t>(w) * h) / 4;
+        gs_texture_set_image(feed->tex_y, y, w, false);
+        gs_texture_set_image(feed->tex_u, u, w / 2, false);
+        gs_texture_set_image(feed->tex_v, v, w / 2, false);
+        feed->uploaded_generation = scratch.generation;
+    }
+    return true;
+}
+
+// Binds one tile's three planes and opens a pass for them.
+//
+// THE BINDING MUST HAPPEN BEFORE THE PASS OPENS, AND EVERY TILE NEEDS ITS OWN
+// PASS. gs_technique_begin_pass() uploads the effect's parameters to the shader
+// (upload_parameters(), libobs/graphics/effect.c:209) and nothing re-uploads
+// them per draw call. Each tile binds *different* textures, so rebinding inside
+// an already-open pass silently draws the previously-bound planes — or nothing.
+// (The alternative is one pass plus gs_effect_update_params() after every
+// rebind; a pass per tile is the same cost and much harder to get wrong.)
+//
+// Returns false when the pass could not be opened, in which case the draw must
+// be skipped: gs_technique_begin_pass() loads the pass's vertex and pixel
+// shaders, so drawing after a failed call runs against whatever shader was
+// loaded last — a wall drawn with some other source's effect.
+static bool tiles_begin_pass(gs_technique_t *tech, gs_texture_t *y,
+                             gs_texture_t *u, gs_texture_t *v)
+{
+    gs_effect_set_texture(s_tiles_effect.param_y, y);
+    gs_effect_set_texture(s_tiles_effect.param_u, u);
+    gs_effect_set_texture(s_tiles_effect.param_v, v);
+    if (gs_technique_begin_pass(tech, 0)) return true;
+
+    if (!s_tile_pass_failed_logged) {
+        s_tile_pass_failed_logged = true;
+        blog(LOG_ERROR,
+             "[obs-zoom-plugin] Tiles: gs_technique_begin_pass failed on the "
+             "I420 technique; the wall will not draw");
+    }
+    return false;
+}
+
+// Paints one rect with the neutral placeholder, through the same I420 technique
+// and the same 1x1 0x80 planes the whole path uses.
+static void tiles_draw_neutral(gs_technique_t *tech, uint32_t x, uint32_t y,
+                               uint32_t w, uint32_t h)
+{
+    if (!tiles_begin_pass(tech, s_neutral_y, s_neutral_u, s_neutral_v)) return;
+    gs_matrix_push();
+    gs_matrix_translate3f(static_cast<float>(x), static_cast<float>(y), 0.0f);
+    gs_draw_sprite(s_neutral_y, 0, w, h);
+    gs_matrix_pop();
+    gs_technique_end_pass(tech);
+}
+
 // Draws the wall. Runs on the OBS graphics thread with the graphics context
 // already entered — do not nest obs_enter_graphics() in here.
-//
-// Every tile is the neutral placeholder for now; participant video is the next
-// change. Splitting it that way isolates a geometry regression (tiles in the
-// wrong place or the wrong size) from a colour one (tiles converted wrongly),
-// which are otherwise very hard to tell apart in a single screenshot.
 static void tiles_source_render(void *data, gs_effect_t *)
 {
     auto *ctx = static_cast<tiles_source *>(data);
@@ -837,6 +992,10 @@ static void tiles_source_render(void *data, gs_effect_t *)
     // itself grey rather than disappear. solve_tile_grid(0, ...) returns no
     // rects, so the tile loop below simply does nothing.
     const std::vector<TileFeedPtr> &feeds = ctx->render_feeds;
+    // Grow-only, like the compositor's: a slot that comes back reuses its
+    // buffer instead of allocating on a 60 Hz draw path.
+    if (ctx->render_scratches.size() < feeds.size())
+        ctx->render_scratches.resize(feeds.size());
 
     // Byte-for-byte the CPU path's parameters, including the even-snapping
     // pass — see composite_once() above. The named constants are load-bearing:
@@ -852,50 +1011,86 @@ static void tiles_source_render(void *data, gs_effect_t *)
     const std::vector<SnappedTileRect> rects =
         snap_tile_grid_even(solve_tile_grid(feeds.size(), params), params);
 
-    // Bound before the pass begins, not inside it: gs_technique_begin_pass()
-    // uploads the effect's parameters to the shader (upload_parameters() in
-    // libobs/graphics/effect.c:209), and nothing re-uploads them per draw call,
-    // so a texture set after the pass began would never reach the sampler.
-    gs_effect_set_texture(s_tiles_effect.param_y, s_neutral_y);
-    gs_effect_set_texture(s_tiles_effect.param_u, s_neutral_u);
-    gs_effect_set_texture(s_tiles_effect.param_v, s_neutral_v);
-
     gs_technique_t *tech = s_tiles_effect.tech_i420;
     gs_technique_begin(tech);
-    gs_technique_begin_pass(tech, 0);
 
     // PARITY-CRITICAL, DO NOT DELETE AS A REDUNDANT DRAW. The CPU compositor
-    // memset the whole canvas to kNeutralY/kNeutralUV before drawing any tile
-    // (composite_once above), so the gutters, the margins and any unfilled area
-    // were neutral grey — not transparent. Painting the canvas here reproduces
-    // that exactly, and through the same 1x1 0x80 textures and the same I420
-    // technique the tiles use, so it is bit-identical to the old fill by
-    // construction rather than by an RGB constant somebody has to trust.
+    // memset the whole canvas to kNeutralY/kNeutralUV before drawing any tile,
+    // so the gutters, the margins and any unfilled area were neutral grey — not
+    // transparent. Painting the canvas here reproduces that exactly, and through
+    // the same 1x1 0x80 textures and the same I420 technique the tiles use, so
+    // it is bit-identical to the old fill by construction rather than by an RGB
+    // constant somebody has to trust.
     //
-    // It will look redundant once the tiles carry participant video and cover
+    // It looks redundant now that the tiles carry participant video and cover
     // their own rects opaquely. It is not: the gutters and margins are never
     // covered by a tile, and they are exactly where the parity baseline in
     // docs/design-reference/tiles-gpu-parity/ observes the neutral 0x80.
-    gs_draw_sprite(s_neutral_y, 0, canvas_w, canvas_h);
+    tiles_draw_neutral(tech, 0, 0, canvas_w, canvas_h);
 
-    for (const SnappedTileRect &r : rects) {
+    size_t drawn = 0;
+    for (size_t i = 0; i < rects.size() && i < feeds.size(); ++i) {
+        const SnappedTileRect &r = rects[i];
         if (r.width < 2 || r.height < 2) continue;  // as the CPU path skips them
+
+        // Exactly the compositor's rule for "this tile has something to show":
+        // tile_take_snapshot() already folds in TileSlotState's epoch check, so
+        // a frame captured under a previous assignment is refused here for the
+        // same reason it was refused there. No new rule is invented.
+        const TileFeedPtr &feed = feeds[i];
+        if (!feed || !tile_take_snapshot(feed, ctx->render_scratches[i]) ||
+            !tile_upload_frame(feed, ctx->render_scratches[i])) {
+            tiles_draw_neutral(tech, r.x, r.y, r.width, r.height);
+            continue;
+        }
+
+        // Sample the largest centred 16:9 sub-rectangle so the tile fills
+        // completely and is never letterboxed — the same solve_cover_crop() the
+        // CPU blit used, mapped straight onto gs_draw_sprite_subregion(), which
+        // samples exactly such a sub-rectangle.
+        const CropRect crop = solve_cover_crop(static_cast<double>(feed->tex_w),
+                                               static_cast<double>(feed->tex_h),
+                                               kTileAspect);
+        // The sprite's geometry is sub_cx x sub_cy *in whole texels*
+        // (build_subsprite_norm(), libobs/graphics/graphics.c:1024), so the
+        // scale must divide by the truncated integers actually passed below,
+        // not by the un-truncated doubles: dividing by crop.width would leave
+        // the tile up to a pixel short of its rect and expose a sliver of the
+        // neutral canvas along two edges.
+        const uint32_t crop_x = static_cast<uint32_t>(crop.x);
+        const uint32_t crop_y = static_cast<uint32_t>(crop.y);
+        const uint32_t crop_w = static_cast<uint32_t>(crop.width);
+        const uint32_t crop_h = static_cast<uint32_t>(crop.height);
+        if (crop_w == 0 || crop_h == 0) {  // degenerate source: nothing to map
+            tiles_draw_neutral(tech, r.x, r.y, r.width, r.height);
+            continue;
+        }
+
+        if (!tiles_begin_pass(tech, feed->tex_y, feed->tex_u, feed->tex_v))
+            continue;
         gs_matrix_push();
         gs_matrix_translate3f(static_cast<float>(r.x), static_cast<float>(r.y),
                               0.0f);
-        gs_draw_sprite(s_neutral_y, 0, r.width, r.height);
+        gs_matrix_scale3f(static_cast<float>(r.width) / static_cast<float>(crop_w),
+                          static_cast<float>(r.height) / static_cast<float>(crop_h),
+                          1.0f);
+        // The chroma planes are half-size but sampled with normalized UVs, so
+        // the same sub-region is correct for all three without separate maths.
+        gs_draw_sprite_subregion(feed->tex_y, 0, crop_x, crop_y, crop_w, crop_h);
         gs_matrix_pop();
+        gs_technique_end_pass(tech);
+        ++drawn;
     }
 
-    gs_technique_end_pass(tech);
     gs_technique_end(tech);
 
     // Rate-limited, like the composite log, so the rig can confirm the draw path
-    // is live and see the grid it solved without flooding the log.
+    // is live and see both the grid it solved and how many tiles actually have a
+    // feed, without flooding the log.
     if (ctx->rendered_frames == 0 || ctx->rendered_frames % 300 == 0) {
         blog(LOG_INFO,
-             "[obs-zoom-plugin] Tiles render: canvas=%ux%u tiles=%zu count=%llu",
-             canvas_w, canvas_h, rects.size(),
+             "[obs-zoom-plugin] Tiles render: canvas=%ux%u tiles=%zu with_video=%zu count=%llu",
+             canvas_w, canvas_h, rects.size(), drawn,
              static_cast<unsigned long long>(ctx->rendered_frames));
     }
     ++ctx->rendered_frames;
@@ -1267,5 +1462,7 @@ void zoom_supersource_unload_gfx()
     destroy_neutral_textures();
     obs_leave_graphics();
     s_neutral_failed_logged = false;
+    s_tile_texture_failed_logged = false;
+    s_tile_pass_failed_logged = false;
     tiles_effect_destroy(s_tiles_effect);
 }

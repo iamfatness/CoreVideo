@@ -62,16 +62,19 @@ bool test_auto_drops_camera_off_and_closes_gap()
                   {10, 30});
 }
 
-// Incumbents win the contest for scarce slots; the newest arrival is cut.
+// Incumbents win the contest for scarce slots: with max_tiles=2, the two
+// incumbents (10, 30) are placed first even though roster order would prefer
+// newcomer 20 over incumbent 30. A broken implementation that builds from
+// roster order then truncates would wrongly yield {10, 20}, dropping incumbent 30.
 bool test_auto_honors_max_tiles()
 {
     TileFillParams params = auto_params();
     params.max_tiles = 2;
-    const std::vector<uint32_t> previous{10, 20};
+    const std::vector<uint32_t> previous{10, 30};
     const std::vector<ParticipantInfo> roster{
         person(10, true), person(20, true), person(30, true)};
     return expect("max tiles",
-                  resolve_tile_assignments(previous, roster, params), {10, 20});
+                  resolve_tile_assignments(previous, roster, params), {10, 30});
 }
 
 bool test_auto_honors_excludes_and_ignores_zeros()

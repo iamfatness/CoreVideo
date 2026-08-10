@@ -5,6 +5,7 @@
 #include "zoom-tile-grid.h"
 #include "zoom-tile-retry.h"
 #include "zoom-tile-slot.h"
+#include "zoom-tiles-effect.h"
 
 #include <media-io/video-io.h>
 #include <obs-module.h>
@@ -36,6 +37,9 @@ static constexpr uint32_t kMinCanvasH = 16, kMaxCanvasH = 4320;
 
 static std::atomic<uint64_t> s_tiles_instance_counter{0};
 static std::atomic<uint64_t> s_tile_feed_serial{0};
+// The shared I420 render effect, loaded once at module load and torn down at
+// module unload. See src/zoom-tiles-effect.h. Nothing draws with it yet.
+static TilesEffect s_tiles_effect;
 // Globally unique per decoded frame, so a scratch buffer can tell whether the
 // pixels it holds are still the newest ones for its slot without any chance of
 // a stale value colliding across feeds.
@@ -1084,4 +1088,14 @@ void zoom_supersource_register()
     info.get_properties = tiles_source_get_properties;
     info.get_defaults   = tiles_source_get_defaults;
     obs_register_source(&info);
+}
+
+void zoom_supersource_load_gfx()
+{
+    tiles_effect_load(s_tiles_effect);
+}
+
+void zoom_supersource_unload_gfx()
+{
+    tiles_effect_destroy(s_tiles_effect);
 }

@@ -369,6 +369,7 @@ bool obs_module_load(void)
     zoom_source_register();
     zoom_participant_audio_source_register();
     zoom_supersource_register();
+    zoom_supersource_load_gfx();
     blog(LOG_INFO, "[obs-zoom-plugin] Registered CoreVideo source kinds");
 
     ZoomPluginSettings s = ZoomPluginSettings::load();
@@ -416,6 +417,7 @@ void obs_module_unload(void)
         g_frontend_callback_registered = false;
     }
     shutdown_corevideo();
+    zoom_supersource_unload_gfx();
     g_dock.clear();
     g_iso_panel.clear();
     g_output_panel.clear();

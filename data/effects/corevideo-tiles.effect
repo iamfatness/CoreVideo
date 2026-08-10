@@ -1,0 +1,52 @@
+// I420 -> RGB for the CoreVideo Tiles wall.
+//
+// BT.709, FULL range. This must match set_yuv_frame_color_info() in
+// src/zoom-source.cpp, which passes VIDEO_CS_709 + VIDEO_RANGE_FULL with
+// full_range = true. Full range means the luma is NOT rescaled from 16-235;
+// applying a limited-range rescale here would wash every face out.
+
+uniform float4x4 ViewProj;
+uniform texture2d image;   // Y plane, GS_R8
+uniform texture2d tex_u;   // U plane, GS_R8, half size
+uniform texture2d tex_v;   // V plane, GS_R8, half size
+
+sampler_state def_sampler {
+    Filter   = Linear;
+    AddressU = Clamp;
+    AddressV = Clamp;
+};
+
+struct VertInOut {
+    float4 pos : POSITION;
+    float2 uv  : TEXCOORD0;
+};
+
+VertInOut VSDefault(VertInOut vert_in)
+{
+    VertInOut vert_out;
+    vert_out.pos = mul(float4(vert_in.pos.xyz, 1.0), ViewProj);
+    vert_out.uv  = vert_in.uv;
+    return vert_out;
+}
+
+float4 PSI420(VertInOut vert_in) : TARGET
+{
+    float y = image.Sample(def_sampler, vert_in.uv).r;
+    float u = tex_u.Sample(def_sampler, vert_in.uv).r - 0.5;
+    float v = tex_v.Sample(def_sampler, vert_in.uv).r - 0.5;
+
+    float r = y + 1.5748 * v;
+    float g = y - 0.1873 * u - 0.4681 * v;
+    float b = y + 1.8556 * u;
+
+    return float4(saturate(float3(r, g, b)), 1.0);
+}
+
+technique I420
+{
+    pass
+    {
+        vertex_shader = VSDefault(vert_in);
+        pixel_shader  = PSI420(vert_in);
+    }
+}

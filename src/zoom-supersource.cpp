@@ -770,6 +770,7 @@ static void add_roster_entries(obs_property_t *list)
             ? "ID " + std::to_string(p.user_id)
             : p.display_name + " (" + std::to_string(p.user_id) + ")";
         if (p.has_video) label += " [video]";
+        if (p.is_talking) label += " [talking]";
         obs_property_list_add_int(list, label.c_str(),
                                   static_cast<long long>(p.user_id));
     }
@@ -810,8 +811,9 @@ static void tiles_source_get_defaults(obs_data_t *settings)
         obs_data_set_default_int(settings, tile_prop_name(i).c_str(), 0);
 }
 
-static obs_properties_t *tiles_source_get_properties(void *)
+static obs_properties_t *tiles_source_get_properties(void *data)
 {
+    auto *ctx = static_cast<tiles_source *>(data);
     obs_properties_t *props = obs_properties_create();
 
     obs_property_t *mode = obs_properties_add_list(props, PROP_FILL_MODE,
@@ -855,6 +857,19 @@ static obs_properties_t *tiles_source_get_properties(void *)
     obs_properties_add_button(props, "btn_refresh",
         obs_module_text("CoreVideoTiles.RefreshParticipants"),
         [](obs_properties_t *, obs_property_t *, void *) -> bool { return true; });
+
+    // Apply the correct initial group visibility before returning, mirroring
+    // zoom_source_get_properties (src/zoom-source.cpp:1985-1987) — otherwise
+    // every control defaults to visible and the dialog shows all 13 at once
+    // until the operator first touches the fill-mode combo. OBS also calls
+    // get_properties with data == nullptr when building a properties view for
+    // the source *type* rather than an instance, so ctx can be null here; the
+    // obs_data_create() fallback gives tiles_fill_mode_modified a fill_mode
+    // read of 0 (TileFillMode::Auto), the correct default layout.
+    obs_data_t *visibility_settings =
+        ctx ? obs_source_get_settings(ctx->source) : obs_data_create();
+    tiles_fill_mode_modified(props, nullptr, visibility_settings);
+    obs_data_release(visibility_settings);
 
     return props;
 }

@@ -179,9 +179,14 @@ VertInOut VSDefault(VertInOut vert_in)
 
 float4 PSI420(VertInOut vert_in) : TARGET
 {
+    // 128.0/255.0, NOT 0.5. libobs builds its own conversion matrix from
+    // black_levels {0, 128, 128} (media-io/video-matrices.c), and
+    // format_conversion.effect offsets chroma by 128/255. Using 0.5 leaves a
+    // systematic ~1-LSB tint: invisible to the eye, but a strict GPU-vs-CPU
+    // parity diff will flag it, which is exactly what Task 6 performs.
     float y = image.Sample(def_sampler, vert_in.uv).r;
-    float u = tex_u.Sample(def_sampler, vert_in.uv).r - 0.5;
-    float v = tex_v.Sample(def_sampler, vert_in.uv).r - 0.5;
+    float u = tex_u.Sample(def_sampler, vert_in.uv).r - 128.0 / 255.0;
+    float v = tex_v.Sample(def_sampler, vert_in.uv).r - 128.0 / 255.0;
 
     float r = y + 1.5748 * v;
     float g = y - 0.1873 * u - 0.4681 * v;
@@ -530,7 +535,9 @@ static void tiles_source_render(void *data, gs_effect_t *)
     params.tile_aspect   = kTileAspect;
     params.gutter        = static_cast<double>(canvas_h) / kSpacingDivisor;
     params.margin        = params.gutter;
-    const std::vector<TileRect> rects =
+    // NOTE the return type: snap_tile_grid_even yields SnappedTileRect (with
+    // integral, even coordinates), not TileRect. See src/zoom-tile-grid.h:45.
+    const std::vector<SnappedTileRect> rects =
         snap_tile_grid_even(solve_tile_grid(feeds.size(), params), params);
 
     gs_technique_t *tech = s_tiles_effect.tech_i420;
@@ -655,10 +662,26 @@ show, which `tile_texture_needs_upload` already returns false for.
 
 Replace the neutral-only draw loop from Task 3. For each tile index: if the feed has a current frame (the existing `TileSlotState::frame_is_current` check the compositor already performs — reuse it, do not invent a new rule), bind that feed's three textures and draw with the cover-crop sub-region; otherwise bind the shared neutral textures and draw as in Task 3.
 
+**Texture binding and pass scope — get this wrong and nothing draws.** libobs
+uploads a pass's shader parameters inside `gs_technique_begin_pass`
+(`libobs/graphics/effect.c`, `upload_shader_params`) and does not re-upload
+them afterwards. Task 3 binds one set of textures before opening a single pass,
+which is correct for a single set. Here each tile has *different* textures, so
+rebinding inside an already-open pass silently draws the previously-bound
+textures — or nothing at all.
+
+Two valid shapes; use the first, it is harder to get wrong:
+
+1. Open and close a pass per tile: `gs_technique_begin_pass(tech, 0)` →
+   `gs_effect_set_texture` ×3 → draw → `gs_technique_end_pass(tech)`.
+2. Keep one pass open and call `gs_effect_update_params(s_tiles_effect.effect)`
+   after every rebind (`graphics.h:416`).
+
 ```cpp
 const CropRect crop = solve_cover_crop(static_cast<double>(feed->tex_w),
                                        static_cast<double>(feed->tex_h),
                                        kTileAspect);
+gs_technique_begin_pass(tech, 0);
 gs_effect_set_texture(s_tiles_effect.param_y, feed->tex_y);
 gs_effect_set_texture(s_tiles_effect.param_u, feed->tex_u);
 gs_effect_set_texture(s_tiles_effect.param_v, feed->tex_v);
@@ -673,6 +696,7 @@ gs_draw_sprite_subregion(feed->tex_y, 0,
                          static_cast<uint32_t>(crop.width),
                          static_cast<uint32_t>(crop.height));
 gs_matrix_pop();
+gs_technique_end_pass(tech);
 ```
 
 The chroma planes are half-size but sampled with normalized UVs, so the same sub-region is correct for all three planes without separate maths.

@@ -66,11 +66,18 @@ public:
 
     // Used by ZoomReconnectManager to drive state transitions.
     void set_state(MeetingState s) { m_state.store(s, std::memory_order_release); }
+    // video_only suppresses the engine-side audio target for this source. It
+    // defaults to false so every existing caller keeps receiving audio; only a
+    // source that will never register an on_audio callback should set it (the
+    // CoreVideo Tiles wall). It is NOT the same as isolate_audio, which claims
+    // the participant's one-way stream and would starve an audience-audio
+    // source pointed at the same person.
     void subscribe(const std::string &source_uuid,
                    uint32_t participant_id,
                    bool isolate_audio,
                    bool audience_audio = false,
-                   VideoResolution video_resolution = VideoResolution::P720);
+                   VideoResolution video_resolution = VideoResolution::P720,
+                   bool video_only = false);
     void subscribe_audio(const std::string &source_uuid,
                          uint32_t participant_id,
                          bool isolate_audio,

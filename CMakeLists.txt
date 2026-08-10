@@ -593,6 +593,18 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoIpcHardening
              COMMAND CoreVideoIpcHardeningTest)
 
+    # Plugin->engine command routing. Pins that "unsubscribe" does not route to
+    # the subscribe branch (it did, because "unsubscribe" contains "subscribe"
+    # and the dispatch tested substrings in source order).
+    add_executable(CoreVideoEngineCommandTest
+        tests/engine-command-test.cpp
+    )
+    target_include_directories(CoreVideoEngineCommandTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoEngineCommand
+             COMMAND CoreVideoEngineCommandTest)
+
     # The shared seqlock frame reader: tear-free copies plus the region
     # generation handling that keeps a resized feed from freezing. Uses real
     # shared memory and a concurrent writer thread, so it needs Threads (and

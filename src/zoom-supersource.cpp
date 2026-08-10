@@ -44,14 +44,16 @@ static std::atomic<uint64_t> s_frame_generation{0};
 // shared-memory region, so a slot owns a uuid, a subscription, and a mapping.
 //
 // The uuid is derived from the slot index and stays fixed for the slot's
-// lifetime, deliberately: the engine's command dispatch matches "subscribe" as
-// a substring before it ever tests "unsubscribe", so an unsubscribe never
-// reaches the branch that would drop the engine-side audio target for that
-// uuid. Minting a fresh uuid per reassignment would therefore strand one
-// orphaned audio target per reassignment, each still being fed mixed meeting
-// audio for the rest of the session. Keeping the uuid pinned to the slot
-// bounds that at one per slot, and matches how the per-participant source
-// reuses its own uuid across resubscribes.
+// lifetime, matching how the per-participant source reuses its own uuid across
+// resubscribes. A stable uuid also keeps the engine's per-source state bounded
+// by the number of slots rather than by the number of reassignments.
+//
+// (This used to be load-bearing for a second reason: the engine's dispatch
+// matched "subscribe" as a substring before it tested "unsubscribe", so an
+// unsubscribe never reached the branch that drops engine-side state for a uuid,
+// and a fresh uuid per reassignment would have stranded one orphaned audio
+// target per repoint. That dispatch bug is fixed — see src/engine-command.h —
+// and tiles no longer register an audio target at all.)
 struct TileFeed {
     const uint64_t id =
         s_tile_feed_serial.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -247,10 +249,20 @@ static void tile_feed_on_frame(const TileFeedPtr &feed, uint32_t event_width,
 // P720 is a deliberate default: past 2-up a tile is at most half the canvas in
 // each axis, so a 720p feed is already oversampled, and the Zoom SDK caps how
 // many high-resolution streams may be subscribed at once.
+//
+// video_only: a tile never plays audio (tile_feed_register supplies no
+// on_audio), so without this flag every slot registered an engine-side target
+// with isolate_audio=false and audience_audio=false — which is exactly the
+// combination that receives *mixed meeting audio* on every callback. Each slot
+// cost one SHM write plus one {"cmd":"audio"} IPC line per audio buffer, which
+// the plugin then parsed and discarded, on the same reader thread that
+// dispatches video frames for every source in the plugin. A nine-tile wall paid
+// that nine times over.
 static void tile_feed_subscribe(const TileFeedPtr &feed)
 {
     ZoomEngineClient::instance().subscribe(feed->uuid, feed->slot.participant_id(),
-                                           false, false, VideoResolution::P720);
+                                           false, false, VideoResolution::P720,
+                                           /*video_only=*/true);
 }
 
 static void tile_feed_register(const TileFeedPtr &feed)

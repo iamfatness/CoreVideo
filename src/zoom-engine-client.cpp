@@ -504,7 +504,8 @@ void ZoomEngineClient::subscribe(const std::string &source_uuid,
                                  uint32_t participant_id,
                                  bool isolate_audio,
                                  bool audience_audio,
-                                 VideoResolution video_resolution)
+                                 VideoResolution video_resolution,
+                                 bool video_only)
 {
     if (!m_running.load(std::memory_order_acquire) || source_uuid.empty()) return;
     write_json(R"({"cmd":"subscribe","source_uuid":")" + json_escape(source_uuid) +
@@ -512,6 +513,7 @@ void ZoomEngineClient::subscribe(const std::string &source_uuid,
         R"(,"resolution":)" + std::to_string(static_cast<int>(video_resolution)) +
         R"(,"isolate_audio":)" + std::string(isolate_audio ? "true" : "false") +
         R"(,"audience_audio":)" + std::string(audience_audio ? "true" : "false") +
+        R"(,"video_only":)" + std::string(video_only ? "true" : "false") +
         "}");
 }
 

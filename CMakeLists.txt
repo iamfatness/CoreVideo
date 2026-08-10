@@ -688,6 +688,15 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoTileSlot
              COMMAND CoreVideoTileSlotTest)
 
+    add_executable(CoreVideoTileFillTest
+        tests/tile-fill-test.cpp
+    )
+    target_include_directories(CoreVideoTileFillTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTileFill
+             COMMAND CoreVideoTileFillTest)
+
     # OSC wire-format and TCP control-request parsing. These use QByteArray /
     # QJsonObject / QString, so they only build where Qt6::Core is available
     # (i.e. when COREVIDEO_BUILD_PLUGIN found it above). Guarded rather than

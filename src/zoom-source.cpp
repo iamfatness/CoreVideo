@@ -1183,88 +1183,51 @@ bool ZoomSource::output_video_from_shared_memory(
     uint32_t event_shm_gen,
     bool commit_director_cut)
 {
+    if (event_width == 0 || event_height == 0 || !source) return false;
+
     // From generation 2 on, the engine creates the region under a
     // generation-suffixed name so a resize is never blocked by our old
-    // mapping (see shm_region_name in engine-ipc.h).
-    const std::string shm_name =
-        shm_region_name(IPC_SHM_PREFIX + uuid, event_shm_gen);
-    if (event_width == 0 || event_height == 0) return false;
-    const size_t frame_bytes = sizeof(ShmFrameHeader) +
-        static_cast<size_t>(event_width) * event_height * 3 / 2;
-    if (shm_mapping_stale(video_shm.ptr, video_shm.size, frame_bytes,
-                          event_shm_gen, video_shm_gen)) {
-        // A generation change means the engine recreated the region (e.g.
-        // after a restart or a resolution increase) — our old mapping points
-        // at an orphaned region that will never update again, so drop it and
-        // re-open by name.
-        if (video_shm.ptr && event_shm_gen != 0 &&
-            event_shm_gen != video_shm_gen) {
-            blog(LOG_INFO,
-                 "[obs-zoom-plugin] Re-opening video shared memory after engine generation change: source=%s uuid=%s gen %u -> %u",
-                 output_name().c_str(), uuid.c_str(), video_shm_gen,
-                 event_shm_gen);
-            shm_region_destroy(video_shm);
-        }
-        if (!shm_region_open_read(video_shm, shm_name, frame_bytes) &&
-            // Engines predating suffixed names recreate the legacy name for
-            // every generation — fall back to it.
-            (event_shm_gen <= 1 ||
-             !shm_region_open_read(video_shm, IPC_SHM_PREFIX + uuid,
-                                   frame_bytes))) {
-            if (m_frame_count == 0) {
-                blog(LOG_WARNING,
-                     "[obs-zoom-plugin] Failed to open video shared memory: source=%s uuid=%s w=%u h=%u bytes=%zu gen=%u",
-                     output_name().c_str(), uuid.c_str(), event_width,
-                     event_height, frame_bytes, event_shm_gen);
-            }
-            return false;
-        }
-        video_shm_gen = event_shm_gen;
+    // mapping. shm_read_i420_frame() handles the reopen; log it first, while
+    // the old generation is still readable.
+    if (video_shm.ptr && event_shm_gen != 0 && event_shm_gen != video_shm_gen) {
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] Re-opening video shared memory after engine generation change: source=%s uuid=%s gen %u -> %u",
+             output_name().c_str(), uuid.c_str(), video_shm_gen, event_shm_gen);
     }
 
-    auto *hdr = static_cast<const ShmFrameHeader *>(video_shm.ptr);
     uint32_t w = 0;
     uint32_t h = 0;
     uint32_t y_len = 0;
-    bool copied = false;
-    for (int attempt = 0; attempt < 3; ++attempt) {
-        const uint32_t seq1 = hdr->sequence;
-        std::atomic_thread_fence(std::memory_order_acquire);
-        if ((seq1 & 1u) != 0) continue;
-        w = hdr->width;
-        h = hdr->height;
-        y_len = hdr->y_len;
-        if (!source || w == 0 || h == 0 || y_len != w * h) break;
-        const size_t needed_bytes = sizeof(ShmFrameHeader) +
-            static_cast<size_t>(y_len) + static_cast<size_t>(y_len) / 2;
-        if (needed_bytes > video_shm.size) {
-            if (m_frame_count == 0) {
+    const ShmFrameRead read_status =
+        shm_read_i420_frame(video_shm, IPC_SHM_PREFIX + uuid, event_width,
+                            event_height, event_shm_gen, video_shm_gen,
+                            video_buf, w, h, y_len);
+    if (read_status != ShmFrameRead::Ok) {
+        if (m_frame_count == 0) {
+            switch (read_status) {
+            case ShmFrameRead::OpenFailed:
+                blog(LOG_WARNING,
+                     "[obs-zoom-plugin] Failed to open video shared memory: source=%s uuid=%s w=%u h=%u bytes=%zu gen=%u",
+                     output_name().c_str(), uuid.c_str(), event_width,
+                     event_height,
+                     sizeof(ShmFrameHeader) +
+                         static_cast<size_t>(event_width) * event_height * 3 / 2,
+                     event_shm_gen);
+                break;
+            case ShmFrameRead::TooSmall:
                 blog(LOG_WARNING,
                      "[obs-zoom-plugin] Video shared memory too small: source=%s uuid=%s need=%zu have=%zu",
-                     output_name().c_str(), uuid.c_str(), needed_bytes,
+                     output_name().c_str(), uuid.c_str(),
+                     sizeof(ShmFrameHeader) + static_cast<size_t>(y_len) +
+                         static_cast<size_t>(y_len) / 2,
                      video_shm.size);
+                break;
+            default:
+                blog(LOG_WARNING,
+                     "[obs-zoom-plugin] Incomplete video frame skipped: source=%s uuid=%s w=%u h=%u y_len=%u",
+                     output_name().c_str(), source_uuid.c_str(), w, h, y_len);
+                break;
             }
-            return false;
-        }
-        const auto *pixels = static_cast<const uint8_t *>(video_shm.ptr) +
-            sizeof(ShmFrameHeader);
-        const size_t payload_size = static_cast<size_t>(y_len) +
-            static_cast<size_t>(y_len) / 2;
-        if (video_buf.size() < payload_size)
-            video_buf.resize(payload_size);
-        std::memcpy(video_buf.data(), pixels, payload_size);
-        std::atomic_thread_fence(std::memory_order_acquire);
-        const uint32_t seq2 = hdr->sequence;
-        if (seq1 == seq2 && (seq2 & 1u) == 0) {
-            copied = true;
-            break;
-        }
-    }
-    if (!copied) {
-        if (m_frame_count == 0) {
-            blog(LOG_WARNING,
-                 "[obs-zoom-plugin] Incomplete video frame skipped: source=%s uuid=%s w=%u h=%u y_len=%u",
-                 output_name().c_str(), source_uuid.c_str(), w, h, y_len);
         }
         return false;
     }

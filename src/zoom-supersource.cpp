@@ -832,8 +832,11 @@ static void tiles_source_render(void *data, gs_effect_t *)
         std::lock_guard<std::mutex> lock(ctx->mutex);
         ctx->render_feeds = ctx->feeds;
     }
+    // No early return on an empty feed list: the CPU path still emitted a full
+    // neutral canvas with nobody on the wall, so an empty wall must still paint
+    // itself grey rather than disappear. solve_tile_grid(0, ...) returns no
+    // rects, so the tile loop below simply does nothing.
     const std::vector<TileFeedPtr> &feeds = ctx->render_feeds;
-    if (feeds.empty()) return;
 
     // Byte-for-byte the CPU path's parameters, including the even-snapping
     // pass — see composite_once() above. The named constants are load-bearing:
@@ -860,6 +863,20 @@ static void tiles_source_render(void *data, gs_effect_t *)
     gs_technique_t *tech = s_tiles_effect.tech_i420;
     gs_technique_begin(tech);
     gs_technique_begin_pass(tech, 0);
+
+    // PARITY-CRITICAL, DO NOT DELETE AS A REDUNDANT DRAW. The CPU compositor
+    // memset the whole canvas to kNeutralY/kNeutralUV before drawing any tile
+    // (composite_once above), so the gutters, the margins and any unfilled area
+    // were neutral grey — not transparent. Painting the canvas here reproduces
+    // that exactly, and through the same 1x1 0x80 textures and the same I420
+    // technique the tiles use, so it is bit-identical to the old fill by
+    // construction rather than by an RGB constant somebody has to trust.
+    //
+    // It will look redundant once the tiles carry participant video and cover
+    // their own rects opaquely. It is not: the gutters and margins are never
+    // covered by a tile, and they are exactly where the parity baseline in
+    // docs/design-reference/tiles-gpu-parity/ observes the neutral 0x80.
+    gs_draw_sprite(s_neutral_y, 0, canvas_w, canvas_h);
 
     for (const SnappedTileRect &r : rects) {
         if (r.width < 2 || r.height < 2) continue;  // as the CPU path skips them

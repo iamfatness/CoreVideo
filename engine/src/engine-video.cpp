@@ -1,5 +1,6 @@
 #include "engine-video.h"
 #include "engine-writer.h"
+#include "tile-clock-log.h"
 #if __has_include(<rawdata/zoom_rawdata_api.h>)
 #include <rawdata/zoom_rawdata_api.h>
 #else
@@ -213,6 +214,7 @@ void ParticipantSubscription::onRawDataFrameReceived(YUVRawDataI420 *data)
             std::to_string(w) + R"(,"h":)" + std::to_string(h) + "}");
         return;
     }
+    tile_clock_log(m_participant_id, data->GetTimeStamp(), tile_clock_now_ns(), "v");
 
     std::lock_guard<std::mutex> lock(m_targets_mtx);
     for (auto &entry : m_targets) {

@@ -1,5 +1,6 @@
 #include "engine-audio.h"
 #include "engine-writer.h"
+#include "tile-clock-log.h"
 #if __has_include(<rawdata/zoom_rawdata_api.h>)
 #include <rawdata/zoom_rawdata_api.h>
 #else
@@ -242,6 +243,8 @@ void EngineAudio::output_audio_frame(AudioTarget &target,
 void EngineAudio::onMixedAudioRawDataReceived(AudioRawData *data)
 {
     if (!data || m_e2p_fd == kIpcInvalidFd || data->GetBufferLen() == 0) return;
+    // Feed id 0: the mixed stream legitimately has no single participant.
+    tile_clock_log(0, data->GetTimeStamp(), tile_clock_now_ns(), "a");
 
     std::lock_guard<std::mutex> lock(m_targets_mtx);
     for (auto &entry : m_targets) {
@@ -256,6 +259,7 @@ void EngineAudio::onMixedAudioRawDataReceived(AudioRawData *data)
 void EngineAudio::onOneWayAudioRawDataReceived(AudioRawData *data, uint32_t user_id)
 {
     if (!data || m_e2p_fd == kIpcInvalidFd || data->GetBufferLen() == 0) return;
+    tile_clock_log(user_id, data->GetTimeStamp(), tile_clock_now_ns(), "a");
 
     std::lock_guard<std::mutex> lock(m_targets_mtx);
 

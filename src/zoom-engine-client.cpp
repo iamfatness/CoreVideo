@@ -812,9 +812,9 @@ void ZoomEngineClient::handle_event(const std::string &line)
     }
 
     if (cmd == "participants") {
-        std::vector<RosterCallback> callbacks;
-        {
-            std::lock_guard<std::mutex> lk(m_mtx);
+        // Roster callbacks are dispatched by the helper with m_mtx released;
+        // see update_roster_state_and_notify() for why that is mandatory.
+        update_roster_state_and_notify([this, &obj] {
             m_active_speaker_id = static_cast<uint32_t>(
                 obj.value("active_speaker_id").toInt());
             m_roster.clear();
@@ -837,26 +837,18 @@ void ZoomEngineClient::handle_event(const std::string &line)
             }
             SpeakerDirector::instance().update_roster(
                 m_roster, m_active_speaker_id, os_gettime_ns() / 1000000ULL);
-            for (const auto &entry : m_roster_callbacks)
-                if (entry.second) callbacks.push_back(entry.second);
-        }
-        for (const auto &cb : callbacks) cb();
+        });
         return;
     }
     if (cmd == "active_speaker") {
-        std::vector<RosterCallback> callbacks;
-        {
-            std::lock_guard<std::mutex> lk(m_mtx);
+        update_roster_state_and_notify([this, &obj] {
             m_active_speaker_id = static_cast<uint32_t>(
                 obj.value("participant_id").toInt());
             for (auto &p : m_roster)
                 p.is_talking = p.user_id == m_active_speaker_id;
             SpeakerDirector::instance().update_roster(
                 m_roster, m_active_speaker_id, os_gettime_ns() / 1000000ULL);
-            for (const auto &entry : m_roster_callbacks)
-                if (entry.second) callbacks.push_back(entry.second);
-        }
-        for (const auto &cb : callbacks) cb();
+        });
         return;
     }
 

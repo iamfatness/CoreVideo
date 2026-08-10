@@ -91,6 +91,12 @@ public:
     void register_source(const std::string &source_uuid, SourceCallbacks callbacks);
     void unregister_source(const std::string &source_uuid);
     using RosterCallback = std::function<void()>;
+    // Roster callbacks are invoked on the engine reader thread with this
+    // client's internal lock RELEASED, so a callback may safely call back into
+    // the client (roster(), raw_active_speaker_id(), subscribe(), ...). It must
+    // not assume it runs on the Qt main thread — marshal there yourself if you
+    // touch UI — and it should return promptly, since it blocks the reader
+    // thread that also dispatches frame and audio events for every source.
     void add_roster_callback(void *key, RosterCallback cb);
     void remove_roster_callback(void *key);
     using ErrorCallback = std::function<void(const std::string &message)>;
@@ -111,6 +117,35 @@ private:
     void send_join_locked();
     // Returns false if the command could not be delivered to the engine.
     bool write_json(const std::string &json);
+
+    // Applies `mutate` to the roster state under m_mtx, then invokes every
+    // registered roster callback with the lock RELEASED.
+    //
+    // Releasing before dispatch is not an optimization, it is required for
+    // correctness: callbacks re-enter this client (ZoomSource::on_roster_changed
+    // and the CoreVideo Tiles source both call roster() from inside one) and
+    // m_mtx is not recursive. Invoking under the lock self-deadlocks the engine
+    // reader thread, which stops frame and audio dispatch for every source in
+    // the plugin until the heartbeat monitor kills the engine.
+    //
+    // Every roster-state change dispatches through here so that this reasoning
+    // lives in one place and a new call site cannot reintroduce the deadlock by
+    // hand-rolling the pattern. `mutate` runs with m_mtx held: it may touch
+    // m_roster / m_active_speaker_id freely, but it must not call any public
+    // method of this client.
+    template <typename Mutate>
+    void update_roster_state_and_notify(Mutate &&mutate)
+    {
+        std::vector<RosterCallback> callbacks;
+        {
+            std::lock_guard<std::mutex> lk(m_mtx);
+            mutate();
+            for (const auto &entry : m_roster_callbacks)
+                if (entry.second) callbacks.push_back(entry.second);
+        }
+        // m_mtx is released here — see the note above before moving this loop.
+        for (const auto &cb : callbacks) cb();
+    }
 
     mutable std::mutex m_mtx;
     IpcFd m_p2e = kIpcInvalidFd;

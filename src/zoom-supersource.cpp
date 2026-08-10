@@ -8,19 +8,15 @@
 #include "zoom-tile-texture.h"
 #include "zoom-tiles-effect.h"
 
-#include <media-io/video-io.h>
 #include <obs-module.h>
 #include <util/platform.h>
-#include <util/threading.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
-#include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 // Tiles are always 16:9 and never bordered (standing product rule).
@@ -30,7 +26,6 @@ static constexpr double kSpacingDivisor = 135.0;
 // Neutral fill for the background and for tiles with no frame yet.
 static constexpr uint8_t kNeutralY = 0x80;
 static constexpr uint8_t kNeutralUV = 0x80;
-static constexpr uint64_t kDefaultFrameIntervalNs = 1000000000ULL / 60ULL;
 // Canvas bounds, matching the property ranges. Enforced against scene data too:
 // an out-of-range value would otherwise reach resize() as a huge allocation.
 static constexpr uint32_t kMinCanvasW = 16, kMaxCanvasW = 7680;
@@ -39,7 +34,7 @@ static constexpr uint32_t kMinCanvasH = 16, kMaxCanvasH = 4320;
 static std::atomic<uint64_t> s_tiles_instance_counter{0};
 static std::atomic<uint64_t> s_tile_feed_serial{0};
 // The shared I420 render effect, loaded once at module load and torn down at
-// module unload. See src/zoom-tiles-effect.h. Nothing draws with it yet.
+// module unload. See src/zoom-tiles-effect.h. Every tile is drawn through it.
 static TilesEffect s_tiles_effect;
 // Globally unique per decoded frame, so a scratch buffer can tell whether the
 // pixels it holds are still the newest ones for its slot without any chance of
@@ -81,7 +76,7 @@ struct TileFeed {
     uint32_t height = 0;
     uint64_t frame_epoch = 0;
     uint64_t generation = 0;
-    bool has_frame = false;  // pixels present that the compositor has not taken
+    bool has_frame = false;  // pixels present that the draw path has not taken
 
     // Retry budget for the silent-slot sweep (see zoom-tile-retry.h). Guarded
     // by mtx, which the sweep's scan already holds. `retry_epoch` records the
@@ -107,8 +102,8 @@ struct TileFeed {
 };
 using TileFeedPtr = std::shared_ptr<TileFeed>;
 
-// The compositor's private copy of one slot's newest frame. Owned solely by the
-// worker thread, so the blit runs with no lock held.
+// The draw path's private copy of one slot's newest frame. Owned solely by the
+// OBS graphics thread, so the texture upload runs with no lock held.
 struct TileScratch {
     std::vector<uint8_t> pixels;
     uint32_t width = 0;
@@ -148,31 +143,16 @@ struct tiles_source {
     // Distinguishes this source's slot uuids from any other tiles source.
     uint64_t instance_id = 0;
 
-    // Owned solely by the composite thread — no locking needed.
-    std::vector<uint8_t> canvas_buf;
-    std::vector<TileScratch> scratches;
-    std::vector<TileFeedPtr> feeds_snapshot;  // reused: assign keeps capacity
-    uint32_t    buf_width  = 0;
-    uint32_t    buf_height = 0;
-    std::size_t buf_tiles  = 0;
-    uint64_t    composited_frames = 0;
-
     // Owned solely by the OBS graphics thread (video_render) — no locking
-    // needed, and deliberately separate from feeds_snapshot above, which the
-    // composite thread still owns while both paths coexist. Copy-assigned into
-    // rather than constructed per frame: allocation churn on a 60 Hz draw path
-    // is the documented root cause of the operator-stutter incident.
+    // needed. Copy-assigned into rather than constructed per frame: allocation
+    // churn on a 60 Hz draw path is the documented root cause of the
+    // operator-stutter incident.
     std::vector<TileFeedPtr> render_feeds;
-    // The draw path's own scratch buffers, one per slot. Deliberately not
-    // shared with `scratches` above: while the CPU compositor still runs, two
-    // threads calling tile_take_snapshot() on the same TileScratch would be a
-    // data race, not merely contention. Grow-only, so a slot that comes back
-    // reuses its buffer instead of allocating on the draw path.
+    // One scratch buffer per slot, holding the pixels last taken from that
+    // feed. Grow-only, so a slot that comes back reuses its buffer instead of
+    // allocating on the draw path.
     std::vector<TileScratch> render_scratches;
     uint64_t    rendered_frames = 0;
-
-    std::thread       worker;
-    std::atomic<bool> running{false};
 
     std::shared_ptr<TilesCallbackGate> gate =
         std::make_shared<TilesCallbackGate>();
@@ -183,71 +163,6 @@ struct tiles_source {
     // before engine_mutex. Same idiom as ZoomSource::m_last_stale_recover_ns.
     std::atomic<uint64_t> last_sweep_ns{0};
 };
-
-// ── Geometry helpers ─────────────────────────────────────────────────────────
-
-// Truncates to an even pixel, for source-rect edges that must stay inside the
-// frame. Tile placement is snapped by snap_tile_grid_even() instead, which
-// preserves uniform spacing; see zoom-tile-grid.h.
-static uint32_t even_floor(double v)
-{
-    if (v <= 0.0) return 0;
-    return static_cast<uint32_t>(v) & ~1u;
-}
-
-// ── Pixel helpers ────────────────────────────────────────────────────────────
-
-// Nearest-neighbour blit of one plane's sub-rectangle into a sub-rectangle of
-// the destination. Matches the sampling the per-participant source already uses
-// for its letterbox scaler.
-static void blit_plane_nearest(const uint8_t *src, uint32_t src_stride,
-                               uint32_t src_x, uint32_t src_y,
-                               uint32_t src_w, uint32_t src_h,
-                               uint8_t *dst, uint32_t dst_stride,
-                               uint32_t dst_x, uint32_t dst_y,
-                               uint32_t dst_w, uint32_t dst_h)
-{
-    if (!src || !dst || src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0)
-        return;
-
-    const uint8_t *src_origin = src + static_cast<size_t>(src_y) * src_stride + src_x;
-    uint8_t *dst_origin = dst + static_cast<size_t>(dst_y) * dst_stride + dst_x;
-
-    for (uint32_t y = 0; y < dst_h; ++y) {
-        const uint32_t sy = std::min<uint32_t>(
-            static_cast<uint32_t>((static_cast<uint64_t>(y) * src_h) / dst_h),
-            src_h - 1);
-        const uint8_t *src_row = src_origin + static_cast<size_t>(sy) * src_stride;
-        uint8_t *dst_row = dst_origin + static_cast<size_t>(y) * dst_stride;
-        for (uint32_t x = 0; x < dst_w; ++x) {
-            const uint32_t sx = std::min<uint32_t>(
-                static_cast<uint32_t>((static_cast<uint64_t>(x) * src_w) / dst_w),
-                src_w - 1);
-            dst_row[x] = src_row[sx];
-        }
-    }
-}
-
-static void fill_plane_rect(uint8_t *dst, uint32_t dst_stride,
-                            uint32_t x, uint32_t y, uint32_t w, uint32_t h,
-                            uint8_t value)
-{
-    if (!dst || w == 0 || h == 0) return;
-    uint8_t *row = dst + static_cast<size_t>(y) * dst_stride + x;
-    for (uint32_t i = 0; i < h; ++i, row += dst_stride)
-        std::memset(row, value, w);
-}
-
-// Fills one canvas rect (all three planes) with neutral grey. Coordinates must
-// already be even.
-static void fill_tile_neutral(uint8_t *y_plane, uint8_t *u_plane, uint8_t *v_plane,
-                              uint32_t canvas_w,
-                              uint32_t x, uint32_t y, uint32_t w, uint32_t h)
-{
-    fill_plane_rect(y_plane, canvas_w, x, y, w, h, kNeutralY);
-    fill_plane_rect(u_plane, canvas_w / 2, x / 2, y / 2, w / 2, h / 2, kNeutralUV);
-    fill_plane_rect(v_plane, canvas_w / 2, x / 2, y / 2, w / 2, h / 2, kNeutralUV);
-}
 
 // ── Feed lifecycle ───────────────────────────────────────────────────────────
 
@@ -348,7 +263,7 @@ static void tile_feed_register(const TileFeedPtr &feed)
 // rest of the session; only hiding and re-showing the source recovers it.
 //
 // Dropping the mapping first leaves the name free for the engine to recreate at
-// the new size. It discards no pixels: `frame` (the decoded copy the compositor
+// the new size. It discards no pixels: `frame` (the decoded copy the draw path
 // reads) is separate from `shm` (the window onto the engine's buffer), and the
 // next frame event reopens the mapping — ensure_shm() retries on every frame, so
 // even if this release loses the race with the engine's first attempt, the
@@ -404,7 +319,7 @@ static void tile_feed_retire(const TileFeedPtr &feed)
 
 // The engine work implied by a change to the assignment list. Computing it is
 // pure bookkeeping; performing it is blocking pipe I/O. They are split so the
-// I/O never runs under ctx->mutex, which the compositor takes every frame.
+// I/O never runs under ctx->mutex, which the draw path takes every frame.
 struct FeedPlan {
     std::vector<TileFeedPtr> to_register;     // new slots: register + subscribe
     std::vector<TileFeedPtr> to_resubscribe;  // repointed slots: subscribe
@@ -505,7 +420,7 @@ static void resubscribe_silent_feeds(tiles_source *ctx)
             std::lock_guard<std::mutex> feed_lock(feed->mtx);
             if (!feed->alive) continue;
             // frame_epoch is the epoch of the last accepted frame and is not
-            // cleared when the compositor takes the pixels, so this stays true
+            // cleared when the draw path takes the pixels, so this stays true
             // for a healthy tile and flips back to "silent" on every repoint.
             const uint64_t epoch = feed->slot.epoch();
             if (feed->slot.frame_is_current_at(feed->frame_epoch, epoch)) {
@@ -564,13 +479,13 @@ static void resubscribe_silent_feeds(tiles_source *ctx)
     }
 }
 
-// ── Compositing ──────────────────────────────────────────────────────────────
+// ── Frame handoff ────────────────────────────────────────────────────────────
 
-// Moves the slot's newest frame into worker-owned scratch, if there is one.
-// The lock is held only for an O(1) buffer swap — never across the blit, which
-// would head-of-line block the engine reader thread that feeds every source in
-// the plugin. The swap hands our previous buffer back to the reader to refill,
-// so neither side allocates after warm-up.
+// Moves the slot's newest frame into the draw path's scratch, if there is one.
+// The lock is held only for an O(1) buffer swap — never across the upload,
+// which would head-of-line block the engine reader thread that feeds every
+// source in the plugin. The swap hands our previous buffer back to the reader
+// to refill, so neither side allocates after warm-up.
 //
 // Returns false when the slot has nothing valid to show, leaving the caller to
 // paint the neutral placeholder.
@@ -591,7 +506,7 @@ static bool tile_take_snapshot(const TileFeedPtr &feed, TileScratch &scratch)
         // One epoch load drives both decisions below. Re-reading it for the
         // second would let a repoint landing between them disagree — declining
         // to take the new frame while also declining to drop the old one, so
-        // the outgoing participant survives an extra composite.
+        // the outgoing participant survives an extra frame.
         const uint64_t epoch = feed->slot.epoch();
         if (feed->has_frame &&
             TileSlotState::frame_is_current_at(feed->frame_epoch, epoch)) {
@@ -611,191 +526,6 @@ static bool tile_take_snapshot(const TileFeedPtr &feed, TileScratch &scratch)
         return false;
     const size_t y_len = static_cast<size_t>(scratch.width) * scratch.height;
     return scratch.pixels.size() >= y_len + y_len / 2;
-}
-
-// Cover-crops the scratch frame into the tile rect. No locks are held here.
-static void blit_tile(const TileScratch &scratch, uint8_t *y_plane,
-                      uint8_t *u_plane, uint8_t *v_plane, uint32_t canvas_w,
-                      uint32_t dst_x, uint32_t dst_y, uint32_t dst_w,
-                      uint32_t dst_h)
-{
-    const uint32_t src_w = scratch.width;
-    const uint32_t src_h = scratch.height;
-    const size_t y_len = static_cast<size_t>(src_w) * src_h;
-
-    // Sample the largest centred 16:9 sub-rectangle so the tile fills
-    // completely and is never letterboxed.
-    const CropRect crop = solve_cover_crop(static_cast<double>(src_w),
-                                           static_cast<double>(src_h),
-                                           kTileAspect);
-    uint32_t crop_w = std::max<uint32_t>(2, even_floor(crop.width));
-    uint32_t crop_h = std::max<uint32_t>(2, even_floor(crop.height));
-    crop_w = std::min(crop_w, src_w);
-    crop_h = std::min(crop_h, src_h);
-    const uint32_t crop_x = std::min(even_floor(crop.x), src_w - crop_w);
-    const uint32_t crop_y = std::min(even_floor(crop.y), src_h - crop_h);
-
-    const uint8_t *src_y = scratch.pixels.data();
-    const uint8_t *src_u = src_y + y_len;
-    const uint8_t *src_v = src_u + y_len / 4;
-    const uint32_t src_stride_uv = src_w / 2;
-
-    blit_plane_nearest(src_y, src_w, crop_x, crop_y, crop_w, crop_h,
-                       y_plane, canvas_w, dst_x, dst_y, dst_w, dst_h);
-    blit_plane_nearest(src_u, src_stride_uv, crop_x / 2, crop_y / 2,
-                       crop_w / 2, crop_h / 2,
-                       u_plane, canvas_w / 2, dst_x / 2, dst_y / 2,
-                       dst_w / 2, dst_h / 2);
-    blit_plane_nearest(src_v, src_stride_uv, crop_x / 2, crop_y / 2,
-                       crop_w / 2, crop_h / 2,
-                       v_plane, canvas_w / 2, dst_x / 2, dst_y / 2,
-                       dst_w / 2, dst_h / 2);
-}
-
-static void composite_once(tiles_source *ctx)
-{
-    // Copy-assign into a reused vector rather than constructing one: this runs
-    // every frame, and allocation churn in the composite path is exactly what
-    // caused the documented operator-stutter incident.
-    {
-        std::lock_guard<std::mutex> lock(ctx->mutex);
-        ctx->feeds_snapshot = ctx->feeds;
-    }
-    const std::vector<TileFeedPtr> &feeds = ctx->feeds_snapshot;
-    const uint32_t canvas_w = ctx->canvas_width.load(std::memory_order_acquire);
-    const uint32_t canvas_h = ctx->canvas_height.load(std::memory_order_acquire);
-    if (canvas_w < 2 || canvas_h < 2) return;
-
-    const size_t y_size = static_cast<size_t>(canvas_w) * canvas_h;
-    const size_t total = y_size + y_size / 2;
-
-    // The buffer is reused across frames: allocation churn at 4K is the
-    // documented root cause of the operator stutter incident in this project.
-    // A full clear is only needed when the layout changes, because every tile
-    // overwrites its own rect completely and empty rects are painted below.
-    bool clear_all = false;
-    if (ctx->canvas_buf.size() < total) {
-        ctx->canvas_buf.resize(total);
-        clear_all = true;
-    }
-    if (ctx->buf_width != canvas_w || ctx->buf_height != canvas_h ||
-        ctx->buf_tiles != feeds.size()) {
-        ctx->buf_width = canvas_w;
-        ctx->buf_height = canvas_h;
-        ctx->buf_tiles = feeds.size();
-        clear_all = true;
-    }
-    // Grow-only: a slot that comes back reuses its buffer instead of allocating.
-    if (ctx->scratches.size() < feeds.size()) ctx->scratches.resize(feeds.size());
-
-    uint8_t *y_plane = ctx->canvas_buf.data();
-    uint8_t *u_plane = y_plane + y_size;
-    uint8_t *v_plane = u_plane + y_size / 4;
-    if (clear_all) {
-        std::memset(y_plane, kNeutralY, y_size);
-        // U and V are contiguous and share the same neutral value.
-        std::memset(u_plane, kNeutralUV, y_size / 2);
-    }
-
-    TileGridParams params;
-    params.canvas_width  = static_cast<double>(canvas_w);
-    params.canvas_height = static_cast<double>(canvas_h);
-    params.tile_aspect   = kTileAspect;
-    params.gutter        = static_cast<double>(canvas_h) / kSpacingDivisor;
-    params.margin        = params.gutter;
-
-    // Snapping happens once, for the whole grid, so every gutter is identical;
-    // see snap_tile_grid_even() in zoom-tile-grid.h.
-    const std::vector<SnappedTileRect> rects =
-        snap_tile_grid_even(solve_tile_grid(feeds.size(), params), params);
-
-    size_t drawn = 0;
-    for (size_t i = 0; i < rects.size() && i < feeds.size(); ++i) {
-        const SnappedTileRect &r = rects[i];
-        if (r.width < 2 || r.height < 2) continue;
-
-        if (tile_take_snapshot(feeds[i], ctx->scratches[i])) {
-            blit_tile(ctx->scratches[i], y_plane, u_plane, v_plane, canvas_w,
-                      r.x, r.y, r.width, r.height);
-            ++drawn;
-        } else {
-            fill_tile_neutral(y_plane, u_plane, v_plane, canvas_w,
-                              r.x, r.y, r.width, r.height);
-        }
-    }
-
-    // Rate-limited so the rig can confirm the wall is live and see how many
-    // tiles actually have a feed, without flooding the log.
-    if (ctx->composited_frames == 0 || ctx->composited_frames % 300 == 0) {
-        blog(LOG_INFO,
-             "[obs-zoom-plugin] Tiles composite: canvas=%ux%u tiles=%zu with_video=%zu count=%llu",
-             canvas_w, canvas_h, rects.size(), drawn,
-             static_cast<unsigned long long>(ctx->composited_frames));
-    }
-    ++ctx->composited_frames;
-
-    // The source now draws itself in video_render (tiles_source_render below),
-    // so the composited canvas has no consumer: obs_source_output_video on a
-    // non-async source would be ignored at best. Everything above still runs so
-    // this stays a single, easily-reverted line while the two paths coexist;
-    // the whole worker goes away with the CPU compositor in the next change.
-    return;
-
-    obs_source_frame frame = {};
-    frame.format = VIDEO_FORMAT_I420;
-    frame.width  = canvas_w;
-    frame.height = canvas_h;
-    frame.data[0] = y_plane;
-    frame.data[1] = u_plane;
-    frame.data[2] = v_plane;
-    frame.linesize[0] = canvas_w;
-    frame.linesize[1] = canvas_w / 2;
-    frame.linesize[2] = canvas_w / 2;
-    // Naive latest-frame selection by design in this phase: there is no shared
-    // presentation clock yet, so the wall is stamped at emit time. Phase 2
-    // replaces this with a real tile clock.
-    frame.timestamp = os_gettime_ns();
-    frame.full_range = true;
-    video_format_get_parameters_for_format(VIDEO_CS_709, VIDEO_RANGE_FULL,
-                                           frame.format, frame.color_matrix,
-                                           frame.color_range_min,
-                                           frame.color_range_max);
-    obs_source_output_video(ctx->source, &frame);
-}
-
-static uint64_t output_frame_interval_ns()
-{
-    obs_video_info ovi = {};
-    if (obs_get_video_info(&ovi) && ovi.fps_num > 0 && ovi.fps_den > 0) {
-        return static_cast<uint64_t>(ovi.fps_den) * 1000000000ULL /
-            static_cast<uint64_t>(ovi.fps_num);
-    }
-    return kDefaultFrameIntervalNs;
-}
-
-// Composites on a dedicated thread rather than in video_tick: a CPU I420
-// composite of a 4K wall would otherwise run on the OBS graphics thread and
-// stall rendering for every other source.
-static void tiles_worker(tiles_source *ctx)
-{
-    os_set_thread_name("corevideo-tiles");
-    while (ctx->running.load(std::memory_order_acquire)) {
-        const uint64_t started = os_gettime_ns();
-        composite_once(ctx);
-        os_sleepto_ns(started + output_frame_interval_ns());
-    }
-}
-
-static void tiles_worker_start(tiles_source *ctx)
-{
-    if (ctx->running.exchange(true, std::memory_order_acq_rel)) return;
-    ctx->worker = std::thread(tiles_worker, ctx);
-}
-
-static void tiles_worker_stop(tiles_source *ctx)
-{
-    if (!ctx->running.exchange(false, std::memory_order_acq_rel)) return;
-    if (ctx->worker.joinable()) ctx->worker.join();
 }
 
 // ── GPU draw ─────────────────────────────────────────────────────────────────
@@ -992,16 +722,17 @@ static void tiles_source_render(void *data, gs_effect_t *)
     // itself grey rather than disappear. solve_tile_grid(0, ...) returns no
     // rects, so the tile loop below simply does nothing.
     const std::vector<TileFeedPtr> &feeds = ctx->render_feeds;
-    // Grow-only, like the compositor's: a slot that comes back reuses its
-    // buffer instead of allocating on a 60 Hz draw path.
+    // Grow-only: a slot that comes back reuses its buffer instead of
+    // allocating on a 60 Hz draw path.
     if (ctx->render_scratches.size() < feeds.size())
         ctx->render_scratches.resize(feeds.size());
 
-    // Byte-for-byte the CPU path's parameters, including the even-snapping
-    // pass — see composite_once() above. The named constants are load-bearing:
-    // substituting 16.0/9.0 or 135.0, or dropping the snap, moves every tile by
-    // up to a pixel. Solved from feeds.size(), as the compositor does, not from
-    // participants.size(): the two can differ while a plan is in flight.
+    // Byte-for-byte the parameters the CPU compositor solved from, including
+    // the even-snapping pass. The named constants are load-bearing: substituting
+    // 16.0/9.0 or 135.0, or dropping the snap, moves every tile by up to a
+    // pixel against the parity baseline in docs/design-reference/. Solved from
+    // feeds.size(), as the compositor did, not from participants.size(): the
+    // two can differ while a plan is in flight.
     TileGridParams params;
     params.canvas_width  = static_cast<double>(canvas_w);
     params.canvas_height = static_cast<double>(canvas_h);
@@ -1084,9 +815,9 @@ static void tiles_source_render(void *data, gs_effect_t *)
 
     gs_technique_end(tech);
 
-    // Rate-limited, like the composite log, so the rig can confirm the draw path
-    // is live and see both the grid it solved and how many tiles actually have a
-    // feed, without flooding the log.
+    // Rate-limited so the rig can confirm the draw path is live and see both
+    // the grid it solved and how many tiles actually have a feed, without
+    // flooding the log at the frame rate.
     if (ctx->rendered_frames == 0 || ctx->rendered_frames % 300 == 0) {
         blog(LOG_INFO,
              "[obs-zoom-plugin] Tiles render: canvas=%ux%u tiles=%zu with_video=%zu count=%llu",
@@ -1236,7 +967,6 @@ static void tiles_source_destroy(void *data)
         ctx->gate->alive = false;
     }
     ZoomEngineClient::instance().remove_roster_callback(ctx);
-    tiles_worker_stop(ctx);
 
     // Scoped so both locks are released before ctx (which owns them) is freed.
     {
@@ -1268,7 +998,6 @@ static void tiles_source_show(void *data)
         plan = plan_feeds_locked(ctx);
     }
     execute_feed_plan(plan);
-    tiles_worker_start(ctx);
 }
 
 static void tiles_source_hide(void *data)
@@ -1283,8 +1012,6 @@ static void tiles_source_hide(void *data)
         ctx->visible = false;
         plan = plan_feeds_locked(ctx);
     }
-    // Join before retiring: the worker holds no feed reference afterwards.
-    tiles_worker_stop(ctx);
     execute_feed_plan(plan);
 }
 

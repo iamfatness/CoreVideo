@@ -143,6 +143,14 @@ struct tiles_source {
     std::size_t buf_tiles  = 0;
     uint64_t    composited_frames = 0;
 
+    // Owned solely by the OBS graphics thread (video_render) — no locking
+    // needed, and deliberately separate from feeds_snapshot above, which the
+    // composite thread still owns while both paths coexist. Copy-assigned into
+    // rather than constructed per frame: allocation churn on a 60 Hz draw path
+    // is the documented root cause of the operator-stutter incident.
+    std::vector<TileFeedPtr> render_feeds;
+    uint64_t    rendered_frames = 0;
+
     std::thread       worker;
     std::atomic<bool> running{false};
 
@@ -685,6 +693,13 @@ static void composite_once(tiles_source *ctx)
     }
     ++ctx->composited_frames;
 
+    // The source now draws itself in video_render (tiles_source_render below),
+    // so the composited canvas has no consumer: obs_source_output_video on a
+    // non-async source would be ignored at best. Everything above still runs so
+    // this stays a single, easily-reverted line while the two paths coexist;
+    // the whole worker goes away with the CPU compositor in the next change.
+    return;
+
     obs_source_frame frame = {};
     frame.format = VIDEO_FORMAT_I420;
     frame.width  = canvas_w;
@@ -740,6 +755,133 @@ static void tiles_worker_stop(tiles_source *ctx)
 {
     if (!ctx->running.exchange(false, std::memory_order_acq_rel)) return;
     if (ctx->worker.joinable()) ctx->worker.join();
+}
+
+// ── GPU draw ─────────────────────────────────────────────────────────────────
+
+// One shared 1x1 sample per plane holding the same neutral bytes the CPU
+// compositor wrote. Drawing the placeholder through the I420 technique makes it
+// bit-identical to the old neutral fill by construction, rather than by an RGB
+// constant that has to be trusted to round the same way. Shared across every
+// Tiles source, like the effect itself.
+static gs_texture_t *s_neutral_y = nullptr;
+static gs_texture_t *s_neutral_u = nullptr;
+static gs_texture_t *s_neutral_v = nullptr;
+static bool s_neutral_failed_logged = false;
+
+// Both of these touch gs_* objects, so every caller must already hold the
+// graphics context: video_render has it entered for us, module unload does not.
+static void destroy_neutral_textures()
+{
+    gs_texture_destroy(s_neutral_y);  // null-safe (libobs graphics.c:2418)
+    gs_texture_destroy(s_neutral_u);
+    gs_texture_destroy(s_neutral_v);
+    s_neutral_y = s_neutral_u = s_neutral_v = nullptr;
+}
+
+static bool ensure_neutral_textures()
+{
+    if (s_neutral_y && s_neutral_u && s_neutral_v) return true;
+    // All three or none: a half-built set would bind a null plane and draw
+    // whatever the previous pass left there.
+    destroy_neutral_textures();
+
+    // The same named constants the CPU path filled its neutral rects with, so
+    // an edit to one path cannot silently drift from the other.
+    static const uint8_t y_byte  = kNeutralY;
+    static const uint8_t uv_byte = kNeutralUV;
+    const uint8_t *y_data  = &y_byte;
+    const uint8_t *uv_data = &uv_byte;
+    s_neutral_y = gs_texture_create(1, 1, GS_R8, 1, &y_data, 0);
+    s_neutral_u = gs_texture_create(1, 1, GS_R8, 1, &uv_data, 0);
+    s_neutral_v = gs_texture_create(1, 1, GS_R8, 1, &uv_data, 0);
+    if (s_neutral_y && s_neutral_u && s_neutral_v) return true;
+
+    destroy_neutral_textures();
+    // Once, not once per vsync: a failing graphics device would otherwise fill
+    // the log at the frame rate. An invisible wall with no explanation is the
+    // worst symptom, so say it at least once.
+    if (!s_neutral_failed_logged) {
+        s_neutral_failed_logged = true;
+        blog(LOG_ERROR,
+             "[obs-zoom-plugin] Tiles: could not create the neutral placeholder "
+             "textures; the wall will not draw");
+    }
+    return false;
+}
+
+// Draws the wall. Runs on the OBS graphics thread with the graphics context
+// already entered — do not nest obs_enter_graphics() in here.
+//
+// Every tile is the neutral placeholder for now; participant video is the next
+// change. Splitting it that way isolates a geometry regression (tiles in the
+// wrong place or the wrong size) from a colour one (tiles converted wrongly),
+// which are otherwise very hard to tell apart in a single screenshot.
+static void tiles_source_render(void *data, gs_effect_t *)
+{
+    auto *ctx = static_cast<tiles_source *>(data);
+    if (!s_tiles_effect.valid() || !ensure_neutral_textures()) return;
+
+    const uint32_t canvas_w = ctx->canvas_width.load(std::memory_order_acquire);
+    const uint32_t canvas_h = ctx->canvas_height.load(std::memory_order_acquire);
+    if (canvas_w < 2 || canvas_h < 2) return;
+
+    // Snapshot the feed list under the lock, then release it — the draw below
+    // must never hold ctx->mutex, which update and roster changes also take.
+    {
+        std::lock_guard<std::mutex> lock(ctx->mutex);
+        ctx->render_feeds = ctx->feeds;
+    }
+    const std::vector<TileFeedPtr> &feeds = ctx->render_feeds;
+    if (feeds.empty()) return;
+
+    // Byte-for-byte the CPU path's parameters, including the even-snapping
+    // pass — see composite_once() above. The named constants are load-bearing:
+    // substituting 16.0/9.0 or 135.0, or dropping the snap, moves every tile by
+    // up to a pixel. Solved from feeds.size(), as the compositor does, not from
+    // participants.size(): the two can differ while a plan is in flight.
+    TileGridParams params;
+    params.canvas_width  = static_cast<double>(canvas_w);
+    params.canvas_height = static_cast<double>(canvas_h);
+    params.tile_aspect   = kTileAspect;
+    params.gutter        = static_cast<double>(canvas_h) / kSpacingDivisor;
+    params.margin        = params.gutter;
+    const std::vector<SnappedTileRect> rects =
+        snap_tile_grid_even(solve_tile_grid(feeds.size(), params), params);
+
+    // Bound before the pass begins, not inside it: gs_technique_begin_pass()
+    // uploads the effect's parameters to the shader (upload_parameters() in
+    // libobs/graphics/effect.c:209), and nothing re-uploads them per draw call,
+    // so a texture set after the pass began would never reach the sampler.
+    gs_effect_set_texture(s_tiles_effect.param_y, s_neutral_y);
+    gs_effect_set_texture(s_tiles_effect.param_u, s_neutral_u);
+    gs_effect_set_texture(s_tiles_effect.param_v, s_neutral_v);
+
+    gs_technique_t *tech = s_tiles_effect.tech_i420;
+    gs_technique_begin(tech);
+    gs_technique_begin_pass(tech, 0);
+
+    for (const SnappedTileRect &r : rects) {
+        if (r.width < 2 || r.height < 2) continue;  // as the CPU path skips them
+        gs_matrix_push();
+        gs_matrix_translate3f(static_cast<float>(r.x), static_cast<float>(r.y),
+                              0.0f);
+        gs_draw_sprite(s_neutral_y, 0, r.width, r.height);
+        gs_matrix_pop();
+    }
+
+    gs_technique_end_pass(tech);
+    gs_technique_end(tech);
+
+    // Rate-limited, like the composite log, so the rig can confirm the draw path
+    // is live and see the grid it solved without flooding the log.
+    if (ctx->rendered_frames == 0 || ctx->rendered_frames % 300 == 0) {
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] Tiles render: canvas=%ux%u tiles=%zu count=%llu",
+             canvas_w, canvas_h, rects.size(),
+             static_cast<unsigned long long>(ctx->rendered_frames));
+    }
+    ++ctx->rendered_frames;
 }
 
 // ── OBS source callbacks ─────────────────────────────────────────────────────
@@ -1076,8 +1218,13 @@ void zoom_supersource_register()
     obs_source_info info = {};
     info.id             = "corevideo_tiles_source";
     info.type           = OBS_SOURCE_TYPE_INPUT;
-    info.output_flags   = OBS_SOURCE_ASYNC_VIDEO | OBS_SOURCE_DO_NOT_DUPLICATE;
+    // The wall draws itself on the graphics thread instead of pushing finished
+    // frames: OBS_SOURCE_CUSTOM_DRAW because it binds its own effect rather
+    // than letting OBS draw one texture with the default one.
+    info.output_flags   = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW |
+                          OBS_SOURCE_DO_NOT_DUPLICATE;
     info.get_name       = tiles_source_get_name;
+    info.video_render   = tiles_source_render;
     info.create         = tiles_source_create;
     info.destroy        = tiles_source_destroy;
     info.update         = tiles_source_update;
@@ -1097,5 +1244,11 @@ void zoom_supersource_load_gfx()
 
 void zoom_supersource_unload_gfx()
 {
+    // Module unload does not run on the graphics thread, so unlike the lazy
+    // creation inside video_render this has to enter the context itself.
+    obs_enter_graphics();
+    destroy_neutral_textures();
+    obs_leave_graphics();
+    s_neutral_failed_logged = false;
     tiles_effect_destroy(s_tiles_effect);
 }

@@ -710,6 +710,17 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoTileFill
              COMMAND CoreVideoTileFillTest)
 
+    # When a tile's plane textures must be recreated, and when their pixels are
+    # actually stale. Pure rules, so they are testable without a GPU device.
+    add_executable(CoreVideoTileTextureTest
+        tests/tile-texture-test.cpp
+    )
+    target_include_directories(CoreVideoTileTextureTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTileTexture
+             COMMAND CoreVideoTileTextureTest)
+
     # Retry pacing for the tiles silent-slot sweep: the sweep interval and the
     # per-slot exponential backoff / attempt cap that stop an unbounded
     # renderer create-destroy loop in the engine.

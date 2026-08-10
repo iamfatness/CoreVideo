@@ -3,6 +3,7 @@
 #include "zoom-engine-client.h"
 #include "zoom-tile-fill.h"
 #include "zoom-tile-grid.h"
+#include "zoom-tile-retry.h"
 #include "zoom-tile-slot.h"
 
 #include <media-io/video-io.h>
@@ -76,6 +77,15 @@ struct TileFeed {
     uint64_t frame_epoch = 0;
     uint64_t generation = 0;
     bool has_frame = false;  // pixels present that the compositor has not taken
+
+    // Retry budget for the silent-slot sweep (see zoom-tile-retry.h). Guarded
+    // by mtx, which the sweep's scan already holds. `retry_epoch` records the
+    // assignment these attempts were spent under, so repointing the slot hands
+    // it a fresh budget instead of inheriting an exhausted one.
+    uint64_t retry_epoch = 0;
+    uint64_t last_retry_ns = 0;
+    uint32_t retry_attempts = 0;
+    bool retry_exhausted_logged = false;
 };
 using TileFeedPtr = std::shared_ptr<TileFeed>;
 
@@ -134,6 +144,12 @@ struct tiles_source {
 
     std::shared_ptr<TilesCallbackGate> gate =
         std::make_shared<TilesCallbackGate>();
+
+    // os_gettime_ns() of the last silent-slot sweep, 0 for "never". Atomic and
+    // CAS-claimed so the rate limit holds without taking a lock first — the
+    // point of the limit is to avoid the lock convoy, so it must be checked
+    // before engine_mutex. Same idiom as ZoomSource::m_last_stale_recover_ns.
+    std::atomic<uint64_t> last_sweep_ns{0};
 };
 
 // ── Geometry helpers ─────────────────────────────────────────────────────────
@@ -408,21 +424,66 @@ static void execute_feed_plan(const FeedPlan &plan)
 // permanently exclude every repointed tile — exactly the slots most likely to
 // need a retry, since repointing at somebody who has not joined yet is the
 // common case.
+//
+// Rate-limited across the source and attempt-bounded per slot — see
+// zoom-tile-retry.h for why both are needed, and for why the sweep is left on
+// every roster event rather than filtered to roster-only ones.
 static void resubscribe_silent_feeds(tiles_source *ctx)
 {
+    // Claim the sweep before taking any lock. The whole point of the interval
+    // is that a burst of roster events must not each acquire engine_mutex,
+    // ctx->mutex and every feed->mtx on the engine reader thread.
+    const uint64_t now_ns = os_gettime_ns();
+    uint64_t last_sweep = ctx->last_sweep_ns.load(std::memory_order_acquire);
+    if (!tile_sweep_due(now_ns, last_sweep)) return;
+    if (!ctx->last_sweep_ns.compare_exchange_strong(last_sweep, now_ns,
+                                                    std::memory_order_acq_rel,
+                                                    std::memory_order_acquire))
+        return;  // another sweep claimed this interval
+
     std::lock_guard<std::mutex> engine_lock(ctx->engine_mutex);
 
     std::vector<TileFeedPtr> retry;
+    std::vector<TileFeedPtr> gave_up;  // logged below, with no lock held
     {
         std::lock_guard<std::mutex> lock(ctx->mutex);
         for (const auto &feed : ctx->feeds) {
             if (!feed) continue;
             std::lock_guard<std::mutex> feed_lock(feed->mtx);
+            if (!feed->alive) continue;
             // frame_epoch is the epoch of the last accepted frame and is not
             // cleared when the compositor takes the pixels, so this stays true
             // for a healthy tile and flips back to "silent" on every repoint.
-            if (feed->alive && !feed->slot.frame_is_current(feed->frame_epoch))
-                retry.push_back(feed);
+            const uint64_t epoch = feed->slot.epoch();
+            if (feed->slot.frame_is_current_at(feed->frame_epoch, epoch)) {
+                // Healthy: a later silence gets a full budget again.
+                feed->retry_epoch = epoch;
+                feed->last_retry_ns = 0;
+                feed->retry_attempts = 0;
+                feed->retry_exhausted_logged = false;
+                continue;
+            }
+            if (feed->retry_epoch != epoch) {
+                // Repointed since the last sweep: fresh assignment, fresh
+                // budget. Covers the Auto-mode reflow as well as an operator
+                // recasting a tile by hand.
+                feed->retry_epoch = epoch;
+                feed->last_retry_ns = 0;
+                feed->retry_attempts = 0;
+                feed->retry_exhausted_logged = false;
+            }
+            if (!tile_retry_due(now_ns, feed->last_retry_ns,
+                                feed->retry_attempts)) {
+                if (feed->retry_attempts >= kTileRetryMaxAttempts &&
+                    !feed->retry_exhausted_logged) {
+                    feed->retry_exhausted_logged = true;
+                    gave_up.push_back(feed);
+                }
+                continue;
+            }
+            feed->last_retry_ns = now_ns;
+            ++feed->retry_attempts;
+            retry.push_back(feed);
         }
     }
     // Issued outside ctx->mutex. The engine no-ops a subscribe that is already
@@ -439,6 +500,14 @@ static void resubscribe_silent_feeds(tiles_source *ctx)
     for (const auto &feed : retry) {
         tile_feed_release_mapping(feed);
         tile_feed_subscribe(feed);
+    }
+    // Silence is a real operator-visible state, so say so once per slot rather
+    // than letting a tile stay grey with no explanation anywhere.
+    for (const auto &feed : gave_up) {
+        blog(LOG_WARNING,
+             "[obs-zoom-plugin] Tile slot stopped retrying a silent feed: uuid=%s participant_id=%u attempts=%u",
+             feed->uuid.c_str(), feed->slot.participant_id(),
+             kTileRetryMaxAttempts);
     }
 }
 

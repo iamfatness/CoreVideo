@@ -709,6 +709,18 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoTileFill
              COMMAND CoreVideoTileFillTest)
 
+    # Retry pacing for the tiles silent-slot sweep: the sweep interval and the
+    # per-slot exponential backoff / attempt cap that stop an unbounded
+    # renderer create-destroy loop in the engine.
+    add_executable(CoreVideoTileRetryTest
+        tests/tile-retry-test.cpp
+    )
+    target_include_directories(CoreVideoTileRetryTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTileRetry
+             COMMAND CoreVideoTileRetryTest)
+
     # OSC wire-format and TCP control-request parsing. These use QByteArray /
     # QJsonObject / QString, so they only build where Qt6::Core is available
     # (i.e. when COREVIDEO_BUILD_PLUGIN found it above). Guarded rather than

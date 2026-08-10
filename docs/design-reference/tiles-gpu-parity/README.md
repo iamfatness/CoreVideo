@@ -37,6 +37,22 @@ All four PNGs were verified with `file` to be exactly 1920×1080, 8-bit RGBA, no
 - Each tile appears to be an independent center-crop/fill of its source frame (portrait subjects are cropped tighter or looser depending on tile aspect — see per-tile `cropLeft/cropRight` values captured live for the individually-assigned `CoreVideo Participant N` sources in scene "8 Sources", which range from 156px to 326px of asymmetric horizontal crop across the 8 tiles).
 - This geometry (tile count → row/column layout, centering, gutter) is exactly what Task 6 needs to reproduce pixel-for-pixel on the GPU path.
 
+## Neutral placeholder reference — no `before-neutral.png` exists
+
+The plan's file list and Task 3 both reference `docs/design-reference/tiles-gpu-parity/before-neutral.png` by that literal name, as the reference for the *neutral placeholder* colour — the grey drawn where a tile has no current frame. **That file does not exist and was never captured.** A live meeting was active for the entire session (see "IMPORTANT DISCREPANCY" below), so every tile in every one of the four delivered captures was populated; there was no way to force an all-neutral wall without tearing down the owner's live meeting, which this task was explicitly told not to do.
+
+Nothing needs recapturing to close this gap, though — the neutral fill is already present in every delivered image, just not covering the whole canvas. Confirmed directly against source: `src/zoom-supersource.cpp:28-30` defines `kNeutralY = 0x80` / `kNeutralUV = 0x80` as "Neutral fill for the background and for tiles with no frame yet," and `:641-644` shows the `clear_all` path `memset`ing the *entire* I420 canvas (Y plane and interleaved U/V) to those constants before any tile is drawn. So the same constant backs both the full-canvas clear and any empty-tile slot — one value, two use sites.
+
+**Use the gutter/margin region of any of the four delivered images as the neutral reference — sample there, not a tile.** All four (`before-corevideo-tiles.png`, `before-corevideo-tiles-verify-.png`, `before-live-5.png`, `before-live-8.png`) show the same flat gray fill around and between tiles (canvas margins, and the strips separating adjacent tiles). The source-side expected value at those pixels is:
+
+| Plane | Expected value |
+|---|---|
+| Y | `0x80` (128) |
+| U | `0x80` (128) |
+| V | `0x80` (128) |
+
+**Maps directly to Task 6 check #6** ("the neutral placeholder is the same grey"): sample a gutter/margin pixel from the GPU-path output at the same canvas position, and confirm it still reads `0x80`/`0x80`/`0x80` on the source I420 planes. Caveat: the four PNGs here are RGBA, re-encoded by OBS's screenshot path from the underlying I420 buffer — they're a reasonable *visual* sanity check (the gutter should look like a flat, neutral mid-gray with no colour cast, and it does in all four) but not a guaranteed bit-exact stand-in for the raw `0x80/0x80/0x80` I420 values. For an exact numeric check, read the source I420 buffer (or an equivalent raw capture) rather than trusting the PNG's re-encoded RGB value to round-trip precisely.
+
 ## IMPORTANT DISCREPANCY: the "no live meeting" premise was contradicted by direct observation
 
 I was told, as verified ground truth going into this task: *"There is currently no live Zoom meeting, so the walls will render neutral/empty. That is expected and is exactly the geometry baseline we want."* I was also told Step 2 (the live-feed baseline) could not be completed today and to record it as **MISSING**.
@@ -59,7 +75,8 @@ Taken together (status metadata + changing pixel hashes + running processes), th
 
 **Net effect on verification:**
 - **Geometry parity** (tile count → grid layout, centering, gutters, per-tile crop) is fully covered by all four images regardless of whether the content is a real meeting or a test rig — the compositor doesn't know or care where the pixels came from.
-- **Color-space/decode parity** (the part Step 2 specifically exists for) is now *probably* coverable using `before-live-5.png` / `before-live-8.png`, since real per-frame Zoom-SDK-decoded video is flowing through the actual pipeline either way (test rig or real meeting, the video still goes through the same Zoom decode → tile compositor path). But because I could not confirm this was the owner's own attended meeting as the brief specified, and because there's real circumstantial evidence it's a synthetic/looping test asset, **treat `before-live-5.png`/`before-live-8.png` as provisional, not a confirmed substitute for an owner-run meeting.** If Task 6 needs a guaranteed-organic capture, request the owner run a real ad hoc meeting with 3+ human participants and re-capture with the same script before converting the compositor — while it's still possible to do so.
+- **Colour/decode parity** (the part Step 2 specifically exists for) *is* covered by `before-live-5.png` / `before-live-8.png`. BT.709 conversion correctness depends only on real YUV bytes flowing through the real Zoom decode → tile compositor path — and that's established independently of what's actually in front of the camera, by the live `zoom_participant_source` status and the changing screenshot hashes recorded above. Whether the faces are organic webcams or a synthetic/looping test rig doesn't touch the shader/conversion maths, so it does not undermine the colour check.
+- **Reproducibility** is the real thing the synthetic-feed observation raises, not colour correctness: if Task 6 wants to compare its GPU-path output against literally the same source frames as this baseline, it needs the same feeds still live and unchanged at that point. That can't be guaranteed for feeds that may be a looping/test asset with its own reset cycle (see the "Time until Meeting Reset" overlay on one tile) rather than a stable, owner-controlled meeting. Recommend Task 6 recapture against whatever feeds are live at the time, close to when the GPU-path comparison actually runs, rather than assuming these exact frames are still being served later.
 
 Raw evidence (full participant roster, `GetInputSettings` dump) was saved during this session to a scratch file, not committed to the repo:
 `C:\Users\walla\AppData\Local\Temp\claude\C--Users-walla\ee90dd79-2091-49db-b5b0-b49223466efa\scratchpad\roster.json`

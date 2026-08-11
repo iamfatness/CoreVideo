@@ -118,6 +118,11 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
   for reframing a guest sitting too far off-centre without disturbing the grid
   or any other tile. Crops belong to the tile position, not to whoever is in
   it, so they apply in Auto mode too. All crops default to 0.
+- Tiles can now create and maintain one Zoom participant audio source per tile,
+  inside a group you nominate, so each person gets a live fader and an ISO
+  track without building the wall twice. Off until you name a group. The wall
+  itself stays silent, so cutting between scenes never swaps audio. Tracks 2-6
+  carry five ISO stems; past that, participants are on the program track only.
 
 ## [0.1.36] - 2026-08-09
 

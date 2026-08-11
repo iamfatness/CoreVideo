@@ -11,6 +11,7 @@
 #include "zoom-tile-shape.h"
 #include "zoom-tile-slot.h"
 #include "zoom-tile-texture.h"
+#include "zoom-tiles-audio.h"
 #include "zoom-tiles-background.h"
 #include "zoom-tiles-effect.h"
 
@@ -262,6 +263,11 @@ struct tiles_source {
     bool visible = false;
     // Distinguishes this source's slot uuids from any other tiles source.
     uint64_t instance_id = 0;
+    // Names the group per-participant audio sources are created into; empty
+    // means the feature is off. Guarded by `mutex` alongside fill_params so a
+    // settings pass lands as one unit, matching how the crop params are
+    // already handled.
+    std::string audio_group;
 
     // Owned solely by the OBS graphics thread (video_render) — no locking
     // needed. Copy-assigned into rather than constructed per frame: allocation
@@ -1381,6 +1387,11 @@ static constexpr const char *PROP_MARGIN_PCT  = "margin_pct";
 // The collapsible group the eighteen crop sliders live in. Named so a scene
 // file can be read, though the group itself stores no value of its own.
 static constexpr const char *PROP_CROP_GROUP = "crop_group";
+// Naming a group is both the destination and the on-switch: empty means the
+// feature does nothing at all. It ships empty, because this feature writes to
+// the operator's scene collection and must not start doing that on upgrade for
+// someone who never asked for it.
+static constexpr const char *PROP_AUDIO_GROUP = "audio_group";
 // kMaxTileSlots is declared with the other draw-path constants at the top of
 // this file, because `tiles_source` sizes its crop array from it.
 static constexpr std::size_t kMaxExcludes   = 3;
@@ -1424,16 +1435,35 @@ static void apply_assignments(tiles_source *ctx)
     const std::vector<ParticipantInfo> roster =
         ZoomEngineClient::instance().roster();
 
-    FeedPlan plan;
+    FeedPlan    plan;
+    std::string audio_group;
+    std::vector<uint32_t> assignments;
     {
         std::lock_guard<std::mutex> lock(ctx->mutex);
         std::vector<uint32_t> next =
             resolve_tile_assignments(ctx->participants, roster, ctx->fill_params);
         if (ctx->participants == next) return;
         ctx->participants.swap(next);
-        plan = plan_feeds_locked(ctx);
+        plan        = plan_feeds_locked(ctx);
+        audio_group = ctx->audio_group;
+        assignments = ctx->participants;
     }
     execute_feed_plan(plan);
+
+    // Deliberately outside both locks. Creating sources and adding them to a
+    // group makes libobs emit signals that run arbitrary handlers, and this
+    // runs on the roster callback thread — holding ctx->mutex across that is
+    // how a lock-order inversion gets built by accident.
+    if (audio_group.empty()) return;
+    const char *uuid = obs_source_get_uuid(ctx->source);
+    if (!uuid || !*uuid) return;
+
+    TilesAudioPlanParams params;
+    params.self_uuid = uuid;
+    params.enabled   = true;
+    const TilesAudioPlan audio_plan =
+        plan_tiles_audio(assignments, tiles_audio_scan(), roster, params);
+    tiles_audio_apply(audio_plan, audio_group, params.self_uuid);
 }
 
 static void tiles_source_update(void *data, obs_data_t *settings)
@@ -1599,6 +1629,9 @@ static void tiles_source_update(void *data, obs_data_t *settings)
     ctx->margin_pct.store(read_spacing_pct(PROP_MARGIN_PCT),
                           std::memory_order_release);
 
+    const char *audio_group_raw = obs_data_get_string(settings, PROP_AUDIO_GROUP);
+    const std::string audio_group = audio_group_raw ? audio_group_raw : "";
+
     // Deliberately outside every lock this function takes: set_source calls
     // into libobs (obs_source_add_active_child walks the source tree,
     // inc/dec_showing fire signals), and ctx->mutex is taken by the graphics
@@ -1623,6 +1656,7 @@ static void tiles_source_update(void *data, obs_data_t *settings)
         std::lock_guard<std::mutex> lock(ctx->mutex);
         ctx->fill_params = std::move(params);
         ctx->slot_crop = crops;
+        ctx->audio_group = audio_group;
     }
     apply_assignments(ctx);
 }
@@ -1883,6 +1917,8 @@ static void tiles_source_get_defaults(obs_data_t *settings)
         obs_data_set_default_int(settings, crop_left_prop_name(i).c_str(), 0);
         obs_data_set_default_int(settings, crop_right_prop_name(i).c_str(), 0);
     }
+    // Empty: per-participant audio is off. See PROP_AUDIO_GROUP.
+    obs_data_set_default_string(settings, PROP_AUDIO_GROUP, "");
 }
 
 static obs_properties_t *tiles_source_get_properties(void *data)
@@ -1949,6 +1985,26 @@ static obs_properties_t *tiles_source_get_properties(void *data)
         }
         return true;
     }, bg);
+
+    // Editable so a scene file naming a group that does not exist yet round-
+    // trips instead of silently resetting to "off" on load.
+    obs_property_t *audio_group = obs_properties_add_list(
+        props, PROP_AUDIO_GROUP, obs_module_text("Tiles.AudioGroup"),
+        OBS_COMBO_TYPE_EDITABLE, OBS_COMBO_FORMAT_STRING);
+    obs_property_list_add_string(audio_group,
+                                 obs_module_text("Tiles.AudioGroup.Off"), "");
+    obs_enum_sources(
+        [](void *param, obs_source_t *src) -> bool {
+            if (!obs_group_from_source(src)) return true;
+            const char *name = obs_source_get_name(src);
+            if (name && *name)
+                obs_property_list_add_string(
+                    static_cast<obs_property_t *>(param), name, name);
+            return true;
+        },
+        audio_group);
+    obs_property_set_long_description(
+        audio_group, obs_module_text("Tiles.AudioGroup.Desc"));
 
     // Tile shape. Presets rather than a bare ratio because the shapes an
     // operator actually wants are a short list, with Custom behind a modified

@@ -42,10 +42,19 @@ int main()
     if (!check("negative width floors at 0", p.width, 0.0)) return 1;
     if (!check("negative radius floors at 0", p.radius, 0.0)) return 1;
 
-    // A degenerate tile must not produce a negative clamp.
+    // A degenerate tile must not produce a negative clamp. Note: this case does
+    // not by itself discriminate whether the `limit <= 0.0` guard exists, since
+    // min(max(6,0), 0) is 0 either way. Kept because it documents intent.
     p = clamp_border(6.0, 6.0, 0.0, 0.0);
     if (!check("degenerate tile width", p.width, 0.0)) return 1;
     if (!check("degenerate tile radius", p.radius, 0.0)) return 1;
+
+    // Negative tile dimensions are what the guard actually exists for: without
+    // it, limit goes negative (min(-10,-10)/2 == -5) and
+    // min(max(width,0), limit) collapses to that negative limit instead of 0.
+    p = clamp_border(6.0, 6.0, -10.0, -10.0);
+    if (!check("negative tile width floors at 0", p.width, 0.0)) return 1;
+    if (!check("negative tile radius floors at 0", p.radius, 0.0)) return 1;
 
     std::cout << "tile-border: all tests passed\n";
     return 0;

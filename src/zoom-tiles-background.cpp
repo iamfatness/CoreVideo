@@ -38,39 +38,52 @@ void TilesBackground::clear(obs_source_t *parent)
     detach_background(parent, weak);
 }
 
-bool TilesBackground::set_source(obs_source_t *parent, const char *name)
+TilesBackgroundResult TilesBackground::set_source(obs_source_t *parent,
+                                                  const char *name)
 {
     if (!name || !*name) {
         clear(parent);
-        return true;
+        return TilesBackgroundResult::Applied;
     }
 
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        // The m_weak test is load-bearing, not belt-and-braces: when the name
-        // failed to resolve last time (a scene collection that had not created
-        // it yet) the selection is remembered as unresolved, and a bare name
-        // compare would make every retry a no-op.
-        if (m_weak && m_name == name) return true;
+        // Both tests on m_weak are load-bearing, and for different reasons.
+        // Non-null: a name that failed to resolve last time leaves no weak
+        // reference, and a bare name compare would turn every retry into a
+        // no-op. Not expired: the operator's natural recovery after deleting
+        // the background source is to recreate it under the same name and
+        // pick it again, and without the expiry test that re-pick would match
+        // the dead reference's name and short-circuit forever — the wall stuck
+        // on the colour with no way out but a rename or a restart.
+        if (m_weak && !obs_weak_source_expired(m_weak) && m_name == name)
+            return TilesBackgroundResult::Applied;
     }
 
     obs_source_t *next = obs_get_source_by_name(name);
     if (!next) {
         blog(LOG_WARNING,
              "[obs-zoom-plugin] Tiles background source not found: %s", name);
-        return false;
+        return TilesBackgroundResult::NotFound;
     }
 
     // Already holding exactly this source under a different name — i.e. the
     // operator renamed it. Registering it as an active child a second time
     // would add a second set of activate refs that only one
     // remove_active_child ever balances, leaving it stuck showing forever.
+    //
+    // Gated on the reference still being live: references_source is a raw
+    // pointer compare (libobs/obs-source.c:922-925), and an expired weak
+    // reference's pointer is dangling, so a recreated source that the
+    // allocator happened to place at the freed address would compare equal and
+    // be recorded as selected while nothing was actually held.
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        if (obs_weak_source_references_source(m_weak, next)) {
+        if (!obs_weak_source_expired(m_weak) &&
+            obs_weak_source_references_source(m_weak, next)) {
             m_name = name;
             obs_source_release(next);
-            return true;
+            return TilesBackgroundResult::Applied;
         }
     }
 
@@ -83,7 +96,7 @@ bool TilesBackground::set_source(obs_source_t *parent, const char *name)
              "[obs-zoom-plugin] Tiles background refused (would render itself): %s",
              name);
         obs_source_release(next);
-        return false;
+        return TilesBackgroundResult::Refused;
     }
 
     // A Media or Browser source that is in no active scene does not play.
@@ -105,7 +118,7 @@ bool TilesBackground::set_source(obs_source_t *parent, const char *name)
     detach_background(parent, prev_weak);
 
     blog(LOG_INFO, "[obs-zoom-plugin] Tiles background source: %s", name);
-    return true;
+    return TilesBackgroundResult::Applied;
 }
 
 void TilesBackground::render(uint32_t canvas_w, uint32_t canvas_h)

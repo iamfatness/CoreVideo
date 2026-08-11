@@ -981,8 +981,20 @@ static void tiles_source_update(void *data, obs_data_t *settings)
     // inc/dec_showing fire signals), and ctx->mutex is taken by the graphics
     // thread on every frame. A refused or unresolved selection is logged
     // inside set_source and simply leaves the previous background in place.
-    ctx->background.set_source(ctx->source,
-                               obs_data_get_string(settings, PROP_BG_SOURCE));
+    //
+    // A cycle is refused permanently, so the setting that named it is dropped
+    // rather than kept: left in place it would show a background in the
+    // dropdown that is not in effect and cannot ever be, be saved into the
+    // scene, and make every subsequent update re-log the same refusal.
+    // NotFound is deliberately not treated this way — a name that has not
+    // resolved yet is the normal state during a scene load, and clearing it
+    // would erase the operator's setting on every restart (tiles_source_load
+    // below is the retry).
+    if (ctx->background.set_source(
+            ctx->source, obs_data_get_string(settings, PROP_BG_SOURCE)) ==
+        TilesBackgroundResult::Refused) {
+        obs_data_set_string(settings, PROP_BG_SOURCE, "");
+    }
 
     {
         std::lock_guard<std::mutex> lock(ctx->mutex);
@@ -1021,8 +1033,14 @@ static void *tiles_source_create(obs_data_t *settings, obs_source_t *source)
 static void tiles_source_load(void *data, obs_data_t *settings)
 {
     auto *ctx = static_cast<tiles_source *>(data);
-    ctx->background.set_source(ctx->source,
-                               obs_data_get_string(settings, PROP_BG_SOURCE));
+    // Same refusal handling as tiles_source_update: a saved scene whose
+    // background names a cycle (hand-edited, or saved before this guard
+    // existed) drops the setting instead of carrying it forward.
+    if (ctx->background.set_source(
+            ctx->source, obs_data_get_string(settings, PROP_BG_SOURCE)) ==
+        TilesBackgroundResult::Refused) {
+        obs_data_set_string(settings, PROP_BG_SOURCE, "");
+    }
 }
 
 // Lets libobs see the background when it walks the source tree. This is not

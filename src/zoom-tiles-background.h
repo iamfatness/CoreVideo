@@ -23,19 +23,45 @@
 // the source tree — add/remove_active_child, inc/dec_showing, video_render,
 // release — happens with m_mutex released, so this class can never be part of
 // a lock cycle with libobs's own locks.
+//
+// The price of that, recorded so the next reader knows it was weighed and not
+// missed: between add_active_child(next) and the swap that publishes `next` to
+// enum_active(), and again between the swap and remove_active_child(prev),
+// there is a window in which a child is a registered active child of the
+// parent but is not the child enum_active() reports. A parent show or hide
+// arriving from another thread in that window — obs-websocket does change
+// scenes off the UI thread — walks enum_active_sources and so could add a
+// show_ref to one child that is later removed from the other, leaking or
+// dropping exactly one. Closing it would mean holding m_mutex across
+// add_active_child, which walks the whole source tree and re-enters
+// enum_active() on any tiles source it meets: a self-deadlock, and a far worse
+// failure than a stray show_ref. libobs's own scene items carry the same
+// window, mitigated only by the scene lock. Accepted deliberately.
+// Why this is an enum and not the bool the interface first carried: the two
+// failure modes need opposite handling from the caller. A name that does not
+// resolve is normal and temporary — a scene collection creates every source
+// before it loads any of them, so the background is routinely missing on the
+// first attempt — and the setting must be kept so a later attempt can find it.
+// A cycle is permanent and must never be retried, so the setting has to be
+// cleared or the dropdown goes on showing a background that is not in effect
+// and every update re-logs the refusal.
+enum class TilesBackgroundResult {
+    Applied,   // selected, cleared, or already in effect
+    NotFound,  // no source by that name (yet) — keep the setting and retry
+    Refused,   // would create a render cycle — drop the setting, never retry
+};
+
 class TilesBackground {
 public:
     // Selects `name` as the background, replacing any previous selection.
     // An empty or null name clears it.
     //
-    // Returns false and leaves the previous selection intact when the choice
-    // would create a render cycle — selecting the tiles source itself, or a
-    // scene that contains it. That case is not merely wrong, it is an infinite
-    // recursion that would crash OBS, so it is refused rather than attempted.
-    // Also returns false when no source by that name exists (yet): the caller
-    // may retry with the same name, which is how a scene collection whose
-    // sources load after this one still finds its background.
-    bool set_source(obs_source_t *parent, const char *name);
+    // Returns Refused, and leaves the previous selection intact, when the
+    // choice would create a render cycle — selecting the tiles source itself,
+    // or a scene that contains it. That case is not merely wrong, it is an
+    // infinite recursion that would crash OBS, so it is refused rather than
+    // attempted.
+    TilesBackgroundResult set_source(obs_source_t *parent, const char *name);
 
     // Draws the background filling canvas_w x canvas_h. No-op when nothing is
     // selected or the selected source has since been deleted. Graphics thread.

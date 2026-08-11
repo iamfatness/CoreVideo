@@ -860,6 +860,19 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoTileGlow
              COMMAND CoreVideoTileGlowTest)
 
+    # Per-participant audio reconciliation. Pure — no libobs — because every
+    # action it emits mutates the operator's scene collection, and the two
+    # rules that matter (never duplicate a participant another Tiles source
+    # owns, never delete anyone) have to be provable off-rig.
+    add_executable(CoreVideoTilesAudioPlanTest
+        tests/tiles-audio-plan-test.cpp
+    )
+    target_include_directories(CoreVideoTilesAudioPlanTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTilesAudioPlan
+             COMMAND CoreVideoTilesAudioPlanTest)
+
     # Which missing effect handles are fatal and which only cost a feature.
     # Pure policy — no libobs — because the consequence is operational, not
     # graphical: the DLL and data/effects/corevideo-tiles.effect install

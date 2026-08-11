@@ -268,6 +268,15 @@ struct tiles_source {
     // settings pass lands as one unit, matching how the crop params are
     // already handled.
     std::string audio_group;
+    // Set while an audio reconcile is queued on OBS_TASK_UI or currently
+    // running there; used to coalesce a burst of triggering events (a
+    // talking change alone fires both an active_speaker line and a full
+    // roster update) into at most one queued task. See
+    // request_audio_reconcile(). Deliberately not guarded by `mutex`: it is
+    // read and written from whatever thread calls apply_assignments
+    // (including the IPC reader thread) and from the queued task on the UI
+    // thread, and a plain compare-exchange is all the coalescing needs.
+    std::atomic<bool> audio_reconcile_pending{false};
 
     // Owned solely by the OBS graphics thread (video_render) — no locking
     // needed. Copy-assigned into rather than constructed per frame: allocation
@@ -1423,26 +1432,117 @@ static std::string crop_right_prop_name(std::size_t slot)
     return "crop_right_" + std::to_string(slot);
 }
 
+// Requests a per-participant audio reconcile; performs none of the work
+// itself. apply_assignments can run on the IPC reader thread — the roster
+// callback tiles_source_create registers below is invoked *synchronously*
+// from ZoomEngineClient::update_roster_state_and_notify, not queued — and a
+// scene-collection load may still be in progress on the UI thread at the
+// same moment. Reconciling inline was wrong on both counts: it mutated the
+// scene collection from a thread OBS never expects source creation on, and
+// it could run before a group (or the whole collection) had finished
+// loading, in which case anything it created either doubled a saved source
+// or got silently stripped moments later when a group's own load pass calls
+// remove_all_items(). Queuing to OBS_TASK_UI fixes both: the task always
+// runs on the main thread, and only after any in-progress load pass —
+// including every group's own — has fully returned control to the event
+// loop. See apply_assignments's call site for why this fires unconditionally
+// now rather than being suppressed for the create-time settings pass the way
+// round 1 of this feature did.
+//
+// Coalesced via audio_reconcile_pending: a talking change alone fires both
+// an active_speaker line and a full roster update (engine/src/main.cpp's
+// onUserActiveAudioChange), several times a second in ordinary conversation,
+// each of which calls apply_assignments. Without coalescing that is a full
+// obs_enum_sources scan-plan-apply, behind a process-wide lock, per event.
+// The flag collapses any burst into at most one task in flight; it is
+// cleared at the very start of the task (not at the end), so a change that
+// arrives while the task is already running queues a fresh one instead of
+// being silently absorbed.
+//
+// Lifetime: obs_source_get_ref keeps the underlying source alive until the
+// task releases it — and with it, ctx, which the source owns for its entire
+// lifetime (tiles_source_destroy only runs, and only frees ctx, once every
+// reference including this one is gone). So ctx cannot be freed out from
+// under a queued or running task. get_ref returns nullptr if the source is
+// already being destroyed; treated here as "nothing to reconcile, and
+// nothing will ever run to clear the flag" — safe, because ctx is being
+// freed by that same teardown regardless, and nothing else ever reads
+// audio_reconcile_pending after that point.
+static void request_audio_reconcile(tiles_source *ctx)
+{
+    // Cheap bail before touching the pending flag or queuing anything: the
+    // common case is the feature being off, and there is no reason to pay
+    // for a ref, an allocation and a queued task just to have the task find
+    // nothing to do.
+    bool has_group = false;
+    {
+        std::lock_guard<std::mutex> lock(ctx->mutex);
+        has_group = !ctx->audio_group.empty();
+    }
+    if (!has_group) return;
+
+    bool expected = false;
+    if (!ctx->audio_reconcile_pending.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel))
+        return;  // already queued or running — this event rides along
+
+    // ref and ctx->source are the same object, so the queued task below
+    // releases it via ctx->source directly rather than carrying a second
+    // copy of the pointer through as a separate payload; ref itself exists
+    // only for the null check.
+    obs_source_t *ref = obs_source_get_ref(ctx->source);
+    if (!ref) {
+        ctx->audio_reconcile_pending.store(false, std::memory_order_release);
+        return;
+    }
+
+    obs_queue_task(OBS_TASK_UI, [](void *param) {
+        auto *ctx = static_cast<tiles_source *>(param);
+
+        // Cleared first, not last: a change arriving while the reconcile
+        // below is in flight must queue a fresh task rather than be
+        // coalesced into this one and then lost.
+        ctx->audio_reconcile_pending.store(false, std::memory_order_release);
+
+        std::string audio_group;
+        std::vector<uint32_t> assignments;
+        {
+            std::lock_guard<std::mutex> lock(ctx->mutex);
+            audio_group = ctx->audio_group;
+            assignments = ctx->participants;
+        }
+
+        if (!audio_group.empty()) {
+            const char *uuid = obs_source_get_uuid(ctx->source);
+            if (uuid && *uuid) {
+                const std::vector<ParticipantInfo> roster =
+                    ZoomEngineClient::instance().roster();
+                TilesAudioPlanParams params;
+                params.self_uuid = uuid;
+                params.enabled   = true;
+                tiles_audio_reconcile(assignments, roster, params, audio_group);
+            }
+        }
+
+        obs_source_release(ctx->source);
+    }, ctx, false);
+}
+
 // Recomputes the wall from the cached settings plus the live roster, and
 // performs whatever engine work the change implies. Safe to call from the
 // settings path and from the roster callback.
 //
-// reconcile_audio gates only the per-participant audio pass, and does so
-// independently of whether the tile assignments changed below: naming a
-// group on an otherwise-stable wall, or switching from one group to
-// another, changes no participant assignment at all but still has to
-// reconcile audio, so audio is not behind the "did the wall change" early
-// exit the feed plan uses.
-//
-// It is false for exactly one caller: the settings pass tiles_source_create
-// makes while constructing this Tiles source. Restoring a scene collection
-// creates every source before it loads any of them (see the comment on
-// tiles_source_load below), so at that instant a saved audio_group's own
-// marked children may not exist yet — reconciling then could create a
-// duplicate set that the load pass would then find already-owned and
-// orphaned. Every other caller (a later settings change, the roster
-// callback, and tiles_source_load itself) passes true.
-static void apply_assignments(tiles_source *ctx, bool reconcile_audio)
+// Audio reconciliation is always requested here, independently of whether
+// the tile assignments changed below: naming a group on an otherwise-stable
+// wall, or switching from one group to another, changes no participant
+// assignment at all but still has to reconcile audio, so it is not behind
+// the "did the wall change" early exit the feed plan uses. Requesting is
+// cheap and coalesced (see request_audio_reconcile) — it is not the actual
+// work — so there is no reason to suppress it for any particular caller,
+// including the very first settings pass tiles_source_create makes: by the
+// time the queued task runs, any scene-collection load already in progress
+// at that instant is guaranteed to have finished.
+static void apply_assignments(tiles_source *ctx)
 {
     std::lock_guard<std::mutex> engine_lock(ctx->engine_mutex);
 
@@ -1451,10 +1551,8 @@ static void apply_assignments(tiles_source *ctx, bool reconcile_audio)
     const std::vector<ParticipantInfo> roster =
         ZoomEngineClient::instance().roster();
 
-    FeedPlan    plan;
-    bool        feed_changed = false;
-    std::string audio_group;
-    std::vector<uint32_t> assignments;
+    FeedPlan plan;
+    bool     feed_changed = false;
     {
         std::lock_guard<std::mutex> lock(ctx->mutex);
         std::vector<uint32_t> next =
@@ -1464,43 +1562,16 @@ static void apply_assignments(tiles_source *ctx, bool reconcile_audio)
             ctx->participants.swap(next);
             plan = plan_feeds_locked(ctx);
         }
-        audio_group = ctx->audio_group;
-        assignments = ctx->participants;
     }
     if (feed_changed) execute_feed_plan(plan);
 
-    if (!reconcile_audio) return;
-    if (audio_group.empty()) return;
-
-    // Deliberately outside ctx->mutex. Creating sources and adding them to a
-    // group makes libobs emit signals that run arbitrary handlers, and this
-    // can run on the roster callback thread — holding ctx->mutex across that
-    // is how a lock-order inversion gets built by accident.
-    //
-    // ctx->engine_mutex stays held, on purpose: its job is to serialise this
-    // whole plan-and-execute cycle against a concurrent one for the SAME
-    // Tiles source (e.g. a settings change racing a roster tick), which is
-    // what stops two overlapping calls from both planning a Create for the
-    // same participant on this wall. It does not, and cannot, serialise
-    // against a DIFFERENT Tiles source doing the same thing — that is what
-    // tiles_audio_reconcile's own process-wide lock is for.
-    const char *uuid = obs_source_get_uuid(ctx->source);
-    if (!uuid || !*uuid) return;
-
-    TilesAudioPlanParams params;
-    params.self_uuid = uuid;
-    params.enabled   = true;
-    tiles_audio_reconcile(assignments, roster, params, audio_group);
+    request_audio_reconcile(ctx);
 }
 
-// Shared by the info.update callback (tiles_source_update below) and the
-// initial settings pass tiles_source_create makes while constructing a
-// Tiles source. reconcile_audio is threaded straight through to
-// apply_assignments — see its parameter comment for why the create-time
-// pass alone must pass false.
-static void tiles_source_apply_settings(tiles_source *ctx, obs_data_t *settings,
-                                        bool reconcile_audio)
+static void tiles_source_update(void *data, obs_data_t *settings)
 {
+    auto *ctx = static_cast<tiles_source *>(data);
+
     TileFillParams params;
     params.mode = obs_data_get_int(settings, PROP_FILL_MODE) ==
                           static_cast<long long>(TileFillMode::Manual)
@@ -1689,12 +1760,7 @@ static void tiles_source_apply_settings(tiles_source *ctx, obs_data_t *settings,
         ctx->slot_crop = crops;
         ctx->audio_group = audio_group;
     }
-    apply_assignments(ctx, reconcile_audio);
-}
-
-static void tiles_source_update(void *data, obs_data_t *settings)
-{
-    tiles_source_apply_settings(static_cast<tiles_source *>(data), settings, true);
+    apply_assignments(ctx);
 }
 
 static void *tiles_source_create(obs_data_t *settings, obs_source_t *source)
@@ -1704,23 +1770,26 @@ static void *tiles_source_create(obs_data_t *settings, obs_source_t *source)
     ctx->instance_id =
         s_tiles_instance_counter.fetch_add(1, std::memory_order_relaxed) +
         os_gettime_ns();
-    // false: see apply_assignments's reconcile_audio parameter. The deferred
-    // first audio pass, for a source that turns out to have been restored
-    // from a saved collection, runs from tiles_source_load below.
-    tiles_source_apply_settings(ctx, settings, false);
+    tiles_source_update(ctx, settings);
     ZoomEngineClient::instance().add_roster_callback(ctx,
         [ctx, gate = ctx->gate]() {
             std::lock_guard<std::mutex> callback_lock(gate->mtx);
             if (!gate->alive) return;
             // Someone joined, left, or toggled their camera: in Auto mode the
             // wall's membership may have changed. Reflow first, then retry any
-            // slot that is still silent under its current assignment. Always
-            // safe to also reconcile audio here: roster callbacks are
-            // dispatched through an OBS_TASK_UI queue (ZoomParticipants::
-            // notify), so none can run until the current call stack — which
-            // is the only one that can still be mid scene-collection load —
-            // has unwound back to the event loop.
-            apply_assignments(ctx, true);
+            // slot that is still silent under its current assignment.
+            //
+            // This callback runs *synchronously* on the IPC reader thread:
+            // ZoomEngineClient::update_roster_state_and_notify calls
+            // registered roster callbacks directly from handle_event/
+            // reader_loop, with no queueing. apply_assignments's feed-plan
+            // half is fine here — it is the existing, established pattern —
+            // but this is exactly why its audio half only ever *requests* a
+            // reconcile (see request_audio_reconcile) instead of doing one:
+            // this thread must never scan or mutate the scene collection
+            // directly, and must never be blocked behind a lock another
+            // Tiles source's reconcile is holding.
+            apply_assignments(ctx);
             resubscribe_silent_feeds(ctx);
         });
     return ctx;
@@ -1733,18 +1802,14 @@ static void *tiles_source_create(obs_data_t *settings, obs_source_t *source)
 // the whole collection exists, which is what makes a saved background come
 // back on restart rather than only after the operator reopens Properties.
 //
-// It is also, for the same reason, the first safe place to reconcile audio
-// for a source that came from a saved collection: tiles_source_create's
-// settings pass deliberately skipped it (see apply_assignments's
-// reconcile_audio parameter), because this source's own saved audio children
-// might not have existed yet at that instant. By the time libobs calls this,
-// the whole collection does exist, so tiles_audio_scan() can see them and
-// Adopt/Unmute/SetMixers them instead of creating a duplicate set. This is a
-// no-op for a freshly-added Tiles source — libobs never calls `load` for one,
-// only for a batch restore (a scene-collection load, or an undo that
-// recreates several sources at once) — and equally harmless for one whose
-// audio_group is still empty, since apply_assignments's own empty-group
-// check short-circuits before anything scans or creates.
+// Per-participant audio needs no equivalent second pass here. It is always
+// requested (never performed) from apply_assignments, and the request is
+// fulfilled by a task queued on OBS_TASK_UI — which cannot run until the
+// current call stack unwinds back to the event loop, i.e. not until the
+// *entire* obs_load_sources batch, including every group's own load pass,
+// has finished. So the settings pass tiles_source_create makes above already
+// requests the correct, safe-to-run-later reconcile for a restored source;
+// adding a second request here would only ever be coalesced into a no-op.
 static void tiles_source_load(void *data, obs_data_t *settings)
 {
     auto *ctx = static_cast<tiles_source *>(data);
@@ -1756,7 +1821,6 @@ static void tiles_source_load(void *data, obs_data_t *settings)
         TilesBackgroundResult::Refused) {
         obs_data_set_string(settings, PROP_BG_SOURCE, "");
     }
-    apply_assignments(ctx, true);
 }
 
 // Lets libobs see the background when it walks the source tree. This is not
@@ -1773,6 +1837,15 @@ static void tiles_source_enum_active_sources(void *data,
     ctx->background.enum_active(ctx->source, enum_callback, param);
 }
 
+// No handling here for a pending or in-flight audio reconcile task, and
+// none is needed: this function only ever runs once obs_source_t's
+// refcount reaches zero, and request_audio_reconcile takes a reference
+// (obs_source_get_ref) before queuing one, held until the task itself
+// releases it. So this cannot run while a queued task exists — the
+// reference blocks it — and by the time a running task calls
+// obs_source_release at its own end, this may run, but that release
+// happens after the task has finished touching ctx. Either way, `delete
+// ctx` below never races a queued or running task.
 static void tiles_source_destroy(void *data)
 {
     auto *ctx = static_cast<tiles_source *>(data);

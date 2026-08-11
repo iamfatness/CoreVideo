@@ -5,6 +5,7 @@
 #include "zoom-tile-border.h"
 #include "zoom-tile-crop.h"
 #include "zoom-tile-fill.h"
+#include "zoom-tile-glow.h"
 #include "zoom-tile-grid.h"
 #include "zoom-tile-retry.h"
 #include "zoom-tile-shape.h"
@@ -58,6 +59,15 @@ static constexpr double kMaxSpacingPct = 10.0;
 // bound the *setting*; clamp_border() then bounds it against the actual tile.
 static constexpr int64_t kMaxBorderWidth  = 64;
 static constexpr int64_t kMaxCornerRadius = 128;
+// Outer glow bounds, on the same terms as the border above. The size is in
+// canvas pixels rather than a percentage of canvas height — deliberately unlike
+// the gutter and margin, and deliberately like the border width and corner
+// radius, because a glow is a drawn effect on the tile whose weight the
+// operator is choosing directly, not structural spacing. Nothing here clamps
+// the glow against the gutter or the margin: overlap is allowed. See
+// src/zoom-tile-glow.h.
+static constexpr int64_t kMaxGlowSize      = 256;  // canvas pixels
+static constexpr int64_t kMaxGlowIntensity = 100;  // percent
 // How many tile slots the wall has. Declared up here rather than beside the
 // other property constants below because `tiles_source` sizes its per-slot crop
 // array from it.
@@ -187,6 +197,16 @@ struct tiles_source {
     std::atomic<uint32_t> border_width{0};
     std::atomic<bool>     border_rounded{false};
     std::atomic<uint32_t> corner_radius{16};
+    // The operator's outer glow: colour (picker byte order, converted at draw
+    // time), size in canvas pixels, and intensity as a percentage. Same
+    // atomic-not-mutex reasoning as bg_color above.
+    //
+    // Size 0 is off and is the default, and the draw path skips the entire
+    // glow pass at 0 — no technique, no blend state, no draw — so a scene saved
+    // before this control existed renders byte-for-byte as it did.
+    std::atomic<uint32_t> glow_color{0xFFFFFFFF};
+    std::atomic<uint32_t> glow_size{0};
+    std::atomic<uint32_t> glow_intensity{100};
     // The wall's geometry: tile shape (width / height, already resolved from
     // the preset and the custom ratio) and the gutter and margin as
     // percentages of canvas height. Same atomic-not-mutex reasoning as
@@ -661,6 +681,26 @@ struct TilePassParams {
     float    crop_cv = 1.0f;
 };
 
+// Everything the Glow technique needs for one tile's halo.
+//
+// Bundled and set in one place for exactly the reason TilePassParams is:
+// libobs uploads a pass's parameters inside gs_technique_begin_pass() and never
+// afterwards, so a glow quad that opened a pass having set only some of these
+// would draw the previous tile's halo — at the previous tile's position, which
+// on a clipped edge tile is visibly wrong rather than subtly wrong.
+struct GlowPassParams {
+    uint32_t color_argb = 0xFFFFFFFF;  // swapped ready for gs_effect_set_color
+    float    quad_w = 0.0f;            // the expanded quad, in canvas pixels
+    float    quad_h = 0.0f;
+    float    center_x = 0.0f;          // the tile's centre, in quad-local px
+    float    center_y = 0.0f;
+    float    half_w = 0.0f;            // half the TILE's size, not the quad's
+    float    half_h = 0.0f;
+    float    corner_radius = 0.0f;     // the tile's own clamped radius
+    float    size = 0.0f;              // falloff distance, canvas pixels
+    float    intensity = 1.0f;         // 0..1 alpha at the tile's edge
+};
+
 // One shared 1x1 sample per plane holding the same neutral bytes the CPU
 // compositor wrote. Drawing the placeholder through the I420 technique makes it
 // bit-identical to the old neutral fill by construction, rather than by an RGB
@@ -719,6 +759,7 @@ static bool ensure_neutral_textures()
 static bool s_tile_texture_failed_logged = false;
 static bool s_tile_pass_failed_logged = false;
 static bool s_bg_pass_failed_logged = false;
+static bool s_glow_pass_failed_logged = false;
 
 // Frees one feed's plane textures and forgets what they held. The caller must
 // already hold the graphics context.
@@ -832,6 +873,43 @@ static bool tiles_begin_pass(gs_technique_t *tech, gs_texture_t *y,
         blog(LOG_ERROR,
              "[obs-zoom-plugin] Tiles: gs_technique_begin_pass failed on the "
              "I420 technique; the wall will not draw");
+    }
+    return false;
+}
+
+// Binds one tile's halo geometry, then opens a pass on the Glow technique.
+//
+// SET BEFORE THE PASS OPENS, ONE PASS PER TILE — the same rule, and the same
+// reason, as tiles_begin_pass() above: gs_technique_begin_pass() is where
+// libobs uploads a pass's parameters (upload_parameters(),
+// libobs/graphics/effect.c:209) and nothing re-uploads them per draw call.
+//
+// Returns false when the pass could not be opened, in which case the draw must
+// be skipped: begin_pass loads the pass's shaders, so drawing after a failed
+// call runs against whatever shader was loaded last.
+static bool glow_begin_pass(gs_technique_t *tech, const GlowPassParams &p)
+{
+    gs_effect_set_color(s_tiles_effect.param_glow_color, p.color_argb);
+    struct vec2 quad_size;
+    vec2_set(&quad_size, p.quad_w, p.quad_h);
+    gs_effect_set_vec2(s_tiles_effect.param_glow_quad_size, &quad_size);
+    struct vec2 center;
+    vec2_set(&center, p.center_x, p.center_y);
+    gs_effect_set_vec2(s_tiles_effect.param_glow_tile_center, &center);
+    struct vec2 half;
+    vec2_set(&half, p.half_w, p.half_h);
+    gs_effect_set_vec2(s_tiles_effect.param_glow_tile_half, &half);
+    gs_effect_set_float(s_tiles_effect.param_glow_corner_radius, p.corner_radius);
+    gs_effect_set_float(s_tiles_effect.param_glow_size, p.size);
+    gs_effect_set_float(s_tiles_effect.param_glow_intensity, p.intensity);
+
+    if (gs_technique_begin_pass(tech, 0)) return true;
+
+    if (!s_glow_pass_failed_logged) {
+        s_glow_pass_failed_logged = true;
+        blog(LOG_ERROR,
+             "[obs-zoom-plugin] Tiles: gs_technique_begin_pass failed on the "
+             "Glow technique; the tile glow will not draw");
     }
     return false;
 }
@@ -959,6 +1037,106 @@ static void tiles_source_render(void *data, gs_effect_t *)
         ctx->border_rounded.load(std::memory_order_acquire)
             ? static_cast<double>(ctx->corner_radius.load(std::memory_order_acquire))
             : 0.0;
+
+    // ── The outer glow, over the background and under the tiles ──────────────
+    //
+    // Its own pass, on a quad expanded beyond each tile rect, because a tile is
+    // drawn as a quad exactly its own size — there is no canvas outside it for
+    // a halo to bleed into. The geometry, including the canvas clamping, is
+    // solve_glow_quad() (src/zoom-tile-glow.h), which is pure and unit-tested.
+    //
+    // A size of 0 skips the whole thing: no technique, no blend state, no draw.
+    // That is the no-regression guarantee for this control — a wall with the
+    // glow off costs nothing and renders byte-for-byte as it did before the
+    // control existed — so the guard is here at the top rather than inside the
+    // loop. An intensity of 0 skips it too; that one is only a cost saving,
+    // since an alpha-0 quad composites to the destination unchanged under the
+    // blend factors below.
+    const double glow_size_px =
+        static_cast<double>(ctx->glow_size.load(std::memory_order_acquire));
+    const uint32_t glow_pct = ctx->glow_intensity.load(std::memory_order_acquire);
+    if (glow_size_px > 0.0 && glow_pct > 0) {
+        const uint32_t glow_argb =
+            picker_color_to_argb(ctx->glow_color.load(std::memory_order_acquire));
+        const float glow_intensity = static_cast<float>(glow_pct) / 100.0f;
+
+        // The halo is transparent everywhere by construction, so it needs
+        // blending — and inheriting whatever OBS last set is how a bug becomes
+        // machine-dependent, exactly as for the tile pass below.
+        //
+        // The same factors as that pass, for the same reasons:
+        // SRCALPHA/INVSRCALPHA composites the halo over the background, and
+        // ONE/INVSRCALPHA for the alpha channel is what libobs's own
+        // gs_reset_blend_state() uses (graphics.c:1289-1295). With the naive
+        // SRCALPHA/INVSRCALPHA for alpha as well, destination alpha
+        // under-accumulates at every partially transparent pixel — which here
+        // is the entire halo — and the wall shows a translucent rectangle
+        // around each tile once it is filtered, nested in another scene, or
+        // routed through the colour-space-conversion texrender path.
+        //
+        // NOT additive (ONE/ONE), the other obvious choice for a glow: two
+        // overlapping halos would blow out towards white instead of staying the
+        // colour the operator picked, and overlap is explicitly allowed here.
+        //
+        // Pushed and popped, so the tile pass that follows starts from exactly
+        // the state it always did and pushes its own.
+        gs_blend_state_push();
+        gs_enable_blending(true);
+        gs_blend_function_separate(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA,
+                                   GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
+
+        gs_technique_t *glow = s_tiles_effect.tech_glow;
+        gs_technique_begin(glow);
+        for (const SnappedTileRect &r : rects) {
+            // Skipped on the same rule the tile loop below uses, so a rect too
+            // small to be drawn does not get a halo drawn around nothing.
+            if (r.width < 2 || r.height < 2) continue;
+
+            const GlowQuad q =
+                solve_glow_quad(r, glow_size_px, canvas_w, canvas_h);
+            if (!q.visible) continue;  // clamped away to nothing
+
+            // The tile's own clamped radius, not the raw setting: the halo has
+            // to follow the shape the tile is actually drawn with, and
+            // clamp_border() is what decides that.
+            const BorderParams b =
+                clamp_border(border_width_setting, corner_radius_setting,
+                             static_cast<double>(r.width),
+                             static_cast<double>(r.height));
+
+            GlowPassParams gp{};
+            gp.color_argb    = glow_argb;
+            gp.quad_w        = static_cast<float>(q.width);
+            gp.quad_h        = static_cast<float>(q.height);
+            gp.center_x      = static_cast<float>(q.center_x);
+            gp.center_y      = static_cast<float>(q.center_y);
+            gp.half_w        = static_cast<float>(q.half_width);
+            gp.half_h        = static_cast<float>(q.half_height);
+            gp.corner_radius = static_cast<float>(b.radius);
+            gp.size          = static_cast<float>(glow_size_px);
+            gp.intensity     = glow_intensity;
+
+            // break, not continue: every tile opens the same pass on the same
+            // technique, so a failure here fails for all of them, and retrying
+            // it once per tile would only repeat the same call nine times a
+            // frame. The tiles loop below uses continue because each of its
+            // passes binds different textures.
+            if (!glow_begin_pass(glow, gp)) break;
+            gs_matrix_push();
+            gs_matrix_translate3f(static_cast<float>(q.x),
+                                  static_cast<float>(q.y), 0.0f);
+            // No texture: the halo is generated from the distance field alone,
+            // and gs_draw_sprite() with a null texture and an explicit size
+            // gives the 0..1 UVs the shader needs (gs_draw_quadf(),
+            // libobs/graphics/graphics.c:1039-1078). The background fill above
+            // draws the same way.
+            gs_draw_sprite(nullptr, 0, q.width, q.height);
+            gs_matrix_pop();
+            gs_technique_end_pass(glow);
+        }
+        gs_technique_end(glow);
+        gs_blend_state_pop();
+    }
 
     // Rounded corners make a tile transparent at its corners, so the background
     // drawn above has to show through them. That needs alpha blending, and
@@ -1129,6 +1307,11 @@ static constexpr const char *PROP_BORDER_WIDTH  = "border_width";
 static constexpr const char *PROP_BORDER_COLOR  = "border_color";
 static constexpr const char *PROP_BORDER_SHAPE  = "border_shape";
 static constexpr const char *PROP_CORNER_RADIUS = "corner_radius";
+// Outer glow. Size 0 is off, which is the default, so the other two are inert
+// until the operator moves it.
+static constexpr const char *PROP_GLOW_SIZE      = "glow_size";
+static constexpr const char *PROP_GLOW_COLOR     = "glow_color";
+static constexpr const char *PROP_GLOW_INTENSITY = "glow_intensity";
 // Tile shape: a preset, plus the ratio the Custom entry reveals. Two keys
 // rather than one so switching to a preset and back keeps the ratio the
 // operator typed, exactly as the corner radius survives a switch to Square.
@@ -1293,6 +1476,27 @@ static void tiles_source_update(void *data, obs_data_t *settings)
     ctx->border_rounded.store(
         obs_data_get_int(settings, PROP_BORDER_SHAPE) ==
             static_cast<long long>(TileBorderShape::Rounded),
+        std::memory_order_release);
+
+    // The outer glow, on the same clamp discipline. The size is NOT bounded
+    // against the gutter or the margin: a halo wider than half the gutter
+    // merges with its neighbour and one wider than the margin clips at the
+    // canvas edge, and both are the operator's number rendered honestly rather
+    // than silently overridden. The only bound is the slider's own, applied
+    // here so a hand-edited scene file cannot ask for a quad the size of a
+    // stadium. solve_glow_quad() clamps the resulting rect to the canvas.
+    const int64_t raw_glow_size = obs_data_get_int(settings, PROP_GLOW_SIZE);
+    const int64_t raw_glow_pct  = obs_data_get_int(settings, PROP_GLOW_INTENSITY);
+    ctx->glow_size.store(
+        static_cast<uint32_t>(std::min<int64_t>(
+            std::max<int64_t>(raw_glow_size, 0), kMaxGlowSize)),
+        std::memory_order_release);
+    ctx->glow_intensity.store(
+        static_cast<uint32_t>(std::min<int64_t>(
+            std::max<int64_t>(raw_glow_pct, 0), kMaxGlowIntensity)),
+        std::memory_order_release);
+    ctx->glow_color.store(
+        static_cast<uint32_t>(obs_data_get_int(settings, PROP_GLOW_COLOR)),
         std::memory_order_release);
 
     // Tile shape and spacing. resolve_tile_aspect() already refuses a ratio of
@@ -1571,6 +1775,14 @@ static void tiles_source_get_defaults(obs_data_t *settings)
     obs_data_set_default_int(settings, PROP_BORDER_SHAPE,
                              static_cast<long long>(TileBorderShape::Square));
     obs_data_set_default_int(settings, PROP_CORNER_RADIUS, 16);
+    // Glow size 0: the glow is off, and the draw path skips the pass entirely
+    // at 0, so a scene saved before this control existed renders byte-for-byte
+    // as it did. The colour and intensity defaults are only what the operator
+    // sees when they first move the size off zero — white at full strength,
+    // which is the soft light halo the reference gallery has.
+    obs_data_set_default_int(settings, PROP_GLOW_SIZE, 0);
+    obs_data_set_default_int(settings, PROP_GLOW_COLOR, 0xFFFFFFFF);
+    obs_data_set_default_int(settings, PROP_GLOW_INTENSITY, 100);
     // 16:9 tiles and a canvas_height/135 gutter and margin: exactly what the
     // wall was hard-coded to before these controls existed, so a scene saved
     // before them renders byte-for-byte as it did. The spacing default is a
@@ -1723,6 +1935,29 @@ static obs_properties_t *tiles_source_get_properties(void *data)
         obs_module_text("CoreVideoTiles.CornerRadius"),
         0, static_cast<int>(kMaxCornerRadius), 1);
 
+    // Outer glow. Size 0 is "no glow", which is the default, so the colour and
+    // intensity are inert until the operator moves the size off zero — the same
+    // arrangement as the border width above.
+    //
+    // Left visible rather than hidden behind a modified callback (as the corner
+    // radius and the custom ratio are): those two are meaningless under the
+    // setting they hang off, whereas a glow colour chosen before the size is
+    // raised is a perfectly reasonable order to work in, and hiding the
+    // controls would make the feature hard to find.
+    //
+    // Deliberately not clamped against the gutter or the margin. A halo wider
+    // than half the gap merges with its neighbour into a wash and one wider
+    // than the margin clips at the canvas edge; both are legitimate small and
+    // obviously wrong large, and that is a judgement to make by eye.
+    obs_properties_add_int_slider(props, PROP_GLOW_SIZE,
+        obs_module_text("CoreVideoTiles.GlowSize"),
+        0, static_cast<int>(kMaxGlowSize), 1);
+    obs_properties_add_color(props, PROP_GLOW_COLOR,
+        obs_module_text("CoreVideoTiles.GlowColor"));
+    obs_properties_add_int_slider(props, PROP_GLOW_INTENSITY,
+        obs_module_text("CoreVideoTiles.GlowIntensity"),
+        0, static_cast<int>(kMaxGlowIntensity), 1);
+
     // Per-slot left/right crop, for reframing a badly-framed guest without
     // touching the grid. Eighteen sliders inline would swamp a dialog that
     // already carries thirteen choosers, so they go in a collapsible group —
@@ -1834,5 +2069,6 @@ void zoom_supersource_unload_gfx()
     s_tile_texture_failed_logged = false;
     s_tile_pass_failed_logged = false;
     s_bg_pass_failed_logged = false;
+    s_glow_pass_failed_logged = false;
     tiles_effect_destroy(s_tiles_effect);
 }

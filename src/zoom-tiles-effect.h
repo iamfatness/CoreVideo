@@ -22,9 +22,22 @@ struct TilesEffect {
     gs_eparam_t    *param_crop_uv       = nullptr;
     gs_technique_t *tech_solid  = nullptr;
     gs_eparam_t    *param_color = nullptr;
+    // The outer glow: a separate technique drawn before the tiles, on a quad
+    // expanded beyond the tile rect. Its uniforms are per-tile for exactly the
+    // same reason the border's are, and have to be set before the tile's
+    // gs_technique_begin_pass() — see glow_begin_pass().
+    gs_technique_t *tech_glow                = nullptr;
+    gs_eparam_t    *param_glow_color         = nullptr;
+    gs_eparam_t    *param_glow_quad_size     = nullptr;
+    gs_eparam_t    *param_glow_tile_center   = nullptr;
+    gs_eparam_t    *param_glow_tile_half     = nullptr;
+    gs_eparam_t    *param_glow_corner_radius = nullptr;
+    gs_eparam_t    *param_glow_size          = nullptr;
+    gs_eparam_t    *param_glow_intensity     = nullptr;
 
     bool valid() const {
-        return effect != nullptr && tech_i420 != nullptr && tech_solid != nullptr;
+        return effect != nullptr && tech_i420 != nullptr &&
+               tech_solid != nullptr && tech_glow != nullptr;
     }
 };
 

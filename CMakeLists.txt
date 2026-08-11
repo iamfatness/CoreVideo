@@ -843,6 +843,23 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoTileShape
              COMMAND CoreVideoTileShapeTest)
 
+    # The outer glow's quad geometry: a tile rect expanded by the glow size and
+    # clamped to the canvas. The clamping is the point — a tile against the
+    # canvas edge produces an expanded rect that runs off it, and the tile's
+    # position inside the clamped quad is what keeps the halo registered against
+    # the tile rather than sliding by however much was clipped.
+    # zoom-tile-grid.cpp is needed because the invariant sweep at the end runs
+    # over real solved walls via solve_tile_grid / snap_tile_grid_even.
+    add_executable(CoreVideoTileGlowTest
+        tests/tile-glow-test.cpp
+        src/zoom-tile-grid.cpp
+    )
+    target_include_directories(CoreVideoTileGlowTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTileGlow
+             COMMAND CoreVideoTileGlowTest)
+
     # Retry pacing for the tiles silent-slot sweep: the sweep interval and the
     # per-slot exponential backoff / attempt cap that stop an unbounded
     # renderer create-destroy loop in the engine.

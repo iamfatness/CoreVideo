@@ -145,3 +145,74 @@ technique Solid
         pixel_shader  = PSSolid(vert_in);
     }
 }
+
+// ── Outer glow ───────────────────────────────────────────────────────────────
+// A soft halo bleeding outward from each tile into the background.
+//
+// This is a SEPARATE PASS, drawn BEFORE the tiles, on a quad expanded beyond
+// the tile rect — not an extension of PSI420. Two reasons, both load-bearing.
+// A tile is drawn as a quad exactly its own size, so there is no canvas outside
+// it for a halo to bleed into. And PSI420 carries the parity-verified BT.709
+// conversion and the crop_uv correction, which are verified twice over and not
+// worth disturbing for an effect that can live beside them.
+//
+// Draw order is: background colour -> background source -> glow -> tiles.
+//
+// All per-tile values, with the same upload rule as the border uniforms above:
+// libobs uploads a pass's parameters inside gs_technique_begin_pass() and does
+// not re-upload them per draw, so every one of these must be set BEFORE that
+// tile's begin_pass. glow_begin_pass() in src/zoom-supersource.cpp is the one
+// place that does it.
+uniform float4 glow_color;         // halo colour; only .rgb is used
+uniform float2 glow_quad_size;     // the expanded quad, in canvas pixels
+uniform float2 glow_tile_center;   // the tile's centre, in quad-local pixels
+uniform float2 glow_tile_half;     // half the TILE's size — not the quad's
+uniform float  glow_corner_radius; // canvas pixels; matches the tile's
+uniform float  glow_size;          // falloff distance in canvas pixels; > 0
+uniform float  glow_intensity;     // 0..1, the alpha at the tile's own edge
+
+float4 PSGlow(VertInOut vert_in) : TARGET
+{
+    // The glow quad is drawn with gs_draw_sprite(), whose UVs run 0..1
+    // (build_sprite_norm(), libobs/graphics/graphics.c:992-1000) — so unlike
+    // PSI420 there is no crop to undo here. Scaling by the quad's size gives
+    // canvas pixels from its origin; subtracting the tile's centre puts the
+    // origin where rounded_rect_sd() wants it.
+    //
+    // glow_tile_center is NOT half the quad. Once the quad is clipped by the
+    // canvas edge the tile is no longer centred in it, and using the quad's
+    // centre would slide every halo in the outer row and column off its tile by
+    // whatever was clipped. solve_glow_quad() (src/zoom-tile-glow.h) computes
+    // it, and tests/tile-glow-test.cpp pins it.
+    float2 p = vert_in.uv * glow_quad_size - glow_tile_center;
+
+    // Evaluated against the INNER tile rect: distance <= 0 is inside the tile,
+    // and the halo falls off from 0 outward. Same corner radius as the tile, so
+    // the halo follows a rounded tile rather than hugging a square one.
+    float d = rounded_rect_sd(p, glow_tile_half, glow_corner_radius);
+
+    // max() rather than a branch on the size: the draw path skips this pass
+    // entirely at size 0, so this only keeps the divide defined.
+    float t = saturate(d / max(glow_size, 0.0001));
+
+    // (1 - t)^2, not a straight ramp: strongest against the tile edge and
+    // tapering away to nothing. A linear ramp ends on a constant gradient,
+    // which reads as a visible band at the outer edge of the halo rather than
+    // as light falling off.
+    float falloff = (1.0 - t) * (1.0 - t);
+
+    // Straight (non-premultiplied) alpha, matching the blend factors the draw
+    // path sets. glow_color.a is deliberately unused: obs_properties_add_color
+    // does not expose an alpha channel, and the strength of the halo is what
+    // the intensity control is for.
+    return float4(glow_color.rgb, falloff * glow_intensity);
+}
+
+technique Glow
+{
+    pass
+    {
+        vertex_shader = VSDefault(vert_in);
+        pixel_shader  = PSGlow(vert_in);
+    }
+}

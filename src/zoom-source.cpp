@@ -1,4 +1,5 @@
 #include "zoom-source.h"
+#include "shm-resubscribe.h"
 #include "speaker-director.h"
 #include "zoom-engine-client.h"
 #include "zoom-iso-recorder.h"
@@ -732,6 +733,15 @@ void ZoomSource::subscribe()
     switch (mode) {
     case AssignmentMode::SpotlightIndex: {
         const uint32_t slot = spotlight_slot.load(std::memory_order_acquire);
+        // Release BEFORE the subscribe reaches the engine, every time, not just
+        // when we can see the target change. Any subscribe for a uuid the
+        // engine already holds can make it destroy and rebuild that uuid's
+        // SourceTarget — whose SHM generation then restarts at the legacy
+        // unsuffixed name — and a live mapping of ours blocks the recreate.
+        // See shm-resubscribe.h. Cost when the engine treats the subscribe as a
+        // no-op is one remap on the next frame event; the on-air cost of
+        // getting this wrong is a white flash on every speaker change.
+        release_video_shm();
         ZoomEngineClient::instance().subscribe_spotlight(source_uuid, slot);
         // Use a sentinel so on_roster_changed re-subscribes only when we
         // actually want to change the dispatch.
@@ -741,6 +751,7 @@ void ZoomSource::subscribe()
         return;
     }
     case AssignmentMode::ScreenShare:
+        release_video_shm();  // before the subscribe — see shm-resubscribe.h
         ZoomEngineClient::instance().subscribe_screenshare(source_uuid);
         m_current_subscription_id = 0xFFFFFFFFu;
         m_last_subscribe_ns.store(os_gettime_ns(), std::memory_order_release);
@@ -790,10 +801,12 @@ void ZoomSource::subscribe()
             m_current_subscription_id = 0;
             return;
         }
-        if (target != 0)
+        if (target != 0) {
+            release_video_shm();  // before the subscribe — see shm-resubscribe.h
             ZoomEngineClient::instance().subscribe(source_uuid, target,
                                                    isolate_audio, audience_audio,
                                                    resolution);
+        }
         blog(LOG_INFO,
              "[obs-zoom-plugin] Zoom source subscription: source=%s uuid=%s participant_id=%u",
              output_name().c_str(), source_uuid.c_str(), target);
@@ -1131,7 +1144,13 @@ void ZoomSource::maybe_update_director_subscription()
     }
 
     ZoomEngineClient::instance().unsubscribe(m_director_preview_uuid);
-    shm_region_destroy(m_director_preview_shm);
+    // Between the unsubscribe and the subscribe, so the preview region's name
+    // is free when the engine rebuilds it (shm-resubscribe.h). This already
+    // dropped the mapping; it now also forgets the generation and takes m_mtx
+    // while doing so, because on_director_preview_frame() reads this same
+    // region under m_mtx. The lock is scoped to the release alone — m_mtx is
+    // never held across the engine writes either side of it.
+    release_director_preview_shm();
     ZoomEngineClient::instance().subscribe(m_director_preview_uuid, directed_id,
                                            isolate_audio, audience_audio,
                                            resolution);
@@ -1310,6 +1329,21 @@ bool ZoomSource::output_video_from_shared_memory(
             m_current_subscription_id.load(std::memory_order_acquire);
         if (previous_id != resolved_participant_id) {
             ZoomEngineClient::instance().unsubscribe(source_uuid);
+            // The on-air defect (2026-08-10): this cut re-points source_uuid at
+            // a new participant, so the engine destroys and rebuilds that
+            // uuid's SourceTarget and its SHM region — but we went on holding
+            // the old mapping, which blocks the recreate at a larger size and
+            // leaves the read side on a region that no longer matches. That is
+            // why participants flashed white on every speaker change. Release
+            // first; see shm-resubscribe.h.
+            //
+            // _locked: our caller (on_director_preview_frame) holds m_mtx for
+            // the whole call. This only unmaps memory — no engine IPC — so it
+            // adds nothing blocking under the lock. The region being released
+            // is m_video_shm, which is NOT the one this frame was read from
+            // (that is m_director_preview_shm), so the frame just published
+            // above is unaffected.
+            release_video_shm_locked();
             ZoomEngineClient::instance().subscribe(source_uuid,
                                                    resolved_participant_id,
                                                    isolate_audio,
@@ -1574,12 +1608,32 @@ void ZoomSource::clear_preview_cb()
 void ZoomSource::release_shared_memory()
 {
     std::lock_guard<std::mutex> lk(m_mtx);
-    shm_region_destroy(m_video_shm);
-    shm_region_destroy(m_director_preview_shm);
-    shm_region_destroy(m_audio_shm);
-    m_video_shm_gen = 0;
-    m_director_preview_shm_gen = 0;
-    m_audio_shm_gen = 0;
+    shm_release_for_resubscribe(m_video_shm, m_video_shm_gen);
+    shm_release_for_resubscribe(m_director_preview_shm, m_director_preview_shm_gen);
+    shm_release_for_resubscribe(m_audio_shm, m_audio_shm_gen);
+}
+
+// Only the video mapping. The audio region is NOT released here on purpose:
+// EngineAudio::subscribe_if_needed() updates an existing AudioTarget in place
+// rather than destroying it (engine/src/engine-audio.cpp), so an audio region
+// is never recreated under a re-subscribe and dropping the mapping would only
+// risk a gap in a live mix.
+void ZoomSource::release_video_shm_locked()
+{
+    shm_release_for_resubscribe(m_video_shm, m_video_shm_gen);
+}
+
+void ZoomSource::release_video_shm()
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    release_video_shm_locked();
+}
+
+void ZoomSource::release_director_preview_shm()
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    shm_release_for_resubscribe(m_director_preview_shm,
+                                m_director_preview_shm_gen);
 }
 
 static const char *zoom_source_get_name(void *)

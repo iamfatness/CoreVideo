@@ -624,6 +624,22 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoShmFrameReader
              COMMAND CoreVideoShmFrameReaderTest)
 
+    # Release-before-resubscribe: the rule that stops a re-pointed source_uuid
+    # from being read through a mapping of the region the engine just rebuilt
+    # (the 2026-08-10 white-flash-on-speaker-change incident). Uses real shared
+    # memory, so it needs librt for shm_open on Linux.
+    add_executable(CoreVideoShmResubscribeTest
+        tests/shm-resubscribe-test.cpp
+    )
+    target_include_directories(CoreVideoShmResubscribeTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    if(NOT WIN32 AND NOT APPLE)
+        target_link_libraries(CoreVideoShmResubscribeTest PRIVATE rt)
+    endif()
+    add_test(NAME CoreVideoShmResubscribe
+             COMMAND CoreVideoShmResubscribeTest)
+
     # Centralized Zoom auth/join decision path + error catalog (issue #89).
     # Header-only logic; no Qt/OBS/SDK dependencies, no secrets.
     add_executable(CoreVideoJoinDecisionTest

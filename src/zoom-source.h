@@ -113,6 +113,15 @@ struct ZoomSource {
 private:
     void output_placeholder_frame(bool color_bars);
     void maybe_update_director_subscription();
+    // Drop one feed's SHM read mapping so the engine can recreate that region.
+    // MUST run before the subscribe that re-points the uuid reaches the engine
+    // — see shm-resubscribe.h for why this is a precondition and not cleanup.
+    // The plain forms take m_mtx (and must therefore not be called with it
+    // held); _locked is for callers already inside it, such as the frame
+    // callbacks. Neither talks to the engine, so neither blocks on IPC.
+    void release_video_shm();
+    void release_video_shm_locked();
+    void release_director_preview_shm();
     bool output_video_from_shared_memory(const std::string &uuid,
                                          ShmRegion &video_shm,
                                          uint32_t &video_shm_gen,

@@ -860,6 +860,20 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoTileGlow
              COMMAND CoreVideoTileGlowTest)
 
+    # Which missing effect handles are fatal and which only cost a feature.
+    # Pure policy — no libobs — because the consequence is operational, not
+    # graphical: the DLL and data/effects/corevideo-tiles.effect install
+    # independently, and treating a stale effect file as fatal would cost a live
+    # operator the whole wall rather than the one feature the old file predates.
+    add_executable(CoreVideoTilesEffectPolicyTest
+        tests/tiles-effect-policy-test.cpp
+    )
+    target_include_directories(CoreVideoTilesEffectPolicyTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTilesEffectPolicy
+             COMMAND CoreVideoTilesEffectPolicyTest)
+
     # Retry pacing for the tiles silent-slot sweep: the sweep interval and the
     # per-slot exponential backoff / attempt cap that stop an unbounded
     # renderer create-destroy loop in the engine.

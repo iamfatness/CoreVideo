@@ -1,6 +1,8 @@
 // src/zoom-tiles-effect.h
 #pragma once
 
+#include "zoom-tiles-effect-policy.h"
+
 #include <graphics/graphics.h>
 
 // The plugin-supplied effect used to draw tiles. Loaded once at module load
@@ -35,10 +37,48 @@ struct TilesEffect {
     gs_eparam_t    *param_glow_size          = nullptr;
     gs_eparam_t    *param_glow_intensity     = nullptr;
 
-    bool valid() const {
-        return effect != nullptr && tech_i420 != nullptr &&
-               tech_solid != nullptr && tech_glow != nullptr;
+    // Decided once at load by classify_tiles_effect() and cached, rather than
+    // re-derived per frame: valid() is on the 60 Hz draw path.
+    bool wall_drawable = false;
+    bool glow_drawable = false;
+
+    // Which handles resolved, in the form the policy header classifies. Kept
+    // beside the members it reads so the two cannot drift apart unnoticed.
+    TilesEffectHandles handles() const {
+        TilesEffectHandles h;
+        h.effect                  = effect != nullptr;
+        h.tech_i420               = tech_i420 != nullptr;
+        h.param_y                 = param_y != nullptr;
+        h.param_u                 = param_u != nullptr;
+        h.param_v                 = param_v != nullptr;
+        h.param_border_color      = param_border_color != nullptr;
+        h.param_border_width      = param_border_width != nullptr;
+        h.param_corner_radius     = param_corner_radius != nullptr;
+        h.param_tile_size         = param_tile_size != nullptr;
+        h.param_crop_uv           = param_crop_uv != nullptr;
+        h.tech_solid              = tech_solid != nullptr;
+        h.param_color             = param_color != nullptr;
+        h.tech_glow               = tech_glow != nullptr;
+        h.param_glow_color        = param_glow_color != nullptr;
+        h.param_glow_quad_size    = param_glow_quad_size != nullptr;
+        h.param_glow_tile_center  = param_glow_tile_center != nullptr;
+        h.param_glow_tile_half    = param_glow_tile_half != nullptr;
+        h.param_glow_corner_radius = param_glow_corner_radius != nullptr;
+        h.param_glow_size         = param_glow_size != nullptr;
+        h.param_glow_intensity    = param_glow_intensity != nullptr;
+        return h;
     }
+
+    // "The wall can be drawn." NOT "everything resolved" — see
+    // zoom-tiles-effect-policy.h. A stale effect file beside a new DLL must
+    // cost the operator the feature it predates, never the whole wall.
+    bool valid() const { return effect != nullptr && wall_drawable; }
+
+    // "The outer glow pass can be drawn." False leaves the wall intact with the
+    // glow skipped; the draw path must check this before touching any
+    // param_glow_* handle, because a partially-set glow pass would inherit
+    // whatever the previous pass left in the unset register.
+    bool glow_valid() const { return effect != nullptr && glow_drawable; }
 };
 
 // Compiles data/effects/corevideo-tiles.effect and resolves its technique and

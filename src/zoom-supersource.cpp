@@ -760,6 +760,12 @@ static bool s_tile_texture_failed_logged = false;
 static bool s_tile_pass_failed_logged = false;
 static bool s_bg_pass_failed_logged = false;
 static bool s_glow_pass_failed_logged = false;
+// The operator asked for a glow that the loaded effect cannot draw — i.e. a
+// stale corevideo-tiles.effect beside a new DLL. tiles_effect_load() already
+// logged the full detail once at module load; this fires at the moment the
+// operator actually notices (they moved the size off zero and saw nothing), so
+// it points back at that line rather than repeating it every frame.
+static bool s_glow_unavailable_logged = false;
 
 // Frees one feed's plane textures and forgets what they held. The caller must
 // already hold the graphics context.
@@ -1055,7 +1061,26 @@ static void tiles_source_render(void *data, gs_effect_t *)
     const double glow_size_px =
         static_cast<double>(ctx->glow_size.load(std::memory_order_acquire));
     const uint32_t glow_pct = ctx->glow_intensity.load(std::memory_order_acquire);
-    if (glow_size_px > 0.0 && glow_pct > 0) {
+    const bool glow_wanted = glow_size_px > 0.0 && glow_pct > 0;
+
+    // The third gate, and unlike the two above it this one is not a cost
+    // saving: a stale corevideo-tiles.effect beside a new DLL resolves the Glow
+    // technique or one of its uniforms to nullptr, and the wall must still
+    // draw. See zoom-tiles-effect-policy.h. Gating the whole block — rather
+    // than checking inside glow_begin_pass() — means no param_glow_* handle is
+    // touched at all, which matters because a pass opened with one uniform
+    // unset draws it from whatever the previous pass left in that register.
+    if (glow_wanted && !s_tiles_effect.glow_valid() &&
+        !s_glow_unavailable_logged) {
+        s_glow_unavailable_logged = true;
+        blog(LOG_ERROR,
+             "[obs-zoom-plugin] Tiles: the outer glow is switched on but the "
+             "loaded effect cannot draw it — the plugin and its data directory "
+             "are out of step (see the effect-load error at startup). The rest "
+             "of the wall is unaffected.");
+    }
+
+    if (glow_wanted && s_tiles_effect.glow_valid()) {
         const uint32_t glow_argb =
             picker_color_to_argb(ctx->glow_color.load(std::memory_order_acquire));
         const float glow_intensity = static_cast<float>(glow_pct) / 100.0f;
@@ -2070,5 +2095,6 @@ void zoom_supersource_unload_gfx()
     s_tile_pass_failed_logged = false;
     s_bg_pass_failed_logged = false;
     s_glow_pass_failed_logged = false;
+    s_glow_unavailable_logged = false;
     tiles_effect_destroy(s_tiles_effect);
 }

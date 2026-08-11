@@ -72,6 +72,14 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
   Previously the engine process stayed alive but unauthenticated and every
   further request was silently ignored. The error now names the other Zoom SDK
   instance as the cause and says what to do about it.
+- **An out-of-date effect file no longer blanks the whole Tiles wall.** The
+  Tiles wall is drawn by a shader that ships beside the plugin, and an install
+  that updated the plugin without updating its data folder left the two out of
+  step. The wall then refused to draw anything at all — a black source in the
+  middle of a show — because one optional part of the newer shader was missing.
+  The wall now draws everything it still can: tiles, background, borders and
+  crop are unaffected, only the tile glow is switched off, and the log says
+  exactly which file is out of date and what to reinstall.
 
 ### Added
 - **Tile shape.** "Tile shape" sets the shape of every tile on the wall —

@@ -6,6 +6,7 @@
 #include "zoom-tile-retry.h"
 #include "zoom-tile-slot.h"
 #include "zoom-tile-texture.h"
+#include "zoom-tiles-background.h"
 #include "zoom-tiles-effect.h"
 
 #include <obs-module.h>
@@ -131,6 +132,12 @@ struct tiles_source {
     // Operator-chosen background fill for the wall's gutters, margins and any
     // uncovered canvas. Same atomic-not-mutex reasoning as canvas_width above.
     std::atomic<uint32_t> bg_color{0xFF808080};
+    // Optional other OBS source drawn over the background colour and under the
+    // tiles. Carries its own leaf lock (see zoom-tiles-background.h) rather
+    // than living under `mutex`: the graphics thread reads it every frame, and
+    // selecting a background calls into libobs, which must never happen under
+    // a lock the graphics thread takes.
+    TilesBackground background;
 
     // Serializes whole plan-and-execute cycles (update/show/hide/destroy) so
     // engine IPC happens outside `mutex` yet still in a well-defined order.
@@ -784,6 +791,13 @@ static void tiles_source_render(void *data, gs_effect_t *)
     }
     gs_technique_end(solid);
 
+    // The operator's background source, over the colour and under the tiles.
+    // Outside the technique above on purpose: it renders through its own
+    // source's effect, so it cannot be drawn inside another technique's pass.
+    // No-op when nothing is selected, which is why an unset background leaves
+    // the colour-only behaviour byte-for-byte unchanged.
+    ctx->background.render(canvas_w, canvas_h);
+
     gs_technique_t *tech = s_tiles_effect.tech_i420;
     gs_technique_begin(tech);
 
@@ -867,6 +881,7 @@ static const char *tiles_source_get_name(void *)
 // properties builder because tiles_source_update reads the same keys.
 static constexpr const char *PROP_FILL_MODE = "fill_mode";
 static constexpr const char *PROP_MAX_TILES = "max_tiles";
+static constexpr const char *PROP_BG_SOURCE = "bg_source";
 static constexpr std::size_t kMaxTileSlots  = 9;
 static constexpr std::size_t kMaxExcludes   = 3;
 
@@ -961,6 +976,14 @@ static void tiles_source_update(void *data, obs_data_t *settings)
     ctx->bg_color.store(static_cast<uint32_t>(obs_data_get_int(settings, "bg_color")),
                         std::memory_order_release);
 
+    // Deliberately outside every lock this function takes: set_source calls
+    // into libobs (obs_source_add_active_child walks the source tree,
+    // inc/dec_showing fire signals), and ctx->mutex is taken by the graphics
+    // thread on every frame. A refused or unresolved selection is logged
+    // inside set_source and simply leaves the previous background in place.
+    ctx->background.set_source(ctx->source,
+                               obs_data_get_string(settings, PROP_BG_SOURCE));
+
     {
         std::lock_guard<std::mutex> lock(ctx->mutex);
         ctx->fill_params = std::move(params);
@@ -989,6 +1012,33 @@ static void *tiles_source_create(obs_data_t *settings, obs_source_t *source)
     return ctx;
 }
 
+// Restoring a scene collection creates every source before it loads any of
+// them (obs_load_sources, libobs/obs.c:2406-2427), so when tiles_source_update
+// runs from create, the background named in the saved settings usually does
+// not exist yet and set_source rightly refuses it. This second pass runs after
+// the whole collection exists, which is what makes a saved background come
+// back on restart rather than only after the operator reopens Properties.
+static void tiles_source_load(void *data, obs_data_t *settings)
+{
+    auto *ctx = static_cast<tiles_source *>(data);
+    ctx->background.set_source(ctx->source,
+                               obs_data_get_string(settings, PROP_BG_SOURCE));
+}
+
+// Lets libobs see the background when it walks the source tree. This is not
+// bookkeeping: obs_source_enum_full_tree returns immediately for a source with
+// no enum_active_sources (libobs/obs-source.c:4663), so without this the cycle
+// check inside obs_source_add_active_child cannot see past a tiles source —
+// two tiles sources set as each other's background would both be accepted and
+// then recurse until the render thread's stack ran out.
+static void tiles_source_enum_active_sources(void *data,
+                                             obs_source_enum_proc_t enum_callback,
+                                             void *param)
+{
+    auto *ctx = static_cast<tiles_source *>(data);
+    ctx->background.enum_active(ctx->source, enum_callback, param);
+}
+
 static void tiles_source_destroy(void *data)
 {
     auto *ctx = static_cast<tiles_source *>(data);
@@ -997,6 +1047,11 @@ static void tiles_source_destroy(void *data)
         ctx->gate->alive = false;
     }
     ZoomEngineClient::instance().remove_roster_callback(ctx);
+
+    // Before the feeds are retired, and before ctx is freed: this is the one
+    // dec_showing that balances the inc_showing taken at selection, and it
+    // must not run after `background` has been destructed.
+    ctx->background.clear(ctx->source);
 
     // Scoped so both locks are released before ctx (which owns them) is freed.
     {
@@ -1105,6 +1160,9 @@ static void tiles_source_get_defaults(obs_data_t *settings)
     // 0xFF808080 — the neutral grey the CPU compositor used, so an existing
     // scene looks unchanged until the operator picks a colour.
     obs_data_set_default_int(settings, "bg_color", 0xFF808080);
+    // Empty = no background source, i.e. the colour alone, which is exactly
+    // what every scene saved before this control existed already does.
+    obs_data_set_default_string(settings, PROP_BG_SOURCE, "");
     obs_data_set_default_int(settings, "canvas_width",  1920);
     obs_data_set_default_int(settings, "canvas_height", 1080);
     obs_data_set_default_int(settings, PROP_FILL_MODE,
@@ -1161,6 +1219,28 @@ static obs_properties_t *tiles_source_get_properties(void *data)
     obs_properties_add_color(props, "bg_color",
         obs_module_text("CoreVideoTiles.BackgroundColor"));
 
+    // Any other OBS source, drawn over the colour and under the tiles. The
+    // tiles source itself is in this list — obs_enum_sources enumerates every
+    // non-private input — and picking it is refused by the cycle check in
+    // TilesBackground::set_source rather than hidden here, because the same
+    // refusal has to hold for a name that arrives from a hand-edited scene
+    // file or obs-websocket, not just from this dropdown.
+    obs_property_t *bg = obs_properties_add_list(props, PROP_BG_SOURCE,
+        obs_module_text("CoreVideoTiles.BackgroundSource"),
+        OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+    obs_property_list_add_string(bg, obs_module_text("CoreVideoTiles.BackgroundNone"), "");
+    obs_enum_sources([](void *param, obs_source_t *src) -> bool {
+        auto *list = static_cast<obs_property_t *>(param);
+        const uint32_t flags = obs_source_get_output_flags(src);
+        // Video-producing sources only: an audio-only source as a background
+        // is a control that can do nothing.
+        if (flags & OBS_SOURCE_VIDEO) {
+            const char *n = obs_source_get_name(src);
+            if (n) obs_property_list_add_string(list, n, n);
+        }
+        return true;
+    }, bg);
+
     obs_properties_add_int(props, "canvas_width",
         obs_module_text("CoreVideoTiles.CanvasWidth"),
         kMinCanvasW, kMaxCanvasW, 2);
@@ -1203,6 +1283,8 @@ void zoom_supersource_register()
     info.create         = tiles_source_create;
     info.destroy        = tiles_source_destroy;
     info.update         = tiles_source_update;
+    info.load           = tiles_source_load;
+    info.enum_active_sources = tiles_source_enum_active_sources;
     info.show           = tiles_source_show;
     info.hide           = tiles_source_hide;
     info.get_width      = tiles_source_get_width;

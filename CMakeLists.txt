@@ -641,6 +641,24 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoShmResubscribe
              COMMAND CoreVideoShmResubscribeTest)
 
+    # Monotonic SHM region generations (src/shm-generation.h): the counter that
+    # keeps a resize off a name another process may still map must survive the
+    # per-source target struct being destroyed on a re-subscribe. Third
+    # production incident from that one defect. Threads for the concurrency
+    # case, real shared memory on Windows for the ACCESS_DENIED reproduction.
+    add_executable(CoreVideoShmGenerationTest
+        tests/shm-generation-test.cpp
+    )
+    target_include_directories(CoreVideoShmGenerationTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    target_link_libraries(CoreVideoShmGenerationTest PRIVATE Threads::Threads)
+    if(NOT WIN32 AND NOT APPLE)
+        target_link_libraries(CoreVideoShmGenerationTest PRIVATE rt)
+    endif()
+    add_test(NAME CoreVideoShmGeneration
+             COMMAND CoreVideoShmGenerationTest)
+
     # Centralized Zoom auth/join decision path + error catalog (issue #89).
     # Header-only logic; no Qt/OBS/SDK dependencies, no secrets.
     add_executable(CoreVideoJoinDecisionTest

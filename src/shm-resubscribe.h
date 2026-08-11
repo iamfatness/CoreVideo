@@ -10,13 +10,25 @@
 //
 // Re-subscribing the same source_uuid at a different participant makes the
 // engine run unsubscribe_locked() first (EngineVideo::subscribe,
-// engine/src/engine-video.cpp), which destroys that uuid's SourceTarget.
-// shm_gen is a member of SourceTarget (engine/src/engine-video.h), so the
-// replacement target restarts at generation 0 and its first ensure_shm()
-// creates generation 1 — which is the *legacy unsuffixed* region name (see
-// shm_region_name() in engine-ipc.h). The generation therefore runs BACKWARDS
-// (the "gen 2 -> 1" and "gen 3 -> 1" lines in the 2026-08-10 on-air log), and
-// the engine tries to create a region under a name we are still mapping.
+// engine/src/engine-video.cpp), which destroys that uuid's SourceTarget. The
+// generation counter used to be a member of SourceTarget, so the replacement
+// target restarted at generation 0 and its first ensure_shm() created
+// generation 1 — the *legacy unsuffixed* region name (see shm_region_name() in
+// engine-ipc.h). The generation therefore ran BACKWARDS (the "gen 2 -> 1" and
+// "gen 3 -> 1" lines in the 2026-08-10 on-air log) and the engine tried to
+// create a region under a name we were still mapping.
+//
+// That reset is fixed at the source: the counter now lives in a process-wide
+// table keyed by region base name (src/shm-generation.h) and survives the
+// target, so a rebuilt target moves to _g2, _g3, … instead of back to the
+// legacy name. This release is still required, and is not made redundant by
+// it:
+//
+//   * a CoreVideo plugin talks to whatever ZoomObsEngine.exe is installed
+//     beside it, including builds that predate the monotonic counter;
+//   * on POSIX the engine grows a region in place under one name, so the read
+//     side must still be told to let go;
+//   * holding a mapping we will never read again is a leak on any platform.
 //
 // A Windows named section cannot be recreated at a larger size while any
 // process still maps it: CreateFileMappingA hands back the existing, smaller

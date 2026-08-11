@@ -5,6 +5,7 @@
 #include <string>
 #include <unordered_map>
 #include "../../src/engine-ipc.h"
+#include "../../src/shm-generation.h"
 #if __has_include(<zoom_sdk_raw_data_def.h>)
 #include <zoom_sdk_raw_data_def.h>
 #else
@@ -60,7 +61,11 @@ private:
         bool isolate_audio = false;
         bool audience_audio = false;
         ShmRegion shm;
-        uint32_t shm_gen = 0; // region generation; part of the name from gen 2
+        // The generation the CURRENT region was created under; part of the name
+        // from gen 2 and published with every audio event. A record of what was
+        // published, NOT the counter — the counter survives this struct in the
+        // process-wide table (src/shm-generation.h).
+        uint32_t shm_gen = 0;
         uint64_t frame_count = 0;
         // True after an ensure_shm() failure has been surfaced as an error —
         // avoids re-emitting once per audio callback while the failure persists.

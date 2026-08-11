@@ -8,6 +8,16 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 ## [Unreleased]
 
 ### Fixed
+- **"Zoom engine could not allocate shared memory" no longer strands a source.**
+  A feed that re-pointed often enough — the Active Speaker source re-points on
+  every speaker change — could reach a state where the engine kept failing to
+  build that source's video buffer, and its frames were dropped for the rest of
+  the session. Each rebuilt buffer was asking for a name the previous one had
+  used, which Windows refuses to resize while CoreVideo still has the old one
+  open. Buffers now move to a fresh name every time they are rebuilt, for
+  video, screen share, and audio alike, so a rebuild cannot collide with a
+  buffer still in use. This was the third time this fault reached air; it is
+  fixed at the mechanism rather than at the timing that exposed it.
 - **Feeds no longer flash bright garbage when they change participant.** On
   air, every active-speaker change made the affected source flash a frame or
   two of bright colour noise before settling. Any re-point of a source — an

@@ -5,8 +5,16 @@
 // active-speaker "clean cut" re-pointed an already-subscribed source_uuid at a
 // new participant while the plugin still held its read mapping of that uuid's
 // SHM region. The engine destroys and rebuilds the SourceTarget on such a
-// re-subscribe, so its generation restarts at 1 — the legacy unsuffixed name,
-// the very name we were still mapping.
+// re-subscribe, and at the time the generation counter was a member of that
+// struct, so it restarted at 1 — the legacy unsuffixed name, the very name we
+// were still mapping.
+//
+// The engine no longer restarts the counter (src/shm-generation.h keeps it
+// process-wide, per region base name; tests/shm-generation-test.cpp pins that).
+// These tests deliberately keep exercising the same-name rebuild anyway: a
+// plugin runs against whatever engine binary is installed beside it, including
+// older ones, and on POSIX the engine grows a region in place under one name.
+// The release is what makes the read side correct in all of those shapes.
 //
 // The tests below use real shared memory (same approach as
 // shm-frame-reader-test.cpp) because the rule under test is a property of the
@@ -44,10 +52,12 @@ constexpr uint32_t kBigH     = kH * 2;
 constexpr uint32_t kBigYLen  = kBigW * kBigH;
 constexpr size_t   kBigBytes = sizeof(ShmFrameHeader) + kBigYLen + kBigYLen / 2;
 
-// Generation 1 is what a freshly created SourceTarget publishes, and it maps to
-// the legacy unsuffixed region name. A re-subscribe therefore hands us the same
-// generation we already had — which is exactly why generation comparison alone
-// cannot rescue us and the release has to be explicit.
+// Generation 1 maps to the legacy unsuffixed region name, and it is what an
+// engine that restarts its counter on every re-subscribe publishes forever.
+// Holding the generation fixed at 1 across the rebuild below is what makes
+// these tests model that engine: the read side is handed the same generation it
+// already had, which is exactly why generation comparison alone cannot rescue
+// us and the release has to be explicit.
 constexpr uint32_t kGen1 = 1;
 
 std::string unique_region_name()
@@ -222,7 +232,7 @@ bool test_reader_follows_the_rebuilt_region_after_release()
     // The fix: release before the subscribe reaches the engine.
     shm_release_for_resubscribe(reader, mapped_gen);
 
-    // The engine's replacement SourceTarget: generation restarts, so it is back
+    // The replacement SourceTarget of an engine that restarts its counter: back
     // to generation 1 and the legacy unsuffixed name, at the new participant's
     // larger size.
     shm_region_destroy(writer);

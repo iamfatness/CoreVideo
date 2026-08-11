@@ -812,6 +812,21 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoTileCrop
              COMMAND CoreVideoTileCropTest)
 
+    # Tile shape presets and the gutter/margin percentages. The exactness of
+    # the default spacing is the point: it has to reproduce the wall's shipped
+    # canvas_height / 135.0 bit-for-bit, or every existing scene reflows.
+    # zoom-tile-grid.cpp is needed because the crop registration check at the
+    # end calls solve_slot_crop, which calls solve_cover_crop.
+    add_executable(CoreVideoTileShapeTest
+        tests/tile-shape-test.cpp
+        src/zoom-tile-grid.cpp
+    )
+    target_include_directories(CoreVideoTileShapeTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTileShape
+             COMMAND CoreVideoTileShapeTest)
+
     # Retry pacing for the tiles silent-slot sweep: the sweep interval and the
     # per-slot exponential backoff / attempt cap that stop an unbounded
     # renderer create-destroy loop in the engine.

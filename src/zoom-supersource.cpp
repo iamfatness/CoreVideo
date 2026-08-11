@@ -7,6 +7,7 @@
 #include "zoom-tile-fill.h"
 #include "zoom-tile-grid.h"
 #include "zoom-tile-retry.h"
+#include "zoom-tile-shape.h"
 #include "zoom-tile-slot.h"
 #include "zoom-tile-texture.h"
 #include "zoom-tiles-background.h"
@@ -26,11 +27,32 @@
 #include <utility>
 #include <vector>
 
-// Tiles are always 16:9 (standing product rule). The operator's border is drawn
-// *inside* that rect by the shader rather than around it, so it changes what a
-// tile looks like without changing the grid the tiles were solved into — the
-// parity-verified geometry in snap_tile_grid_even() is untouched.
-static constexpr double kTileAspect = 16.0 / 9.0;
+// The tile shape and the wall's spacing are operator controls; their defaults
+// are the constants this file used to hard-code, resolved in zoom-tile-shape.h
+// and pinned bit-for-bit by tests/tile-shape-test.cpp. The operator's border is
+// drawn *inside* the tile rect by the shader rather than around it, so it
+// changes what a tile looks like without changing the grid the tiles were
+// solved into — the parity-verified geometry in snap_tile_grid_even() is
+// untouched either way.
+//
+// The tile aspect has three consumers: the grid solve, the cover-crop that
+// decides which part of a camera frame fills the resulting rect, and
+// solve_slot_crop() for the per-slot crop. Only two of them are call sites in
+// this file — the cover-crop reaches it *through* solve_slot_crop(), which
+// passes its dst_aspect straight to solve_cover_crop() (zoom-tile-crop.h:46).
+// All three must see the SAME value or the layout and the sampling disagree
+// and every tile is mis-framed, which is why tiles_source_render() reads the
+// atomic once into TileGridParams and the crop then takes it from there rather
+// than loading it a second time.
+
+// Custom ratio bounds, matching the property's own range. Enforced against
+// scene data as well, since obs_data_get_double will hand over anything.
+static constexpr double kMinCustomAspect = 0.1;
+static constexpr double kMaxCustomAspect = 10.0;
+// Gutter and margin, as a percentage of canvas height. The upper bound is the
+// slider's; resolve_spacing_px() bounds the resulting pixels against the canvas
+// as well, for hand-edited scene files.
+static constexpr double kMaxSpacingPct = 10.0;
 // Border property bounds. Enforced against scene data as well as the sliders:
 // obs_data_get_int returns int64 and scene files are hand-editable. These only
 // bound the *setting*; clamp_border() then bounds it against the actual tile.
@@ -45,8 +67,6 @@ static constexpr std::size_t kMaxTileSlots = 9;
 // zoom-tile-crop.h stays a defensive backstop for hand-edited scene files
 // rather than something the sliders reach.
 static constexpr int64_t kMaxSlotCropPct = 45;
-// Gutter and margin scale with the canvas: 8 px at 1080p.
-static constexpr double kSpacingDivisor = 135.0;
 // Neutral fill for the background and for tiles with no frame yet.
 static constexpr uint8_t kNeutralY = 0x80;
 static constexpr uint8_t kNeutralUV = 0x80;
@@ -167,6 +187,17 @@ struct tiles_source {
     std::atomic<uint32_t> border_width{0};
     std::atomic<bool>     border_rounded{false};
     std::atomic<uint32_t> corner_radius{16};
+    // The wall's geometry: tile shape (width / height, already resolved from
+    // the preset and the custom ratio) and the gutter and margin as
+    // percentages of canvas height. Same atomic-not-mutex reasoning as
+    // bg_color above — the graphics thread reads all three every frame.
+    //
+    // Stored resolved rather than as (preset, ratio) so the draw path never
+    // has to know the preset numbering, and so the fallback for an unusable
+    // custom ratio happens once per settings change instead of once per frame.
+    std::atomic<double> tile_aspect{kDefaultTileAspect};
+    std::atomic<double> gutter_pct{kDefaultSpacingPct};
+    std::atomic<double> margin_pct{kDefaultSpacingPct};
     // Optional other OBS source drawn over the background colour and under the
     // tiles. Carries its own leaf lock (see zoom-tiles-background.h) rather
     // than living under `mutex`: the graphics thread reads it every frame, and
@@ -853,18 +884,30 @@ static void tiles_source_render(void *data, gs_effect_t *)
     if (ctx->render_scratches.size() < feeds.size())
         ctx->render_scratches.resize(feeds.size());
 
-    // Byte-for-byte the parameters the CPU compositor solved from, including
-    // the even-snapping pass. The named constants are load-bearing: substituting
-    // 16.0/9.0 or 135.0, or dropping the snap, moves every tile by up to a
-    // pixel against the parity baseline in docs/design-reference/. Solved from
-    // feeds.size(), as the compositor did, not from participants.size(): the
-    // two can differ while a plan is in flight.
+    // The parameters the grid is solved from. At their defaults these are
+    // byte-for-byte the ones the CPU compositor solved from — 16:9 tiles and a
+    // canvas_height/135 gutter and margin — including the even-snapping pass;
+    // resolve_spacing_px() reproduces that division exactly, which
+    // tests/tile-shape-test.cpp pins at every canvas height the source accepts.
+    // Dropping the snap, or letting the spacing default drift by a bit, moves
+    // every tile by up to a pixel against the parity baseline in
+    // docs/design-reference/. Solved from feeds.size(), as the compositor did,
+    // not from participants.size(): the two can differ while a plan is in
+    // flight.
+    //
+    // Each atomic is read exactly once here. Reading tile_aspect a second time
+    // for the crop below would let a settings change landing mid-frame solve
+    // the grid at one shape and sample at another, which is precisely the
+    // mis-framing this control has to avoid.
+    const double canvas_h_d = static_cast<double>(canvas_h);
     TileGridParams params;
     params.canvas_width  = static_cast<double>(canvas_w);
-    params.canvas_height = static_cast<double>(canvas_h);
-    params.tile_aspect   = kTileAspect;
-    params.gutter        = static_cast<double>(canvas_h) / kSpacingDivisor;
-    params.margin        = params.gutter;
+    params.canvas_height = canvas_h_d;
+    params.tile_aspect   = ctx->tile_aspect.load(std::memory_order_acquire);
+    params.gutter        = resolve_spacing_px(
+        ctx->gutter_pct.load(std::memory_order_acquire), canvas_h_d);
+    params.margin        = resolve_spacing_px(
+        ctx->margin_pct.load(std::memory_order_acquire), canvas_h_d);
     const std::vector<SnappedTileRect> rects =
         snap_tile_grid_even(solve_tile_grid(feeds.size(), params), params);
 
@@ -974,10 +1017,16 @@ static void tiles_source_render(void *data, gs_effect_t *)
         }
 
         // Narrow the usable source by this slot's crop, then sample the largest
-        // centred 16:9 sub-rectangle of what is left, so the tile fills
+        // centred tile-shaped sub-rectangle of what is left, so the tile fills
         // completely and is never letterboxed — the same solve_cover_crop() the
         // CPU blit used, mapped straight onto gs_draw_sprite_subregion(), which
         // samples exactly such a sub-rectangle.
+        //
+        // params.tile_aspect, deliberately, rather than a second read of the
+        // atomic: this is the value the grid above was actually solved from, so
+        // the rect being filled and the rect being sampled cannot disagree.
+        // A non-16:9 tile fed by a 16:9 camera therefore crops more off the
+        // sides — that is what filling a narrower rect means, not a defect.
         //
         // The order is crop-then-cover and it is pinned by
         // tests/tile-crop-test.cpp; see zoom-tile-crop.h. With both crops at 0
@@ -992,7 +1041,7 @@ static void tiles_source_render(void *data, gs_effect_t *)
                                              : std::pair<double, double>{0.0, 0.0};
         const CropRect crop = solve_slot_crop(static_cast<double>(feed->tex_w),
                                               static_cast<double>(feed->tex_h),
-                                              kTileAspect,
+                                              params.tile_aspect,
                                               slot_crop.first, slot_crop.second);
         // The sprite's geometry is sub_cx x sub_cy *in whole texels*
         // (build_subsprite_norm(), libobs/graphics/graphics.c:1024), so the
@@ -1017,11 +1066,14 @@ static void tiles_source_render(void *data, gs_effect_t *)
         // when it builds the quad's UVs — anything else would put the border
         // slightly out of register with the video.
         //
-        // This is why the slot crop above changes nothing here: it moves the
-        // sub-rectangle, and these four come from that same moved rectangle by
-        // construction. Any future change must keep computing crop_uv from the
-        // exact integers handed to gs_draw_sprite_subregion(), or borders will
-        // silently misregister on every tile with a non-zero crop.
+        // This is why neither the slot crop nor the tile shape changes anything
+        // here: both move the sub-rectangle, and these four come from that same
+        // moved rectangle by construction. Any future change must keep
+        // computing crop_uv from the exact integers handed to
+        // gs_draw_sprite_subregion(), or borders will silently misregister on
+        // every tile. tests/tile-shape-test.cpp reproduces this arithmetic for
+        // a 4:3 tile with a non-zero crop and checks the shader's
+        // (uv - crop_uv.xy) / crop_uv.zw still lands on 0..1 across the tile.
         pass.crop_u  = static_cast<float>(crop_x) / static_cast<float>(feed->tex_w);
         pass.crop_v  = static_cast<float>(crop_y) / static_cast<float>(feed->tex_h);
         pass.crop_cu = static_cast<float>(crop_w) / static_cast<float>(feed->tex_w);
@@ -1051,8 +1103,10 @@ static void tiles_source_render(void *data, gs_effect_t *)
     // flooding the log at the frame rate.
     if (ctx->rendered_frames == 0 || ctx->rendered_frames % 300 == 0) {
         blog(LOG_INFO,
-             "[obs-zoom-plugin] Tiles render: canvas=%ux%u tiles=%zu with_video=%zu count=%llu",
-             canvas_w, canvas_h, rects.size(), drawn,
+             "[obs-zoom-plugin] Tiles render: canvas=%ux%u aspect=%.4f "
+             "gutter=%.2fpx margin=%.2fpx tiles=%zu with_video=%zu count=%llu",
+             canvas_w, canvas_h, params.tile_aspect, params.gutter,
+             params.margin, rects.size(), drawn,
              static_cast<unsigned long long>(ctx->rendered_frames));
     }
     ++ctx->rendered_frames;
@@ -1075,6 +1129,14 @@ static constexpr const char *PROP_BORDER_WIDTH  = "border_width";
 static constexpr const char *PROP_BORDER_COLOR  = "border_color";
 static constexpr const char *PROP_BORDER_SHAPE  = "border_shape";
 static constexpr const char *PROP_CORNER_RADIUS = "corner_radius";
+// Tile shape: a preset, plus the ratio the Custom entry reveals. Two keys
+// rather than one so switching to a preset and back keeps the ratio the
+// operator typed, exactly as the corner radius survives a switch to Square.
+static constexpr const char *PROP_TILE_SHAPE  = "tile_shape";
+static constexpr const char *PROP_TILE_RATIO  = "tile_ratio";
+// Wall spacing, each a percentage of canvas height.
+static constexpr const char *PROP_GUTTER_PCT  = "gutter_pct";
+static constexpr const char *PROP_MARGIN_PCT  = "margin_pct";
 // The collapsible group the eighteen crop sliders live in. Named so a scene
 // file can be read, though the group itself stores no value of its own.
 static constexpr const char *PROP_CROP_GROUP = "crop_group";
@@ -1232,6 +1294,38 @@ static void tiles_source_update(void *data, obs_data_t *settings)
         obs_data_get_int(settings, PROP_BORDER_SHAPE) ==
             static_cast<long long>(TileBorderShape::Rounded),
         std::memory_order_release);
+
+    // Tile shape and spacing. resolve_tile_aspect() already refuses a ratio of
+    // zero or less (and a NaN) and falls back to 16:9; the clamp here is the
+    // same bound the slider carries, applied to scene data too because
+    // obs_data_get_double will hand over anything a text editor put there.
+    // A ratio outside the range is clamped rather than dropped: an operator who
+    // typed 40 wanted "as wide as possible", and the widest the control offers
+    // is a truer reading of that than silently reverting them to 16:9.
+    const double raw_ratio = obs_data_get_double(settings, PROP_TILE_RATIO);
+    const double bounded_ratio =
+        (raw_ratio > 0.0)  // false for NaN, which resolve_tile_aspect handles
+            ? std::min(std::max(raw_ratio, kMinCustomAspect), kMaxCustomAspect)
+            : raw_ratio;
+    ctx->tile_aspect.store(
+        resolve_tile_aspect(obs_data_get_int(settings, PROP_TILE_SHAPE),
+                            bounded_ratio),
+        std::memory_order_release);
+
+    // Percentages of canvas height, not pixels: spacing is structural and
+    // scales with the canvas, deliberately unlike the border width and corner
+    // radius above, which are absolute pixels because they are a drawn line
+    // whose weight the operator is choosing directly. resolve_spacing_px()
+    // bounds the result against the canvas as well; this bounds the setting.
+    const auto read_spacing_pct = [settings](const char *key) -> double {
+        const double raw = obs_data_get_double(settings, key);
+        if (!(raw > 0.0)) return 0.0;  // negative or NaN: no spacing at all
+        return std::min(raw, kMaxSpacingPct);
+    };
+    ctx->gutter_pct.store(read_spacing_pct(PROP_GUTTER_PCT),
+                          std::memory_order_release);
+    ctx->margin_pct.store(read_spacing_pct(PROP_MARGIN_PCT),
+                          std::memory_order_release);
 
     // Deliberately outside every lock this function takes: set_source calls
     // into libobs (obs_source_add_active_child walks the source tree,
@@ -1446,6 +1540,19 @@ static bool tiles_border_shape_modified(obs_properties_t *props,
     return true;  // properties changed: redraw the dialog
 }
 
+// The custom ratio means nothing under a preset, so it is hidden rather than
+// left on screen doing nothing. Kept separate from the two callbacks above for
+// the same reason they are separate from each other: each one redraws only the
+// controls it has an opinion about.
+static bool tiles_tile_shape_modified(obs_properties_t *props, obs_property_t *,
+                                      obs_data_t *settings)
+{
+    const bool custom = obs_data_get_int(settings, PROP_TILE_SHAPE) ==
+                        static_cast<long long>(TileAspectPreset::Custom);
+    obs_property_set_visible(obs_properties_get(props, PROP_TILE_RATIO), custom);
+    return true;  // properties changed: redraw the dialog
+}
+
 static void tiles_source_get_defaults(obs_data_t *settings)
 {
     // 0xFF808080 — the neutral grey the CPU compositor used, so an existing
@@ -1464,6 +1571,17 @@ static void tiles_source_get_defaults(obs_data_t *settings)
     obs_data_set_default_int(settings, PROP_BORDER_SHAPE,
                              static_cast<long long>(TileBorderShape::Square));
     obs_data_set_default_int(settings, PROP_CORNER_RADIUS, 16);
+    // 16:9 tiles and a canvas_height/135 gutter and margin: exactly what the
+    // wall was hard-coded to before these controls existed, so a scene saved
+    // before them renders byte-for-byte as it did. The spacing default is a
+    // percentage rather than a rounded-off one on purpose —
+    // resolve_spacing_px() reproduces canvas_height/135.0 bit-for-bit from it,
+    // and tests/tile-shape-test.cpp is what keeps that true.
+    obs_data_set_default_int(settings, PROP_TILE_SHAPE,
+                             static_cast<long long>(TileAspectPreset::Wide16x9));
+    obs_data_set_default_double(settings, PROP_TILE_RATIO, kDefaultTileAspect);
+    obs_data_set_default_double(settings, PROP_GUTTER_PCT, kDefaultSpacingPct);
+    obs_data_set_default_double(settings, PROP_MARGIN_PCT, kDefaultSpacingPct);
     obs_data_set_default_int(settings, PROP_FILL_MODE,
                              static_cast<long long>(TileFillMode::Auto));
     obs_data_set_default_int(settings, PROP_MAX_TILES,
@@ -1546,6 +1664,41 @@ static obs_properties_t *tiles_source_get_properties(void *data)
         }
         return true;
     }, bg);
+
+    // Tile shape. Presets rather than a bare ratio because the shapes an
+    // operator actually wants are a short list, with Custom behind a modified
+    // callback for the ones that are not on it — the same pattern the corner
+    // radius uses.
+    obs_property_t *shape_list = obs_properties_add_list(props, PROP_TILE_SHAPE,
+        obs_module_text("CoreVideoTiles.TileShape"),
+        OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    static const struct { TileAspectPreset preset; const char *key; } kShapes[] = {
+        {TileAspectPreset::Wide16x9,    "CoreVideoTiles.Shape16x9"},
+        {TileAspectPreset::Standard4x3, "CoreVideoTiles.Shape4x3"},
+        {TileAspectPreset::Photo5x4,    "CoreVideoTiles.Shape5x4"},
+        {TileAspectPreset::Square1x1,   "CoreVideoTiles.Shape1x1"},
+        {TileAspectPreset::Portrait3x4, "CoreVideoTiles.Shape3x4"},
+        {TileAspectPreset::Tall9x16,    "CoreVideoTiles.Shape9x16"},
+        {TileAspectPreset::Custom,      "CoreVideoTiles.ShapeCustom"},
+    };
+    for (const auto &s : kShapes) {
+        obs_property_list_add_int(shape_list, obs_module_text(s.key),
+                                  static_cast<long long>(s.preset));
+    }
+    obs_property_set_modified_callback(shape_list, tiles_tile_shape_modified);
+
+    obs_properties_add_float(props, PROP_TILE_RATIO,
+        obs_module_text("CoreVideoTiles.TileRatio"),
+        kMinCustomAspect, kMaxCustomAspect, 0.01);
+
+    // Spacing, as a percentage of canvas height so it scales with the canvas.
+    // Three decimals is not fussiness: the snap pass truncates the gutter to an
+    // even pixel, so at 1080p a value displayed as 0.74 rather than 0.741 would
+    // solve 7.99 px and snap to a 6 px gutter.
+    obs_properties_add_float_slider(props, PROP_GUTTER_PCT,
+        obs_module_text("CoreVideoTiles.Gutter"), 0.0, kMaxSpacingPct, 0.001);
+    obs_properties_add_float_slider(props, PROP_MARGIN_PCT,
+        obs_module_text("CoreVideoTiles.Margin"), 0.0, kMaxSpacingPct, 0.001);
 
     // Tile borders. Width 0 is "no border", which is the default, so these four
     // controls are inert until the operator moves the width off zero.
@@ -1630,6 +1783,10 @@ static obs_properties_t *tiles_source_get_properties(void *data)
     // obs_data_create() fallback reads border_shape as 0 (Square), which is
     // the correct default layout.
     tiles_border_shape_modified(props, nullptr, visibility_settings);
+    // Same reason again, for the custom tile ratio: the obs_data_create()
+    // fallback reads tile_shape as 0 (16:9), so the ratio starts hidden, which
+    // is the correct layout for every preset.
+    tiles_tile_shape_modified(props, nullptr, visibility_settings);
     obs_data_release(visibility_settings);
 
     return props;

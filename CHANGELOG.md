@@ -60,6 +60,15 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
   instance as the cause and says what to do about it.
 
 ### Added
+- **Tile shape.** "Tile shape" sets the shape of every tile on the wall —
+  16:9, 4:3, 5:4, 1:1, 3:4 or 9:16 — with a "Custom ratio" entry for anything
+  else. A narrower tile fed by a widescreen camera crops more off the sides,
+  because the tile is always filled and never letterboxed. Defaults to 16:9,
+  which is what the wall has always been.
+- **Wall spacing.** "Gap between tiles" and "Margin around the wall" are now
+  yours to set, each as a percentage of the canvas height so the spacing scales
+  with the canvas. Both default to 0.741%, which is the 8 px at 1080p the wall
+  has always used, so an untouched scene lays out exactly as it did.
 - **A background for the Tiles wall.** "Background colour" fills the gutters,
   margins and any uncovered canvas, and "Background source" draws any
   video-producing OBS source — an Image, a Media Source, a Browser Source —

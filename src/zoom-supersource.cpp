@@ -2371,6 +2371,23 @@ static obs_properties_t *tiles_source_get_properties(void *data)
     obs_property_t *audio_group = obs_properties_add_list(
         props, PROP_AUDIO_GROUP, obs_module_text("CoreVideoTiles.AudioGroup"),
         OBS_COMBO_TYPE_EDITABLE, OBS_COMBO_FORMAT_STRING);
+    // Both containers are offered because both work, and the choice belongs to
+    // the operator. A nested scene is the better one for audio that has to
+    // survive every scene change: a group sits one right-click away from
+    // "Ungroup", which dissolves it and scatters the sources inside into the
+    // parent scene. Scenes are listed first for that reason.
+    //
+    // Two enumerations are needed, not one: obs_enum_sources walks inputs and
+    // groups but NOT scenes (libobs/obs.c:1837), so a scene-only sweep is the
+    // only way a nested scene reaches this list.
+    const auto add_container = [](void *param, obs_source_t *src) -> bool {
+        const char *name = obs_source_get_name(src);
+        if (name && *name)
+            obs_property_list_add_string(
+                static_cast<obs_property_t *>(param), name, name);
+        return true;
+    };
+    obs_enum_scenes(add_container, audio_group);
     obs_enum_sources(
         [](void *param, obs_source_t *src) -> bool {
             if (!obs_group_from_source(src)) return true;

@@ -234,13 +234,21 @@ void tiles_audio_apply(const TilesAudioPlan &plan, const std::string &group_name
                          "ones are still muted/unmuted/retracked normally)",
                          group_name.c_str());
                 } else {
-                    group = obs_group_from_source(group_src);
+                    // Either container works, and the operator should be free
+                    // to pick on the merits rather than on what this code
+                    // happens to accept. A nested scene is the better choice
+                    // for audio that must survive every scene change — a group
+                    // carries an "Ungroup" command one right-click away, which
+                    // dissolves it and scatters the sources inside it into the
+                    // parent scene. obs_group_from_source alone returns NULL
+                    // for a scene, which would have rejected the safer option.
+                    group = obs_group_or_scene_from_source(group_src);
                     if (!group) {
                         blog(LOG_WARNING,
-                             "[corevideo] tiles audio: '%s' is not a group; "
-                             "skipping new participants this round (existing "
-                             "ones are still muted/unmuted/retracked "
-                             "normally)",
+                             "[corevideo] tiles audio: '%s' is neither a scene "
+                             "nor a group; skipping new participants this "
+                             "round (existing ones are still "
+                             "muted/unmuted/retracked normally)",
                              group_name.c_str());
                     } else {
                         group_usable = true;

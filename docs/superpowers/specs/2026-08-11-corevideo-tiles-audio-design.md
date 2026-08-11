@@ -51,7 +51,7 @@ wall.
 | Whether it runs at all | **Opt-in, off by default.** See below |
 | Wall audio | **Silent.** Never carries the mix |
 | When someone leaves the wall | **Mute and keep**, not delete — *recommended default, not an explicit owner choice* |
-| Track assignment | Auto-assign while OBS's six tracks last, remainder on track 1 with a log line — *recommended default, not an explicit owner choice* |
+| Track assignment | Everyone on track 1 (program); tracks 2-6 carry five ISO stems; the rest are program-only, logged once — *recommended default, not an explicit owner choice* |
 
 Both rows marked *recommended* were proposed by the assistant and accepted with
 the design as a whole. They are the two most likely things the owner will want
@@ -111,12 +111,15 @@ Cleanup of long-dead sources is an explicit operator action, not automatic.
 
 ## Track assignment
 
-Each created source is assigned an OBS audio track for ISO stems, allocated in
-tile order. OBS provides six tracks; a wall larger than that cannot give every
-participant a stem.
+Every created source joins **track 1**, the program mix — that is what gives
+the operator a live fader for each person. Tracks **2 through 6** then carry one
+ISO stem each, allocated in tile order.
 
-When the tracks run out, the remaining sources stay on track 1 and the plugin
-logs once, naming how many participants exceeded the ceiling. It degrades
+So the real ceiling is **five stems**, not six: track 1 is spent on the live
+mix. A wall of six or more people cannot give everyone their own stem.
+
+When the stem tracks run out, the remaining participants stay on track 1 alone
+and the plugin logs once, naming how many exceeded the ceiling. It degrades
 honestly rather than silently dropping stems.
 
 ## Error handling

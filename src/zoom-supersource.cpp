@@ -68,6 +68,18 @@ static constexpr int64_t kMaxCornerRadius = 128;
 // src/zoom-tile-glow.h.
 static constexpr int64_t kMaxGlowSize      = 256;  // canvas pixels
 static constexpr int64_t kMaxGlowIntensity = 100;  // percent
+// The falloff's shape, as a percentage the operator can judge by eye. It maps
+// linearly onto the shader's own parameter k in (1-t)^2 * (1 + k*t), where the
+// useful range is k in [0, 2]:
+//   0%   -> k = 0, i.e. (1-t)^2 — the curve the glow shipped with, so an
+//           existing scene renders unchanged;
+//   100% -> k = 2, i.e. (1-t)^2(1+2t) = 1 - smoothstep(t), flat at both ends.
+// 2 is where the family stops being monotone rather than a matter of taste:
+// d/dt = (1-t)[(k-2) - 3kt] is <= 0 across [0,1) exactly when k <= 2, and above
+// it the halo brightens just outside the tile and draws a ring. Every value in
+// range leaves both the value and the slope at 0 at the outer edge, which is
+// what keeps the halo from ending on a visible band.
+static constexpr int64_t kMaxGlowSoftness  = 100;  // percent
 // How many tile slots the wall has. Declared up here rather than beside the
 // other property constants below because `tiles_source` sizes its per-slot crop
 // array from it.
@@ -207,6 +219,10 @@ struct tiles_source {
     std::atomic<uint32_t> glow_color{0xFFFFFFFF};
     std::atomic<uint32_t> glow_size{0};
     std::atomic<uint32_t> glow_intensity{100};
+    // How the halo falls off between the tile edge and the outer limit, as a
+    // percentage. 0 is the curve the glow shipped with, so this control is
+    // inert until the operator moves it. See kMaxGlowSoftness.
+    std::atomic<uint32_t> glow_softness{0};
     // The wall's geometry: tile shape (width / height, already resolved from
     // the preset and the custom ratio) and the gutter and margin as
     // percentages of canvas height. Same atomic-not-mutex reasoning as
@@ -699,6 +715,7 @@ struct GlowPassParams {
     float    corner_radius = 0.0f;     // the tile's own clamped radius
     float    size = 0.0f;              // falloff distance, canvas pixels
     float    intensity = 1.0f;         // 0..1 alpha at the tile's edge
+    float    falloff = 0.0f;           // 0..2 curve shape; 0 = (1-t)^2
 };
 
 // One shared 1x1 sample per plane holding the same neutral bytes the CPU
@@ -908,6 +925,7 @@ static bool glow_begin_pass(gs_technique_t *tech, const GlowPassParams &p)
     gs_effect_set_float(s_tiles_effect.param_glow_corner_radius, p.corner_radius);
     gs_effect_set_float(s_tiles_effect.param_glow_size, p.size);
     gs_effect_set_float(s_tiles_effect.param_glow_intensity, p.intensity);
+    gs_effect_set_float(s_tiles_effect.param_glow_falloff, p.falloff);
 
     if (gs_technique_begin_pass(tech, 0)) return true;
 
@@ -1084,6 +1102,13 @@ static void tiles_source_render(void *data, gs_effect_t *)
         const uint32_t glow_argb =
             picker_color_to_argb(ctx->glow_color.load(std::memory_order_acquire));
         const float glow_intensity = static_cast<float>(glow_pct) / 100.0f;
+        // The operator's percentage mapped onto the curve's own parameter k,
+        // whose useful range is [0, 2] — see kMaxGlowSoftness and the shader.
+        // 0% is k = 0, which is the original (1-t)^2 exactly.
+        const float glow_falloff =
+            static_cast<float>(
+                ctx->glow_softness.load(std::memory_order_acquire)) *
+            (2.0f / static_cast<float>(kMaxGlowSoftness));
 
         // The halo is transparent everywhere by construction, so it needs
         // blending — and inheriting whatever OBS last set is how a bug becomes
@@ -1140,6 +1165,7 @@ static void tiles_source_render(void *data, gs_effect_t *)
             gp.corner_radius = static_cast<float>(b.radius);
             gp.size          = static_cast<float>(glow_size_px);
             gp.intensity     = glow_intensity;
+            gp.falloff       = glow_falloff;
 
             // break, not continue: every tile opens the same pass on the same
             // technique, so a failure here fails for all of them, and retrying
@@ -1337,6 +1363,7 @@ static constexpr const char *PROP_CORNER_RADIUS = "corner_radius";
 static constexpr const char *PROP_GLOW_SIZE      = "glow_size";
 static constexpr const char *PROP_GLOW_COLOR     = "glow_color";
 static constexpr const char *PROP_GLOW_INTENSITY = "glow_intensity";
+static constexpr const char *PROP_GLOW_SOFTNESS  = "glow_softness";
 // Tile shape: a preset, plus the ratio the Custom entry reveals. Two keys
 // rather than one so switching to a preset and back keeps the ratio the
 // operator typed, exactly as the corner radius survives a switch to Square.
@@ -1522,6 +1549,16 @@ static void tiles_source_update(void *data, obs_data_t *settings)
         std::memory_order_release);
     ctx->glow_color.store(
         static_cast<uint32_t>(obs_data_get_int(settings, PROP_GLOW_COLOR)),
+        std::memory_order_release);
+    // The softness clamp is load-bearing rather than defensive: the shader's
+    // curve stops being monotone above k = 2, so a hand-edited scene file
+    // asking for 300% would brighten the halo just outside every tile and draw
+    // a ring. Clamped here so the shader is only ever handed a k it is valid
+    // for. See kMaxGlowSoftness.
+    const int64_t raw_glow_soft = obs_data_get_int(settings, PROP_GLOW_SOFTNESS);
+    ctx->glow_softness.store(
+        static_cast<uint32_t>(std::min<int64_t>(
+            std::max<int64_t>(raw_glow_soft, 0), kMaxGlowSoftness)),
         std::memory_order_release);
 
     // Tile shape and spacing. resolve_tile_aspect() already refuses a ratio of
@@ -1808,6 +1845,11 @@ static void tiles_source_get_defaults(obs_data_t *settings)
     obs_data_set_default_int(settings, PROP_GLOW_SIZE, 0);
     obs_data_set_default_int(settings, PROP_GLOW_COLOR, 0xFFFFFFFF);
     obs_data_set_default_int(settings, PROP_GLOW_INTENSITY, 100);
+    // Softness 0 is the curve the glow shipped with, so a scene saved before
+    // this control existed renders exactly as it did — the same no-regression
+    // guarantee the size default carries, and the reason the default is 0
+    // rather than whatever eventually matches the reference best.
+    obs_data_set_default_int(settings, PROP_GLOW_SOFTNESS, 0);
     // 16:9 tiles and a canvas_height/135 gutter and margin: exactly what the
     // wall was hard-coded to before these controls existed, so a scene saved
     // before them renders byte-for-byte as it did. The spacing default is a
@@ -1982,6 +2024,23 @@ static obs_properties_t *tiles_source_get_properties(void *data)
     obs_properties_add_int_slider(props, PROP_GLOW_INTENSITY,
         obs_module_text("CoreVideoTiles.GlowIntensity"),
         0, static_cast<int>(kMaxGlowIntensity), 1);
+
+    // How the halo falls off, so it can be matched against a reference image by
+    // eye rather than by another build. 0% is the curve the glow shipped with
+    // — strongest against the tile edge and dropping away immediately — and
+    // 100% holds the halo's strength just outside the tile before falling away
+    // through an inflection, which is how a blurred reference reads.
+    //
+    // What this control does NOT change is the peak: the halo is still at full
+    // intensity AT the tile edge for every setting, whereas a Photoshop or
+    // Gaussian outer glow sits around half strength there because half the blur
+    // kernel falls inside the shape. Lowering the peak is what "Glow intensity"
+    // already does, so matching such a reference means roughly 50% intensity
+    // plus whatever softness looks right — one control each, rather than two
+    // controls fighting over the same number.
+    obs_properties_add_int_slider(props, PROP_GLOW_SOFTNESS,
+        obs_module_text("CoreVideoTiles.GlowSoftness"),
+        0, static_cast<int>(kMaxGlowSoftness), 1);
 
     // Per-slot left/right crop, for reframing a badly-framed guest without
     // touching the grid. Eighteen sliders inline would swamp a dialog that

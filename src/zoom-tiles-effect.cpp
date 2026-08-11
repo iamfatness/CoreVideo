@@ -50,6 +50,8 @@ bool tiles_effect_load(TilesEffect &out)
             gs_effect_get_param_by_name(out.effect, "glow_size");
         out.param_glow_intensity =
             gs_effect_get_param_by_name(out.effect, "glow_intensity");
+        out.param_glow_falloff =
+            gs_effect_get_param_by_name(out.effect, "glow_falloff");
     }
     obs_leave_graphics();
 

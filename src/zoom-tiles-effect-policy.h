@@ -81,6 +81,7 @@ struct TilesEffectHandles {
     bool param_glow_corner_radius = false;
     bool param_glow_size          = false;
     bool param_glow_intensity     = false;
+    bool param_glow_falloff       = false;
 };
 
 struct TilesEffectStatus {
@@ -137,6 +138,7 @@ inline TilesEffectStatus classify_tiles_effect(const TilesEffectHandles &h)
     note(st.missing_glow, h.param_glow_corner_radius, "glow_corner_radius");
     note(st.missing_glow, h.param_glow_size, "glow_size");
     note(st.missing_glow, h.param_glow_intensity, "glow_intensity");
+    note(st.missing_glow, h.param_glow_falloff, "glow_falloff");
 
     st.wall_drawable = st.missing_required.empty();
     // Gated on the wall as well: with no compiled effect there is nothing to

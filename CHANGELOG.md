@@ -103,6 +103,16 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
   for Rounded). Rounded corners cut the video itself, so the background shows
   through them. Width defaults to 0, so existing walls look exactly as they
   did until you move it.
+- **Tile glow.** Every tile can sit on a soft halo bleeding out into the
+  background: "Glow size" (0-256 px), "Glow colour", "Glow intensity" and
+  "Glow softness". Softness shapes how the halo falls away from the tile — 0%
+  is strongest right at the tile edge and drops off immediately, 100% holds it
+  just outside the tile before fading — so it can be matched against a
+  reference by eye. Size defaults to 0, so existing walls look exactly as they
+  did until you move it, and softness defaults to 0%. Note that the halo is at
+  full strength at the tile edge whatever the softness; a Photoshop-style outer
+  glow sits around half strength there, so start at roughly 50% intensity if
+  you are matching one.
 - **Per-tile crop.** A collapsible "Per-tile crop" group gives every tile its
   own left and right crop, as a percentage of the source width (0-45% a side),
   for reframing a guest sitting too far off-centre without disturbing the grid

@@ -170,6 +170,9 @@ uniform float2 glow_tile_half;     // half the TILE's size — not the quad's
 uniform float  glow_corner_radius; // canvas pixels; matches the tile's
 uniform float  glow_size;          // falloff distance in canvas pixels; > 0
 uniform float  glow_intensity;     // 0..1, the alpha at the tile's own edge
+// Shapes the falloff between the tile edge and the outer limit. 0..2; see the
+// curve below. 0 is the default and reproduces the original (1-t)^2 exactly.
+uniform float  glow_falloff;
 
 float4 PSGlow(VertInOut vert_in) : TARGET
 {
@@ -195,11 +198,28 @@ float4 PSGlow(VertInOut vert_in) : TARGET
     // entirely at size 0, so this only keeps the divide defined.
     float t = saturate(d / max(glow_size, 0.0001));
 
-    // (1 - t)^2, not a straight ramp: strongest against the tile edge and
-    // tapering away to nothing. A linear ramp ends on a constant gradient,
-    // which reads as a visible band at the outer edge of the halo rather than
-    // as light falling off.
-    float falloff = (1.0 - t) * (1.0 - t);
+    // (1 - t)^2 * (1 + k*t), where k = glow_falloff, 0..2.
+    //
+    // The (1 - t)^2 factor is what stops the halo ending on a visible band: a
+    // straight ramp reaches its outer limit on a constant gradient, which reads
+    // as an edge rather than as light falling off. Anything smooth multiplied
+    // by (1 - t)^2 still has BOTH value and slope 0 at t = 1, so every setting
+    // in range keeps that property by construction rather than by taste.
+    //
+    // k = 0 is the original curve, exactly — the default, so an existing scene
+    // renders unchanged. k = 2 is (1-t)^2(1+2t) = 1 - smoothstep(t): flat at
+    // both ends, so the halo holds its strength just outside the tile before
+    // falling away through an inflection, which is how a blurred reference
+    // reads next to a hard light source.
+    //
+    // 2 is the upper bound because it is where the family stops being monotone,
+    // not because it looked far enough: d/dt = (1-t)[(k-2) - 3kt], which is <= 0
+    // across [0,1) exactly when k <= 2. Above that the curve RISES just outside
+    // the tile, clipping at 1 and drawing a bright ring around every tile.
+    // tiles_source_update() clamps the setting; saturate() here is the shader's
+    // own guard, and is exact identity on the valid domain.
+    float ramp = 1.0 - t;
+    float falloff = saturate(ramp * ramp * (1.0 + glow_falloff * t));
 
     // Straight (non-premultiplied) alpha, matching the blend factors the draw
     // path sets. glow_color.a is deliberately unused: obs_properties_add_color

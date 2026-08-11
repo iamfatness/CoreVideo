@@ -36,6 +36,7 @@ struct TilesEffect {
     gs_eparam_t    *param_glow_corner_radius = nullptr;
     gs_eparam_t    *param_glow_size          = nullptr;
     gs_eparam_t    *param_glow_intensity     = nullptr;
+    gs_eparam_t    *param_glow_falloff       = nullptr;
 
     // Decided once at load by classify_tiles_effect() and cached, rather than
     // re-derived per frame: valid() is on the 60 Hz draw path.
@@ -66,6 +67,7 @@ struct TilesEffect {
         h.param_glow_corner_radius = param_glow_corner_radius != nullptr;
         h.param_glow_size         = param_glow_size != nullptr;
         h.param_glow_intensity    = param_glow_intensity != nullptr;
+        h.param_glow_falloff      = param_glow_falloff != nullptr;
         return h;
     }
 

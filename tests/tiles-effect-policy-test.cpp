@@ -54,6 +54,7 @@ static TilesEffectHandles all_present()
     h.param_glow_corner_radius = true;
     h.param_glow_size          = true;
     h.param_glow_intensity     = true;
+    h.param_glow_falloff       = true;
     return h;
 }
 
@@ -94,6 +95,10 @@ static std::vector<Handle> glow_handles()
         {"glow_corner_radius", &TilesEffectHandles::param_glow_corner_radius},
         {"glow_size",          &TilesEffectHandles::param_glow_size},
         {"glow_intensity",     &TilesEffectHandles::param_glow_intensity},
+        // Newest of the group, and the one a stale-but-recent effect file is
+        // most likely to be missing on its own: the glow shipped before the
+        // softness control did.
+        {"glow_falloff",       &TilesEffectHandles::param_glow_falloff},
     };
 }
 

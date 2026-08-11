@@ -80,6 +80,22 @@ static void frontend_event_callback(enum obs_frontend_event event, void *)
         ensure_output_panel();
         ensure_diagnostics_panel();
     }
+    // Gates Tiles per-participant audio reconciliation off for the duration
+    // of a scene-collection load, and sweeps every Tiles source once it is
+    // confirmed finished. See zoom_supersource_set_collection_loading's own
+    // comment: obs_queue_task(OBS_TASK_UI, ...) is not reliably deferred
+    // when called from the UI thread, which a collection load runs on, so
+    // without this gate a restored Tiles source can reconcile audio against
+    // a still-loading collection and create a duplicate of its own saved
+    // source. CHANGING fires before the old collection's sources are torn
+    // down; CHANGED and FINISHED_LOADING both mark "safe to reconcile now" —
+    // CHANGED for an ordinary collection switch, FINISHED_LOADING for the
+    // very first load at OBS startup, which CHANGED is not emitted for.
+    if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING)
+        zoom_supersource_set_collection_loading(true);
+    if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED ||
+        event == OBS_FRONTEND_EVENT_FINISHED_LOADING)
+        zoom_supersource_set_collection_loading(false);
     if (event == OBS_FRONTEND_EVENT_EXIT)
         shutdown_corevideo();
 }

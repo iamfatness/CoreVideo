@@ -171,24 +171,22 @@ int main()
     }
 
     // ── LOAD-BEARING: another Tiles source owns this participant ─────────────
-    // No Create. Two sources for one voice is doubling.
+    // No Create, Unmute, or SetMixers. The guard must prevent all action.
+    // Two sources for one voice is doubling. The fixture differs from the
+    // correct state (muted and wrong mixers) so the guard is what prevents
+    // the planner from acting, not just the fact that the state is already right.
     {
         TilesAudioSourceState st;
         st.participant_id = 11;
         st.owner_uuid     = kOther;
         st.name           = "Ada (CoreVideo)";
-        st.muted          = false;
-        st.mixers         = 0x3u;
+        st.muted          = true;   // requires Unmute if guard were removed
+        st.mixers         = 0x0u;   // requires SetMixers if guard were removed
         const TilesAudioPlan plan =
             plan_tiles_audio({11}, {st}, roster, params_on());
-        if (find_action(plan, TilesAudioActionKind::Create, 11)) {
-            std::cerr << "created a duplicate audio source for a participant "
-                         "already owned by another Tiles source — this doubles "
-                         "their audio\n";
-            return 1;
-        }
         if (has_any_for(plan, 11)) {
-            std::cerr << "acted on a source owned by another Tiles source\n";
+            std::cerr << "acted on a source owned by another Tiles source (muted "
+                         "or wrong mixers) — the ownership guard failed\n";
             return 1;
         }
     }

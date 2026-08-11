@@ -590,6 +590,7 @@ static bool ensure_neutral_textures()
 // a wall that silently will not draw is the worst symptom there is.
 static bool s_tile_texture_failed_logged = false;
 static bool s_tile_pass_failed_logged = false;
+static bool s_bg_pass_failed_logged = false;
 
 // Frees one feed's plane textures and forgets what they held. The caller must
 // already hold the graphics context.
@@ -772,6 +773,14 @@ static void tiles_source_render(void *data, gs_effect_t *)
     if (gs_technique_begin_pass(solid, 0)) {
         gs_draw_sprite(nullptr, 0, canvas_w, canvas_h);
         gs_technique_end_pass(solid);
+    } else if (!s_bg_pass_failed_logged) {
+        // Same once-only treatment as tiles_begin_pass() above: a background
+        // that silently stops drawing looks like "the gutters went
+        // transparent", with no clue why, unless this is logged.
+        s_bg_pass_failed_logged = true;
+        blog(LOG_ERROR,
+             "[obs-zoom-plugin] Tiles: gs_technique_begin_pass failed on the "
+             "Solid technique; the background will not draw");
     }
     gs_technique_end(solid);
 
@@ -1218,5 +1227,6 @@ void zoom_supersource_unload_gfx()
     s_neutral_failed_logged = false;
     s_tile_texture_failed_logged = false;
     s_tile_pass_failed_logged = false;
+    s_bg_pass_failed_logged = false;
     tiles_effect_destroy(s_tiles_effect);
 }

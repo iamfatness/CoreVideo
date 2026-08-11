@@ -34,6 +34,7 @@ Confirm `scripts/Test-CoreVideoPackage.ps1` validates:
 - OAuth callback helper.
 - Qt runtime and TLS plugins.
 - Locale data.
+- The Tiles wall's effect (`data/.../effects/corevideo-tiles.effect`).
 - Zoom runtime files for full releases.
 - Embedded OAuth public client ID.
 - Embedded Meeting SDK public app key.

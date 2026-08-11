@@ -41,6 +41,12 @@ SetCompressor /SOLID lzma
 !insertmacro RequireSourceFile "obs-plugins\64bit\plugins\tls\qcertonlybackend.dll"
 !insertmacro RequireSourceFile "obs-plugins\64bit\plugins\tls\qschannelbackend.dll"
 !insertmacro RequireSourceFile "data\obs-plugins\obs-zoom-plugin\locale\en-US.ini"
+; The Tiles wall's shader, shipped by the same install(DIRECTORY data/ ...) rule
+; as the locale file above. A package built without it produces a Tiles source
+; that cannot draw at all, and a stale one silently loses whatever feature it
+; predates (see src/zoom-tiles-effect-policy.h) — neither of which is something
+; to find out during a show.
+!insertmacro RequireSourceFile "data\obs-plugins\obs-zoom-plugin\effects\corevideo-tiles.effect"
 !insertmacro RequireSourceFile "obs-plugins\64bit\zoom-runtime\ZoomObsEngine.exe"
 !insertmacro RequireSourceFile "obs-plugins\64bit\zoom-runtime\sdk.dll"
 !insertmacro RequireSourceFile "obs-plugins\64bit\zoom-runtime\sdkExt.dll"
@@ -147,6 +153,9 @@ Function VerifyInstalledRuntime
   !insertmacro VerifyInstalledFile "obs-plugins\64bit\plugins\tls\qcertonlybackend.dll"
   !insertmacro VerifyInstalledFile "obs-plugins\64bit\plugins\tls\qschannelbackend.dll"
   !insertmacro VerifyInstalledFile "data\obs-plugins\obs-zoom-plugin\locale\en-US.ini"
+  ; Checked after the copy as well as before it: the partial install this guards
+  ; against is one where the DLL landed and data\ did not.
+  !insertmacro VerifyInstalledFile "data\obs-plugins\obs-zoom-plugin\effects\corevideo-tiles.effect"
   !insertmacro VerifyInstalledFile "obs-plugins\64bit\zoom-runtime\ZoomObsEngine.exe"
   !insertmacro VerifyInstalledFile "obs-plugins\64bit\zoom-runtime\sdk.dll"
   !insertmacro VerifyInstalledFile "obs-plugins\64bit\zoom-runtime\sdkExt.dll"

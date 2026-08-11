@@ -33,9 +33,10 @@ void tiles_audio_apply(const TilesAudioPlan &plan, const std::string &group_name
                        const std::string &self_uuid);
 
 // Runs scan → plan → apply as one atomic step, serialised across every Tiles
-// source in the process. engine_mutex already serialises one Tiles source
-// against itself; nothing serialised different Tiles sources against each
-// other, so two of them could both call tiles_audio_scan(), both see nothing
+// source in the process. Nothing else serialises two Tiles sources against
+// each other — the per-ctx engine_mutex is not held across this call, and the
+// per-ctx coalescing flag only collapses one source's own burst — so without
+// this two of them could both call tiles_audio_scan(), both see nothing
 // for a participant one is about to gain, and both plan a Create — the loser
 // would then hit its own name clash and uniquify into a genuine duplicate.
 // Holding one process-wide lock across the whole scan-and-apply pair for

@@ -81,17 +81,37 @@ static void frontend_event_callback(enum obs_frontend_event event, void *)
         ensure_diagnostics_panel();
     }
     // Gates Tiles per-participant audio reconciliation off for the duration
-    // of a scene-collection load, and sweeps every Tiles source once it is
-    // confirmed finished. See zoom_supersource_set_collection_loading's own
-    // comment: obs_queue_task(OBS_TASK_UI, ...) is not reliably deferred
+    // of a scene-collection teardown+load, and sweeps every Tiles source once
+    // it is confirmed finished. See zoom_supersource_set_collection_loading's
+    // own comment: obs_queue_task(OBS_TASK_UI, ...) is not reliably deferred
     // when called from the UI thread, which a collection load runs on, so
-    // without this gate a restored Tiles source can reconcile audio against
-    // a still-loading collection and create a duplicate of its own saved
-    // source. CHANGING fires before the old collection's sources are torn
-    // down; CHANGED and FINISHED_LOADING both mark "safe to reconcile now" —
-    // CHANGED for an ordinary collection switch, FINISHED_LOADING for the
-    // very first load at OBS startup, which CHANGED is not emitted for.
-    if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING)
+    // without this gate a restored Tiles source can reconcile audio against a
+    // still-loading collection and create a duplicate of its own saved source.
+    //
+    // CLEANUP is what actually makes the gate reliable, and CHANGING alone is
+    // not enough. Two load paths never fire CHANGING at all —
+    // OBSBasic::SetupDuplicateSceneCollection and SetupRenameSceneCollection
+    // (frontend/widgets/OBSBasic_SceneCollections.cpp:159-206 and :208-240)
+    // both call ActivateSceneCollection, and therefore the full
+    // ClearSceneData + obs_load_sources sequence, with no CHANGING first.
+    // CLEANUP has none of that asymmetry: it is emitted from ClearSceneData
+    // itself (:1544), on every path that tears a collection down, immediately
+    // before the Qt event-queue pumps at :1550-1559 that can otherwise run an
+    // already-posted reconcile task mid-teardown. It is also the one event
+    // deliberately exempt from the disableSaving filter that drops every other
+    // frontend event during a load (OBSStudioAPI.cpp:711), so it is delivered
+    // even on the very first load at startup. CHANGING is kept as well: it
+    // fires earlier still on the paths that do have it, and closing the gate
+    // sooner is free.
+    //
+    // CHANGED and FINISHED_LOADING both mark "safe to reconcile now".
+    // CHANGED is emitted on every ActivateSceneCollection path
+    // (:789) once Load() has fully returned — including the very first load
+    // at startup, where OBSBasic.cpp:1109-1111 momentarily drops disableSaving
+    // specifically so it is delivered. FINISHED_LOADING is kept as a
+    // belt-and-braces second clear for startup.
+    if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING ||
+        event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP)
         zoom_supersource_set_collection_loading(true);
     if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED ||
         event == OBS_FRONTEND_EVENT_FINISHED_LOADING)

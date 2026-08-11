@@ -121,6 +121,10 @@ private:
     // callbacks. Neither talks to the engine, so neither blocks on IPC.
     void release_video_shm();
     void release_video_shm_locked();
+    // Audio only needs this where an explicit unsubscribe precedes the
+    // re-subscribe, which destroys the engine's AudioTarget — see the comment
+    // on the definition. Currently that is the active-speaker clean cut alone.
+    void release_audio_shm_locked();
     void release_director_preview_shm();
     bool output_video_from_shared_memory(const std::string &uuid,
                                          ShmRegion &video_shm,

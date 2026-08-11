@@ -13,10 +13,13 @@
 // operating system, not of our arithmetic: the reason the release is mandatory
 // cannot be demonstrated with a mock.
 //
-// What is NOT covered here: nothing in this file touches the engine process,
-// OBS, or ZoomSource. It proves the platform rule and the helper's
-// postcondition; it does not prove the call sites in zoom-source.cpp are wired
-// up, which needs a live engine.
+// What is NOT covered here, stated plainly so nobody reads these as more than
+// they are: nothing in this file touches the engine process, OBS, or
+// ZoomSource. These tests prove the platform rule and the helper's
+// postcondition. They do NOT pin the wiring — deleting a release call from any
+// of its call sites in src/zoom-source.cpp would fail nothing here, because no
+// test constructs a ZoomSource. Proving the wiring needs a live engine and a
+// running OBS.
 
 #include "shm-resubscribe.h"
 
@@ -95,8 +98,14 @@ bool test_release_clears_mapping_and_generation()
     }
 
     if (ok) {
-        shm_release_for_resubscribe(reader, mapped_gen);
-        if (reader.ptr != nullptr) {
+        // Returns true because a mapping really was dropped. Call sites log on
+        // that, so a release that reported false here would go unrecorded and
+        // the next recurrence would have no trail.
+        if (!shm_release_for_resubscribe(reader, mapped_gen)) {
+            std::cerr << "release of a live mapping did not report it\n";
+            ok = false;
+        }
+        if (ok && reader.ptr != nullptr) {
             std::cerr << "release left the mapping in place\n";
             ok = false;
         }
@@ -110,7 +119,13 @@ bool test_release_clears_mapping_and_generation()
         }
     }
 
-    shm_release_for_resubscribe(reader, mapped_gen);
+    // Releasing again has nothing to drop and must say so, or every no-op call
+    // would emit a log line.
+    if (ok && shm_release_for_resubscribe(reader, mapped_gen)) {
+        std::cerr << "release with nothing mapped reported a drop\n";
+        ok = false;
+    }
+
     shm_region_destroy(writer);
     return ok;
 }

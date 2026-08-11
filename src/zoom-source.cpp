@@ -1337,13 +1337,25 @@ bool ZoomSource::output_video_from_shared_memory(
             // why participants flashed white on every speaker change. Release
             // first; see shm-resubscribe.h.
             //
+            // Audio too, and ONLY here. The unsubscribe on the line above makes
+            // the engine destroy this uuid's AudioTarget as well, so its region
+            // is rebuilt from generation 1 under the legacy unsuffixed
+            // "..._audio" name exactly as the video one is. If it needs to grow,
+            // our live mapping blocks the create and the source goes
+            // permanently silent — a failed ensure_shm() emits no audio event,
+            // so nothing would ever prompt us to reopen. See
+            // release_audio_shm_locked(). The three sends in subscribe() do not
+            // need this: with no unsubscribe the engine updates the AudioTarget
+            // in place.
+            //
             // _locked: our caller (on_director_preview_frame) holds m_mtx for
-            // the whole call. This only unmaps memory — no engine IPC — so it
-            // adds nothing blocking under the lock. The region being released
-            // is m_video_shm, which is NOT the one this frame was read from
-            // (that is m_director_preview_shm), so the frame just published
-            // above is unaffected.
+            // the whole call, and m_mtx is what guards both regions against the
+            // frame/audio callbacks. These only unmap memory — no engine IPC —
+            // so they add nothing blocking under the lock. Neither region is
+            // the one this frame was read from (that is m_director_preview_shm),
+            // so the frame just published above is unaffected.
             release_video_shm_locked();
+            release_audio_shm_locked();
             ZoomEngineClient::instance().subscribe(source_uuid,
                                                    resolved_participant_id,
                                                    isolate_audio,
@@ -1613,14 +1625,19 @@ void ZoomSource::release_shared_memory()
     shm_release_for_resubscribe(m_audio_shm, m_audio_shm_gen);
 }
 
-// Only the video mapping. The audio region is NOT released here on purpose:
-// EngineAudio::subscribe_if_needed() updates an existing AudioTarget in place
-// rather than destroying it (engine/src/engine-audio.cpp), so an audio region
-// is never recreated under a re-subscribe and dropping the mapping would only
-// risk a gap in a live mix.
+// Each of these logs the generation it dropped. Without that line a release is
+// invisible: it nulls the mapping, and the "Re-opening video shared memory
+// after engine generation change: gen N -> M" line below is guarded on a
+// non-null pointer, so it stops firing. That reopen line is how the 2026-08-10
+// white-flash incident was root-caused — keep a trail here or the next
+// recurrence has none.
 void ZoomSource::release_video_shm_locked()
 {
-    shm_release_for_resubscribe(m_video_shm, m_video_shm_gen);
+    const uint32_t dropped_gen = m_video_shm_gen;
+    if (!shm_release_for_resubscribe(m_video_shm, m_video_shm_gen)) return;
+    blog(LOG_INFO,
+         "[obs-zoom-plugin] Released video shared memory before re-subscribe: source=%s uuid=%s dropped_gen=%u",
+         output_name().c_str(), source_uuid.c_str(), dropped_gen);
 }
 
 void ZoomSource::release_video_shm()
@@ -1629,11 +1646,40 @@ void ZoomSource::release_video_shm()
     release_video_shm_locked();
 }
 
+// Audio has the SAME defect as video, but ONLY on paths that send an explicit
+// unsubscribe first. The engine handles Unsubscribe with
+// EngineAudio::instance().remove(uuid) (engine/src/main.cpp), which erases the
+// AudioTarget and with it its shm_gen (engine/src/engine-audio.cpp). The
+// replacement target therefore restarts at 0, and ensure_shm() creates
+// generation 1 — the legacy unsuffixed "..._audio" name we are still mapping.
+// When the new participant's buffers are larger the create fails, the engine
+// emits audio_shm_create_failed, and because a failed ensure_shm() publishes no
+// audio event there is nothing left to make us reopen: that source goes
+// PERMANENTLY silent. Equal-or-smaller buffers reuse the section and look fine,
+// which is why this survives casual testing.
+//
+// A bare subscribe (no unsubscribe) is different: EngineAudio::subscribe_if_needed()
+// updates an existing AudioTarget in place, so nothing is recreated and no
+// release is needed. That is why this is called only from the clean cut.
+void ZoomSource::release_audio_shm_locked()
+{
+    const uint32_t dropped_gen = m_audio_shm_gen;
+    if (!shm_release_for_resubscribe(m_audio_shm, m_audio_shm_gen)) return;
+    blog(LOG_INFO,
+         "[obs-zoom-plugin] Released audio shared memory before re-subscribe: source=%s uuid=%s dropped_gen=%u",
+         output_name().c_str(), source_uuid.c_str(), dropped_gen);
+}
+
 void ZoomSource::release_director_preview_shm()
 {
     std::lock_guard<std::mutex> lk(m_mtx);
-    shm_release_for_resubscribe(m_director_preview_shm,
-                                m_director_preview_shm_gen);
+    const uint32_t dropped_gen = m_director_preview_shm_gen;
+    if (!shm_release_for_resubscribe(m_director_preview_shm,
+                                     m_director_preview_shm_gen))
+        return;
+    blog(LOG_INFO,
+         "[obs-zoom-plugin] Released director preview shared memory before re-subscribe: source=%s uuid=%s dropped_gen=%u",
+         output_name().c_str(), m_director_preview_uuid.c_str(), dropped_gen);
 }
 
 static const char *zoom_source_get_name(void *)

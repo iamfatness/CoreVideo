@@ -51,9 +51,18 @@
 // stays correct no matter which generation the engine's replacement target
 // comes back with — higher, lower, or the same.
 //
+// Returns true when a mapping was actually dropped, so callers can log the
+// release once per real occurrence instead of on every no-op call. That log
+// matters: once the mapping is released, the "gen N -> M" reopen line in
+// zoom-source.cpp stops firing (it is guarded on a non-null pointer), and that
+// line is how the 2026-08-10 incident was diagnosed. Releasing silently would
+// remove the evidence trail for the next recurrence.
+//
 // Caller must serialise this against the frame callback that reads `region`.
-inline void shm_release_for_resubscribe(ShmRegion &region, uint32_t &mapped_gen)
+inline bool shm_release_for_resubscribe(ShmRegion &region, uint32_t &mapped_gen)
 {
+    const bool had_mapping = region.ptr != nullptr;
     shm_region_destroy(region);
     mapped_gen = 0;
+    return had_mapping;
 }

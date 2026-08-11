@@ -8,6 +8,21 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 ## [Unreleased]
 
 ### Fixed
+- **Feeds no longer flash bright garbage when they change participant.** On
+  air, every active-speaker change made the affected source flash a frame or
+  two of bright colour noise before settling. Any re-point of a source — an
+  active-speaker cut, a reassignment in the Output Manager, an automatic
+  recovery of a dropped feed — now hands the old video buffer back before
+  asking for the new one, so the engine can rebuild it at the new
+  participant's size instead of being blocked by the buffer CoreVideo was
+  still holding. Switches cut cleanly, on Zoom sources and on the Tiles wall
+  alike.
+- **A source no longer goes permanently silent after an active-speaker
+  change.** The same held-buffer problem could hit a source's audio on an
+  active-speaker cut, and audio had no way to recover on its own: the source
+  stayed silent for the rest of the session unless you hid and re-showed it.
+  It only bit when the incoming participant needed a larger audio buffer than
+  the outgoing one, which is why it survived casual testing.
 - **Requesting the Zoom engine works on the first attempt.** A `ZoomObsEngine`
   left over from a previous OBS session keeps holding the Zoom SDK for a while
   after OBS exits — the SDK's own shutdown runs long — so the new engine's
@@ -22,6 +37,25 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
   Previously the engine process stayed alive but unauthenticated and every
   further request was silently ignored. The error now names the other Zoom SDK
   instance as the cause and says what to do about it.
+
+### Added
+- **A background for the Tiles wall.** "Background colour" fills the gutters,
+  margins and any uncovered canvas, and "Background source" draws any
+  video-producing OBS source — an Image, a Media Source, a Browser Source —
+  behind the tiles and over that colour. Leave the source on "- none -" for
+  colour only. A background source that is deleted, or one that would render
+  itself (the wall, or a scene containing it), falls back to the colour
+  rather than breaking the wall.
+- **Tile borders.** "Border width" (0-64 px), "Border colour", and a "Corner
+  shape" of Square or Rounded with a "Corner radius" (0-128 px, shown only
+  for Rounded). Rounded corners cut the video itself, so the background shows
+  through them. Width defaults to 0, so existing walls look exactly as they
+  did until you move it.
+- **Per-tile crop.** A collapsible "Per-tile crop" group gives every tile its
+  own left and right crop, as a percentage of the source width (0-45% a side),
+  for reframing a guest sitting too far off-centre without disturbing the grid
+  or any other tile. Crops belong to the tile position, not to whoever is in
+  it, so they apply in Auto mode too. All crops default to 0.
 
 ## [0.1.36] - 2026-08-09
 

@@ -675,6 +675,17 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoReconnectBackoff
              COMMAND CoreVideoReconnectBackoffTest)
 
+    # Retry rules for the Zoom SDK init handshake when an orphaned engine still
+    # holds the SDK (SDKERR_OTHER_SDK_INSTANCE_RUNNING). Pure logic, no Qt/OBS.
+    add_executable(CoreVideoSdkInitRetryTest
+        tests/zoom-sdk-init-retry-test.cpp
+    )
+    target_include_directories(CoreVideoSdkInitRetryTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoSdkInitRetry
+             COMMAND CoreVideoSdkInitRetryTest)
+
     add_executable(CoreVideoReconnectScheduleTest
         tests/zoom-reconnect-schedule-test.cpp
     )

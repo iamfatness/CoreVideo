@@ -129,6 +129,12 @@ private:
     bool connect_ipc();
     void disconnect_ipc();
     void set_last_error(const std::string &message);
+    // Records `message` as the last error and hands it to every registered
+    // error callback with m_mtx RELEASED, for the same reason
+    // update_roster_state_and_notify() releases it: a callback may re-enter
+    // this client (the dock reads last_error() from one) and m_mtx is not
+    // recursive.
+    void set_error_and_notify(const std::string &message);
     void reader_loop();
     void monitor_loop();
     void handle_event(const std::string &line);
@@ -155,11 +161,10 @@ private:
     // change. Leave it alone.
     //
     // Being private makes the correct path the shortest one, but it cannot
-    // force a future site to take it. The same snapshot-then-dispatch shape is
-    // still hand-rolled for *error* callbacks, in the "error"/"auth_fail"
-    // handling in handle_event() and in clear_last_error(), so that copy-paste
-    // template remains in this file. If you extend those, factor them into a
-    // sibling helper rather than open-coding the pattern a fourth time.
+    // force a future site to take it. The error-callback side of the same
+    // snapshot-then-dispatch shape now lives in set_error_and_notify(); use
+    // that rather than open-coding the pattern again. clear_last_error() is the
+    // one remaining hand-rolled copy, because it clears rather than sets.
     //
     // `mutate` runs with m_mtx held: it may touch m_roster /
     // m_active_speaker_id freely, but it must not call any public method of
@@ -206,6 +211,33 @@ private:
     std::string m_pending_display_name;
     ZoomJoinAuthTokens m_pending_tokens;
     MeetingKind m_pending_kind = MeetingKind::Meeting;
+
+    // --- Zoom SDK init retry (SDKERR_OTHER_SDK_INSTANCE_RUNNING) ------------
+    // An orphaned ZoomObsEngine from a previous OBS session still holds the
+    // Zoom SDK when the freshly launched engine calls InitSDK, so the FIRST
+    // engine request of a session fails and the operator has to ask twice. The
+    // orphan exits on its own, so we replay the init command a bounded number
+    // of times instead of failing. The rules live in zoom-sdk-init-retry.h.
+    //
+    // The wait deliberately runs on the monitor thread. start() is called from
+    // a Qt worker (and from the control/OSC server threads), the auth_fail
+    // arrives on the reader thread, and neither may sleep: the reader also
+    // dispatches every source's frames and keeps m_last_rx_ms fresh, so a
+    // sleeping reader would stall video AND let monitor_loop() decide the
+    // engine had gone silent. monitor_loop() already ticks about once a second
+    // and exits as soon as m_running clears, so stop() cancels a pending retry
+    // for free and never blocks on it.
+    //
+    // 0 = nothing scheduled; otherwise the wall-clock ms (os_gettime_ns()/1e6)
+    // at which monitor_loop() should replay m_init_payload.
+    std::atomic<uint64_t> m_init_retry_due_ms{0};
+    // Reader-thread only, plus the reset in start() (which runs with the reader
+    // thread joined, so there is no concurrent access).
+    int m_init_retry_attempts = 0;
+    uint64_t m_init_retry_waited_ms = 0;
+    // The exact init command to replay. Guarded by m_mtx; holds an SDK
+    // credential, so it is cleared on teardown.
+    std::string m_init_payload;
 
 #if defined(WIN32)
     void *m_process = nullptr;

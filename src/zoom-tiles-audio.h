@@ -23,7 +23,11 @@
 // empty owner_uuid, which the planner reads as an adoptable orphan.
 std::vector<TilesAudioSourceState> tiles_audio_scan();
 
-// Applies the plan. Creates into group_name, which must already exist —
-// creating the group is the operator's act, and is also how they opt in.
+// Applies the plan. Create actions go into group_name, which must already
+// exist — creating the group is the operator's act, and is also how they opt
+// in. group_name is resolved lazily, only when a Create actually needs it:
+// Adopt/Unmute/Mute/SetMixers never touch the group, so a missing or renamed
+// group only skips new participants for this call — it never blocks muting
+// someone who left the wall.
 void tiles_audio_apply(const TilesAudioPlan &plan, const std::string &group_name,
                        const std::string &self_uuid);

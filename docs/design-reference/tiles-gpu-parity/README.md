@@ -150,3 +150,17 @@ future 4K work; it is still owed.
 the truncated integer crop passed to `gs_draw_sprite_subregion`, and truncates
 the crop to whole rather than even source pixels. This is a sub-canvas-pixel
 difference from the CPU path by construction, not a defect.
+
+### Correction: one real visible difference (found in review, after the checks above)
+
+The GPU effect samples with `Filter = Linear`; the deleted CPU path scaled with
+nearest-neighbour (`blit_plane_nearest`). Tiles are therefore **softer** on the
+GPU path wherever a feed is scaled, which is a larger visible difference than
+the sub-pixel crop truncation noted above, and it was missed by the side-by-side
+comparison recorded here.
+
+This is a quality improvement, not a regression — nearest-neighbour downscaling
+of a 720p feed into a small tile aliases badly. But Phase A's stated contract
+was "no operator-visible change", and this is one. Recorded rather than quietly
+accepted: reverting to nearest to honour the letter of the contract is possible
+(`Filter = Point`) and is the owner's call.

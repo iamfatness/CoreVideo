@@ -87,6 +87,19 @@ public:
     MeetingState state() const { return m_state.load(std::memory_order_acquire); }
     bool is_running() const { return m_running.load(std::memory_order_acquire); }
     bool is_authenticated() const { return m_authenticated.load(std::memory_order_acquire); }
+    // True while a scheduled SDKERR_OTHER_SDK_INSTANCE_RUNNING init retry is
+    // still waiting to be replayed (see m_init_retry_due_ms below).
+    //
+    // Exposed for the dock's join watchdog. That watchdog measures how long the
+    // state has been Joining, and the init retry runs *inside* that window
+    // (on_join_clicked() sets Joining before start(), and every start() is
+    // immediately followed by join()), so a long wait for another SDK instance
+    // would otherwise be charged against the join's deadline. This is a
+    // point-in-time read, safe from any thread; it can go false at any moment
+    // when the monitor thread replays the init.
+    bool is_init_retry_pending() const {
+        return m_init_retry_due_ms.load(std::memory_order_acquire) != 0;
+    }
     bool is_media_active() const { return m_media_active.load(std::memory_order_acquire); }
     std::string last_error() const;
     void clear_last_error();

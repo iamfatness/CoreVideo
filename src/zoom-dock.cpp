@@ -996,6 +996,28 @@ void ZoomDock::update_state_indicator()
 {
     const MeetingState s = ZoomEngineClient::instance().state();
 
+    // Don't charge the Zoom SDK init retry against the join deadline below.
+    //
+    // When an orphaned ZoomObsEngine from a previous OBS session still holds
+    // the SDK, the engine's InitSDK is replayed on a bounded schedule
+    // (zoom-sdk-init-retry.h): up to 78s of scheduled delay, plus the monitor
+    // thread's ~1s tick per attempt, plus the round trips themselves. All of
+    // that runs with the state already at Joining — on_join_clicked() sets
+    // Joining before start(), and every start() is immediately followed by
+    // join() — so the two-minute deadline would be most of the way spent before
+    // the join request even reaches Zoom, and a meeting with a waiting room (or
+    // one that has not started yet) would be cancelled while it was still
+    // progressing normally.
+    //
+    // Holding the start of the window at "now" while a retry is pending keeps
+    // the deadline measuring the join itself. It cannot hold the watchdog off
+    // indefinitely: the retry schedule is capped at kSdkInitRetryMaxAttempts,
+    // and exhausting it tears the engine down and moves the state to Failed,
+    // which clears m_join_started_ms below.
+    if (s == MeetingState::Joining && m_join_started_ms > 0 &&
+        ZoomEngineClient::instance().is_init_retry_pending())
+        m_join_started_ms = QDateTime::currentMSecsSinceEpoch();
+
     if (s == MeetingState::Joining && m_join_started_ms > 0 &&
         !m_join_timeout_reported &&
         QDateTime::currentMSecsSinceEpoch() - m_join_started_ms > 120000) {

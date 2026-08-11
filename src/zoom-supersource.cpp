@@ -1,5 +1,6 @@
 #include "zoom-supersource.h"
 #include "engine-ipc.h"
+#include "shm-resubscribe.h"
 #include "zoom-engine-client.h"
 #include "zoom-tile-border.h"
 #include "zoom-tile-crop.h"
@@ -298,42 +299,25 @@ static void tile_feed_register(const TileFeedPtr &feed)
 // before any subscribe that re-points an existing uuid, and before the subscribe
 // reaches the engine.
 //
-// Why, in full, because this is not redundant and deleting it reintroduces a
-// production incident (2026-08-08):
+// This is not redundant cleanup and deleting it reintroduces a production
+// incident (2026-08-08). The rule, and the full reasoning for it, live in
+// src/shm-resubscribe.h; the tile-specific part is only that `frame` (the
+// decoded copy the draw path reads) is separate from `shm` (the window onto the
+// engine's buffer), so dropping the mapping discards no pixels — the tile keeps
+// showing its last frame until the next frame event reopens the region.
 //
-// Re-subscribing the same source_uuid at a different participant makes the
-// engine run unsubscribe_locked() first (EngineVideo::subscribe,
-// engine/src/engine-video.cpp), which destroys that uuid's SourceTarget. shm_gen
-// is a member of SourceTarget (engine/src/engine-video.h), so the replacement
-// target restarts at generation 0 and its first ensure_shm() creates generation
-// 1 — which is the *legacy unsuffixed* region name (shm_region_name() in
-// engine-ipc.h). Meanwhile we are still mapping the old section under that exact
-// name. A Windows named section cannot be recreated at a larger size while any
-// process still maps it: CreateFileMappingA hands back the existing smaller
-// section and the larger MapViewOfFile fails. ensure_shm() then returns false
-// and the engine drops the frame *without* emitting a frame event, and since the
-// plugin only reopens on a generation change (shm_mapping_stale) and both sides
-// read generation 1, the two never resynchronise. The tile stays black for the
-// rest of the session; only hiding and re-showing the source recovers it.
-//
-// Dropping the mapping first leaves the name free for the engine to recreate at
-// the new size. It discards no pixels: `frame` (the decoded copy the draw path
-// reads) is separate from `shm` (the window onto the engine's buffer), and the
-// next frame event reopens the mapping — ensure_shm() retries on every frame, so
-// even if this release loses the race with the engine's first attempt, the
-// following frame self-heals. Same release-then-subscribe order as the
-// director-preview repoint in src/zoom-source.cpp.
-//
-// Takes feed->mtx, the innermost lock: callers hold ctx->engine_mutex with
-// ctx->mutex released, matching tile_feed_retire().
+// What this wrapper adds over the shared helper is the locking the helper
+// requires of its callers: it takes feed->mtx, the innermost lock and the same
+// one tile_feed_on_frame() holds while reading `shm`. Callers hold
+// ctx->engine_mutex with ctx->mutex released, matching tile_feed_retire().
 static void tile_feed_release_mapping(const TileFeedPtr &feed)
 {
     if (!feed) return;
     std::lock_guard<std::mutex> lock(feed->mtx);
-    shm_region_destroy(feed->shm);
-    // No mapping is held, so no generation is pinned open. The next frame event
-    // reopens against whatever generation the engine reports.
-    feed->shm_gen = 0;
+    // Return value deliberately ignored: it exists so a caller can log a real
+    // release once, and the two call sites here already log the reassign /
+    // resubscribe they are part of.
+    shm_release_for_resubscribe(feed->shm, feed->shm_gen);
 }
 
 // Defined with the rest of the draw path below; declared here because teardown

@@ -35,9 +35,10 @@
 // Order is not negotiable: release, THEN subscribe. Releasing after the
 // subscribe has already reached the engine is the same bug with extra steps.
 //
-// Prior art for the same rule: tile_feed_release_mapping() in
-// src/zoom-supersource.cpp (Tiles, Phase A) and shm_region_name() in
-// src/engine-ipc.h.
+// This rule was first worked out in the Tiles path (Phase A); the tiles code
+// now calls this helper through tile_feed_release_mapping() in
+// src/zoom-supersource.cpp, which wraps it in the feed lock. See also
+// shm_region_name() in src/engine-ipc.h.
 
 #include "engine-ipc.h"
 

@@ -209,6 +209,86 @@ int main()
         }
     }
 
+    // ── LOAD-BEARING: turning the feature off mutes what this wall owns ──────
+    // Clearing the audio group is the operator switching the feature off, and
+    // tiles_audio_reconcile implements that as one reconcile with an empty
+    // assignment list. Everything this Tiles source owns must come out as
+    // Mute: if it did not, "off" would leave every participant unmuted, on
+    // tracks 1-6, inside a group that sits in every scene — still going to air
+    // and to the stems, and still owned by a live Tiles source, so nothing
+    // else could adopt or mute them either. Nothing may be created on this
+    // path, and another wall's sources must still be left strictly alone.
+    {
+        TilesAudioSourceState live;  // ours, on air
+        live.participant_id = 11;
+        live.owner_uuid     = kSelf;
+        live.name           = "Ada (CoreVideo)";
+        live.muted          = false;
+        live.mixers         = 0x3u;
+
+        TilesAudioSourceState already_muted;  // ours, already quiet
+        already_muted.participant_id = 22;
+        already_muted.owner_uuid     = kSelf;
+        already_muted.name           = "Grace (CoreVideo)";
+        already_muted.muted          = true;
+        already_muted.mixers         = 0x5u;
+
+        TilesAudioSourceState theirs;  // another wall's, on air
+        theirs.participant_id = 33;
+        theirs.owner_uuid     = kOther;
+        theirs.name           = "Katherine (CoreVideo)";
+        theirs.muted          = false;
+        theirs.mixers         = 0x3u;
+
+        const TilesAudioPlan plan = plan_tiles_audio(
+            {}, {live, already_muted, theirs}, roster, params_on());
+
+        if (!find_action(plan, TilesAudioActionKind::Mute, 11)) {
+            std::cerr << "turning the feature off left a source we own live on "
+                         "air — 'off' has to actually be off\n";
+            return 1;
+        }
+        if (has_any_for(plan, 22)) {
+            std::cerr << "turning the feature off re-muted a source that was "
+                         "already muted\n";
+            return 1;
+        }
+        if (has_any_for(plan, 33)) {
+            std::cerr << "turning the feature off muted another Tiles source's "
+                         "participant\n";
+            return 1;
+        }
+        for (const auto &a : plan.actions) {
+            if (a.kind != TilesAudioActionKind::Mute) {
+                std::cerr << "turning the feature off emitted a non-Mute action "
+                             "for participant " << a.participant_id
+                          << "; off must never create, adopt, unmute or "
+                             "retrack\n";
+                return 1;
+            }
+        }
+    }
+
+    // ── Off with nothing owned is a no-op, so it can be logged honestly ──────
+    // The off reconcile is what tells the operator their change took effect,
+    // and it is silent when it planned nothing. A second one must therefore
+    // plan nothing rather than repeat the line.
+    {
+        TilesAudioSourceState settled;
+        settled.participant_id = 11;
+        settled.owner_uuid     = kSelf;
+        settled.name           = "Ada (CoreVideo)";
+        settled.muted          = true;  // the previous off reconcile muted it
+        settled.mixers         = 0x3u;
+        const TilesAudioPlan plan =
+            plan_tiles_audio({}, {settled}, roster, params_on());
+        if (!plan.actions.empty()) {
+            std::cerr << "a repeated off reconcile emitted "
+                      << plan.actions.size() << " action(s); want 0\n";
+            return 1;
+        }
+    }
+
     // ── An orphan is adopted, not duplicated ─────────────────────────────────
     // The Tiles source that made it was deleted; its sources outlive it.
     {

@@ -376,7 +376,7 @@ int main()
 - [ ] **Step 2: Run the test to verify it fails**
 
 ```bash
-cmake --build build-tests --target CoreVideoTilesAudioPlanTest
+cmake --build build-tests --config Debug --target CoreVideoTilesAudioPlanTest
 ```
 
 Expected: FAIL — the target does not exist yet (Step 3 adds it) and `zoom-tiles-audio-plan.h` is missing.
@@ -586,8 +586,8 @@ In `CMakeLists.txt`, immediately after the `add_test(NAME CoreVideoTileGlow ...)
 - [ ] **Step 5: Run the test to verify it passes**
 
 ```bash
-cmake --build build-tests --target CoreVideoTilesAudioPlanTest
-ctest --test-dir build-tests -R CoreVideoTilesAudioPlan --output-on-failure
+cmake --build build-tests --config Debug --target CoreVideoTilesAudioPlanTest
+ctest --test-dir build-tests -C Debug -R CoreVideoTilesAudioPlan --output-on-failure
 ```
 
 Expected: PASS, printing `tiles-audio-plan: all tests passed`.
@@ -595,7 +595,7 @@ Expected: PASS, printing `tiles-audio-plan: all tests passed`.
 - [ ] **Step 6: Run the whole suite to confirm nothing regressed**
 
 ```bash
-ctest --test-dir build-tests --output-on-failure
+ctest --test-dir build-tests -C Debug --output-on-failure
 ```
 
 Expected: all tests pass.
@@ -894,7 +894,7 @@ Expected: compiles clean, no new warnings.
 - [ ] **Step 5: Confirm the unit suite still passes**
 
 ```bash
-ctest --test-dir build-tests --output-on-failure
+ctest --test-dir build-tests -C Debug --output-on-failure
 ```
 
 Expected: all tests pass, including `CoreVideoTilesAudioPlan`.
@@ -1061,7 +1061,7 @@ Tiles.AudioGroup.Desc="Creates one Zoom participant audio source per tile inside
 
 ```bash
 cmake --build build-rel --config RelWithDebInfo --target obs-zoom-plugin
-ctest --test-dir build-tests --output-on-failure
+ctest --test-dir build-tests -C Debug --output-on-failure
 ```
 
 Expected: compiles clean; all tests pass.

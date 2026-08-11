@@ -123,6 +123,16 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
   track without building the wall twice. Off until you name a group. The wall
   itself stays silent, so cutting between scenes never swaps audio. Tracks 2-6
   carry five ISO stems; past that, participants are on the program track only.
+  Clearing the group again switches the feature off properly: the sources it
+  made are muted rather than deleted, so your faders and filters survive and
+  naming a group again brings back whoever is on the wall.
+  **Use the audio group on one Tiles source only.** If you run a second wall —
+  a panel wall beside a main one, say — leave its "Participant audio group"
+  blank. Audio for each person belongs to whichever wall created it, so on a
+  second wall someone who drops off that wall can be left muted while still on
+  screen on the other one, and both walls number their ISO stems from track 2
+  up, which can put two people on the same stem in the recording. The plugin
+  logs a warning if it sees a second wall with a group set.
 
 ## [0.1.36] - 2026-08-09
 

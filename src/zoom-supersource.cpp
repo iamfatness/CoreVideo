@@ -305,6 +305,25 @@ struct tiles_source {
     // (including the IPC reader thread) and from the queued task on the UI
     // thread, and a plain compare-exchange is all the coalescing needs.
     std::atomic<bool> audio_reconcile_pending{false};
+    // Set when the operator clears audio_group after it had a value; cleared
+    // by the reconcile that acts on it. Clearing the field is the operator
+    // turning the feature off, usually mid-show and usually because something
+    // is wrong — so off has to mean the sources this wall owns actually go
+    // quiet. Without this, clearing the field only stopped reconciliation:
+    // every participant stayed unmuted, on tracks 1-6, in a group that is in
+    // every scene, and stayed owned by a still-live Tiles source so nothing
+    // else could adopt or mute them either.
+    //
+    // A flag rather than testing "audio_group is empty" at reconcile time,
+    // because the reconcile has to distinguish "just turned off — mute
+    // everything I own, once" from "has been off all along — do nothing,
+    // touch nothing".
+    //
+    // Deliberately not guarded by `mutex`, like audio_reconcile_pending above:
+    // it is set on the UI thread under that lock but read by the queued task,
+    // and it has to survive a request the collection-load gate suppresses —
+    // the post-load sweep picks it up from here.
+    std::atomic<bool> audio_off_pending{false};
 
     // Owned solely by the OBS graphics thread (video_render) — no locking
     // needed. Copy-assigned into rather than constructed per frame: allocation
@@ -1425,9 +1444,11 @@ static constexpr const char *PROP_MARGIN_PCT  = "margin_pct";
 // file can be read, though the group itself stores no value of its own.
 static constexpr const char *PROP_CROP_GROUP = "crop_group";
 // Naming a group is both the destination and the on-switch: empty means the
-// feature does nothing at all. It ships empty, because this feature writes to
+// feature creates nothing. It ships empty, because this feature writes to
 // the operator's scene collection and must not start doing that on upgrade for
-// someone who never asked for it.
+// someone who never asked for it. Clearing it once it has been set is a
+// distinct event — the operator switching the feature off — and owes one final
+// reconcile that mutes what this wall owns; see audio_off_pending.
 static constexpr const char *PROP_AUDIO_GROUP = "audio_group";
 // kMaxTileSlots is declared with the other draw-path constants at the top of
 // this file, because `tiles_source` sizes its crop array from it.
@@ -1458,6 +1479,63 @@ static std::string crop_left_prop_name(std::size_t slot)
 static std::string crop_right_prop_name(std::size_t slot)
 {
     return "crop_right_" + std::to_string(slot);
+}
+
+// Logs, once per occurrence, that a second Tiles source has nominated a
+// participant audio group.
+//
+// Multi-wall audio is not supported, and this is the honest way to say so
+// rather than the expensive way to fix it. Audio for a participant is owned by
+// exactly one Tiles source (see the design's "one owner per participant"), and
+// two consequences fall out of that the moment a second wall names a group.
+// Wall B owns P; P drops off B's wall, so B mutes P; P is still on wall A's
+// wall, but A hits the "owned by another live Tiles source" guard and emits
+// nothing at all — so P is muted while on screen and no reconcile will ever
+// unmute them. And stem tracks are allocated per wall from track 2 up, so
+// A's first tile and B's first tile both claim track 2 and that ISO stem
+// records two people mixed together. Both are silent failures; a log line at
+// least makes them findable.
+//
+// Read from each Tiles source's settings rather than from its ctx->audio_group
+// on purpose: this runs inside an obs_enum_sources callback, which holds
+// obs->data.sources_mutex, and taking a ctx->mutex there — a lock the graphics
+// thread takes every frame — would add a fresh lock-order edge for a value the
+// settings already hold authoritatively.
+static void warn_on_multiple_audio_walls()
+{
+    int walls = 0;
+    obs_enum_sources(
+        [](void *param, obs_source_t *src) -> bool {
+            const char *id = obs_source_get_id(src);
+            if (!id || std::strcmp(id, kTilesSourceId) != 0) return true;
+            obs_data_t *settings = obs_source_get_settings(src);
+            if (!settings) return true;
+            const char *group = obs_data_get_string(settings, PROP_AUDIO_GROUP);
+            if (group && *group) ++*static_cast<int *>(param);
+            obs_data_release(settings);
+            return true;
+        },
+        &walls);
+
+    // Latched: a standing misconfiguration is logged once, not on every roster
+    // tick, and the latch re-arms when it clears so setting the same thing up
+    // again tomorrow logs again.
+    static std::atomic<bool> s_warned_multi_wall{false};
+    if (walls < 2) {
+        s_warned_multi_wall.store(false, std::memory_order_release);
+        return;
+    }
+    if (s_warned_multi_wall.exchange(true, std::memory_order_acq_rel)) return;
+
+    blog(LOG_WARNING,
+         "[obs-zoom-plugin] Tiles audio: %d Tiles sources have a participant "
+         "audio group set. Only one is supported. A participant's audio "
+         "belongs to a single wall, so someone who leaves that wall while "
+         "still on another one is muted and will not be unmuted again, and "
+         "both walls assign ISO stems from track 2 upwards, so two people can "
+         "end up recorded on the same stem. Set the audio group on one Tiles "
+         "source and clear it on the others.",
+         walls);
 }
 
 // Requests a per-participant audio reconcile; performs none of the work
@@ -1532,12 +1610,21 @@ static void request_audio_reconcile(tiles_source *ctx)
     // common case is the feature being off, and there is no reason to pay
     // for a ref, an allocation and a queued task just to have the task find
     // nothing to do.
+    //
+    // The one no-group case that does have work to do is the transition into
+    // it — the operator clearing the field, which owes exactly one reconcile
+    // that mutes everything this wall owns. If a reconcile is already pending
+    // when that happens, the compare-exchange below fails and this returns
+    // without queuing a second one; that is correct and not a lost signal,
+    // because the task body re-reads both audio_group and audio_off_pending
+    // when it runs, so the reconcile already in flight performs the off sweep.
     bool has_group = false;
     {
         std::lock_guard<std::mutex> lock(ctx->mutex);
         has_group = !ctx->audio_group.empty();
     }
-    if (!has_group) return;
+    if (!has_group && !ctx->audio_off_pending.load(std::memory_order_acquire))
+        return;
 
     bool expected = false;
     if (!ctx->audio_reconcile_pending.compare_exchange_strong(
@@ -1595,16 +1682,44 @@ static void request_audio_reconcile(tiles_source *ctx)
             assignments = ctx->participants;
         }
 
-        if (!audio_group.empty()) {
-            const char *uuid = obs_source_get_uuid(ctx->source);
-            if (uuid && *uuid) {
-                const std::vector<ParticipantInfo> roster =
-                    ZoomEngineClient::instance().roster();
-                TilesAudioPlanParams params;
-                params.self_uuid = uuid;
-                params.enabled   = true;
-                tiles_audio_reconcile(assignments, roster, params, audio_group);
-            }
+        // Read after the load gate above, not before it: a task that bails on
+        // a closed gate must leave the flag set, so the post-load sweep still
+        // performs the off reconcile it owes the operator.
+        const bool off_sweep =
+            ctx->audio_off_pending.load(std::memory_order_acquire);
+
+        // No group and no pending off means the feature has been off all
+        // along: nothing to reconcile, and nothing of the operator's to touch.
+        if (audio_group.empty() && !off_sweep) {
+            obs_source_release(ctx->source);
+            return;
+        }
+
+        const char *uuid = obs_source_get_uuid(ctx->source);
+        if (uuid && *uuid) {
+            const std::vector<ParticipantInfo> roster =
+                ZoomEngineClient::instance().roster();
+            TilesAudioPlanParams params;
+            params.self_uuid = uuid;
+            params.enabled   = true;
+
+            // Cleared before the reconcile rather than after, for the same
+            // reason audio_reconcile_pending is cleared at task entry: a
+            // clear-the-field that somehow lands while this is running must
+            // leave a request behind rather than be absorbed. Cleared on the
+            // group-named path too — a group named again after being cleared
+            // supersedes the off sweep entirely, and a stale flag left set
+            // there would mute the whole wall on some later tick.
+            ctx->audio_off_pending.store(false, std::memory_order_release);
+
+            // Cheap enough beside a full scan-plan-apply, and this is the only
+            // place that sees every wall at once. Called on the off path too,
+            // so the latch re-arms as soon as the second wall stands down.
+            warn_on_multiple_audio_walls();
+
+            // audio_group is empty on the off path, which tiles_audio_reconcile
+            // reads as "mute everything this wall owns, create nothing".
+            tiles_audio_reconcile(assignments, roster, params, audio_group);
         }
 
         obs_source_release(ctx->source);
@@ -1863,6 +1978,16 @@ static void tiles_source_update(void *data, obs_data_t *settings)
         std::lock_guard<std::mutex> lock(ctx->mutex);
         ctx->fill_params = std::move(params);
         ctx->slot_crop = crops;
+        // Clearing a group that had a value is an instruction — turn the
+        // feature off — and not merely the absence of one. Detected here,
+        // under the same lock that publishes the new value, so that the
+        // transition cannot be lost between a read and a write if two
+        // settings passes land back to back. The flag survives independently
+        // of whether the request below actually queues anything (the
+        // collection-load gate may swallow it), and the reconcile that
+        // eventually acts on it clears it. See audio_off_pending.
+        if (!ctx->audio_group.empty() && audio_group.empty())
+            ctx->audio_off_pending.store(true, std::memory_order_release);
         ctx->audio_group = audio_group;
     }
     apply_assignments(ctx);
@@ -2244,7 +2369,7 @@ static obs_properties_t *tiles_source_get_properties(void *data)
     // later reconcile. An empty, blank field is off, and it is unambiguous:
     // whatever text is showing IS the value that gets stored.
     obs_property_t *audio_group = obs_properties_add_list(
-        props, PROP_AUDIO_GROUP, obs_module_text("Tiles.AudioGroup"),
+        props, PROP_AUDIO_GROUP, obs_module_text("CoreVideoTiles.AudioGroup"),
         OBS_COMBO_TYPE_EDITABLE, OBS_COMBO_FORMAT_STRING);
     obs_enum_sources(
         [](void *param, obs_source_t *src) -> bool {
@@ -2257,7 +2382,7 @@ static obs_properties_t *tiles_source_get_properties(void *data)
         },
         audio_group);
     obs_property_set_long_description(
-        audio_group, obs_module_text("Tiles.AudioGroup.Desc"));
+        audio_group, obs_module_text("CoreVideoTiles.AudioGroup.Desc"));
 
     // Tile shape. Presets rather than a bare ratio because the shapes an
     // operator actually wants are a short list, with Custom behind a modified

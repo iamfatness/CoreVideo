@@ -126,10 +126,31 @@ void clear_name_clash(uint32_t participant_id)
 // Serialises the whole scan-and-apply pair across every Tiles source in the
 // process — see tiles_audio_reconcile()'s declaration for why a per-source
 // lock (engine_mutex) is not enough on its own.
+//
+// Non-recursive, and taken in exactly one place: tiles_audio_reconcile below.
+// That is an invariant to keep, not an incidental fact. The whole
+// scan-plan-apply runs inline under this lock on the UI thread, and
+// tiles_audio_apply calls obs_source_create, obs_source_update and
+// obs_scene_add — each of which fires libobs signals synchronously on that
+// same thread. A future signal handler (source_create, item_add, a frontend
+// callback) that reached apply_assignments and so tiles_audio_reconcile would
+// therefore re-enter this lock on the thread already holding it, and
+// std::mutex re-entered by its own owner is undefined behaviour — in practice
+// a hung UI thread, mid-show, with the operator's scene collection half
+// reconciled. Two call sites exist today, both in tiles_audio_reconcile's own
+// body, so nothing re-enters. Anything that adds a libobs callback into this
+// path has to preserve that, or defer its reconcile to a fresh queued task
+// instead of running one inline.
 std::mutex g_reconcile_mutex;
 
-}  // namespace
-
+// Snapshots every marked source in the scene collection. Takes no arguments on
+// purpose: ownership is read off each source's own marker, never inferred from
+// who is asking. A marker naming a uuid with no live source is reported with an
+// empty owner_uuid, which the planner reads as an adoptable orphan.
+//
+// Internal, along with tiles_audio_apply below: tiles_audio_reconcile is the
+// only caller of either, and the pair is only correct when run together under
+// g_reconcile_mutex.
 std::vector<TilesAudioSourceState> tiles_audio_scan()
 {
     std::vector<TilesAudioSourceState> out;
@@ -170,11 +191,21 @@ std::vector<TilesAudioSourceState> tiles_audio_scan()
     return out;
 }
 
+// Applies the plan. Create actions go into group_name, which must already
+// exist — creating the group is the operator's act, and is also how they opt
+// in. group_name is resolved lazily, only when a Create actually needs it:
+// Adopt/Unmute/Mute/SetMixers never touch the group, so a missing or renamed
+// group only skips new participants for this call — it never blocks muting
+// someone who left the wall.
+//
+// An empty group_name is the feature being switched off (see
+// tiles_audio_reconcile): every Create is skipped, and the Mute actions that
+// make "off" mean off still run.
 void tiles_audio_apply(const TilesAudioPlan &plan, const std::string &group_name,
                        const std::string &self_uuid)
 {
     if (plan.actions.empty()) return;
-    if (group_name.empty() || self_uuid.empty()) return;
+    if (self_uuid.empty()) return;
 
     // Resolved lazily, on the first Create that actually needs it. Adopt,
     // Unmute, Mute and SetMixers never touch the group — gating them on it
@@ -188,6 +219,11 @@ void tiles_audio_apply(const TilesAudioPlan &plan, const std::string &group_name
 
     for (const TilesAudioAction &action : plan.actions) {
         if (action.kind == TilesAudioActionKind::Create) {
+            // No group named means the operator turned the feature off, and
+            // off creates nothing — ever. Skipped rather than returned from,
+            // because the same plan's Mute actions are the whole point of the
+            // reconcile that gets here with no group.
+            if (group_name.empty()) continue;
             if (!group_tried) {
                 group_tried = true;
                 group_src = obs_get_source_by_name(group_name.c_str());
@@ -322,15 +358,55 @@ void tiles_audio_apply(const TilesAudioPlan &plan, const std::string &group_name
     if (group_src) obs_source_release(group_src);
 }
 
+}  // namespace
+
 void tiles_audio_reconcile(const std::vector<uint32_t>        &assignments,
                            const std::vector<ParticipantInfo> &roster,
                            const TilesAudioPlanParams          &params,
                            const std::string                   &group_name)
 {
-    if (!params.enabled || group_name.empty()) return;
+    if (!params.enabled) return;
+
+    // An empty group name used to return here, which made turning the feature
+    // off mean "stop reconciling" rather than "stop". Nothing about the
+    // sources changed: they stayed in the group, unmuted, on tracks 1-6, in
+    // every scene — so every participant kept going to air and to the stems —
+    // and they stayed owned by a still-live Tiles source, so nothing else
+    // could adopt or mute them either. An operator clearing the field mid-show
+    // to stop the feature heard no change at all, and the remedies left to
+    // them are the destructive ones: kill the group (everyone at once) or
+    // delete sources by hand, on air.
+    //
+    // So off runs one last reconcile, with no assignments. The planner then
+    // emits Mute for every source this Tiles source owns and nothing else:
+    // Create is impossible from an empty assignment list (and refused by
+    // tiles_audio_apply without a group anyway), and anything owned by another
+    // Tiles source is untouched exactly as always. Consistent with the
+    // feature's own mute-rather-than-delete rule, and reversible — naming a
+    // group again unmutes whoever is back on the wall.
+    //
+    // The assignments are dropped here rather than at the call site so that
+    // "off creates nothing" is a property of this function, not of a caller
+    // remembering to pass an empty vector.
+    const std::vector<uint32_t>  no_assignments;
+    const std::vector<uint32_t> &wanted =
+        group_name.empty() ? no_assignments : assignments;
 
     std::lock_guard<std::mutex> lock(g_reconcile_mutex);
     const TilesAudioPlan plan =
-        plan_tiles_audio(assignments, tiles_audio_scan(), roster, params);
+        plan_tiles_audio(wanted, tiles_audio_scan(), roster, params);
+
+    // Logged because the operator has to be able to tell that clearing the
+    // field took effect — the whole failure this fixes is a change with no
+    // audible or visible confirmation. Silent when there was nothing to mute
+    // (already off, or nothing owned), so a repeated off reconcile does not
+    // repeat the line.
+    if (group_name.empty() && !plan.actions.empty())
+        blog(LOG_INFO,
+             "[corevideo] tiles audio: participant audio group cleared; "
+             "muting %zu source(s) this wall owns. They are kept, not deleted "
+             "— name a group again to bring back whoever is on the wall.",
+             plan.actions.size());
+
     tiles_audio_apply(plan, group_name, params.self_uuid);
 }

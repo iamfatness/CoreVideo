@@ -159,3 +159,18 @@ Audio filters on created sources, per-participant monitoring settings, automatic
 gain or ducking, stem recording configuration beyond track assignment, and any
 change to the existing three manual audio source kinds — which continue to work
 exactly as they do today for operators who prefer to build audio by hand.
+
+**Multi-wall audio.** Exactly one Tiles source may nominate an audio group. The
+ownership rule above deliberately makes a participant's audio belong to a single
+wall, and two walls both nominating a group produce two failures that only
+coordination between them could fix: a participant who leaves wall B (which
+mutes them) but is still on wall A stays muted on screen, because A's ownership
+guard correctly refuses to touch B's source and so can never unmute it; and stem
+tracks are allocated per wall from track 2 upwards, so each wall's first tile
+claims track 2 and the ISO stem records two people mixed together. Coordinating
+ownership and track allocation across walls is a materially larger design — a
+process-wide allocator, and an arbitration rule for who unmutes whom — and is
+not worth building before anyone has asked for two audio-bearing walls. The
+plugin logs a WARNING naming both consequences when it sees a second wall with a
+group set, and the operator-facing note in the changelog says to use the audio
+group on one Tiles source only.

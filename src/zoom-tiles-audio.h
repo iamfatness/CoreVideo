@@ -17,21 +17,12 @@
 // not create.
 #define CV_TILES_AUDIO_OWNER_KEY "cv_tiles_audio_owner"
 
-// Snapshots every marked source in the scene collection. Takes no arguments on
-// purpose: ownership is read off each source's own marker, never inferred from
-// who is asking. A marker naming a uuid with no live source is reported with an
-// empty owner_uuid, which the planner reads as an adoptable orphan.
-std::vector<TilesAudioSourceState> tiles_audio_scan();
-
-// Applies the plan. Create actions go into group_name, which must already
-// exist — creating the group is the operator's act, and is also how they opt
-// in. group_name is resolved lazily, only when a Create actually needs it:
-// Adopt/Unmute/Mute/SetMixers never touch the group, so a missing or renamed
-// group only skips new participants for this call — it never blocks muting
-// someone who left the wall.
-void tiles_audio_apply(const TilesAudioPlan &plan, const std::string &group_name,
-                       const std::string &self_uuid);
-
+// The scan and apply halves of a reconcile are deliberately NOT declared here.
+// They are internal to zoom-tiles-audio.cpp, because running either without
+// the other — or either of them outside the process-wide lock
+// tiles_audio_reconcile takes — reintroduces exactly the cross-source race
+// that lock exists to close. One entry point, one lock, no way to bypass it.
+//
 // Runs scan → plan → apply as one atomic step, serialised across every Tiles
 // source in the process. Nothing else serialises two Tiles sources against
 // each other — the per-ctx engine_mutex is not held across this call, and the
@@ -42,8 +33,16 @@ void tiles_audio_apply(const TilesAudioPlan &plan, const std::string &group_name
 // Holding one process-wide lock across the whole scan-and-apply pair for
 // every caller closes that: whichever Tiles source reconciles first sees its
 // own Create (or someone else's prior one) before the next reconcile's scan
-// runs. No-op if params.enabled is false or group_name is empty — checked
-// here too so a caller need not special-case the off state before calling.
+// runs. No-op if params.enabled is false.
+//
+// An EMPTY group_name is not a no-op, and this is the one asymmetry worth
+// knowing about: it means the operator cleared the field, which is them
+// turning the feature off. Off has to actually be off, so this runs one
+// reconcile with no assignments at all — muting every source this Tiles
+// source owns, creating nothing, and touching nothing owned by anyone else.
+// The mute is reversible: naming a group again unmutes whoever is back on the
+// wall. Calling it repeatedly with an empty group is harmless — the second
+// call finds everything already muted and plans nothing.
 void tiles_audio_reconcile(const std::vector<uint32_t>        &assignments,
                            const std::vector<ParticipantInfo> &roster,
                            const TilesAudioPlanParams          &params,

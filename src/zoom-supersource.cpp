@@ -2,6 +2,7 @@
 #include "engine-ipc.h"
 #include "zoom-engine-client.h"
 #include "zoom-tile-border.h"
+#include "zoom-tile-crop.h"
 #include "zoom-tile-fill.h"
 #include "zoom-tile-grid.h"
 #include "zoom-tile-retry.h"
@@ -15,11 +16,13 @@
 #include <util/platform.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 // Tiles are always 16:9 (standing product rule). The operator's border is drawn
@@ -32,6 +35,15 @@ static constexpr double kTileAspect = 16.0 / 9.0;
 // bound the *setting*; clamp_border() then bounds it against the actual tile.
 static constexpr int64_t kMaxBorderWidth  = 64;
 static constexpr int64_t kMaxCornerRadius = 128;
+// How many tile slots the wall has. Declared up here rather than beside the
+// other property constants below because `tiles_source` sizes its per-slot crop
+// array from it.
+static constexpr std::size_t kMaxTileSlots = 9;
+// Per-slot crop bound, in percent of the source width. 45 each side means left
+// and right together can never exceed 90%, so kMinCropRemainder in
+// zoom-tile-crop.h stays a defensive backstop for hand-edited scene files
+// rather than something the sliders reach.
+static constexpr int64_t kMaxSlotCropPct = 45;
 // Gutter and margin scale with the canvas: 8 px at 1080p.
 static constexpr double kSpacingDivisor = 135.0;
 // Neutral fill for the background and for tiles with no frame yet.
@@ -171,6 +183,12 @@ struct tiles_source {
     // with no obs_data_t in hand — it only knows the participants changed.
     TileFillParams fill_params;
     std::vector<TileFeedPtr> feeds;  // parallel to participants, slot for slot
+    // The operator's per-slot left/right crop, in percent of the source width,
+    // indexed by tile slot. Under `mutex` rather than in atomics like the
+    // border settings: the draw path needs all eighteen values to belong to one
+    // consistent settings pass, and it is already taking this lock every frame
+    // to snapshot the feed list, so this costs nothing extra.
+    std::array<std::pair<double, double>, kMaxTileSlots> slot_crop{};
     bool visible = false;
     // Distinguishes this source's slot uuids from any other tiles source.
     uint64_t instance_id = 0;
@@ -180,6 +198,10 @@ struct tiles_source {
     // churn on a 60 Hz draw path is the documented root cause of the
     // operator-stutter incident.
     std::vector<TileFeedPtr> render_feeds;
+    // Taken in the same critical section as render_feeds above, so a settings
+    // change landing mid-frame cannot give one tile the new crop and the next
+    // the old one.
+    std::array<std::pair<double, double>, kMaxTileSlots> render_slot_crop{};
     // One scratch buffer per slot, holding the pixels last taken from that
     // feed. Grow-only, so a slot that comes back reuses its buffer instead of
     // allocating on the draw path.
@@ -823,6 +845,7 @@ static void tiles_source_render(void *data, gs_effect_t *)
     {
         std::lock_guard<std::mutex> lock(ctx->mutex);
         ctx->render_feeds = ctx->feeds;
+        ctx->render_slot_crop = ctx->slot_crop;
     }
     // No early return on an empty feed list: the CPU path still emitted a full
     // neutral canvas with nobody on the wall, so an empty wall must still paint
@@ -945,13 +968,27 @@ static void tiles_source_render(void *data, gs_effect_t *)
             continue;
         }
 
-        // Sample the largest centred 16:9 sub-rectangle so the tile fills
+        // Narrow the usable source by this slot's crop, then sample the largest
+        // centred 16:9 sub-rectangle of what is left, so the tile fills
         // completely and is never letterboxed — the same solve_cover_crop() the
         // CPU blit used, mapped straight onto gs_draw_sprite_subregion(), which
         // samples exactly such a sub-rectangle.
-        const CropRect crop = solve_cover_crop(static_cast<double>(feed->tex_w),
-                                               static_cast<double>(feed->tex_h),
-                                               kTileAspect);
+        //
+        // The order is crop-then-cover and it is pinned by
+        // tests/tile-crop-test.cpp; see zoom-tile-crop.h. With both crops at 0
+        // solve_slot_crop() reduces to solve_cover_crop() exactly, so an
+        // operator who never touches the sliders sees no change at all.
+        //
+        // Bounds-checked rather than assumed: feeds.size() is capped at
+        // kMaxTileSlots by the resolver, but the draw path is the wrong place
+        // to depend on that holding.
+        const std::pair<double, double> slot_crop =
+            i < ctx->render_slot_crop.size() ? ctx->render_slot_crop[i]
+                                             : std::pair<double, double>{0.0, 0.0};
+        const CropRect crop = solve_slot_crop(static_cast<double>(feed->tex_w),
+                                              static_cast<double>(feed->tex_h),
+                                              kTileAspect,
+                                              slot_crop.first, slot_crop.second);
         // The sprite's geometry is sub_cx x sub_cy *in whole texels*
         // (build_subsprite_norm(), libobs/graphics/graphics.c:1024), so the
         // scale must divide by the truncated integers actually passed below,
@@ -974,6 +1011,12 @@ static void tiles_source_render(void *data, gs_effect_t *)
         // because those are precisely what build_subsprite_norm() divides by
         // when it builds the quad's UVs — anything else would put the border
         // slightly out of register with the video.
+        //
+        // This is why the slot crop above changes nothing here: it moves the
+        // sub-rectangle, and these four come from that same moved rectangle by
+        // construction. Any future change must keep computing crop_uv from the
+        // exact integers handed to gs_draw_sprite_subregion(), or borders will
+        // silently misregister on every tile with a non-zero crop.
         pass.crop_u  = static_cast<float>(crop_x) / static_cast<float>(feed->tex_w);
         pass.crop_v  = static_cast<float>(crop_y) / static_cast<float>(feed->tex_h);
         pass.crop_cu = static_cast<float>(crop_w) / static_cast<float>(feed->tex_w);
@@ -1027,7 +1070,11 @@ static constexpr const char *PROP_BORDER_WIDTH  = "border_width";
 static constexpr const char *PROP_BORDER_COLOR  = "border_color";
 static constexpr const char *PROP_BORDER_SHAPE  = "border_shape";
 static constexpr const char *PROP_CORNER_RADIUS = "corner_radius";
-static constexpr std::size_t kMaxTileSlots  = 9;
+// The collapsible group the eighteen crop sliders live in. Named so a scene
+// file can be read, though the group itself stores no value of its own.
+static constexpr const char *PROP_CROP_GROUP = "crop_group";
+// kMaxTileSlots is declared with the other draw-path constants at the top of
+// this file, because `tiles_source` sizes its crop array from it.
 static constexpr std::size_t kMaxExcludes   = 3;
 
 // Corner shape, stored as an int in the scene file so the list is stable if
@@ -1042,6 +1089,19 @@ static std::string tile_prop_name(std::size_t slot)
 static std::string exclude_prop_name(std::size_t slot)
 {
     return "exclude_" + std::to_string(slot);
+}
+
+// One key per side per slot, numbered from 1 like the tile choosers so a scene
+// file reads the same way. Shared by the defaults, the properties builder and
+// tiles_source_update, so the three cannot drift apart.
+static std::string crop_left_prop_name(std::size_t slot)
+{
+    return "crop_left_" + std::to_string(slot);
+}
+
+static std::string crop_right_prop_name(std::size_t slot)
+{
+    return "crop_right_" + std::to_string(slot);
 }
 
 // Recomputes the wall from the cached settings plus the live roster, and
@@ -1110,6 +1170,24 @@ static void tiles_source_update(void *data, obs_data_t *settings)
     for (std::size_t i = 1; i <= kMaxTileSlots; ++i)
         params.manual.push_back(read_id(tile_prop_name(i)));
 
+    // Per-slot crop, read here and stored under ctx->mutex below with the fill
+    // params, so one settings pass lands on the draw path as a unit.
+    //
+    // Clamped for the same reason the canvas and border settings above are: the
+    // sliders bound these to 0..45, but obs_data_get_int returns int64 and a
+    // scene file is hand-editable. solve_slot_crop() clamps again against the
+    // frame — that is the backstop, this is the bound on the setting itself.
+    const auto read_crop_pct = [settings](const std::string &key) -> double {
+        const int64_t raw = obs_data_get_int(settings, key.c_str());
+        return static_cast<double>(
+            std::min<int64_t>(std::max<int64_t>(raw, 0), kMaxSlotCropPct));
+    };
+    std::array<std::pair<double, double>, kMaxTileSlots> crops{};
+    for (std::size_t i = 1; i <= kMaxTileSlots; ++i) {
+        crops[i - 1] = {read_crop_pct(crop_left_prop_name(i)),
+                        read_crop_pct(crop_right_prop_name(i))};
+    }
+
     // Clamp before the parity mask. The properties UI already bounds these, but
     // scene files are hand-editable and obs_data_get_int returns int64: an
     // absurd width would otherwise reach resize() as a terabyte allocation and
@@ -1173,6 +1251,7 @@ static void tiles_source_update(void *data, obs_data_t *settings)
     {
         std::lock_guard<std::mutex> lock(ctx->mutex);
         ctx->fill_params = std::move(params);
+        ctx->slot_crop = crops;
     }
     apply_assignments(ctx);
 }
@@ -1389,6 +1468,13 @@ static void tiles_source_get_defaults(obs_data_t *settings)
         obs_data_set_default_int(settings, exclude_prop_name(i).c_str(), 0);
     for (std::size_t i = 1; i <= kMaxTileSlots; ++i)
         obs_data_set_default_int(settings, tile_prop_name(i).c_str(), 0);
+    // No crop on any slot, so a scene saved before these controls existed
+    // renders byte-for-byte as it did: solve_slot_crop() with both sides at 0
+    // is solve_cover_crop().
+    for (std::size_t i = 1; i <= kMaxTileSlots; ++i) {
+        obs_data_set_default_int(settings, crop_left_prop_name(i).c_str(), 0);
+        obs_data_set_default_int(settings, crop_right_prop_name(i).c_str(), 0);
+    }
 }
 
 static obs_properties_t *tiles_source_get_properties(void *data)
@@ -1478,6 +1564,39 @@ static obs_properties_t *tiles_source_get_properties(void *data)
     obs_properties_add_int_slider(props, PROP_CORNER_RADIUS,
         obs_module_text("CoreVideoTiles.CornerRadius"),
         0, static_cast<int>(kMaxCornerRadius), 1);
+
+    // Per-slot left/right crop, for reframing a badly-framed guest without
+    // touching the grid. Eighteen sliders inline would swamp a dialog that
+    // already carries thirteen choosers, so they go in a collapsible group —
+    // the operator opens it only when they need it.
+    //
+    // Deliberately NOT hidden in Auto mode: a crop belongs to the tile slot,
+    // not to whoever is currently in it, and Auto walls get reframed too.
+    obs_properties_t *crop_group = obs_properties_create();
+    for (std::size_t i = 1; i <= kMaxTileSlots; ++i) {
+        const std::string left  = crop_left_prop_name(i);
+        const std::string right = crop_right_prop_name(i);
+        // Built by concatenation, as the tile and exclude labels above are, so
+        // the same "Tile" string serves all of them.
+        const std::string left_label =
+            std::string(obs_module_text("CoreVideoTiles.Tile")) + " " +
+            std::to_string(i) + " " +
+            obs_module_text("CoreVideoTiles.CropLeftSuffix");
+        const std::string right_label =
+            std::string(obs_module_text("CoreVideoTiles.Tile")) + " " +
+            std::to_string(i) + " " +
+            obs_module_text("CoreVideoTiles.CropRightSuffix");
+        obs_properties_add_int_slider(crop_group, left.c_str(),
+            left_label.c_str(), 0, static_cast<int>(kMaxSlotCropPct), 1);
+        obs_properties_add_int_slider(crop_group, right.c_str(),
+            right_label.c_str(), 0, static_cast<int>(kMaxSlotCropPct), 1);
+    }
+    // OBS takes ownership of crop_group here (obs_properties_add_group ->
+    // obs_property_group_content), so it must not be destroyed by this
+    // function.
+    obs_properties_add_group(props, PROP_CROP_GROUP,
+        obs_module_text("CoreVideoTiles.CropGroup"),
+        OBS_GROUP_NORMAL, crop_group);
 
     obs_properties_add_int(props, "canvas_width",
         obs_module_text("CoreVideoTiles.CanvasWidth"),

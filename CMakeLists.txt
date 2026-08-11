@@ -760,6 +760,22 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoTileBorder
              COMMAND CoreVideoTileBorderTest)
 
+    # Per-slot left/right crop composed with the cover-crop. The composition
+    # order is the point: the slot crop narrows the usable source first, and the
+    # cover-crop then fills the tile from what is left. Reversing the two cuts a
+    # different part of the frame and only shows on an off-centre subject, so it
+    # is pinned by a test rather than by eye. zoom-tile-grid.cpp is needed
+    # because solve_cover_crop lives there.
+    add_executable(CoreVideoTileCropTest
+        tests/tile-crop-test.cpp
+        src/zoom-tile-grid.cpp
+    )
+    target_include_directories(CoreVideoTileCropTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTileCrop
+             COMMAND CoreVideoTileCropTest)
+
     # Retry pacing for the tiles silent-slot sweep: the sweep interval and the
     # per-slot exponential backoff / attempt cap that stop an unbounded
     # renderer create-destroy loop in the engine.

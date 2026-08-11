@@ -267,6 +267,7 @@ if(COREVIDEO_BUILD_PLUGIN)
         src/zoom-participant-audio-source.cpp
         src/zoom-supersource.cpp
         src/zoom-tiles-background.cpp
+        src/zoom-tiles-audio.cpp
         src/zoom-tiles-effect.cpp
         src/zoom-tile-grid.cpp
         src/zoom-engine-client.cpp

@@ -933,7 +933,16 @@ static void tiles_source_render(void *data, gs_effect_t *)
     // the explicit gs_enable_blending(true) alongside it.
     gs_blend_state_push();
     gs_enable_blending(true);
-    gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
+    // Separate alpha factors, not gs_blend_function(SRCALPHA, INVSRCALPHA) for
+    // all four: with the same pair for colour and alpha, destination alpha
+    // under-accumulates at partial-alpha pixels (e.g. 0.84 instead of 1.0),
+    // visible as a faint translucent ring around rounded corners when the wall
+    // is filtered, nested in another scene, or routed through the
+    // colour-space-conversion texrender path. ONE/INVSRCALPHA for alpha is
+    // what libobs's own gs_reset_blend_state() uses (graphics.c:1289-1295) —
+    // match it here instead of "simplifying" back to gs_blend_function().
+    gs_blend_function_separate(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA,
+                                GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
 
     gs_technique_t *tech = s_tiles_effect.tech_i420;
     gs_technique_begin(tech);

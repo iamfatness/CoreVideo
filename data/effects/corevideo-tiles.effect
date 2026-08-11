@@ -55,3 +55,19 @@ technique I420
         pixel_shader  = PSI420(vert_in);
     }
 }
+
+uniform float4 fill_color;
+
+float4 PSSolid(VertInOut vert_in) : TARGET
+{
+    return fill_color;
+}
+
+technique Solid
+{
+    pass
+    {
+        vertex_shader = VSDefault(vert_in);
+        pixel_shader  = PSSolid(vert_in);
+    }
+}

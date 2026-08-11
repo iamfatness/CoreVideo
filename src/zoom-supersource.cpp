@@ -128,6 +128,9 @@ struct tiles_source {
     // must never be able to block behind engine IPC.
     std::atomic<uint32_t> canvas_width{1920};
     std::atomic<uint32_t> canvas_height{1080};
+    // Operator-chosen background fill for the wall's gutters, margins and any
+    // uncovered canvas. Same atomic-not-mutex reasoning as canvas_width above.
+    std::atomic<uint32_t> bg_color{0xFF808080};
 
     // Serializes whole plan-and-execute cycles (update/show/hide/destroy) so
     // engine IPC happens outside `mutex` yet still in a well-defined order.
@@ -742,22 +745,38 @@ static void tiles_source_render(void *data, gs_effect_t *)
     const std::vector<SnappedTileRect> rects =
         snap_tile_grid_even(solve_tile_grid(feeds.size(), params), params);
 
+    // Background first, so tiles and their borders draw over it. This replaces
+    // what used to be a fixed neutral fill drawn through the I420 technique
+    // purely for CPU-path parity; the per-tile placeholder below
+    // (tiles_draw_neutral) is untouched and still uses that path, because it
+    // remains parity-critical for tiles with no frame. The full-canvas fill is
+    // now the operator's "bg_color" setting, drawn through the effect's Solid
+    // technique. The default, 0xFF808080, is grey in either byte order, so an
+    // existing scene looks unchanged until the operator picks a colour.
+    //
+    // Byte order, observed rather than assumed: the "bg_color" obs_data int
+    // (as OBS's colour picker and obs-websocket both write it) is 0xAABBGGRR.
+    // gs_effect_set_color() takes uint32_t argb, i.e. 0xAARRGGBB
+    // (graphics.h:442). Setting the property to opaque red stored
+    // 0xFF0000FF; passed straight through, the rendered gutter sampled
+    // (r=0, g=0, b=255) — blue — confirming the mismatch. Swapping the R and
+    // B bytes before the call made the same setting render (r=255, g=0,
+    // b=0), matching the picker. See task-1-report.md for the full trace.
+    const uint32_t picker_color = ctx->bg_color.load(std::memory_order_acquire);
+    const uint32_t fill_argb = (picker_color & 0xFF00FF00u) |
+                               ((picker_color & 0x000000FFu) << 16) |
+                               ((picker_color & 0x00FF0000u) >> 16);
+    gs_effect_set_color(s_tiles_effect.param_color, fill_argb);
+    gs_technique_t *solid = s_tiles_effect.tech_solid;
+    gs_technique_begin(solid);
+    if (gs_technique_begin_pass(solid, 0)) {
+        gs_draw_sprite(nullptr, 0, canvas_w, canvas_h);
+        gs_technique_end_pass(solid);
+    }
+    gs_technique_end(solid);
+
     gs_technique_t *tech = s_tiles_effect.tech_i420;
     gs_technique_begin(tech);
-
-    // PARITY-CRITICAL, DO NOT DELETE AS A REDUNDANT DRAW. The CPU compositor
-    // memset the whole canvas to kNeutralY/kNeutralUV before drawing any tile,
-    // so the gutters, the margins and any unfilled area were neutral grey — not
-    // transparent. Painting the canvas here reproduces that exactly, and through
-    // the same 1x1 0x80 textures and the same I420 technique the tiles use, so
-    // it is bit-identical to the old fill by construction rather than by an RGB
-    // constant somebody has to trust.
-    //
-    // It looks redundant now that the tiles carry participant video and cover
-    // their own rects opaquely. It is not: the gutters and margins are never
-    // covered by a tile, and they are exactly where the parity baseline in
-    // docs/design-reference/tiles-gpu-parity/ observes the neutral 0x80.
-    tiles_draw_neutral(tech, 0, 0, canvas_w, canvas_h);
 
     size_t drawn = 0;
     for (size_t i = 0; i < rects.size() && i < feeds.size(); ++i) {
@@ -930,6 +949,8 @@ static void tiles_source_update(void *data, obs_data_t *settings)
         std::min<int64_t>(std::max<int64_t>(raw_h, kMinCanvasH), kMaxCanvasH)) & ~1u;
     ctx->canvas_width.store(width, std::memory_order_release);
     ctx->canvas_height.store(height, std::memory_order_release);
+    ctx->bg_color.store(static_cast<uint32_t>(obs_data_get_int(settings, "bg_color")),
+                        std::memory_order_release);
 
     {
         std::lock_guard<std::mutex> lock(ctx->mutex);
@@ -1072,6 +1093,9 @@ static bool tiles_fill_mode_modified(obs_properties_t *props, obs_property_t *,
 
 static void tiles_source_get_defaults(obs_data_t *settings)
 {
+    // 0xFF808080 — the neutral grey the CPU compositor used, so an existing
+    // scene looks unchanged until the operator picks a colour.
+    obs_data_set_default_int(settings, "bg_color", 0xFF808080);
     obs_data_set_default_int(settings, "canvas_width",  1920);
     obs_data_set_default_int(settings, "canvas_height", 1080);
     obs_data_set_default_int(settings, PROP_FILL_MODE,
@@ -1124,6 +1148,9 @@ static obs_properties_t *tiles_source_get_properties(void *data)
         add_roster_entries(obs_properties_add_list(props, name.c_str(),
             label.c_str(), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT), roster);
     }
+
+    obs_properties_add_color(props, "bg_color",
+        obs_module_text("CoreVideoTiles.BackgroundColor"));
 
     obs_properties_add_int(props, "canvas_width",
         obs_module_text("CoreVideoTiles.CanvasWidth"),

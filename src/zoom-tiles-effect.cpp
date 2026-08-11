@@ -23,6 +23,8 @@ bool tiles_effect_load(TilesEffect &out)
         out.param_y   = gs_effect_get_param_by_name(out.effect, "image");
         out.param_u   = gs_effect_get_param_by_name(out.effect, "tex_u");
         out.param_v   = gs_effect_get_param_by_name(out.effect, "tex_v");
+        out.tech_solid  = gs_effect_get_technique(out.effect, "Solid");
+        out.param_color = gs_effect_get_param_by_name(out.effect, "fill_color");
     }
     obs_leave_graphics();
 
@@ -36,10 +38,11 @@ bool tiles_effect_load(TilesEffect &out)
     }
     bfree(error);
 
-    if (!out.valid() || !out.param_y || !out.param_u || !out.param_v) {
+    if (!out.valid() || !out.param_y || !out.param_u || !out.param_v ||
+        !out.param_color) {
         blog(LOG_ERROR,
              "[obs-zoom-plugin] Tiles effect compiled but is missing its I420 "
-             "technique or a plane parameter");
+             "or Solid technique, or a plane/color parameter");
         tiles_effect_destroy(out);
         return false;
     }

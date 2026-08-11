@@ -12,8 +12,12 @@ struct TilesEffect {
     gs_eparam_t    *param_y    = nullptr;
     gs_eparam_t    *param_u    = nullptr;
     gs_eparam_t    *param_v    = nullptr;
+    gs_technique_t *tech_solid  = nullptr;
+    gs_eparam_t    *param_color = nullptr;
 
-    bool valid() const { return effect != nullptr && tech_i420 != nullptr; }
+    bool valid() const {
+        return effect != nullptr && tech_i420 != nullptr && tech_solid != nullptr;
+    }
 };
 
 // Compiles data/effects/corevideo-tiles.effect and resolves its technique and

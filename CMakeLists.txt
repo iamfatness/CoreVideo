@@ -677,6 +677,22 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoShmEngineRestart
              COMMAND CoreVideoShmEngineRestartTest)
 
+    # The other half of surviving an engine restart (src/audio-subscription-
+    # state.h). Releasing the mapping unblocks the new engine's first create;
+    # something still has to ask it for the feed. Video is re-subscribed by
+    # ZoomOutputManager::resubscribe_all(), which iterates ZoomSource only — the
+    # dedicated CoreVideo audio sources are not in it, and a `subscribed` flag
+    # left over from the dead engine made their one re-subscribe path a no-op,
+    # so they went silent for the session. Header-only logic; no Qt/OBS.
+    add_executable(CoreVideoAudioSubscriptionStateTest
+        tests/audio-subscription-state-test.cpp
+    )
+    target_include_directories(CoreVideoAudioSubscriptionStateTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoAudioSubscriptionState
+             COMMAND CoreVideoAudioSubscriptionStateTest)
+
     # Centralized Zoom auth/join decision path + error catalog (issue #89).
     # Header-only logic; no Qt/OBS/SDK dependencies, no secrets.
     add_executable(CoreVideoJoinDecisionTest

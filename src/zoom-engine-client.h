@@ -41,8 +41,9 @@ public:
                            uint32_t shm_generation)> on_audio;
         // "A NEW ZoomObsEngine PROCESS is about to serve you — drop every
         // shared-memory read mapping you hold." Invoked once per source, from
-        // start(), after the new process is launched and connected and BEFORE
-        // it can be sent a single subscribe.
+        // start(), BEFORE the replacement process is launched and therefore
+        // before anything — including a subscribe that was already in flight
+        // when the old engine died — can reach it.
         //
         // Why this exists. The engine's SHM generation counter
         // (src/shm-generation.h) is process-wide, which is what makes a resize
@@ -105,7 +106,14 @@ public:
                    bool audience_audio = false,
                    VideoResolution video_resolution = VideoResolution::P720,
                    bool video_only = false);
-    void subscribe_audio(const std::string &source_uuid,
+    // Returns true only if the command was handed to a running engine over a
+    // live pipe. False means it was dropped — no engine, or the link broke —
+    // and the caller must NOT record the source as subscribed: the dedicated
+    // CoreVideo audio sources have no sweep equivalent to
+    // ZoomOutputManager::resubscribe_all() to correct a flag that says
+    // "subscribed" about a command the engine never saw, so a false claim there
+    // is silent for the rest of the session.
+    bool subscribe_audio(const std::string &source_uuid,
                          uint32_t participant_id,
                          bool isolate_audio,
                          bool audience_audio);
@@ -167,9 +175,9 @@ private:
 
     bool launch_engine();
     // Fires every registered source's on_new_engine_process callback. Called
-    // from start() only, between "the new engine is connected" and "the new
-    // engine can be sent a subscribe" — see the definition for why that window
-    // is the correct one and the only correct one.
+    // from start() only, and before launch_engine() — see the definition, and
+    // the call site, for why it has to run before the replacement process
+    // exists rather than merely before its first create.
     void release_source_mappings_for_new_engine();
     bool connect_ipc();
     void disconnect_ipc();

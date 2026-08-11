@@ -1,5 +1,6 @@
 #include "zoom-participant-audio-source.h"
 
+#include "audio-subscription-state.h"
 #include "engine-ipc.h"
 #include "shm-resubscribe.h"
 #include "speaker-director.h"
@@ -27,11 +28,8 @@
 
 static constexpr uint32_t kZoomBytesPerSample = sizeof(int16_t);
 
-enum class CoreVideoAudioKind {
-    Participant,
-    ActiveSpeaker,
-    Audience,
-};
+// CoreVideoAudioKind, AudioSubscriptionState and the two decisions they drive
+// live in src/audio-subscription-state.h so they can be tested without OBS.
 
 static std::string make_audio_source_uuid()
 {
@@ -51,6 +49,11 @@ struct CoreVideoAudioSource {
     CoreVideoAudioKind kind = CoreVideoAudioKind::Participant;
     std::atomic<uint32_t> participant_id{0};
     std::atomic<AudioChannelMode> audio_mode{AudioChannelMode::Mono};
+    // The two fields of AudioSubscriptionState, held as atomics because they
+    // are touched from the OBS UI thread (activate/deactivate/update), the
+    // engine reader thread (roster callbacks) and whichever thread called
+    // ZoomEngineClient::start() (the new-engine callback). The rules that read
+    // them live in src/audio-subscription-state.h.
     std::atomic<uint32_t> current_participant_id{0};
     std::atomic<bool> subscribed{false};
     std::atomic<bool> active{false};
@@ -90,19 +93,43 @@ static void subscribe_audio(CoreVideoAudioSource *ctx)
 {
     if (!ctx || ctx->source_uuid.empty()) return;
 
-    if (ctx->kind == CoreVideoAudioKind::Audience) {
-        ZoomEngineClient::instance().subscribe_audio(ctx->source_uuid, 0,
-                                                     false, true);
-        ctx->current_participant_id.store(0, std::memory_order_release);
-        ctx->subscribed.store(true, std::memory_order_release);
-        return;
+    const bool audience = ctx->kind == CoreVideoAudioKind::Audience;
+    uint32_t target = 0;
+    if (!audience) {
+        target = target_participant_id(ctx);
+        if (target == 0) return;
     }
 
-    const uint32_t target = target_participant_id(ctx);
-    if (target == 0) return;
-
-    ZoomEngineClient::instance().subscribe_audio(ctx->source_uuid, target,
-                                                 true, false);
+    // Only claim the subscription if the command was actually handed to an
+    // engine. ZoomEngineClient::subscribe_audio() drops it silently when no
+    // engine is running or the pipe has broken, and both happen on exactly the
+    // path this file has to survive: audio_activate() can fire while a
+    // replacement engine is still being launched, in the window that
+    // release_source_mappings_for_new_engine() opens. Marking a dropped
+    // command as subscribed makes maybe_resubscribe_for_roster() read it as
+    // "already done" and the source never asks again.
+    //
+    // It is not only the restart window. The same claim was being made every
+    // time OBS started with one of these sources already on screen: the engine
+    // has not been requested yet, so the subscribe went nowhere, and the flag
+    // it set meant the roster tick after the eventual join did nothing. A
+    // Participant- or Audience-kind source in that position was silent for the
+    // whole session.
+    //
+    // Same rule ZoomOutputManager::resubscribe_all() adopted for video after
+    // the 2026-08-09 incident: re-subscribe by intent, never trust a flag that
+    // may have outlived the engine it described.
+    if (!ZoomEngineClient::instance().subscribe_audio(ctx->source_uuid, target,
+                                                      !audience, audience)) {
+        // "No engine yet" is ordinary (OBS starts long before anyone joins);
+        // a drop while an engine IS running means the link broke, which is not.
+        const bool engine_running = ZoomEngineClient::instance().is_running();
+        blog(engine_running ? LOG_WARNING : LOG_INFO,
+             "[obs-zoom-plugin] CoreVideo audio subscribe was not delivered (%s): source=%s uuid=%s participant_id=%u - will retry on the next roster update",
+             engine_running ? "engine link down" : "no engine running",
+             obs_source_get_name(ctx->source), ctx->source_uuid.c_str(), target);
+        return;
+    }
     ctx->current_participant_id.store(target, std::memory_order_release);
     ctx->subscribed.store(true, std::memory_order_release);
 }
@@ -119,9 +146,11 @@ static void unsubscribe_audio(CoreVideoAudioSource *ctx)
 // comes up, and only then.
 //
 // These sources are the most exposed holder of the whole defect class and the
-// last one to be covered. They map "<uuid>_audio" and never let go of it: there
-// is no video path here to piggyback on, and unlike ZoomSource nothing in this
-// file releases before a re-subscribe. Within one engine process that is safe,
+// last one to be covered. They map "<uuid>_audio" and hold it for the whole life
+// of the source: audio_destroy() unmaps it, but that is teardown, not recovery,
+// and nothing else in this file lets go. There is no video path here to
+// piggyback on, and unlike ZoomSource nothing here releases before a
+// re-subscribe. Within one engine process that is safe,
 // because the engine's generation counter survives the AudioTarget that
 // maybe_resubscribe_for_roster() destroys on every active-speaker change
 // (src/shm-generation.h), so the rebuilt region always lands on a fresh _gN
@@ -144,22 +173,72 @@ static void release_audio_mapping(CoreVideoAudioSource *ctx)
          obs_source_get_name(ctx->source), ctx->source_uuid.c_str(), dropped_gen);
 }
 
+// Forgets the subscription this source believed it had, because the engine that
+// held it no longer exists. Called from the same new-engine callback that
+// releases the mapping, and only from there.
+//
+// Releasing the mapping alone does not restore audio. It clears the way for the
+// new engine's first region create, but nothing re-subscribes these sources:
+// the reconnect path's ZoomOutputManager::resubscribe_all() iterates ZoomSource
+// only, and maybe_resubscribe_for_roster() — the one path that does reach here —
+// treats a set `subscribed` as "already done" and returns. Left set, the
+// Participant and Audience kinds stayed silent for the rest of the session and
+// ActiveSpeaker recovered only if the resolved speaker happened to change.
+//
+// Sends nothing. on_new_engine_process must not talk to the engine (see
+// SourceCallbacks in zoom-engine-client.h), and there is nothing to cancel: the
+// subscription died with the old process.
+//
+// The re-subscribe is deliberately left to the roster path rather than issued
+// here, because here is too early — the new engine has not been launched, let
+// alone authenticated or joined. The new engine drives it instead: on reaching
+// MEETING_STATUS_INMEETING it attaches the participants controller and
+// immediately publishes a roster (EngineParticipants::attach(),
+// engine/src/main.cpp), which the plugin turns into a roster callback for every
+// registered source. So every successful rejoin produces at least one tick, and
+// that tick now finds `subscribed` false and subscribes.
+//
+// Touches only the two atomics, so it needs no lock; the caller already holds
+// the CallbackGate that keeps ctx alive.
+static void forget_subscription_for_new_engine(CoreVideoAudioSource *ctx)
+{
+    if (!ctx) return;
+    const AudioSubscriptionState cleared = audio_state_for_new_engine_process();
+    const bool was_subscribed =
+        ctx->subscribed.exchange(cleared.subscribed, std::memory_order_acq_rel);
+    ctx->current_participant_id.store(cleared.participant_id,
+                                      std::memory_order_release);
+    if (!was_subscribed) return;
+    blog(LOG_INFO,
+         "[obs-zoom-plugin] Dropped CoreVideo audio subscription held with the previous engine: source=%s uuid=%s - will re-subscribe on the new engine's first roster",
+         obs_source_get_name(ctx->source), ctx->source_uuid.c_str());
+}
+
 static void maybe_resubscribe_for_roster(CoreVideoAudioSource *ctx)
 {
-    if (!ctx || !ctx->active.load(std::memory_order_acquire)) return;
-    if (ctx->kind == CoreVideoAudioKind::Audience) {
-        if (!ctx->subscribed.load(std::memory_order_acquire))
-            subscribe_audio(ctx);
-        return;
-    }
+    if (!ctx) return;
+    const bool active = ctx->active.load(std::memory_order_acquire);
+    if (!active) return;
 
-    const uint32_t target = target_participant_id(ctx);
-    if (target == 0) return;
-    if (!ctx->subscribed.load(std::memory_order_acquire) ||
-        target != ctx->current_participant_id.load(std::memory_order_acquire)) {
-        if (ctx->subscribed.load(std::memory_order_acquire))
-            unsubscribe_audio(ctx);
+    const AudioSubscriptionState state{
+        ctx->subscribed.load(std::memory_order_acquire),
+        ctx->current_participant_id.load(std::memory_order_acquire)};
+    // Audience follows no participant, and resolving a target is not free —
+    // target_participant_id() also reconfigures and ticks the SpeakerDirector
+    // for the ActiveSpeaker kind — so it is only asked of the kinds that use it.
+    const uint32_t target = ctx->kind == CoreVideoAudioKind::Audience
+        ? 0 : target_participant_id(ctx);
+
+    switch (audio_resubscribe_action(ctx->kind, active, state, target)) {
+    case AudioResubscribeAction::None:
+        return;
+    case AudioResubscribeAction::UnsubscribeThenSubscribe:
+        unsubscribe_audio(ctx);
         subscribe_audio(ctx);
+        return;
+    case AudioResubscribeAction::Subscribe:
+        subscribe_audio(ctx);
+        return;
     }
 }
 
@@ -299,10 +378,16 @@ static void *audio_create_common(obs_data_t *settings, obs_source_t *source,
             if (!gate->alive) return;
             output_audio_frame(ctx, byte_len, participant_id, shm_gen);
         },
+        // Two things, and both are needed. Releasing the mapping unblocks the
+        // new engine's first create for this region; forgetting the
+        // subscription is what lets the roster path ask it for audio again.
+        // Release first, so there is no instant at which this source could
+        // subscribe while still holding a name the new engine wants.
         [ctx, gate = ctx->callback_gate]() {
             std::lock_guard<std::mutex> callback_lock(gate->mtx);
             if (!gate->alive) return;
             release_audio_mapping(ctx);
+            forget_subscription_for_new_engine(ctx);
         }
     });
     ZoomEngineClient::instance().add_roster_callback(ctx,

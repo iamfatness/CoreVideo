@@ -15,10 +15,24 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
   while CoreVideo was still holding the old ones open. Any buffer that needed to
   be larger the second time round could not be built, and audio in particular
   had no way back: it went quiet for the rest of the session. Every source now
-  hands back the buffers it is holding the moment a new engine process comes
-  up — video, screen share, audio, active-speaker preview and every tile on the
-  Tiles wall together — so the new engine starts with a clear field. This closes
-  the last route by which this fault could reach air.
+  hands back the buffers it is holding before the replacement engine is even
+  launched — video, screen share, audio, active-speaker preview and every tile
+  on the Tiles wall together — so the new engine starts with a clear field.
+  Handing the buffers back is only half of it, and the other half is asking the
+  new engine for the feed again. Video sources were already re-subscribed on
+  recovery; the Participant Audio, Audience Audio and Active Speaker Audio
+  sources were not, and would sit silent on a subscription that had died with
+  the old engine. They now forget that subscription when the engine is
+  replaced and ask the new one for their audio as soon as it reports who is in
+  the meeting.
+- **Audio sources already on screen when OBS starts are no longer silent for
+  the session.** A Participant Audio or Audience Audio source that was in the
+  live scene before the Zoom engine had been requested asked for its audio
+  immediately, before there was anything to ask, and then recorded itself as
+  subscribed — so when the meeting was finally joined it never asked again and
+  stayed quiet until you hid and re-showed it. These sources now only count
+  themselves subscribed once the request has actually reached an engine, and
+  keep asking on each participant update until it has.
 - **"Zoom engine could not allocate shared memory" no longer strands a source.**
   A feed that re-pointed often enough — the Active Speaker source re-points on
   every speaker change — could reach a state where the engine kept failing to

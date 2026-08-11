@@ -256,8 +256,9 @@ ZoomEngineClient::~ZoomEngineClient()
 // fallback — a failed ensure_shm() publishes no audio event
 // (engine/src/engine-audio.cpp), so nothing ever prompts the plugin to reopen
 // and that source stays silent for the rest of the session. The dedicated
-// CoreVideo audio sources (src/zoom-participant-audio-source.cpp) never release
-// at all.
+// CoreVideo audio sources (src/zoom-participant-audio-source.cpp) release only
+// in audio_destroy() — teardown, not recovery — so nothing lets go of their
+// mapping while the source is alive.
 //
 // WHY THE TRIGGER IS THE RESTART AND NOT THE SUBSCRIBE. The obvious repair is
 // to release audio on every subscribe path the way video does. That is wrong on
@@ -273,6 +274,16 @@ ZoomEngineClient::~ZoomEngineClient()
 // cheaper than one release per subscribe AND covers more: video, share, audio,
 // director preview and tiles together, on the single event that actually
 // invalidates the whole name space.
+//
+// RELEASING IS ONLY HALF OF RECOVERY, and this function does only that half.
+// It clears the way for the new engine's first create; something still has to
+// ask the new engine for the feed. Video is asked for by
+// ZoomOutputManager::resubscribe_all() on the reconnect path. The dedicated
+// CoreVideo audio sources are not in that sweep — it iterates ZoomSource — so
+// they clear their own stale subscription state inside their callback here and
+// re-subscribe from the new engine's first roster
+// (forget_subscription_for_new_engine() in
+// src/zoom-participant-audio-source.cpp says why that is the trigger).
 void ZoomEngineClient::release_source_mappings_for_new_engine()
 {
     std::vector<std::function<void()>> callbacks;
@@ -293,7 +304,7 @@ void ZoomEngineClient::release_source_mappings_for_new_engine()
     // report needs to distinguish from "we released and it still broke".
     blog(LOG_INFO,
          "[obs-zoom-plugin] New ZoomObsEngine process: released shared-memory "
-         "mappings for %zu registered source(s) before its first region create",
+         "mappings for %zu registered source(s) before launching it",
          callbacks.size());
 }
 
@@ -324,6 +335,28 @@ bool ZoomEngineClient::start(const std::string &jwt_token,
     m_init_retry_attempts = 0;
     m_init_retry_waited_ms = 0;
 
+    // Everything the plugin still has mapped is standing on a name the next
+    // engine process is about to reuse, so drop it all now — BEFORE that
+    // process exists.
+    //
+    // Before the new engine's first create is necessary but not sufficient.
+    // A subscribe reaches the engine through write_json(), which checks only
+    // the pipe; the m_running gate is read earlier, by the caller. A thread
+    // that passed that gate while the old engine was alive and then parked can
+    // resume any time after connect_ipc() installs the new pipe, and its stale
+    // subscribe would be the new engine's first prompt to create a region —
+    // ahead of a release still queued behind it. Releasing before launch_engine()
+    // puts the release ahead of everything the new process can be told, so that
+    // race has no window left to run in rather than a small one.
+    //
+    // Nothing here needs the new engine: every on_new_engine_process callback
+    // unmaps and does no more (that is a documented precondition of the
+    // callback), so it is safe this early. And if the launch below fails, the
+    // release cost nothing — the mappings belonged to a process that is already
+    // dead, and the regions are reopened from the first frame or audio event
+    // whenever an engine does come up.
+    release_source_mappings_for_new_engine();
+
     if (!launch_engine() || !connect_ipc()) {
         disconnect_ipc();
         // Engine may have been launched before IPC connection failed — kill it.
@@ -343,14 +376,6 @@ bool ZoomEngineClient::start(const std::string &jwt_token,
 #endif
         return false;
     }
-
-    // A brand-new engine process is serving us from here on, and its SHM
-    // generation counter starts from nothing. Everything we still have mapped
-    // is standing on a name it is about to reuse — drop it all now, while the
-    // whole name space is still guaranteed free. This is the last moment at
-    // which that is true: m_running goes true on the next line, and that is
-    // what unblocks every subscribe path.
-    release_source_mappings_for_new_engine();
 
     // Seed the heartbeat clock so a freshly connected engine isn't immediately
     // considered stale before its first line arrives.
@@ -661,13 +686,14 @@ void ZoomEngineClient::subscribe(const std::string &source_uuid,
         "}");
 }
 
-void ZoomEngineClient::subscribe_audio(const std::string &source_uuid,
+bool ZoomEngineClient::subscribe_audio(const std::string &source_uuid,
                                        uint32_t participant_id,
                                        bool isolate_audio,
                                        bool audience_audio)
 {
-    if (!m_running.load(std::memory_order_acquire) || source_uuid.empty()) return;
-    write_json(R"({"cmd":"subscribe_audio","source_uuid":")" + json_escape(source_uuid) +
+    if (!m_running.load(std::memory_order_acquire) || source_uuid.empty())
+        return false;
+    return write_json(R"({"cmd":"subscribe_audio","source_uuid":")" + json_escape(source_uuid) +
         R"(","participant_id":)" + std::to_string(participant_id) +
         R"(,"isolate_audio":)" + std::string(isolate_audio ? "true" : "false") +
         R"(,"audience_audio":)" + std::string(audience_audio ? "true" : "false") +

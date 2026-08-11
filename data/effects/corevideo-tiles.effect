@@ -10,6 +10,30 @@ uniform texture2d image;   // Y plane, GS_R8
 uniform texture2d tex_u;   // U plane, GS_R8, half size
 uniform texture2d tex_v;   // V plane, GS_R8, half size
 
+// ── Tile border ──────────────────────────────────────────────────────────────
+// All per-tile values. libobs uploads a pass's parameters inside
+// gs_technique_begin_pass() (upload_parameters(), graphics/effect.c) and does
+// not re-upload them for later draws, so every one of these must be set BEFORE
+// that tile's begin_pass. The draw path funnels both the video and the neutral
+// placeholder through tiles_begin_pass() for exactly that reason.
+uniform float4 border_color;   // stroke colour; only .rgb is used
+uniform float2 tile_size;      // the tile's width/height in canvas pixels
+uniform float  border_width;   // canvas pixels; 0 = no border
+uniform float  corner_radius;  // canvas pixels; 0 = square corners
+
+// The sub-rectangle of the source texture this draw samples, in normalized
+// texture coordinates: .xy = origin, .zw = size.
+//
+// This exists because vert_in.uv is NOT 0..1 across the tile. The video path
+// draws with gs_draw_sprite_subregion(), which builds its quad's UVs as
+// sub_x/tex_w .. (sub_x+sub_cx)/tex_w (build_subsprite_norm(),
+// libobs/graphics/graphics.c:1002-1025) so that the cover-crop is sampled —
+// so uv spans the crop rect, not the tile. Undoing that here recovers a true
+// 0..1 tile coordinate, which is what the distance field below needs.
+// The neutral placeholder draws with gs_draw_sprite(), whose UVs already run
+// 0..1, and passes (0, 0, 1, 1) — the identity — rather than a special case.
+uniform float4 crop_uv;
+
 sampler_state def_sampler {
     Filter   = Linear;
     AddressU = Clamp;
@@ -29,8 +53,22 @@ VertInOut VSDefault(VertInOut vert_in)
     return vert_out;
 }
 
+// Signed distance to a rounded rectangle centred on the origin. Negative
+// inside, positive outside, in the same units as `half_size`.
+//
+// clamp_border() (src/zoom-tile-border.h) caps the radius at half the tile's
+// shorter side, which is exactly min(half_size.x, half_size.y) — so
+// `half_size - r` never goes negative and the shape never inverts. The extreme
+// is a capsule, which is a valid rounded rect, not a degenerate one.
+float rounded_rect_sd(float2 p, float2 half_size, float r)
+{
+    float2 q = abs(p) - (half_size - r);
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
 float4 PSI420(VertInOut vert_in) : TARGET
 {
+    // ── Colour conversion. Parity-critical; independently verified. ──
     // Chroma offset is 128/255, not a flat 0.5: libobs builds its YUV matrix
     // from black_levels = {0, 128, 128} (media-io/video-matrices.c,
     // initialize_matrix), and format_conversion.effect offsets chroma by the
@@ -43,8 +81,44 @@ float4 PSI420(VertInOut vert_in) : TARGET
     float r = y + 1.5748 * v;
     float g = y - 0.1873 * u - 0.4681 * v;
     float b = y + 1.8556 * u;
+    float3 rgb = saturate(float3(r, g, b));
 
-    return float4(saturate(float3(r, g, b)), 1.0);
+    // ── Border. Deliberately downstream of, and separate from, the colour
+    // maths above: it only ever reads `rgb` and never alters how it was
+    // produced, so the two cannot become entangled. ──
+
+    // Distance field in canvas pixels, so width and radius are pixel units
+    // regardless of the tile's size or the feed's resolution.
+    float2 tile_uv = (vert_in.uv - crop_uv.xy) / crop_uv.zw;  // 0..1 over the tile
+    float2 p = (tile_uv - 0.5) * tile_size;
+    float d = rounded_rect_sd(p, tile_size * 0.5, corner_radius);
+
+    // One pixel of anti-aliasing either side of each edge. fwidth() is in
+    // *screen* pixels, so this stays a single pixel wide however the operator
+    // has scaled the wall in the scene. Computed outside the branches below so
+    // the derivative is never taken in non-uniform control flow.
+    float aa = max(fwidth(d), 0.0001);
+
+    // Square corners: the rounded-rect mask is then the tile rect itself, which
+    // the sprite already covers exactly, so the only thing the mask could do is
+    // soften an edge that is not there. Forced opaque so a wall with rounded
+    // corners switched off renders exactly as it did before borders existed,
+    // by construction rather than by inspection.
+    float alpha = 1.0;
+    if (corner_radius > 0.0)
+        alpha = 1.0 - smoothstep(-aa, aa, d);
+
+    // Likewise, with no border there is nothing to stroke — and without this
+    // guard a zero width would still tint the outermost pixel row towards
+    // border_color, i.e. the feature would be visible while switched off.
+    if (border_width > 0.0) {
+        // d + border_width is the same rounded rect inset by the border, so
+        // the inner corner radius follows the outer one automatically.
+        float inner = 1.0 - smoothstep(-aa, aa, d + border_width);
+        rgb = lerp(border_color.rgb, rgb, inner);
+    }
+
+    return float4(rgb, alpha);
 }
 
 technique I420

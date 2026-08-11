@@ -1,6 +1,7 @@
 #include "zoom-supersource.h"
 #include "engine-ipc.h"
 #include "zoom-engine-client.h"
+#include "zoom-tile-border.h"
 #include "zoom-tile-fill.h"
 #include "zoom-tile-grid.h"
 #include "zoom-tile-retry.h"
@@ -9,6 +10,7 @@
 #include "zoom-tiles-background.h"
 #include "zoom-tiles-effect.h"
 
+#include <graphics/vec4.h>  // obs.h brings in vec2/vec3 but not vec4
 #include <obs-module.h>
 #include <util/platform.h>
 
@@ -20,8 +22,16 @@
 #include <string>
 #include <vector>
 
-// Tiles are always 16:9 and never bordered (standing product rule).
+// Tiles are always 16:9 (standing product rule). The operator's border is drawn
+// *inside* that rect by the shader rather than around it, so it changes what a
+// tile looks like without changing the grid the tiles were solved into — the
+// parity-verified geometry in snap_tile_grid_even() is untouched.
 static constexpr double kTileAspect = 16.0 / 9.0;
+// Border property bounds. Enforced against scene data as well as the sliders:
+// obs_data_get_int returns int64 and scene files are hand-editable. These only
+// bound the *setting*; clamp_border() then bounds it against the actual tile.
+static constexpr int64_t kMaxBorderWidth  = 64;
+static constexpr int64_t kMaxCornerRadius = 128;
 // Gutter and margin scale with the canvas: 8 px at 1080p.
 static constexpr double kSpacingDivisor = 135.0;
 // Neutral fill for the background and for tiles with no frame yet.
@@ -132,6 +142,18 @@ struct tiles_source {
     // Operator-chosen background fill for the wall's gutters, margins and any
     // uncovered canvas. Same atomic-not-mutex reasoning as canvas_width above.
     std::atomic<uint32_t> bg_color{0xFF808080};
+    // The operator's tile border: colour (in the picker's 0xAABBGGRR byte
+    // order, converted at draw time), width in canvas pixels, and whether the
+    // corners are rounded plus by how much. Same atomic-not-mutex reasoning as
+    // bg_color above — the graphics thread reads all four every frame.
+    //
+    // The radius is kept separate from the shape rather than folded to 0 when
+    // Square, so switching to Square and back does not lose the operator's
+    // radius; the fold happens at draw time instead.
+    std::atomic<uint32_t> border_color{0xFF000000};
+    std::atomic<uint32_t> border_width{0};
+    std::atomic<bool>     border_rounded{false};
+    std::atomic<uint32_t> corner_radius{16};
     // Optional other OBS source drawn over the background colour and under the
     // tiles. Carries its own leaf lock (see zoom-tiles-background.h) rather
     // than living under `mutex`: the graphics thread reads it every frame, and
@@ -540,6 +562,56 @@ static bool tile_take_snapshot(const TileFeedPtr &feed, TileScratch &scratch)
 
 // ── GPU draw ─────────────────────────────────────────────────────────────────
 
+// Converts an OBS colour-property value to what gs_effect_set_color() expects.
+//
+// Byte order, observed rather than assumed: an obs_data colour int (as OBS's
+// colour picker and obs-websocket both write it) is 0xAABBGGRR.
+// gs_effect_set_color() takes uint32_t argb, i.e. 0xAARRGGBB (graphics.h:442,
+// which then calls vec4_from_bgra). Setting "bg_color" to opaque red stored
+// 0xFF0000FF; passed straight through, the rendered gutter sampled
+// (r=0, g=0, b=255) — blue — confirming the mismatch. Swapping the R and B
+// bytes before the call made the same setting render (r=255, g=0, b=0),
+// matching the picker. See task-1-report.md for the full trace.
+//
+// One helper for every colour property this source has, so the border cannot
+// drift from the background: they come from the same kind of control and need
+// the same swap.
+static inline uint32_t picker_color_to_argb(uint32_t picker)
+{
+    return (picker & 0xFF00FF00u) | ((picker & 0x000000FFu) << 16) |
+           ((picker & 0x00FF0000u) >> 16);
+}
+
+// Everything the I420 technique needs for one tile that is not a texture.
+//
+// Bundled into a struct, and taken by tiles_begin_pass() rather than set at the
+// call sites, because these are per-tile uniforms: libobs uploads a pass's
+// parameters inside gs_technique_begin_pass() and does not re-upload them for
+// later draws, so a path that forgot to set them would silently inherit the
+// previous tile's border geometry. Routing the video path and the neutral
+// placeholder through the same setter makes that impossible rather than
+// merely unlikely.
+// Plain floats rather than struct vec2/vec4 members: those are C unions of an
+// anonymous struct and an array, which brace-initialise awkwardly. The vectors
+// are built with libobs's own vec2_set/vec4_set inside tiles_begin_pass().
+struct TilePassParams {
+    uint32_t border_argb   = 0xFF000000;  // swapped ready for gs_effect_set_color
+    float    border_width  = 0.0f;        // canvas pixels, clamped to the tile
+    float    corner_radius = 0.0f;        // canvas pixels, clamped to the tile
+    float    tile_w = 0.0f;
+    float    tile_h = 0.0f;
+    // The sub-rectangle of the source texture this draw samples, in normalized
+    // texture coords (origin, then size). Defaults to the identity — the whole
+    // texture — which is exactly what a full gs_draw_sprite() produces; the
+    // video path overrides it with the cover-crop it passes to
+    // gs_draw_sprite_subregion(). See the crop_uv comment in
+    // data/effects/corevideo-tiles.effect.
+    float    crop_u = 0.0f;
+    float    crop_v = 0.0f;
+    float    crop_cu = 1.0f;
+    float    crop_cv = 1.0f;
+};
+
 // One shared 1x1 sample per plane holding the same neutral bytes the CPU
 // compositor wrote. Drawing the placeholder through the I420 technique makes it
 // bit-identical to the old neutral fill by construction, rather than by an RGB
@@ -667,7 +739,7 @@ static bool tile_upload_frame(const TileFeedPtr &feed, const TileScratch &scratc
     return true;
 }
 
-// Binds one tile's three planes and opens a pass for them.
+// Binds one tile's three planes and its border geometry, then opens a pass.
 //
 // THE BINDING MUST HAPPEN BEFORE THE PASS OPENS, AND EVERY TILE NEEDS ITS OWN
 // PASS. gs_technique_begin_pass() uploads the effect's parameters to the shader
@@ -677,16 +749,33 @@ static bool tile_upload_frame(const TileFeedPtr &feed, const TileScratch &scratc
 // (The alternative is one pass plus gs_effect_update_params() after every
 // rebind; a pass per tile is the same cost and much harder to get wrong.)
 //
+// The border uniforms are per-tile for exactly the same reason and are set
+// here, in the same breath as the textures, so no draw path can open a pass
+// having set one and not the other: a tile that skipped them would inherit the
+// previous tile's border width, radius and crop rect.
+//
 // Returns false when the pass could not be opened, in which case the draw must
 // be skipped: gs_technique_begin_pass() loads the pass's vertex and pixel
 // shaders, so drawing after a failed call runs against whatever shader was
 // loaded last — a wall drawn with some other source's effect.
 static bool tiles_begin_pass(gs_technique_t *tech, gs_texture_t *y,
-                             gs_texture_t *u, gs_texture_t *v)
+                             gs_texture_t *u, gs_texture_t *v,
+                             const TilePassParams &p)
 {
     gs_effect_set_texture(s_tiles_effect.param_y, y);
     gs_effect_set_texture(s_tiles_effect.param_u, u);
     gs_effect_set_texture(s_tiles_effect.param_v, v);
+
+    gs_effect_set_color(s_tiles_effect.param_border_color, p.border_argb);
+    gs_effect_set_float(s_tiles_effect.param_border_width, p.border_width);
+    gs_effect_set_float(s_tiles_effect.param_corner_radius, p.corner_radius);
+    struct vec2 tile_size;
+    vec2_set(&tile_size, p.tile_w, p.tile_h);
+    gs_effect_set_vec2(s_tiles_effect.param_tile_size, &tile_size);
+    struct vec4 crop_uv;
+    vec4_set(&crop_uv, p.crop_u, p.crop_v, p.crop_cu, p.crop_cv);
+    gs_effect_set_vec4(s_tiles_effect.param_crop_uv, &crop_uv);
+
     if (gs_technique_begin_pass(tech, 0)) return true;
 
     if (!s_tile_pass_failed_logged) {
@@ -700,10 +789,17 @@ static bool tiles_begin_pass(gs_technique_t *tech, gs_texture_t *y,
 
 // Paints one rect with the neutral placeholder, through the same I420 technique
 // and the same 1x1 0x80 planes the whole path uses.
+//
+// It takes the same TilePassParams as a video tile, so a slot with no frame
+// gets the operator's border at its own rect rather than the previous tile's.
+// gs_draw_sprite() maps the whole texture, so the caller's default identity
+// crop rect is the correct one here — nothing to override.
 static void tiles_draw_neutral(gs_technique_t *tech, uint32_t x, uint32_t y,
-                               uint32_t w, uint32_t h)
+                               uint32_t w, uint32_t h,
+                               const TilePassParams &p)
 {
-    if (!tiles_begin_pass(tech, s_neutral_y, s_neutral_u, s_neutral_v)) return;
+    if (!tiles_begin_pass(tech, s_neutral_y, s_neutral_u, s_neutral_v, p))
+        return;
     gs_matrix_push();
     gs_matrix_translate3f(static_cast<float>(x), static_cast<float>(y), 0.0f);
     gs_draw_sprite(s_neutral_y, 0, w, h);
@@ -762,18 +858,10 @@ static void tiles_source_render(void *data, gs_effect_t *)
     // technique. The default, 0xFF808080, is grey in either byte order, so an
     // existing scene looks unchanged until the operator picks a colour.
     //
-    // Byte order, observed rather than assumed: the "bg_color" obs_data int
-    // (as OBS's colour picker and obs-websocket both write it) is 0xAABBGGRR.
-    // gs_effect_set_color() takes uint32_t argb, i.e. 0xAARRGGBB
-    // (graphics.h:442). Setting the property to opaque red stored
-    // 0xFF0000FF; passed straight through, the rendered gutter sampled
-    // (r=0, g=0, b=255) — blue — confirming the mismatch. Swapping the R and
-    // B bytes before the call made the same setting render (r=255, g=0,
-    // b=0), matching the picker. See task-1-report.md for the full trace.
-    const uint32_t picker_color = ctx->bg_color.load(std::memory_order_acquire);
-    const uint32_t fill_argb = (picker_color & 0xFF00FF00u) |
-                               ((picker_color & 0x000000FFu) << 16) |
-                               ((picker_color & 0x00FF0000u) >> 16);
+    // The picker-to-ARGB byte swap is picker_color_to_argb(); the evidence for
+    // it is documented there.
+    const uint32_t fill_argb =
+        picker_color_to_argb(ctx->bg_color.load(std::memory_order_acquire));
     gs_effect_set_color(s_tiles_effect.param_color, fill_argb);
     gs_technique_t *solid = s_tiles_effect.tech_solid;
     gs_technique_begin(solid);
@@ -798,6 +886,32 @@ static void tiles_source_render(void *data, gs_effect_t *)
     // the colour-only behaviour byte-for-byte unchanged.
     ctx->background.render(canvas_w, canvas_h);
 
+    // The operator's border, read once for the whole wall. The shape is folded
+    // into the radius here rather than stored folded, so switching to Square
+    // and back keeps the radius the operator chose.
+    const uint32_t border_argb =
+        picker_color_to_argb(ctx->border_color.load(std::memory_order_acquire));
+    const double border_width_setting =
+        static_cast<double>(ctx->border_width.load(std::memory_order_acquire));
+    const double corner_radius_setting =
+        ctx->border_rounded.load(std::memory_order_acquire)
+            ? static_cast<double>(ctx->corner_radius.load(std::memory_order_acquire))
+            : 0.0;
+
+    // Rounded corners make a tile transparent at its corners, so the background
+    // drawn above has to show through them. That needs alpha blending, and
+    // inheriting whatever OBS last set is how a bug becomes machine-dependent:
+    // correct on the box it was written on, wrong somewhere else. Pushed and
+    // popped so the rest of the frame is left exactly as it was found — the
+    // stack saves the enable flag, all four factors and the op
+    // (gs_blend_state_pop(), libobs/graphics/graphics.c:1265-1282).
+    //
+    // gs_blend_function() sets the factors but does not enable blending, hence
+    // the explicit gs_enable_blending(true) alongside it.
+    gs_blend_state_push();
+    gs_enable_blending(true);
+    gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
+
     gs_technique_t *tech = s_tiles_effect.tech_i420;
     gs_technique_begin(tech);
 
@@ -806,6 +920,20 @@ static void tiles_source_render(void *data, gs_effect_t *)
         const SnappedTileRect &r = rects[i];
         if (r.width < 2 || r.height < 2) continue;  // as the CPU path skips them
 
+        // Bounded against this tile, not against the canvas: a width past half
+        // the shorter side would leave no interior, and the shader's distance
+        // field assumes a radius no larger than that. See zoom-tile-border.h.
+        const BorderParams b =
+            clamp_border(border_width_setting, corner_radius_setting,
+                         static_cast<double>(r.width),
+                         static_cast<double>(r.height));
+        TilePassParams pass{};
+        pass.border_argb   = border_argb;
+        pass.border_width  = static_cast<float>(b.width);
+        pass.corner_radius = static_cast<float>(b.radius);
+        pass.tile_w = static_cast<float>(r.width);
+        pass.tile_h = static_cast<float>(r.height);
+
         // Exactly the compositor's rule for "this tile has something to show":
         // tile_take_snapshot() already folds in TileSlotState's epoch check, so
         // a frame captured under a previous assignment is refused here for the
@@ -813,7 +941,7 @@ static void tiles_source_render(void *data, gs_effect_t *)
         const TileFeedPtr &feed = feeds[i];
         if (!feed || !tile_take_snapshot(feed, ctx->render_scratches[i]) ||
             !tile_upload_frame(feed, ctx->render_scratches[i])) {
-            tiles_draw_neutral(tech, r.x, r.y, r.width, r.height);
+            tiles_draw_neutral(tech, r.x, r.y, r.width, r.height, pass);
             continue;
         }
 
@@ -835,11 +963,23 @@ static void tiles_source_render(void *data, gs_effect_t *)
         const uint32_t crop_w = static_cast<uint32_t>(crop.width);
         const uint32_t crop_h = static_cast<uint32_t>(crop.height);
         if (crop_w == 0 || crop_h == 0) {  // degenerate source: nothing to map
-            tiles_draw_neutral(tech, r.x, r.y, r.width, r.height);
+            tiles_draw_neutral(tech, r.x, r.y, r.width, r.height, pass);
             continue;
         }
 
-        if (!tiles_begin_pass(tech, feed->tex_y, feed->tex_u, feed->tex_v))
+        // The same sub-rectangle, in normalized texture coords, so the shader
+        // can undo the crop and recover a 0..1 coordinate across the tile for
+        // its distance field. Derived from the truncated integers actually
+        // passed to gs_draw_sprite_subregion() below, and from tex_w/tex_h,
+        // because those are precisely what build_subsprite_norm() divides by
+        // when it builds the quad's UVs — anything else would put the border
+        // slightly out of register with the video.
+        pass.crop_u  = static_cast<float>(crop_x) / static_cast<float>(feed->tex_w);
+        pass.crop_v  = static_cast<float>(crop_y) / static_cast<float>(feed->tex_h);
+        pass.crop_cu = static_cast<float>(crop_w) / static_cast<float>(feed->tex_w);
+        pass.crop_cv = static_cast<float>(crop_h) / static_cast<float>(feed->tex_h);
+
+        if (!tiles_begin_pass(tech, feed->tex_y, feed->tex_u, feed->tex_v, pass))
             continue;
         gs_matrix_push();
         gs_matrix_translate3f(static_cast<float>(r.x), static_cast<float>(r.y),
@@ -856,6 +996,7 @@ static void tiles_source_render(void *data, gs_effect_t *)
     }
 
     gs_technique_end(tech);
+    gs_blend_state_pop();
 
     // Rate-limited so the rig can confirm the draw path is live and see both
     // the grid it solved and how many tiles actually have a feed, without
@@ -882,8 +1023,16 @@ static const char *tiles_source_get_name(void *)
 static constexpr const char *PROP_FILL_MODE = "fill_mode";
 static constexpr const char *PROP_MAX_TILES = "max_tiles";
 static constexpr const char *PROP_BG_SOURCE = "bg_source";
+static constexpr const char *PROP_BORDER_WIDTH  = "border_width";
+static constexpr const char *PROP_BORDER_COLOR  = "border_color";
+static constexpr const char *PROP_BORDER_SHAPE  = "border_shape";
+static constexpr const char *PROP_CORNER_RADIUS = "corner_radius";
 static constexpr std::size_t kMaxTileSlots  = 9;
 static constexpr std::size_t kMaxExcludes   = 3;
+
+// Corner shape, stored as an int in the scene file so the list is stable if
+// more shapes are ever added.
+enum class TileBorderShape : long long { Square = 0, Rounded = 1 };
 
 static std::string tile_prop_name(std::size_t slot)
 {
@@ -975,6 +1124,31 @@ static void tiles_source_update(void *data, obs_data_t *settings)
     ctx->canvas_height.store(height, std::memory_order_release);
     ctx->bg_color.store(static_cast<uint32_t>(obs_data_get_int(settings, "bg_color")),
                         std::memory_order_release);
+
+    // Same clamp discipline as the canvas above, and for the same reason: the
+    // sliders bound these but a hand-edited scene file does not. clamp_border()
+    // bounds them again against each tile's own rect at draw time — this only
+    // keeps an absurd setting out of the atomics.
+    const int64_t raw_border_w = obs_data_get_int(settings, PROP_BORDER_WIDTH);
+    const int64_t raw_radius   = obs_data_get_int(settings, PROP_CORNER_RADIUS);
+    ctx->border_width.store(
+        static_cast<uint32_t>(std::min<int64_t>(
+            std::max<int64_t>(raw_border_w, 0), kMaxBorderWidth)),
+        std::memory_order_release);
+    ctx->corner_radius.store(
+        static_cast<uint32_t>(std::min<int64_t>(
+            std::max<int64_t>(raw_radius, 0), kMaxCornerRadius)),
+        std::memory_order_release);
+    ctx->border_color.store(
+        static_cast<uint32_t>(obs_data_get_int(settings, PROP_BORDER_COLOR)),
+        std::memory_order_release);
+    // Anything that is not exactly "Rounded" is Square, so an unknown value
+    // from a newer scene file degrades to the shape that existed first rather
+    // than to an undefined one.
+    ctx->border_rounded.store(
+        obs_data_get_int(settings, PROP_BORDER_SHAPE) ==
+            static_cast<long long>(TileBorderShape::Rounded),
+        std::memory_order_release);
 
     // Deliberately outside every lock this function takes: set_source calls
     // into libobs (obs_source_add_active_child walks the source tree,
@@ -1173,6 +1347,21 @@ static bool tiles_fill_mode_modified(obs_properties_t *props, obs_property_t *,
     return true;  // properties changed: redraw the dialog
 }
 
+// The corner radius means nothing with square corners, so it is hidden rather
+// than left on screen doing nothing. Kept separate from
+// tiles_fill_mode_modified() because the two groups are independent: the
+// fill-mode callback fires on a fill-mode change, and folding this in would
+// make each one redraw controls it has no opinion about.
+static bool tiles_border_shape_modified(obs_properties_t *props,
+                                        obs_property_t *, obs_data_t *settings)
+{
+    const bool rounded = obs_data_get_int(settings, PROP_BORDER_SHAPE) ==
+                         static_cast<long long>(TileBorderShape::Rounded);
+    obs_property_set_visible(obs_properties_get(props, PROP_CORNER_RADIUS),
+                             rounded);
+    return true;  // properties changed: redraw the dialog
+}
+
 static void tiles_source_get_defaults(obs_data_t *settings)
 {
     // 0xFF808080 — the neutral grey the CPU compositor used, so an existing
@@ -1183,6 +1372,14 @@ static void tiles_source_get_defaults(obs_data_t *settings)
     obs_data_set_default_string(settings, PROP_BG_SOURCE, "");
     obs_data_set_default_int(settings, "canvas_width",  1920);
     obs_data_set_default_int(settings, "canvas_height", 1080);
+    // Width 0 and Square corners: borders off, so a scene saved before this
+    // control existed renders exactly as it did. The colour and radius defaults
+    // are only what the operator sees when they first switch borders on.
+    obs_data_set_default_int(settings, PROP_BORDER_WIDTH, 0);
+    obs_data_set_default_int(settings, PROP_BORDER_COLOR, 0xFF000000);
+    obs_data_set_default_int(settings, PROP_BORDER_SHAPE,
+                             static_cast<long long>(TileBorderShape::Square));
+    obs_data_set_default_int(settings, PROP_CORNER_RADIUS, 16);
     obs_data_set_default_int(settings, PROP_FILL_MODE,
                              static_cast<long long>(TileFillMode::Auto));
     obs_data_set_default_int(settings, PROP_MAX_TILES,
@@ -1259,6 +1456,29 @@ static obs_properties_t *tiles_source_get_properties(void *data)
         return true;
     }, bg);
 
+    // Tile borders. Width 0 is "no border", which is the default, so these four
+    // controls are inert until the operator moves the width off zero.
+    obs_properties_add_int_slider(props, PROP_BORDER_WIDTH,
+        obs_module_text("CoreVideoTiles.BorderWidth"),
+        0, static_cast<int>(kMaxBorderWidth), 1);
+    obs_properties_add_color(props, PROP_BORDER_COLOR,
+        obs_module_text("CoreVideoTiles.BorderColor"));
+
+    obs_property_t *shape = obs_properties_add_list(props, PROP_BORDER_SHAPE,
+        obs_module_text("CoreVideoTiles.BorderShape"),
+        OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(shape,
+        obs_module_text("CoreVideoTiles.BorderSquare"),
+        static_cast<long long>(TileBorderShape::Square));
+    obs_property_list_add_int(shape,
+        obs_module_text("CoreVideoTiles.BorderRounded"),
+        static_cast<long long>(TileBorderShape::Rounded));
+    obs_property_set_modified_callback(shape, tiles_border_shape_modified);
+
+    obs_properties_add_int_slider(props, PROP_CORNER_RADIUS,
+        obs_module_text("CoreVideoTiles.CornerRadius"),
+        0, static_cast<int>(kMaxCornerRadius), 1);
+
     obs_properties_add_int(props, "canvas_width",
         obs_module_text("CoreVideoTiles.CanvasWidth"),
         kMinCanvasW, kMaxCanvasW, 2);
@@ -1281,6 +1501,11 @@ static obs_properties_t *tiles_source_get_properties(void *data)
     obs_data_t *visibility_settings =
         ctx ? obs_source_get_settings(ctx->source) : obs_data_create();
     tiles_fill_mode_modified(props, nullptr, visibility_settings);
+    // Same reason, for the corner radius: without this it would show for a
+    // Square wall until the operator first touched the shape combo. The
+    // obs_data_create() fallback reads border_shape as 0 (Square), which is
+    // the correct default layout.
+    tiles_border_shape_modified(props, nullptr, visibility_settings);
     obs_data_release(visibility_settings);
 
     return props;

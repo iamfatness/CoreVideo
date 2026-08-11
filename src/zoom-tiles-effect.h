@@ -12,6 +12,14 @@ struct TilesEffect {
     gs_eparam_t    *param_y    = nullptr;
     gs_eparam_t    *param_u    = nullptr;
     gs_eparam_t    *param_v    = nullptr;
+    // Per-tile border geometry, consumed by the I420 technique. Every one of
+    // these has to be set before the tile's gs_technique_begin_pass(), which is
+    // where libobs uploads a pass's parameters — see tiles_begin_pass().
+    gs_eparam_t    *param_border_color  = nullptr;
+    gs_eparam_t    *param_border_width  = nullptr;
+    gs_eparam_t    *param_corner_radius = nullptr;
+    gs_eparam_t    *param_tile_size     = nullptr;
+    gs_eparam_t    *param_crop_uv       = nullptr;
     gs_technique_t *tech_solid  = nullptr;
     gs_eparam_t    *param_color = nullptr;
 

@@ -749,6 +749,17 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoTileTexture
              COMMAND CoreVideoTileTextureTest)
 
+    # Border width / corner radius clamping against the tile they are drawn on.
+    # Both are operator-reachable and both degenerate the tile if trusted.
+    add_executable(CoreVideoTileBorderTest
+        tests/tile-border-test.cpp
+    )
+    target_include_directories(CoreVideoTileBorderTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTileBorder
+             COMMAND CoreVideoTileBorderTest)
+
     # Retry pacing for the tiles silent-slot sweep: the sweep interval and the
     # per-slot exponential backoff / attempt cap that stop an unbounded
     # renderer create-destroy loop in the engine.

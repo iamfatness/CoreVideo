@@ -39,6 +39,33 @@ public:
         std::function<void(uint32_t byte_len,
                            uint32_t participant_id,
                            uint32_t shm_generation)> on_audio;
+        // "A NEW ZoomObsEngine PROCESS is about to serve you — drop every
+        // shared-memory read mapping you hold." Invoked once per source, from
+        // start(), after the new process is launched and connected and BEFORE
+        // it can be sent a single subscribe.
+        //
+        // Why this exists. The engine's SHM generation counter
+        // (src/shm-generation.h) is process-wide, which is what makes a resize
+        // land on a name nothing can still be mapping — but only within one
+        // engine process. A restarted engine starts from an empty table, so its
+        // FIRST create for any region asks for generation 1, and generation 1
+        // is the legacy unsuffixed name (shm_region_name() in engine-ipc.h).
+        // Every mapping we carried across the restart is therefore standing on
+        // a name the new engine is about to ask for, and on Windows a live
+        // mapping makes that create fail (ERROR_ACCESS_DENIED) whenever the new
+        // region needs to be larger. See src/shm-resubscribe.h.
+        //
+        // This is a precondition of the new engine's first create, not cleanup.
+        // The registry it is dispatched from IS the set of mapping holders:
+        // a region name is only ever learned from a frame/audio event, so
+        // anything holding a mapping registered here to receive them.
+        //
+        // Called on the thread that called start() (a Qt worker, the control
+        // server, the OSC server, or the reconnect thread) with this client's
+        // m_mtx RELEASED, for the same reason roster callbacks are — the
+        // callback takes the source's own lock and may re-enter this client.
+        // It must not talk to the engine; unmapping is all it may do.
+        std::function<void()> on_new_engine_process;
     };
 
     static ZoomEngineClient &instance();
@@ -139,6 +166,11 @@ private:
     ~ZoomEngineClient();
 
     bool launch_engine();
+    // Fires every registered source's on_new_engine_process callback. Called
+    // from start() only, between "the new engine is connected" and "the new
+    // engine can be sent a subscribe" — see the definition for why that window
+    // is the correct one and the only correct one.
+    void release_source_mappings_for_new_engine();
     bool connect_ipc();
     void disconnect_ipc();
     void set_last_error(const std::string &message);

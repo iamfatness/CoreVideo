@@ -283,6 +283,10 @@ static void tile_feed_subscribe(const TileFeedPtr &feed)
                                            /*video_only=*/true);
 }
 
+// Defined below with the other mapping-lifetime helpers; needed here for the
+// new-engine-process callback.
+static void tile_feed_release_mapping(const TileFeedPtr &feed);
+
 static void tile_feed_register(const TileFeedPtr &feed)
 {
     ZoomEngineClient::instance().register_source(feed->uuid, {
@@ -291,7 +295,15 @@ static void tile_feed_register(const TileFeedPtr &feed)
             tile_feed_on_frame(feed, width, height, participant_id,
                                shm_generation);
         },
-        {}  // tiles are video-only; audio stays on the dedicated audio sources
+        {},  // tiles are video-only; audio stays on the dedicated audio sources
+        // A new engine process restarts the SHM generation counter from
+        // nothing, so its first create for this slot's region asks for the
+        // legacy unsuffixed name whatever generation the dead engine had
+        // reached. A mapping carried across the restart blocks it exactly as a
+        // mapping carried across a re-point does. The retry sweep would find
+        // the slot silent and release eventually, but only after the operator
+        // has watched a dead tile through several backoff intervals.
+        [feed]() { tile_feed_release_mapping(feed); }
     });
 }
 

@@ -1617,12 +1617,41 @@ void ZoomSource::clear_preview_cb()
     m_preview_cb = nullptr;
 }
 
+// Teardown: clearing the assignment, and zoom_source_destroy(). Deliberately
+// silent, and deliberately NOT routed through the logging _locked forms below.
+// Those call output_name() -> obs_source_get_name(), and this runs inside
+// obs_source_info::destroy, where the source is mid-teardown. The log line
+// would say nothing useful on a path where the source is going away anyway, so
+// there is nothing to weigh against touching the source object there.
+//
+// The engine-restart release is a different case — the trail is the whole point
+// there — and has its own entry point below.
 void ZoomSource::release_shared_memory()
 {
     std::lock_guard<std::mutex> lk(m_mtx);
     shm_release_for_resubscribe(m_video_shm, m_video_shm_gen);
     shm_release_for_resubscribe(m_director_preview_shm, m_director_preview_shm_gen);
     shm_release_for_resubscribe(m_audio_shm, m_audio_shm_gen);
+}
+
+// A new ZoomObsEngine process is about to serve this source, and its SHM
+// generation table is empty: its first create for any of our three regions asks
+// for generation 1, the legacy unsuffixed name, whatever the dead engine had
+// climbed to. Every mapping we hold is standing on a name it is about to ask
+// for, so all three go — video, director preview and audio alike. Audio matters
+// most: no subscribe path releases it, and a blocked audio create publishes no
+// event, so nothing would ever prompt us to reopen and the source would stay
+// silent for the rest of the session. See ZoomEngineClient::SourceCallbacks.
+//
+// Logged per region, through the _locked forms. When a source goes quiet after
+// an engine restart, "which mappings did we actually drop, and at which
+// generation" is the first question and the operator's log has to answer it.
+void ZoomSource::release_shared_memory_for_new_engine()
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    release_video_shm_locked();
+    release_director_preview_shm_locked();
+    release_audio_shm_locked();
 }
 
 // Each of these logs the generation it dropped. Without that line a release is
@@ -1660,7 +1689,13 @@ void ZoomSource::release_video_shm()
 //
 // A bare subscribe (no unsubscribe) is different: EngineAudio::subscribe_if_needed()
 // updates an existing AudioTarget in place, so nothing is recreated and no
-// release is needed. That is why this is called only from the clean cut.
+// release is needed. That is why this is NOT called from subscribe().
+//
+// The other caller is release_shared_memory_for_new_engine(), for the case a
+// per-subscribe release could never cover: a new engine PROCESS. Its table
+// is empty, so its first create for this region asks for generation 1 — the
+// legacy unsuffixed name we are still holding — whatever the previous engine
+// had climbed to. See ZoomEngineClient::SourceCallbacks.
 void ZoomSource::release_audio_shm_locked()
 {
     const uint32_t dropped_gen = m_audio_shm_gen;
@@ -1670,9 +1705,8 @@ void ZoomSource::release_audio_shm_locked()
          output_name().c_str(), source_uuid.c_str(), dropped_gen);
 }
 
-void ZoomSource::release_director_preview_shm()
+void ZoomSource::release_director_preview_shm_locked()
 {
-    std::lock_guard<std::mutex> lk(m_mtx);
     const uint32_t dropped_gen = m_director_preview_shm_gen;
     if (!shm_release_for_resubscribe(m_director_preview_shm,
                                      m_director_preview_shm_gen))
@@ -1680,6 +1714,12 @@ void ZoomSource::release_director_preview_shm()
     blog(LOG_INFO,
          "[obs-zoom-plugin] Released director preview shared memory before re-subscribe: source=%s uuid=%s dropped_gen=%u",
          output_name().c_str(), m_director_preview_uuid.c_str(), dropped_gen);
+}
+
+void ZoomSource::release_director_preview_shm()
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    release_director_preview_shm_locked();
 }
 
 static const char *zoom_source_get_name(void *)
@@ -1733,6 +1773,15 @@ static void *zoom_source_create_common(obs_data_t *settings, obs_source_t *sourc
             std::lock_guard<std::mutex> callback_lock(gate->mtx);
             if (!gate->alive) return;
             ctx->on_engine_audio(byte_len, participant_id, shm_gen);
+        },
+        // A new engine process restarts the SHM generation counter, so every
+        // name we hold is one it is about to reuse. Drop all three mappings —
+        // audio included, which no subscribe path releases. Same lock order as
+        // the two callbacks above: the gate, then the source's own m_mtx inside.
+        [ctx, gate = ctx->m_callback_gate]() {
+            std::lock_guard<std::mutex> callback_lock(gate->mtx);
+            if (!gate->alive) return;
+            ctx->release_shared_memory_for_new_engine();
         }
     });
     if (dedicated_active_speaker) {
@@ -1749,6 +1798,16 @@ static void *zoom_source_create_common(obs_data_t *settings, obs_source_t *sourc
                 if (!gate->alive) return;
                 // Audio cuts follow the committed current slot. The preview
                 // slot is video-only so it can warm a frame before the cut.
+            },
+            // Deliberately the same wholesale release as the main uuid above,
+            // not a preview-only one. It is idempotent — the second call finds
+            // nothing mapped, drops nothing and logs nothing — and registering
+            // it on both uuids means neither registration silently depends on
+            // the other still existing.
+            [ctx, gate = ctx->m_callback_gate]() {
+                std::lock_guard<std::mutex> callback_lock(gate->mtx);
+                if (!gate->alive) return;
+                ctx->release_shared_memory_for_new_engine();
             }
         });
     }

@@ -233,6 +233,70 @@ ZoomEngineClient::~ZoomEngineClient()
     stop();
 }
 
+// The fourth and last shape of one defect class: a plugin-side SHM read mapping
+// that outlives the engine which named it.
+//
+// Two fixes already landed. The engine's generation counter moved into a
+// process-wide table (src/shm-generation.h) so a rebuilt target keeps climbing
+// instead of restarting at the legacy unsuffixed name, and the plugin releases
+// its video mapping before every subscribe (src/zoom-source.cpp) and before
+// every tile re-point (src/zoom-supersource.cpp). Both are scoped to ONE engine
+// process.
+//
+// An engine restart escapes both. The new process starts with an empty table,
+// so its first create for any region asks for generation 1 — the legacy
+// unsuffixed name — and every mapping the plugin carried across the restart is
+// sitting on exactly that name. On Windows the create then fails with
+// ERROR_ACCESS_DENIED whenever the new region has to be larger than the one we
+// are holding (src/shm-resubscribe.h has the operating-system rule in full).
+//
+// Video mostly survives that because resubscribe_all() re-subscribes through
+// ZoomSource::subscribe(), which releases first. Audio does not: nothing on the
+// restart path releases an audio mapping, and audio has no self-healing
+// fallback — a failed ensure_shm() publishes no audio event
+// (engine/src/engine-audio.cpp), so nothing ever prompts the plugin to reopen
+// and that source stays silent for the rest of the session. The dedicated
+// CoreVideo audio sources (src/zoom-participant-audio-source.cpp) never release
+// at all.
+//
+// WHY THE TRIGGER IS THE RESTART AND NOT THE SUBSCRIBE. The obvious repair is
+// to release audio on every subscribe path the way video does. That is wrong on
+// cost and wrong on coverage. On cost: a bare subscribe makes the engine update
+// its AudioTarget in place (EngineAudio::subscribe_if_needed) and recreate
+// nothing, so a release there buys nothing and pays a remap on every
+// active-speaker change, of which a show has thousands. On coverage: the
+// subscribe paths are not the whole set of mapping holders — the tiles wall,
+// the director preview and the dedicated audio sources each reach the engine by
+// a different route, and each would need its own copy of the rule.
+//
+// One release per engine process, dispatched to every registered source, is
+// cheaper than one release per subscribe AND covers more: video, share, audio,
+// director preview and tiles together, on the single event that actually
+// invalidates the whole name space.
+void ZoomEngineClient::release_source_mappings_for_new_engine()
+{
+    std::vector<std::function<void()>> callbacks;
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        for (const auto &entry : m_sources)
+            if (entry.second.on_new_engine_process)
+                callbacks.push_back(entry.second.on_new_engine_process);
+    }
+    // m_mtx is released here — a callback takes its own source's lock and may
+    // re-enter this client, and m_mtx is not recursive. Same rule as
+    // update_roster_state_and_notify().
+    for (const auto &cb : callbacks) cb();
+
+    // Logged unconditionally, including the zero case. A restart that released
+    // nothing is itself the evidence that no source was registered at the time,
+    // which is what any future "it went silent after the engine restarted"
+    // report needs to distinguish from "we released and it still broke".
+    blog(LOG_INFO,
+         "[obs-zoom-plugin] New ZoomObsEngine process: released shared-memory "
+         "mappings for %zu registered source(s) before its first region create",
+         callbacks.size());
+}
+
 bool ZoomEngineClient::start(const std::string &jwt_token,
                              const std::string &public_app_key)
 {
@@ -279,6 +343,14 @@ bool ZoomEngineClient::start(const std::string &jwt_token,
 #endif
         return false;
     }
+
+    // A brand-new engine process is serving us from here on, and its SHM
+    // generation counter starts from nothing. Everything we still have mapped
+    // is standing on a name it is about to reuse — drop it all now, while the
+    // whole name space is still guaranteed free. This is the last moment at
+    // which that is true: m_running goes true on the next line, and that is
+    // what unblocks every subscribe path.
+    release_source_mappings_for_new_engine();
 
     // Seed the heartbeat clock so a freshly connected engine isn't immediately
     // considered stale before its first line arrives.

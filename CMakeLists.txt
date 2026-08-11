@@ -659,6 +659,24 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoShmGeneration
              COMMAND CoreVideoShmGenerationTest)
 
+    # The last residual of the same defect class: the generation table is
+    # per engine PROCESS, so an engine restart puts the next create back on the
+    # legacy unsuffixed name whatever the dead engine had climbed to. Pins why
+    # the plugin must drop every mapping when a new engine comes up, and why
+    # releasing only the region a re-subscribe touches leaves audio blocked.
+    # Real shared memory on Windows for the ACCESS_DENIED reproduction.
+    add_executable(CoreVideoShmEngineRestartTest
+        tests/shm-engine-restart-test.cpp
+    )
+    target_include_directories(CoreVideoShmEngineRestartTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    if(NOT WIN32 AND NOT APPLE)
+        target_link_libraries(CoreVideoShmEngineRestartTest PRIVATE rt)
+    endif()
+    add_test(NAME CoreVideoShmEngineRestart
+             COMMAND CoreVideoShmEngineRestartTest)
+
     # Centralized Zoom auth/join decision path + error catalog (issue #89).
     # Header-only logic; no Qt/OBS/SDK dependencies, no secrets.
     add_executable(CoreVideoJoinDecisionTest

@@ -1,6 +1,7 @@
 #include "zoom-participant-audio-source.h"
 
 #include "engine-ipc.h"
+#include "shm-resubscribe.h"
 #include "speaker-director.h"
 #include "zoom-engine-client.h"
 #include "zoom-settings.h"
@@ -112,6 +113,35 @@ static void unsubscribe_audio(CoreVideoAudioSource *ctx)
     ZoomEngineClient::instance().unsubscribe(ctx->source_uuid);
     ctx->subscribed.store(false, std::memory_order_release);
     ctx->current_participant_id.store(0, std::memory_order_release);
+}
+
+// Drops this source's SHM read mapping. Called when a NEW ZoomObsEngine process
+// comes up, and only then.
+//
+// These sources are the most exposed holder of the whole defect class and the
+// last one to be covered. They map "<uuid>_audio" and never let go of it: there
+// is no video path here to piggyback on, and unlike ZoomSource nothing in this
+// file releases before a re-subscribe. Within one engine process that is safe,
+// because the engine's generation counter survives the AudioTarget that
+// maybe_resubscribe_for_roster() destroys on every active-speaker change
+// (src/shm-generation.h), so the rebuilt region always lands on a fresh _gN
+// name. A new engine process throws that away: its table is empty, its first
+// create asks for generation 1 — the legacy unsuffixed name this mapping is
+// sitting on — and if the new region has to be larger, Windows refuses. The
+// engine then emits audio_shm_create_failed and publishes no audio event, so
+// nothing ever asks us to reopen and this source is silent for the session.
+//
+// Caller must hold nothing: this takes ctx->mtx, which output_audio_frame()
+// holds while reading the region.
+static void release_audio_mapping(CoreVideoAudioSource *ctx)
+{
+    if (!ctx) return;
+    std::lock_guard<std::mutex> lk(ctx->mtx);
+    const uint32_t dropped_gen = ctx->audio_shm_gen;
+    if (!shm_release_for_resubscribe(ctx->audio_shm, ctx->audio_shm_gen)) return;
+    blog(LOG_INFO,
+         "[obs-zoom-plugin] Released CoreVideo audio shared memory for a new engine process: source=%s uuid=%s dropped_gen=%u",
+         obs_source_get_name(ctx->source), ctx->source_uuid.c_str(), dropped_gen);
 }
 
 static void maybe_resubscribe_for_roster(CoreVideoAudioSource *ctx)
@@ -268,6 +298,11 @@ static void *audio_create_common(obs_data_t *settings, obs_source_t *source,
             std::lock_guard<std::mutex> callback_lock(gate->mtx);
             if (!gate->alive) return;
             output_audio_frame(ctx, byte_len, participant_id, shm_gen);
+        },
+        [ctx, gate = ctx->callback_gate]() {
+            std::lock_guard<std::mutex> callback_lock(gate->mtx);
+            if (!gate->alive) return;
+            release_audio_mapping(ctx);
         }
     });
     ZoomEngineClient::instance().add_roster_callback(ctx,

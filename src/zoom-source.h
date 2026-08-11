@@ -101,7 +101,11 @@ struct ZoomSource {
     bool wants_subscription() const;
     void set_preview_cb(ZoomPreviewCallback cb);
     void clear_preview_cb();
-    void release_shared_memory();
+    // Both drop all three of this source's SHM read mappings (video, director
+    // preview, audio). They differ only in logging, and for a reason that is
+    // about where each one runs — see the definitions.
+    void release_shared_memory();               // teardown; silent
+    void release_shared_memory_for_new_engine(); // engine restart; logged
 
     HwVideoPipeline m_hw_pipeline;
     // Per-source OBS hotkey IDs.
@@ -123,9 +127,12 @@ private:
     void release_video_shm_locked();
     // Audio only needs this where an explicit unsubscribe precedes the
     // re-subscribe, which destroys the engine's AudioTarget — see the comment
-    // on the definition. Currently that is the active-speaker clean cut alone.
+    // on the definition. Within one engine process that is the active-speaker
+    // clean cut alone; a NEW engine process invalidates every mapping at once
+    // and is handled wholesale by release_shared_memory_for_new_engine().
     void release_audio_shm_locked();
     void release_director_preview_shm();
+    void release_director_preview_shm_locked();
     bool output_video_from_shared_memory(const std::string &uuid,
                                          ShmRegion &video_shm,
                                          uint32_t &video_shm_gen,

@@ -8,6 +8,17 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 ## [Unreleased]
 
 ### Fixed
+- **Restarting the Zoom engine no longer leaves a source silent or dark.** If
+  the engine process was replaced mid-show — a crash, a stall the watchdog
+  caught, or a stop and start by hand — the fresh engine began numbering its
+  buffers from scratch and asked for the same names it had used the first time,
+  while CoreVideo was still holding the old ones open. Any buffer that needed to
+  be larger the second time round could not be built, and audio in particular
+  had no way back: it went quiet for the rest of the session. Every source now
+  hands back the buffers it is holding the moment a new engine process comes
+  up — video, screen share, audio, active-speaker preview and every tile on the
+  Tiles wall together — so the new engine starts with a clear field. This closes
+  the last route by which this fault could reach air.
 - **"Zoom engine could not allocate shared memory" no longer strands a source.**
   A feed that re-pointed often enough — the Active Speaker source re-points on
   every speaker change — could reach a state where the engine kept failing to

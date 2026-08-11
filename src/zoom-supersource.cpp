@@ -1426,7 +1426,23 @@ static std::string crop_right_prop_name(std::size_t slot)
 // Recomputes the wall from the cached settings plus the live roster, and
 // performs whatever engine work the change implies. Safe to call from the
 // settings path and from the roster callback.
-static void apply_assignments(tiles_source *ctx)
+//
+// reconcile_audio gates only the per-participant audio pass, and does so
+// independently of whether the tile assignments changed below: naming a
+// group on an otherwise-stable wall, or switching from one group to
+// another, changes no participant assignment at all but still has to
+// reconcile audio, so audio is not behind the "did the wall change" early
+// exit the feed plan uses.
+//
+// It is false for exactly one caller: the settings pass tiles_source_create
+// makes while constructing this Tiles source. Restoring a scene collection
+// creates every source before it loads any of them (see the comment on
+// tiles_source_load below), so at that instant a saved audio_group's own
+// marked children may not exist yet — reconciling then could create a
+// duplicate set that the load pass would then find already-owned and
+// orphaned. Every other caller (a later settings change, the roster
+// callback, and tiles_source_load itself) passes true.
+static void apply_assignments(tiles_source *ctx, bool reconcile_audio)
 {
     std::lock_guard<std::mutex> engine_lock(ctx->engine_mutex);
 
@@ -1436,40 +1452,55 @@ static void apply_assignments(tiles_source *ctx)
         ZoomEngineClient::instance().roster();
 
     FeedPlan    plan;
+    bool        feed_changed = false;
     std::string audio_group;
     std::vector<uint32_t> assignments;
     {
         std::lock_guard<std::mutex> lock(ctx->mutex);
         std::vector<uint32_t> next =
             resolve_tile_assignments(ctx->participants, roster, ctx->fill_params);
-        if (ctx->participants == next) return;
-        ctx->participants.swap(next);
-        plan        = plan_feeds_locked(ctx);
+        feed_changed = !(ctx->participants == next);
+        if (feed_changed) {
+            ctx->participants.swap(next);
+            plan = plan_feeds_locked(ctx);
+        }
         audio_group = ctx->audio_group;
         assignments = ctx->participants;
     }
-    execute_feed_plan(plan);
+    if (feed_changed) execute_feed_plan(plan);
 
-    // Deliberately outside both locks. Creating sources and adding them to a
-    // group makes libobs emit signals that run arbitrary handlers, and this
-    // runs on the roster callback thread — holding ctx->mutex across that is
-    // how a lock-order inversion gets built by accident.
+    if (!reconcile_audio) return;
     if (audio_group.empty()) return;
+
+    // Deliberately outside ctx->mutex. Creating sources and adding them to a
+    // group makes libobs emit signals that run arbitrary handlers, and this
+    // can run on the roster callback thread — holding ctx->mutex across that
+    // is how a lock-order inversion gets built by accident.
+    //
+    // ctx->engine_mutex stays held, on purpose: its job is to serialise this
+    // whole plan-and-execute cycle against a concurrent one for the SAME
+    // Tiles source (e.g. a settings change racing a roster tick), which is
+    // what stops two overlapping calls from both planning a Create for the
+    // same participant on this wall. It does not, and cannot, serialise
+    // against a DIFFERENT Tiles source doing the same thing — that is what
+    // tiles_audio_reconcile's own process-wide lock is for.
     const char *uuid = obs_source_get_uuid(ctx->source);
     if (!uuid || !*uuid) return;
 
     TilesAudioPlanParams params;
     params.self_uuid = uuid;
     params.enabled   = true;
-    const TilesAudioPlan audio_plan =
-        plan_tiles_audio(assignments, tiles_audio_scan(), roster, params);
-    tiles_audio_apply(audio_plan, audio_group, params.self_uuid);
+    tiles_audio_reconcile(assignments, roster, params, audio_group);
 }
 
-static void tiles_source_update(void *data, obs_data_t *settings)
+// Shared by the info.update callback (tiles_source_update below) and the
+// initial settings pass tiles_source_create makes while constructing a
+// Tiles source. reconcile_audio is threaded straight through to
+// apply_assignments — see its parameter comment for why the create-time
+// pass alone must pass false.
+static void tiles_source_apply_settings(tiles_source *ctx, obs_data_t *settings,
+                                        bool reconcile_audio)
 {
-    auto *ctx = static_cast<tiles_source *>(data);
-
     TileFillParams params;
     params.mode = obs_data_get_int(settings, PROP_FILL_MODE) ==
                           static_cast<long long>(TileFillMode::Manual)
@@ -1658,7 +1689,12 @@ static void tiles_source_update(void *data, obs_data_t *settings)
         ctx->slot_crop = crops;
         ctx->audio_group = audio_group;
     }
-    apply_assignments(ctx);
+    apply_assignments(ctx, reconcile_audio);
+}
+
+static void tiles_source_update(void *data, obs_data_t *settings)
+{
+    tiles_source_apply_settings(static_cast<tiles_source *>(data), settings, true);
 }
 
 static void *tiles_source_create(obs_data_t *settings, obs_source_t *source)
@@ -1668,15 +1704,23 @@ static void *tiles_source_create(obs_data_t *settings, obs_source_t *source)
     ctx->instance_id =
         s_tiles_instance_counter.fetch_add(1, std::memory_order_relaxed) +
         os_gettime_ns();
-    tiles_source_update(ctx, settings);
+    // false: see apply_assignments's reconcile_audio parameter. The deferred
+    // first audio pass, for a source that turns out to have been restored
+    // from a saved collection, runs from tiles_source_load below.
+    tiles_source_apply_settings(ctx, settings, false);
     ZoomEngineClient::instance().add_roster_callback(ctx,
         [ctx, gate = ctx->gate]() {
             std::lock_guard<std::mutex> callback_lock(gate->mtx);
             if (!gate->alive) return;
             // Someone joined, left, or toggled their camera: in Auto mode the
             // wall's membership may have changed. Reflow first, then retry any
-            // slot that is still silent under its current assignment.
-            apply_assignments(ctx);
+            // slot that is still silent under its current assignment. Always
+            // safe to also reconcile audio here: roster callbacks are
+            // dispatched through an OBS_TASK_UI queue (ZoomParticipants::
+            // notify), so none can run until the current call stack — which
+            // is the only one that can still be mid scene-collection load —
+            // has unwound back to the event loop.
+            apply_assignments(ctx, true);
             resubscribe_silent_feeds(ctx);
         });
     return ctx;
@@ -1688,6 +1732,19 @@ static void *tiles_source_create(obs_data_t *settings, obs_source_t *source)
 // not exist yet and set_source rightly refuses it. This second pass runs after
 // the whole collection exists, which is what makes a saved background come
 // back on restart rather than only after the operator reopens Properties.
+//
+// It is also, for the same reason, the first safe place to reconcile audio
+// for a source that came from a saved collection: tiles_source_create's
+// settings pass deliberately skipped it (see apply_assignments's
+// reconcile_audio parameter), because this source's own saved audio children
+// might not have existed yet at that instant. By the time libobs calls this,
+// the whole collection does exist, so tiles_audio_scan() can see them and
+// Adopt/Unmute/SetMixers them instead of creating a duplicate set. This is a
+// no-op for a freshly-added Tiles source — libobs never calls `load` for one,
+// only for a batch restore (a scene-collection load, or an undo that
+// recreates several sources at once) — and equally harmless for one whose
+// audio_group is still empty, since apply_assignments's own empty-group
+// check short-circuits before anything scans or creates.
 static void tiles_source_load(void *data, obs_data_t *settings)
 {
     auto *ctx = static_cast<tiles_source *>(data);
@@ -1699,6 +1756,7 @@ static void tiles_source_load(void *data, obs_data_t *settings)
         TilesBackgroundResult::Refused) {
         obs_data_set_string(settings, PROP_BG_SOURCE, "");
     }
+    apply_assignments(ctx, true);
 }
 
 // Lets libobs see the background when it walks the source tree. This is not
@@ -1988,11 +2046,18 @@ static obs_properties_t *tiles_source_get_properties(void *data)
 
     // Editable so a scene file naming a group that does not exist yet round-
     // trips instead of silently resetting to "off" on load.
+    //
+    // Deliberately no "Off" list entry. For an editable combo, OBS stores
+    // whatever text is displayed, not the item's data value (Qt's
+    // QComboBox::currentText(), not currentData()) — so a labelled entry
+    // like "Off — no audio sources created" would itself become the stored
+    // group name the moment it was selected, which both fails to turn the
+    // feature off and then fails to find a group by that name on every
+    // later reconcile. An empty, blank field is off, and it is unambiguous:
+    // whatever text is showing IS the value that gets stored.
     obs_property_t *audio_group = obs_properties_add_list(
         props, PROP_AUDIO_GROUP, obs_module_text("Tiles.AudioGroup"),
         OBS_COMBO_TYPE_EDITABLE, OBS_COMBO_FORMAT_STRING);
-    obs_property_list_add_string(audio_group,
-                                 obs_module_text("Tiles.AudioGroup.Off"), "");
     obs_enum_sources(
         [](void *param, obs_source_t *src) -> bool {
             if (!obs_group_from_source(src)) return true;

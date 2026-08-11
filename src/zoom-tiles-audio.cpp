@@ -123,6 +123,11 @@ void clear_name_clash(uint32_t participant_id)
     g_warned_clash.erase(participant_id);
 }
 
+// Serialises the whole scan-and-apply pair across every Tiles source in the
+// process — see tiles_audio_reconcile()'s declaration for why a per-source
+// lock (engine_mutex) is not enough on its own.
+std::mutex g_reconcile_mutex;
+
 }  // namespace
 
 std::vector<TilesAudioSourceState> tiles_audio_scan()
@@ -315,4 +320,17 @@ void tiles_audio_apply(const TilesAudioPlan &plan, const std::string &group_name
              plan.overflow);
 
     if (group_src) obs_source_release(group_src);
+}
+
+void tiles_audio_reconcile(const std::vector<uint32_t>        &assignments,
+                           const std::vector<ParticipantInfo> &roster,
+                           const TilesAudioPlanParams          &params,
+                           const std::string                   &group_name)
+{
+    if (!params.enabled || group_name.empty()) return;
+
+    std::lock_guard<std::mutex> lock(g_reconcile_mutex);
+    const TilesAudioPlan plan =
+        plan_tiles_audio(assignments, tiles_audio_scan(), roster, params);
+    tiles_audio_apply(plan, group_name, params.self_uuid);
 }

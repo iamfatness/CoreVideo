@@ -31,3 +31,19 @@ std::vector<TilesAudioSourceState> tiles_audio_scan();
 // someone who left the wall.
 void tiles_audio_apply(const TilesAudioPlan &plan, const std::string &group_name,
                        const std::string &self_uuid);
+
+// Runs scan → plan → apply as one atomic step, serialised across every Tiles
+// source in the process. engine_mutex already serialises one Tiles source
+// against itself; nothing serialised different Tiles sources against each
+// other, so two of them could both call tiles_audio_scan(), both see nothing
+// for a participant one is about to gain, and both plan a Create — the loser
+// would then hit its own name clash and uniquify into a genuine duplicate.
+// Holding one process-wide lock across the whole scan-and-apply pair for
+// every caller closes that: whichever Tiles source reconciles first sees its
+// own Create (or someone else's prior one) before the next reconcile's scan
+// runs. No-op if params.enabled is false or group_name is empty — checked
+// here too so a caller need not special-case the off state before calling.
+void tiles_audio_reconcile(const std::vector<uint32_t>        &assignments,
+                           const std::vector<ParticipantInfo> &roster,
+                           const TilesAudioPlanParams          &params,
+                           const std::string                   &group_name);

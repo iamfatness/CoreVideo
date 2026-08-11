@@ -214,8 +214,10 @@ float4 PSGlow(VertInOut vert_in) : TARGET
     //
     // 2 is the upper bound because it is where the family stops being monotone,
     // not because it looked far enough: d/dt = (1-t)[(k-2) - 3kt], which is <= 0
-    // across [0,1) exactly when k <= 2. Above that the curve RISES just outside
-    // the tile, clipping at 1 and drawing a bright ring around every tile.
+    // across [0,1) exactly when k <= 2, given k >= 0 (what the clamp
+    // guarantees — a negative k such as -3 is also <= 2 but breaks the
+    // bound). Above k = 2 the curve RISES just outside the tile, clipping at
+    // 1 and drawing a bright ring around every tile.
     // tiles_source_update() clamps the setting; saturate() here is the shader's
     // own guard, and is exact identity on the valid domain.
     float ramp = 1.0 - t;

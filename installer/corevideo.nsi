@@ -42,10 +42,12 @@ SetCompressor /SOLID lzma
 !insertmacro RequireSourceFile "obs-plugins\64bit\plugins\tls\qschannelbackend.dll"
 !insertmacro RequireSourceFile "data\obs-plugins\obs-zoom-plugin\locale\en-US.ini"
 ; The Tiles wall's shader, shipped by the same install(DIRECTORY data/ ...) rule
-; as the locale file above. A package built without it produces a Tiles source
-; that cannot draw at all, and a stale one silently loses whatever feature it
-; predates (see src/zoom-tiles-effect-policy.h) — neither of which is something
-; to find out during a show.
+; as the locale file above. This check only proves the file is present in the
+; package being built: a package missing it (or missing the data/ tree
+; entirely) produces a Tiles source that cannot draw at all (see
+; src/zoom-tiles-effect-policy.h). It says nothing about whether the file's
+; CONTENTS match this build of the DLL — an existing-but-stale effect file
+; passes this check and would only show up as a degraded wall at runtime.
 !insertmacro RequireSourceFile "data\obs-plugins\obs-zoom-plugin\effects\corevideo-tiles.effect"
 !insertmacro RequireSourceFile "obs-plugins\64bit\zoom-runtime\ZoomObsEngine.exe"
 !insertmacro RequireSourceFile "obs-plugins\64bit\zoom-runtime\sdk.dll"

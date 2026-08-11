@@ -75,10 +75,12 @@ static constexpr int64_t kMaxGlowIntensity = 100;  // percent
 //           existing scene renders unchanged;
 //   100% -> k = 2, i.e. (1-t)^2(1+2t) = 1 - smoothstep(t), flat at both ends.
 // 2 is where the family stops being monotone rather than a matter of taste:
-// d/dt = (1-t)[(k-2) - 3kt] is <= 0 across [0,1) exactly when k <= 2, and above
-// it the halo brightens just outside the tile and draws a ring. Every value in
-// range leaves both the value and the slope at 0 at the outer edge, which is
-// what keeps the halo from ending on a visible band.
+// d/dt = (1-t)[(k-2) - 3kt] is <= 0 across [0,1) exactly when k <= 2, given
+// k >= 0 — the clamp's floor here. (Without that precondition the claim is
+// false: k = -3 is also <= 2 but breaks the bound.) Above k = 2 the halo
+// brightens just outside the tile and draws a ring. Every value in range
+// leaves both the value and the slope at 0 at the outer edge, which is what
+// keeps the halo from ending on a visible band.
 static constexpr int64_t kMaxGlowSoftness  = 100;  // percent
 // How many tile slots the wall has. Declared up here rather than beside the
 // other property constants below because `tiles_source` sizes its per-slot crop
@@ -1086,8 +1088,12 @@ static void tiles_source_render(void *data, gs_effect_t *)
     // technique or one of its uniforms to nullptr, and the wall must still
     // draw. See zoom-tiles-effect-policy.h. Gating the whole block — rather
     // than checking inside glow_begin_pass() — means no param_glow_* handle is
-    // touched at all, which matters because a pass opened with one uniform
-    // unset draws it from whatever the previous pass left in that register.
+    // touched at all, which matters for two reasons: gs_effect_set_*() on a
+    // null parameter is harmless but logs LOG_ERROR per call
+    // (libobs/graphics/effect.c), and a stale Glow technique was never
+    // written to consume the values a current build would set, so drawing
+    // through it risks a halo of the wrong colour or size that reads as a
+    // driver fault rather than a version mismatch.
     if (glow_wanted && !s_tiles_effect.glow_valid() &&
         !s_glow_unavailable_logged) {
         s_glow_unavailable_logged = true;

@@ -44,7 +44,11 @@ struct TilesEffect {
     bool glow_drawable = false;
 
     // Which handles resolved, in the form the policy header classifies. Kept
-    // beside the members it reads so the two cannot drift apart unnoticed.
+    // beside the members it reads as a convention, not a guarantee: nothing
+    // compile-time ties this method's fields to TilesEffect's members above,
+    // so a newly added member left out of both this function and
+    // TilesEffectHandles (zoom-tiles-effect-policy.h) compiles cleanly and is
+    // simply never classified.
     TilesEffectHandles handles() const {
         TilesEffectHandles h;
         h.effect                  = effect != nullptr;

@@ -41,19 +41,45 @@
 // The same reasoning applies to PARAMETERS, not just techniques — which is why
 // the glow's uniforms are in the degrading set. But note the direction it runs:
 // a missing glow uniform degrades the WHOLE GLOW, it is not individually
-// ignored. libobs uploads a pass's parameters inside gs_technique_begin_pass()
-// and does not re-upload them per draw, so a glow pass opened with six of its
-// seven uniforms set would draw the seventh from whatever the last pass left in
-// that register — a halo of the wrong colour or size that looks like a driver
-// fault. Skipping the pass is the only honest partial state.
+// ignored. A null handle here means the uniform is not declared in
+// data/effects/corevideo-tiles.effect AT ALL — no shader in the file
+// references that constant, so there is no register for a partially-set pass
+// to inherit from (libobs/graphics/effect.c: gs_effect_get_param_by_name()
+// returns null exactly when the name is absent from the parsed file). That is
+// a different situation from a DECLARED-but-never-set uniform, where the
+// stale-register risk is real — which is why every one of these uniforms has
+// to be set before gs_technique_begin_pass() on the path that does set them
+// (see zoom-tiles-effect.h).
 //
-// The fatal set's parameters stay fatal for the mirror-image reason: they are
-// consumed unconditionally on the only path that draws a tile, so there is no
-// "skip" available that still puts a wall on screen.
+// The gate exists for two reasons instead:
+//   * a stale effect's Glow technique would silently ignore a parameter the
+//     operator set, or mis-place the halo — the DLL cannot know what an old
+//     technique does with a value it was never written to consume; and
+//   * gs_effect_set_*() on a null parameter is null-safe but logs LOG_ERROR
+//     per call (libobs/graphics/effect.c: effect_setval_inline()) — roughly
+//     8 uniforms x 9 tiles x 60 fps ~= 4,000 log lines per second without
+//     this gate.
+// Skipping the pass avoids both.
+//
+// The fatal set's own parameters (border_color, border_width, corner_radius,
+// tile_size, crop_uv) are NOT spared by that same argument, and that is not
+// a mirror image of the glow's case — it is a stricter policy choice. An
+// effect predating tile borders would, in the same sense as a pre-glow
+// effect, very likely draw something with those uniforms left stale; nothing
+// about the I420 technique makes that structurally impossible the way it is
+// impossible to "skip" the technique itself. It is fatal anyway because these
+// parameters govern the framing of the operator's own video — crop, size,
+// corner shape — not a decorative layer over it, and the DLL has no way to
+// tell "drew a plain square tile" from "drew the wrong crop of the source"
+// without them. Blacking out the wall on a loud, logged error is safer than
+// guessing that an old technique still frames the video correctly.
 
 // One bool per handle tiles_effect_load() resolves: true = resolved.
-// Deliberately mirrors the members of TilesEffect one-for-one, so a handle
-// added there without being classified here is an obvious hole.
+// Deliberately mirrors the members of TilesEffect one-for-one — but nothing
+// compile-time enforces that mirroring. A handle added to TilesEffect and
+// left unclassified here compiles cleanly, defaults to false (unresolved),
+// and is caught only if someone notices the two struct definitions have
+// drifted apart, not by any mechanism in this file.
 struct TilesEffectHandles {
     bool effect = false;
 

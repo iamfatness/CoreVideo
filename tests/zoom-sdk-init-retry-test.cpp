@@ -43,10 +43,14 @@ int main()
            kSdkErrOtherSdkInstanceRunning == 14);
 
     // ---------------------------------------------------------------------
-    // The schedule: 2s, 4s, 8s, then clamped at 8s.
+    // The schedule: 2s, 4s, 8s, then clamped at 8s for the rest.
     // ---------------------------------------------------------------------
     {
-        const uint64_t expected[] = {2000, 4000, 8000, 8000, 8000};
+        const uint64_t expected[] = {2000, 4000, 8000, 8000, 8000, 8000,
+                                     8000, 8000, 8000, 8000, 8000};
+        expect("the expected-schedule table covers every attempt",
+               sizeof(expected) / sizeof(expected[0]) ==
+                   static_cast<size_t>(kSdkInitRetryMaxAttempts));
         uint64_t previous = 0;
         for (int attempt = 0; attempt < kSdkInitRetryMaxAttempts; ++attempt) {
             const SdkInitRetryDecision d = decide_sdk_init_retry("init", 14, attempt);
@@ -100,13 +104,19 @@ int main()
                       static_cast<uint64_t>(kSdkInitRetryMaxAttempts));
         expect_eq_u64("the accumulated wait matches the advertised budget",
                       waited_ms, sdk_init_retry_total_budget_ms());
-        // The whole point is to outlast an orphaned engine. The one measured in
-        // the field took ~19s to exit, so a budget at or under that would ship a
-        // feature that still fails the operator's first click.
-        expect("the budget outlasts the observed ~19s orphan", waited_ms >= 19000);
-        // ...but it is a bound, not a hang: an operator must get an answer.
+        // Pin the chosen bound. The only hard measurement of an orphaned
+        // engine's SDK hold is 38.6s (2026-08-10 logs: quit at 19:15:52.734,
+        // still holding at 19:16:31.346) — 78s is 2x that. Changing the budget
+        // should be a deliberate act that updates this number and the
+        // justification in the header, not a side effect of tuning a constant.
+        expect_eq_u64("the total budget is the calibrated 78s",
+                      waited_ms, 78000);
+        expect("the budget clears the measured 38.6s orphan with margin",
+               waited_ms >= 2 * 38600);
+        // ...but it is a bound, not a hang: an operator must get an answer, and
+        // one they can act on, inside a plausible show break.
         expect("the budget stays inside a live-show-tolerable window",
-               waited_ms <= 45000);
+               waited_ms <= 90000);
     }
 
     // ---------------------------------------------------------------------
@@ -159,7 +169,8 @@ int main()
     // the whole difference between this failure and a generic auth_fail.
     // ---------------------------------------------------------------------
     {
-        const std::string msg = sdk_init_other_instance_message(30000);
+        const std::string msg =
+            sdk_init_other_instance_message(sdk_init_retry_total_budget_ms());
         expect("message names the cause",
                msg.find("another Zoom SDK instance") != std::string::npos);
         expect("message names the SDK error",
@@ -167,9 +178,15 @@ int main()
         expect("message names the likely culprit process",
                msg.find("ZoomObsEngine.exe") != std::string::npos);
         expect("message reports how long we waited",
-               msg.find("30s") != std::string::npos);
+               msg.find("78s") != std::string::npos);
         expect("message tells the operator what to do",
                msg.find("Task Manager") != std::string::npos);
+        // The advice is only truthful because the caller tears the engine down
+        // first — while the process is alive, start() early-returns and asking
+        // again does nothing. If the text stops promising a fresh launch, the
+        // teardown in fail_after_init_retries_exhausted() has probably gone too.
+        expect("message promises the relaunch the teardown makes possible",
+               msg.find("launch a fresh one") != std::string::npos);
     }
 
     if (g_failures == 0)

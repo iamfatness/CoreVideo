@@ -9,14 +9,19 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ### Fixed
 - **Requesting the Zoom engine works on the first attempt.** A `ZoomObsEngine`
-  left over from a previous OBS session still holds the Zoom SDK while it shuts
-  down, so the new engine's `InitSDK` failed with
-  `SDKERR_OTHER_SDK_INSTANCE_RUNNING` and the request died as an opaque
-  authentication failure — asking a second time ~20s later worked. CoreVideo now
-  recognises that specific collision, waits the leftover engine out (2s, 4s, 8s,
-  8s, 8s — 30s in total) and replays the handshake itself. If another Zoom SDK
-  instance is still running after that, the error names it and says what to do
-  instead of reporting a generic auth failure.
+  left over from a previous OBS session keeps holding the Zoom SDK for a while
+  after OBS exits — the SDK's own shutdown runs long — so the new engine's
+  `InitSDK` failed with `SDKERR_OTHER_SDK_INSTANCE_RUNNING` and the request died
+  as an opaque authentication failure. CoreVideo now recognises that specific
+  collision and waits the leftover engine out (2s, 4s, then 8s a time, 78s in
+  total), replaying the handshake itself; the join you already asked for goes
+  through as soon as it succeeds.
+- **A failed engine request no longer leaves a dead engine behind.** If the
+  wait above runs out, CoreVideo stops its own engine before reporting the
+  failure, so requesting the engine again really does launch a fresh one.
+  Previously the engine process stayed alive but unauthenticated and every
+  further request was silently ignored. The error now names the other Zoom SDK
+  instance as the cause and says what to do about it.
 
 ## [0.1.36] - 2026-08-09
 

@@ -248,16 +248,17 @@ bool ZoomEngineClient::start(const std::string &jwt_token,
     m_user_leaving.store(false, std::memory_order_release);
     m_authenticated.store(false, std::memory_order_release);
     m_media_active.store(false, std::memory_order_release);
-    // Fresh engine session: no init retry is owed. Safe to touch without a lock
-    // here because the reader/monitor threads of any previous session are
-    // joined just below (and m_running was false on entry).
-    m_init_retry_due_ms.store(0, std::memory_order_release);
-    m_init_retry_attempts = 0;
-    m_init_retry_waited_ms = 0;
-
     // Join threads from any previous session (e.g. after a crash).
     if (m_reader.joinable())  m_reader.join();
     if (m_monitor.joinable()) m_monitor.join();
+
+    // Fresh engine session: no init retry is owed. This must come AFTER the
+    // joins above — the previous session's reader thread owns these fields and
+    // can still be inside handle_event() until it is joined.
+    m_init_retry_due_ms.store(0, std::memory_order_release);
+    m_init_teardown_pending.store(false, std::memory_order_release);
+    m_init_retry_attempts = 0;
+    m_init_retry_waited_ms = 0;
 
     if (!launch_engine() || !connect_ipc()) {
         disconnect_ipc();
@@ -331,6 +332,7 @@ void ZoomEngineClient::stop_for_reconnect()
     // joined by now, so nothing can fire it; clearing the payload also drops the
     // SDK credential it carries. start() repopulates both.
     m_init_retry_due_ms.store(0, std::memory_order_release);
+    m_init_teardown_pending.store(false, std::memory_order_release);
     m_init_retry_attempts = 0;
     m_init_retry_waited_ms = 0;
     {
@@ -398,6 +400,15 @@ void ZoomEngineClient::monitor_loop()
             }
         }
 
+        // The reader thread ran out of SDK-init retries and handed us the
+        // teardown, because it cannot stop the engine from the thread stop()
+        // joins. This exits monitor_loop() without triggering recovery: an
+        // auth failure is permanent, retries are already spent.
+        if (m_init_teardown_pending.load(std::memory_order_acquire)) {
+            fail_after_init_retries_exhausted();
+            return;
+        }
+
         // Deliver a due SDK-init retry (see the m_init_retry_due_ms comment in
         // the header for why the wait lives on this thread). The engine is
         // still up and idle after a failed InitSDK — it logged auth_fail and
@@ -430,6 +441,14 @@ void ZoomEngineClient::monitor_loop()
     // If m_running is still true the engine exited (or went silent) without
     // being asked to.
     if (m_running.exchange(false, std::memory_order_acq_rel)) {
+        // ...unless we broke out of the loop while an exhausted-init teardown
+        // was in flight (the engine exited or went silent in that window). That
+        // failure still wins: it explains what actually happened, and it is not
+        // a crash to reconnect from.
+        if (m_init_teardown_pending.load(std::memory_order_acquire)) {
+            fail_after_init_retries_exhausted();
+            return;
+        }
         if (heartbeat_timeout) {
             blog(LOG_ERROR,
                  "[obs-zoom-plugin] ZoomObsEngine stopped responding (no IPC for >%llums)",
@@ -713,6 +732,62 @@ void ZoomEngineClient::set_last_error(const std::string &message)
     m_last_error = message;
 }
 
+void ZoomEngineClient::fail_after_init_retries_exhausted()
+{
+    // Monitor thread only.
+    const std::string message =
+        sdk_init_other_instance_message(m_init_retry_waited_ms);
+
+    // Clearing m_running FIRST is deliberate. It is what makes a subsequent
+    // start() work: that call joins this thread (so it waits for the teardown
+    // below to finish) and then relaunches. If we cleared it last, a request
+    // arriving mid-teardown would early-return and be silently swallowed.
+    m_running.store(false, std::memory_order_release);
+    write_json(R"({"cmd":"quit"})");
+#if defined(WIN32)
+    if (m_process) {
+        if (WaitForSingleObject(static_cast<HANDLE>(m_process), 3000) !=
+            WAIT_OBJECT_0) {
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] ZoomObsEngine did not exit on quit after a failed "
+                 "SDK init; terminating it so the next request can relaunch");
+            TerminateProcess(static_cast<HANDLE>(m_process), 1);
+            WaitForSingleObject(static_cast<HANDLE>(m_process), 3000);
+        }
+        CloseHandle(static_cast<HANDLE>(m_process));
+        m_process = nullptr;
+    }
+#else
+    if (m_pid > 0) {
+        kill(m_pid, SIGTERM);
+        waitpid(m_pid, nullptr, 0);
+        m_pid = -1;
+    }
+#endif
+    disconnect_ipc(); // unblocks reader_loop so it exits cleanly
+
+    m_authenticated.store(false, std::memory_order_release);
+    m_media_active.store(false, std::memory_order_release);
+    m_init_retry_due_ms.store(0, std::memory_order_release);
+    m_init_retry_attempts = 0;
+    m_init_retry_waited_ms = 0;
+    m_init_teardown_pending.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        m_init_payload.clear();
+    }
+
+    // Surface the failure only AFTER the teardown: a failing write_json() or a
+    // broken pipe on the way out overwrites m_last_error with "Lost connection
+    // to Zoom engine", which would bury the message that actually explains
+    // this. Same permanent disposition as any other auth_fail — only the text
+    // the operator reads is different.
+    blog(LOG_ERROR, "[obs-zoom-plugin] %s", message.c_str());
+    set_error_and_notify(message);
+    m_state.store(MeetingState::Failed, std::memory_order_release);
+    ZoomReconnectManager::instance().on_join_failed(true);
+}
+
 void ZoomEngineClient::set_error_and_notify(const std::string &message)
 {
     std::vector<ErrorCallback> callbacks;
@@ -836,18 +911,18 @@ void ZoomEngineClient::handle_event(const std::string &line)
                 return;
             }
             if (retry_decision.exhausted) {
-                const std::string message =
-                    sdk_init_other_instance_message(m_init_retry_waited_ms);
-                blog(LOG_ERROR, "[obs-zoom-plugin] %s (%s)", message.c_str(),
+                blog(LOG_ERROR,
+                     "[obs-zoom-plugin] Zoom SDK init still blocked by another SDK "
+                     "instance after %d attempts over %llus — stopping the engine so "
+                     "the next request can relaunch it: %s",
+                     kSdkInitRetryMaxAttempts,
+                     static_cast<unsigned long long>(m_init_retry_waited_ms / 1000),
                      line.c_str());
                 m_init_retry_due_ms.store(0, std::memory_order_release);
-                m_init_retry_attempts = 0;
-                m_init_retry_waited_ms = 0;
-                set_error_and_notify(message);
-                // Same disposition as any other auth_fail: permanent, no
-                // reconnect. Only the message the operator sees is different.
-                m_state.store(MeetingState::Failed, std::memory_order_release);
-                ZoomReconnectManager::instance().on_join_failed(true);
+                // Hand the teardown and the operator-facing failure to the
+                // monitor thread. This is the reader thread: stopping the
+                // engine from here would self-join it.
+                m_init_teardown_pending.store(true, std::memory_order_release);
                 return;
             }
         }

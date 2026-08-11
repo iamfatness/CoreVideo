@@ -135,6 +135,9 @@ private:
     // this client (the dock reads last_error() from one) and m_mtx is not
     // recursive.
     void set_error_and_notify(const std::string &message);
+    // Runs on the monitor thread ONLY (see m_init_teardown_pending). Stops the
+    // engine process, then surfaces the operator-facing failure.
+    void fail_after_init_retries_exhausted();
     void reader_loop();
     void monitor_loop();
     void handle_event(const std::string &line);
@@ -231,8 +234,22 @@ private:
     // 0 = nothing scheduled; otherwise the wall-clock ms (os_gettime_ns()/1e6)
     // at which monitor_loop() should replay m_init_payload.
     std::atomic<uint64_t> m_init_retry_due_ms{0};
-    // Reader-thread only, plus the reset in start() (which runs with the reader
-    // thread joined, so there is no concurrent access).
+    // Set by the reader thread when the retry bound is spent; the monitor
+    // thread notices it, tears the engine process down and only then surfaces
+    // the failure. The teardown cannot happen where the failure is detected:
+    // that is the reader thread, and stop() joins the reader thread (see the
+    // roster-callback note above — the same self-join hazard). It also cannot
+    // be skipped: an engine process that is alive but unauthenticated makes
+    // start() early-return on m_running, so "request the engine again" would
+    // silently do nothing, which is what the operator already hit in the field
+    // log when their second click sent no init at all.
+    std::atomic<bool> m_init_teardown_pending{false};
+    // Written by the reader thread (retry accounting) and by start() /
+    // stop_for_reconnect() / fail_after_init_retries_exhausted() when they
+    // reset it. Those resets are safe unlocked because start() and
+    // stop_for_reconnect() only touch them with the reader thread joined, and
+    // the monitor thread reads them only after acquiring
+    // m_init_teardown_pending, which the reader releases after its last write.
     int m_init_retry_attempts = 0;
     uint64_t m_init_retry_waited_ms = 0;
     // The exact init command to replay. Guarded by m_mtx; holds an SDK

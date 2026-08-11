@@ -769,8 +769,13 @@ void ZoomEngineClient::fail_after_init_retries_exhausted()
     m_authenticated.store(false, std::memory_order_release);
     m_media_active.store(false, std::memory_order_release);
     m_init_retry_due_ms.store(0, std::memory_order_release);
-    m_init_retry_attempts = 0;
-    m_init_retry_waited_ms = 0;
+    // m_init_retry_attempts / m_init_retry_waited_ms are deliberately NOT reset
+    // here: disconnect_ipc() above may still let the reader thread run one more
+    // handle_event() on a buffered line before it observes m_running == false,
+    // and that thread owns these two non-atomic fields. Resetting them here would
+    // race with it. start() and stop_for_reconnect() both join the reader thread
+    // before resetting these fields, so the reset still always happens before
+    // the next session can use them.
     m_init_teardown_pending.store(false, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lk(m_mtx);

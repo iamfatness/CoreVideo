@@ -1,4 +1,5 @@
 #include "zoom-source.h"
+#include "director-preview-frame-guard.h"
 #include "shm-resubscribe.h"
 #include "luma-range-probe.h"
 #include "speaker-director.h"
@@ -1224,9 +1225,14 @@ void ZoomSource::on_director_preview_frame(uint32_t event_width,
     // cut to, the commit below cut straight back to it — the sub-second A->B->A
     // pairs. Publish only the frame that belongs to the live preview target;
     // that frame, and only that frame, is the cut.
+    //
+    // The decision itself lives in director-preview-frame-guard.h so it can be
+    // tested without libobs: a regression here is silent everywhere except a
+    // live broadcast, so it is not left as an untested inline condition.
     const uint32_t awaited =
         m_director_preview_subscription_id.load(std::memory_order_acquire);
-    if (awaited == 0 || resolved_participant_id != awaited) {
+    if (!should_publish_director_preview_frame(awaited,
+                                               resolved_participant_id)) {
         if (cv_zoom_verbose_logging()) {
             blog(LOG_INFO,
                  "[obs-zoom-plugin] Dropped stale director preview frame: source=%s participant=%u awaited=%u",

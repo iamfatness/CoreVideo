@@ -7,6 +7,21 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.38] - 2026-08-12
+
+### Fixed
+- **Hardware acceleration works again.** It had been silently off: every source
+  set to use the GPU for colour conversion failed to build its filter graph,
+  gave up after eight attempts and fell back to converting on the CPU, which on
+  an eight-feed 1080p show is a great deal of CPU spent for nothing. Two things
+  current FFmpeg no longer allows had been done in the old order — constraining
+  the output format after the sink was already initialised, and attaching the
+  GPU device after the chain was parsed rather than before it is initialised —
+  and both failed through paths that logged nothing, so the only trace was
+  "filter graph build failed" with no reason attached. Every failure in that
+  path now says what went wrong. If you saw high CPU with acceleration enabled,
+  this is why.
+
 ## [0.1.37] - 2026-08-12
 
 ### Fixed
@@ -39,7 +54,6 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
   audio tick, several times a second each — and re-applied the whole director
   configuration every time. Settings are now applied where they change. This
   also clears the deprecation warnings that were flooding the OBS log.
-
 - **Restarting the Zoom engine no longer leaves a source silent or dark.** If
   the engine process was replaced mid-show — a crash, a stall the watchdog
   caught, or a stop and start by hand — the fresh engine began numbering its
@@ -476,7 +490,8 @@ sign-in, per-participant and screen-share sources, the Active Speaker
 Director, auto-reconnect, TCP/OSC control APIs, ISO recording, the Output
 Manager, and the initial Windows release packaging and CI pipeline.
 
-[Unreleased]: https://github.com/iamfatness/CoreVideo/compare/v0.1.37...HEAD
+[Unreleased]: https://github.com/iamfatness/CoreVideo/compare/v0.1.38...HEAD
+[0.1.38]: https://github.com/iamfatness/CoreVideo/compare/v0.1.37...v0.1.38
 [0.1.37]: https://github.com/iamfatness/CoreVideo/compare/v0.1.36...v0.1.37
 [0.1.27]: https://github.com/iamfatness/CoreVideo/compare/v0.1.26...v0.1.27
 [0.1.26]: https://github.com/iamfatness/CoreVideo/compare/v0.1.25...v0.1.26

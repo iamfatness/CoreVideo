@@ -148,6 +148,87 @@ two-slot handoff internally: the current participant remains visible while the
 next participant warms on a hidden slot, then the source cuts only after a valid
 frame is available.
 
+## CoreVideo Tiles
+
+**CoreVideo Tiles** is one OBS source that draws every participant as a gallery
+wall. Where a participant source is one person, Tiles is the whole grid: it
+picks the layout for the number of people on screen, and repaints itself as
+people join and leave. Add it from **Sources -> Add -> CoreVideo Tiles**.
+
+Every tile is filled, never letterboxed. A tile narrower than the camera feeding
+it crops the sides rather than adding bars, which is what keeps a wall of mixed
+cameras looking even.
+
+### Filling the wall
+
+| Control | Does |
+| --- | --- |
+| **Fill mode** | `Auto - everyone with video` fills the wall with whoever currently has video, in roster order. `Manual - choose per tile` gives you a **Tile 1..N** dropdown per position, so you place people yourself. |
+| **Maximum tiles** | Upper bound on how many tiles Auto mode will draw. |
+| **Never show** | Participants Auto mode skips — the stage camera, a recording bot, anyone who should never land on the wall. |
+| **Refresh participant list** | Re-reads the roster if someone joined while the properties dialog was open. |
+
+### Shape and spacing
+
+| Control | Default | Does |
+| --- | --- | --- |
+| **Tile shape** | `16:9 (widescreen)` | Shape of every tile: 16:9, 4:3, 5:4, 1:1 (square), 3:4 (portrait), 9:16 (vertical), or `Custom ratio`. |
+| **Custom ratio (width / height)** | 16:9 | Used only when Tile shape is `Custom ratio`. |
+| **Gap between tiles (% of canvas height)** | 0.741% | Space between tiles. A percentage of canvas height, so spacing scales with the canvas — 0.741% is the 8 px at 1080p the wall has always used. |
+| **Margin around the wall (% of canvas height)** | 0.741% | Space between the wall and the canvas edge. |
+
+### Background
+
+**Background colour** fills the gutters, the margin, and any canvas the wall does
+not cover. **Background source** draws any video-producing OBS source — an Image,
+a Media Source, a Browser Source — behind the tiles and over that colour; leave
+it on `- none -` for colour only. A background source that is deleted, or one
+that would render itself (the wall, or a scene containing it), falls back to the
+colour rather than breaking the wall.
+
+### Borders and glow
+
+| Control | Default | Does |
+| --- | --- | --- |
+| **Border width** | 0 (off) | Border drawn inside each tile's edge. |
+| **Border colour** | black | |
+| **Corner shape** | Square | `Square` or `Rounded`. |
+| **Corner radius** | 16 | Shown only when Corner shape is `Rounded`. |
+| **Glow size** | 0 (off) | Outer glow drawn around each tile, in a pass behind the tiles. |
+| **Glow colour** | white | |
+| **Glow intensity (%)** | 100 | |
+| **Glow softness (%)** | 0 | How gradually the glow falls off. |
+
+Border width and corner radius are clamped against the tile they are drawn on —
+past half the shorter side there is no interior left — so an extreme value
+degrades gracefully instead of inverting the tile.
+
+### Per-tile crop
+
+**Per-tile crop** gives each tile its own `crop left %` and `crop right %`, for
+trimming a participant who is sitting off-centre without touching the others.
+
+### Per-participant audio
+
+The wall itself carries no audio. **Participant audio scene or group** names a
+scene or group in which the wall creates one Zoom participant audio source per
+tile, so every person on the wall gets their own fader and their own ISO track.
+Leave it blank and nothing is created.
+
+Points worth knowing before you switch it on:
+
+- **Add that scene or group to every scene.** Audio then stays put while you cut
+  between scenes, instead of appearing and disappearing with the wall.
+- **A nested scene is safer than a group.** A group can be dissolved with
+  **Ungroup**, which scatters the sources inside it.
+- **Use the audio group on one Tiles source only.** If you run a second wall — a
+  panel wall beside a main one — leave its audio field blank. Audio for each
+  person belongs to whichever wall created it, so on a second wall someone who
+  drops off that wall can be left muted while still on screen on the other one,
+  and both walls number their ISO stems from track 2 up, which can put two
+  people on the same stem in the recording. The plugin logs a warning if it sees
+  a second wall with a group set.
+
 ## Active Speaker Director
 
 The Active Speaker Director is controlled from the Zoom Control dock. It is not

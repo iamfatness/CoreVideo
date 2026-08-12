@@ -28,6 +28,35 @@ changing the Zoom sign-in or meeting-join path.
 - Use manual take/release and confirm release does not cut away unnecessarily
   when the manual speaker remains valid.
 
+## Tiles Wall Live Validation
+
+- Use at least four participants with video enabled.
+- In `Auto - everyone with video`, confirm the wall relays itself as
+  participants join and leave, and that it never exceeds **Maximum tiles**.
+- Add a participant to **Never show** and confirm they leave the wall and no
+  gap is left behind.
+- Switch to `Manual - choose per tile`, assign specific people, and confirm
+  each tile holds its assignment across a join/leave.
+- Change **Tile shape** and confirm tiles crop to fill rather than letterbox.
+- Change **Gap between tiles** and **Margin around the wall** and confirm the
+  spacing scales with canvas height.
+- Set a **Background source** and confirm it draws behind the tiles; delete that
+  source mid-show and confirm the wall falls back to **Background colour**
+  instead of breaking.
+- Point **Background source** at the wall itself, or a scene containing it, and
+  confirm the self-reference falls back to colour.
+- Enable borders and glow; confirm an extreme **Border width** or **Corner
+  radius** clamps instead of inverting the tile.
+- Apply a per-tile **crop left %** / **crop right %** and confirm only that tile
+  changes.
+- Set **Participant audio scene or group** and confirm one audio source per tile
+  is created inside it, each with its own fader and ISO track, and that the wall
+  itself carries no audio.
+- Cut between scenes with the audio scene/group present in each and confirm
+  audio does not drop.
+- Add a second Tiles source with an audio group set and confirm the plugin logs
+  a warning about the second wall.
+
 ## OBS Lifecycle And Reopen
 
 - Start OBS with the plugin installed.

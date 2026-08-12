@@ -1,6 +1,7 @@
 // src/luma-range-probe.h
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 // What the luma plane of a received frame actually contains. Limited-range
@@ -31,7 +32,7 @@ inline LumaRange probe_luma_range(const uint8_t *y_plane, uint32_t width,
         step = 1;
 
     for (uint32_t y = 0; y < height; y += step) {
-        const uint8_t *row = y_plane + static_cast<size_t>(y) * stride;
+        const uint8_t *row = y_plane + static_cast<std::size_t>(y) * stride;
         for (uint32_t x = 0; x < width; x += step) {
             const uint8_t v = row[x];
             if (v < out.min) out.min = v;

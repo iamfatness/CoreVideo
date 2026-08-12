@@ -12,6 +12,7 @@
 
 #include "luma-range-probe.h"
 
+#include <cstddef>
 #include <iostream>
 #include <vector>
 
@@ -29,13 +30,13 @@ static void check(bool ok, const char *message)
 static std::vector<uint8_t> ramp_plane(uint32_t w, uint32_t h,
                                        uint8_t lo, uint8_t hi)
 {
-    std::vector<uint8_t> plane(static_cast<size_t>(w) * h, lo);
+    std::vector<uint8_t> plane(static_cast<std::size_t>(w) * h, lo);
     for (uint32_t y = 0; y < h; ++y) {
         const uint32_t span = h > 1 ? h - 1 : 1;
         const int value = lo + (hi - lo) * static_cast<int>(y) /
                                    static_cast<int>(span);
         for (uint32_t x = 0; x < w; ++x)
-            plane[static_cast<size_t>(y) * w + x] =
+            plane[static_cast<std::size_t>(y) * w + x] =
                 static_cast<uint8_t>(value);
     }
     return plane;
@@ -69,10 +70,10 @@ int main()
     // --- Stride wider than width: padding must not be sampled ---
     {
         const uint32_t w = 8, h = 4, stride = 16;
-        std::vector<uint8_t> plane(static_cast<size_t>(stride) * h, 255);
+        std::vector<uint8_t> plane(static_cast<std::size_t>(stride) * h, 255);
         for (uint32_t y = 0; y < h; ++y)
             for (uint32_t x = 0; x < w; ++x)
-                plane[static_cast<size_t>(y) * stride + x] = 100;
+                plane[static_cast<std::size_t>(y) * stride + x] = 100;
         const LumaRange r = probe_luma_range(plane.data(), w, h, stride, 1);
         check(r.min == 100 && r.max == 100,
               "probe read past the visible width into stride padding");

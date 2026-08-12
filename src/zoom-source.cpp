@@ -1,6 +1,7 @@
 #include "zoom-source.h"
 #include "shm-resubscribe.h"
 #include "speaker-director.h"
+#include "speaker-settings-merge.h"
 #include "zoom-engine-client.h"
 #include "zoom-iso-recorder.h"
 #include "zoom-settings.h"
@@ -457,12 +458,38 @@ void ZoomSource::apply_settings(obs_data_t *settings)
         obs_data_get_int(settings, PROP_ASSIGNMENT_MODE) ==
             static_cast<int>(AssignmentMode::ActiveSpeaker)) {
         ZoomPluginSettings plugin_settings = ZoomPluginSettings::load();
-        plugin_settings.speaker_sensitivity_ms = speaker_sensitivity_ms;
-        plugin_settings.speaker_hold_ms = speaker_hold_ms;
-        plugin_settings.speaker_exclude_participant_1 = static_cast<uint32_t>(
+        // Only push values this source actually carries. apply_settings() runs
+        // on every source load and property refresh, not just on a user edit,
+        // so mirroring unset properties into the global settings let a source
+        // that never had an exclusion configured wipe the one the dock holds.
+        // The precedence rule and the on-air consequence of getting it wrong
+        // are in tests/speaker-settings-merge-test.cpp.
+        SpeakerSourceValues carried;
+        carried.has_sensitivity =
+            obs_data_has_user_value(settings, PROP_SPEAKER_SENSITIVITY);
+        carried.sensitivity_ms = speaker_sensitivity_ms;
+        carried.has_hold = obs_data_has_user_value(settings, PROP_SPEAKER_HOLD);
+        carried.hold_ms = speaker_hold_ms;
+        carried.has_exclude_1 =
+            obs_data_has_user_value(settings, PROP_SPEAKER_EXCLUDE_1);
+        carried.exclude_1 = static_cast<uint32_t>(
             obs_data_get_int(settings, PROP_SPEAKER_EXCLUDE_1));
-        plugin_settings.speaker_exclude_participant_2 = static_cast<uint32_t>(
+        carried.has_exclude_2 =
+            obs_data_has_user_value(settings, PROP_SPEAKER_EXCLUDE_2);
+        carried.exclude_2 = static_cast<uint32_t>(
             obs_data_get_int(settings, PROP_SPEAKER_EXCLUDE_2));
+
+        SpeakerGlobalSettings merged;
+        merged.sensitivity_ms = plugin_settings.speaker_sensitivity_ms;
+        merged.hold_ms        = plugin_settings.speaker_hold_ms;
+        merged.exclude_1      = plugin_settings.speaker_exclude_participant_1;
+        merged.exclude_2      = plugin_settings.speaker_exclude_participant_2;
+        merged = merge_speaker_settings(merged, carried);
+
+        plugin_settings.speaker_sensitivity_ms         = merged.sensitivity_ms;
+        plugin_settings.speaker_hold_ms                = merged.hold_ms;
+        plugin_settings.speaker_exclude_participant_1  = merged.exclude_1;
+        plugin_settings.speaker_exclude_participant_2  = merged.exclude_2;
         plugin_settings.save();
         configure_speaker_director_from_settings(plugin_settings);
     }
@@ -1129,9 +1156,13 @@ void ZoomSource::maybe_update_director_subscription()
     if (m_director_preview_uuid.empty())
         m_director_preview_uuid = make_source_uuid();
 
-    const ZoomPluginSettings settings = ZoomPluginSettings::load();
-    configure_speaker_director_from_settings(settings);
-
+    // No settings reload here. on_roster_changed() drives this ~9x/second, and
+    // ZoomPluginSettings::load() goes through obs_frontend_get_global_config()
+    // — an obs_frontend call, off the UI thread, once per roster update. Every
+    // one of those re-applied the whole director config, so any momentarily
+    // stale read republished a config the dock had already moved on from. The
+    // director is configured where it changes instead: apply_settings(),
+    // subscribe(), the dock, and the control/OSC servers.
     const uint32_t directed_id = ZoomEngineClient::instance().active_speaker_id();
     const uint32_t current_id =
         m_current_subscription_id.load(std::memory_order_acquire);
@@ -1179,6 +1210,29 @@ void ZoomSource::on_director_preview_frame(uint32_t event_width,
                                            uint32_t resolved_participant_id,
                                            uint32_t shm_generation)
 {
+    // The preview slot only exists to warm the next speaker's region so the cut
+    // publishes a real frame instead of a gap. But output_video_from_shared_
+    // memory() pushes whatever it is handed straight to the program output, so
+    // a frame from anyone other than the participant we are currently waiting
+    // on puts the wrong face on air. Two of those arrive routinely: frames
+    // still in flight for the previous target after
+    // maybe_update_director_subscription() re-points the slot, and frames the
+    // engine had already queued when the cut unsubscribed it below. On air that
+    // read as a participant flashing up with no speaker change behind it, and
+    // when such a late frame carried a different id than the one we had just
+    // cut to, the commit below cut straight back to it — the sub-second A->B->A
+    // pairs. Publish only the frame that belongs to the live preview target;
+    // that frame, and only that frame, is the cut.
+    const uint32_t awaited =
+        m_director_preview_subscription_id.load(std::memory_order_acquire);
+    if (awaited == 0 || resolved_participant_id != awaited) {
+        if (cv_zoom_verbose_logging()) {
+            blog(LOG_INFO,
+                 "[obs-zoom-plugin] Dropped stale director preview frame: source=%s participant=%u awaited=%u",
+                 output_name().c_str(), resolved_participant_id, awaited);
+        }
+        return;
+    }
     std::lock_guard<std::mutex> lk(m_mtx);
     output_video_from_shared_memory(m_director_preview_uuid,
                                     m_director_preview_shm,

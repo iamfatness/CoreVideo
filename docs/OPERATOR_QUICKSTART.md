@@ -61,6 +61,29 @@ changing settings. The bundle redacts tokens and includes OBS/engine/ISO status.
 CoreVideo keeps OBS sources at a stable canvas size and lets OBS scale lower
 quality feeds instead of changing source geometry during a meeting.
 
+## Tiles Wall
+
+Use **CoreVideo Tiles** when you want everyone on screen at once as a gallery,
+in a single OBS source that relays itself as people come and go.
+
+1. Add **CoreVideo Tiles** from **Sources -> Add**.
+2. Leave **Fill mode** on `Auto - everyone with video` to fill the wall with
+   whoever has video, or pick `Manual - choose per tile` to place people
+   yourself.
+3. Set **Maximum tiles** to the largest wall you want, and list anyone who
+   should never appear under **Never show** — a stage camera or a recording bot.
+4. Style it: **Tile shape**, **Gap between tiles**, **Margin around the wall**,
+   **Background colour** and optional **Background source**, then borders and
+   glow if the show wants them.
+5. For per-person faders and ISO tracks, set **Participant audio scene or
+   group** to a scene or group, and add that scene or group to every scene so
+   audio does not come and go as you cut. Leave it blank if you do not want the
+   wall creating audio sources.
+
+Tiles are always filled, never letterboxed: a tile narrower than the camera
+feeding it crops the sides. If you run a second wall, leave its audio field
+blank — only one wall should own participant audio.
+
 ## Active Speaker
 
 Use the **CoreVideo Active Speaker** OBS source when you want one clean output

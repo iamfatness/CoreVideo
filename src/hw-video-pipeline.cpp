@@ -220,9 +220,19 @@ bool HwVideoPipeline::build_filter_graph(int w, int h)
     }
 
     // Constrain sink output to NV12 only.
-    const enum AVPixelFormat sink_fmts[] = { AV_PIX_FMT_NV12, AV_PIX_FMT_NONE };
-    if (av_opt_set_int_list(m_buf_sink, "pix_fmts", sink_fmts,
-                            AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN) < 0) {
+    //
+    // Set the binary option directly rather than through av_opt_set_int_list().
+    // That macro was deprecated and has now been removed, and CI takes FFmpeg
+    // from a "latest" build that picked the removal up — so the plugin stopped
+    // compiling on Windows without a line of our code changing. av_opt_set_bin()
+    // is what the macro expanded to, and it exists either side of the removal.
+    // The size it wants counts the formats only, never the AV_PIX_FMT_NONE
+    // terminator, so the array does not carry one.
+    const enum AVPixelFormat sink_fmts[] = { AV_PIX_FMT_NV12 };
+    if (av_opt_set_bin(m_buf_sink, "pix_fmts",
+                       reinterpret_cast<const uint8_t *>(sink_fmts),
+                       static_cast<int>(sizeof(sink_fmts)),
+                       AV_OPT_SEARCH_CHILDREN) < 0) {
         teardown_graph();
         return false;
     }

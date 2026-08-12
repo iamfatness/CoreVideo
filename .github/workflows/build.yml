@@ -71,11 +71,23 @@ jobs:
               $def = "$sdk\lib\$name.def"
               $lib = "$sdk\lib\$name.lib"
 
+              # No $ anchor after the name. Current dumpbin prints the export
+              # table as "ordinal hint RVA name = decorated_name", and anchoring
+              # on the name being the last token stopped matching anything at
+              # all when that suffix appeared — every .def came out with zero
+              # symbols, the import libs were empty, and the plugin failed to
+              # link on every libobs symbol it used.
               $exports = @("EXPORTS")
               (dumpbin /nologo /exports $dll) | ForEach-Object {
-                  if ($_ -match "^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)\s*$") {
+                  if ($_ -match "^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)") {
                       $exports += "  $($Matches[1])"
                   }
+              }
+              # obs.dll exports ~1800 symbols and obs-frontend-api.dll ~100. A
+              # handful means the format moved again: fail here, where the cause
+              # is legible, rather than in a wall of LNK2001s.
+              if ($exports.Count -lt 50) {
+                  throw "Parsed only $($exports.Count - 1) exports from $dll. dumpbin's output format has probably changed again."
               }
               $exports | Set-Content $def -Encoding ASCII
               lib /nologo /def:$def /out:$lib /machine:x64

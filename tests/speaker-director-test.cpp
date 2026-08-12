@@ -165,6 +165,105 @@ int main()
     director.update_roster(excluded_update_roster, 711, t + 10);
     if (!check_directed(712)) fail("dynamic exclusion did not move away from directed speaker");
 
+    // --- A forced vacancy hands out at most ONE undebounced cut per hold
+    //     window (the 2026-08-10 on-air defect). A settings-precedence bug
+    //     flapped the exclusion list, so the directed speaker was dethroned on
+    //     nearly every cycle; each dethrone took the "directed == 0" path and
+    //     promoted the instantaneous pick with neither hold nor sensitivity
+    //     applied, producing cuts 0.3 s apart on a 2 s hold. ---
+    director.reset();
+    director.configure(500, 2000, true, {});
+    t = 80000;
+    const auto flap_roster = roster({
+        p(1301, true, true),
+        p(1302, true, true),
+        p(1303, true, true)
+    });
+    director.update_roster(flap_roster, 1301, t);
+    if (!check_directed(1301)) fail("initial 1301 before exclusion flap");
+
+    // Excluding the on-air speaker still moves away at once: getting OFF an
+    // ineligible incumbent is never delayed.
+    t += 10;
+    director.configure(500, 2000, true, {1301});
+    director.update_roster(flap_roster, 1301, t);
+    if (!check_directed(1302)) fail("first exclusion should still cut away immediately");
+
+    // The flap: 0.3 s later the exclusion set swings onto the NEW on-air
+    // speaker. Leaving 1302 is still immediate, but the replacement has not
+    // earned the shot, so no cut is published. Reporting 0 does not black the
+    // program output — an ActiveSpeaker source keeps its current subscription
+    // while the director reports 0 (see zoom-source.cpp).
+    t += 300;
+    director.configure(500, 2000, true, {1302});
+    if (director.update_roster(flap_roster, 1301, t))
+        fail("second forced vacancy inside the hold window cut for free");
+    if (!check_directed(0)) fail("undebounced replacement promoted on a flap");
+
+    // The vacancy is not a dead end: once the replacement has been the
+    // candidate for a full sensitivity window it goes on air.
+    t += 500;
+    if (!director.tick(t)) fail("replacement should promote once sensitivity elapsed");
+    if (!check_directed(1301)) fail("did not promote the vetted replacement");
+
+    // --- The replacement chosen after a rate-limited forced vacancy has to be
+    //     STABLE: half a second of cross-talk or a cough must never reach the
+    //     program output just because the chair happened to be empty. ---
+    director.reset();
+    director.configure(500, 2000, true, {});
+    t = 90000;
+    director.update_roster(roster({
+        p(1401, true, true), p(1402, true, false), p(1403, true, false)
+    }), 1401, t);
+    if (!check_directed(1401)) fail("initial 1401 before cough test");
+
+    t += 10;
+    director.configure(500, 2000, true, {1401});   // operator excludes who is on air
+    director.update_roster(roster({
+        p(1401, true, true), p(1402, true, true), p(1403, true, false)
+    }), 1402, t);
+    if (!check_directed(1402)) fail("first exclusion should move to 1402");
+
+    // Flap 200 ms later: 1402 (now on air) is excluded while 1403 coughs.
+    t += 200;
+    director.configure(500, 2000, true, {1402});
+    director.update_roster(roster({
+        p(1401, true, false), p(1402, true, true), p(1403, true, true)
+    }), 1403, t);
+    if (!check_directed(0)) fail("a cough was promoted by a repeat forced vacancy");
+
+    // The cough stops after 200 ms and the real speaker resumes. The new
+    // candidate re-arms the sensitivity window rather than inheriting the
+    // cough's elapsed time.
+    t += 200;
+    director.update_roster(roster({
+        p(1401, true, true), p(1402, true, true), p(1403, true, false)
+    }), 1401, t);
+    if (!check_directed(0)) fail("candidate restart should re-arm the sensitivity window");
+    t += 500;
+    director.tick(t);
+    if (!check_directed(1401)) fail("stable speaker should take the vacancy after sensitivity");
+
+    // --- The immediate fill is a per-hold-window budget, not a one-shot: an
+    //     isolated exclusion later in the show still cuts at once. ---
+    director.reset();
+    director.configure(500, 2000, true, {});
+    t = 100000;
+    const auto late_roster = roster({p(1501, true, true), p(1502, true, true)});
+    director.update_roster(late_roster, 1501, t);
+    if (!check_directed(1501)) fail("initial 1501 before late exclusion");
+    t += 10;
+    director.configure(500, 2000, true, {1501});
+    director.update_roster(late_roster, 1501, t);
+    if (!check_directed(1502)) fail("first exclusion should cut immediately");
+
+    // A quiet minute passes, then the operator excludes the new speaker.
+    t += 60000;
+    director.configure(500, 2000, true, {1502});
+    director.update_roster(late_roster, 1501, t);
+    if (!check_directed(1501))
+        fail("an isolated forced vacancy must still be filled immediately");
+
     // --- Departed speaker: hold through the grace window, then clear ---
     director.reset();
     director.configure(100, 1000, true, {});

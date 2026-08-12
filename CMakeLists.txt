@@ -813,6 +813,18 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoTileBorder
              COMMAND CoreVideoTileBorderTest)
 
+    # Precedence between a source's own speaker properties and the dock-owned
+    # global settings. A source that carries nothing must not overwrite them —
+    # see the 2026-08-11 live-show incident described in the test.
+    add_executable(CoreVideoSpeakerSettingsMergeTest
+        tests/speaker-settings-merge-test.cpp
+    )
+    target_include_directories(CoreVideoSpeakerSettingsMergeTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoSpeakerSettingsMerge
+             COMMAND CoreVideoSpeakerSettingsMergeTest)
+
     # Per-slot left/right crop composed with the cover-crop. The composition
     # order is the point: the slot crop narrows the usable source first, and the
     # cover-crop then fills the tile from what is left. Reversing the two cuts a

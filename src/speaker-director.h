@@ -51,6 +51,9 @@ private:
     // must keep showing the last speaker until someone else takes over).
     void enforce_incumbent_eligibility_locked(uint64_t now_ms);
     uint32_t choose_candidate_locked(uint32_t raw_speaker_id) const;
+    // Fills an empty chair. Immediate on a cold start and on the first forced
+    // vacancy in a hold window; debounced by sensitivity on repeats.
+    bool fill_vacancy_locked(uint32_t candidate, uint64_t now_ms);
     bool tick_locked(uint64_t now_ms);
 
     mutable std::mutex m_mtx;
@@ -65,6 +68,12 @@ private:
     std::vector<uint32_t> m_excluded_participant_ids;
     uint64_t m_candidate_since_ms = 0;
     uint64_t m_last_switch_ms = 0;
+    // When the chair was emptied by enforce_incumbent_eligibility_locked
+    // rather than by a cold start, and when the last such emergency fill
+    // happened. Together these cap undebounced replacements at one per hold
+    // window — see fill_vacancy_locked() and the 2026-08-10 incident.
+    uint64_t m_last_forced_fill_ms = 0;
+    bool m_forced_vacancy = false;
     uint32_t m_sensitivity_ms = 500;
     uint32_t m_hold_ms = 2000;
     bool m_require_video = true;

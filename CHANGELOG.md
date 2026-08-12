@@ -7,6 +7,19 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+### Fixed
+- **Active speaker can no longer cut faster than the hold time when someone
+  becomes ineligible.** Excluding whoever is on air still moves off them
+  immediately — that part is deliberate — but the *replacement* was chosen with
+  neither the hold nor the sensitivity window applied. Anything that emptied the
+  active speaker slot repeatedly (an exclusion list that flapped, a participant
+  dropping out of the roster) therefore handed out a free cut every time it
+  happened; a live show saw cuts 0.3 seconds apart on a 2 second hold. The first
+  such cut is still instant, so one operator action still cuts at once. A second
+  one inside the same hold window now has to hold the floor for the sensitivity
+  window first, so a cough or a moment of cross-talk can no longer take the
+  program output just because the slot happened to be empty.
+
 ## [0.1.38] - 2026-08-12
 
 ### Fixed

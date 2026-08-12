@@ -42,6 +42,8 @@ void SpeakerDirector::reset()
     m_excluded_participant_ids.clear();
     m_candidate_since_ms = 0;
     m_last_switch_ms = 0;
+    m_last_forced_fill_ms = 0;
+    m_forced_vacancy = false;
 }
 
 // Strict vetting for NEW candidates only. The incumbent is judged by
@@ -88,16 +90,16 @@ void SpeakerDirector::enforce_incumbent_eligibility_locked(uint64_t now_ms)
     const auto enforce = [&](uint32_t &holder, uint64_t &missing_since) {
         if (holder == 0) {
             missing_since = 0;
-            return;
+            return false;
         }
         if (participant_excluded_locked(holder)) {
             holder = 0;
             missing_since = 0;
-            return;
+            return true;
         }
         if (participant_in_roster_locked(holder)) {
             missing_since = 0;
-            return;
+            return false;
         }
         // Absent from the roster: could be a transient blip (engine
         // reconnect) — dethrone only after the grace window.
@@ -107,9 +109,16 @@ void SpeakerDirector::enforce_incumbent_eligibility_locked(uint64_t now_ms)
                  now_ms - missing_since > kAbsenceGraceMs) {
             holder = 0;
             missing_since = 0;
+            return true;
         }
+        return false;
     };
-    enforce(m_directed_speaker_id, m_directed_missing_since_ms);
+    // Remember that the chair was emptied by enforcement, not by a cold
+    // start: fill_vacancy_locked() debounces the replacement in that case.
+    // Sticky until something is actually promoted — the vacancy is still a
+    // forced one on the ticks that follow.
+    if (enforce(m_directed_speaker_id, m_directed_missing_since_ms))
+        m_forced_vacancy = true;
     enforce(m_manual_speaker_id, m_manual_missing_since_ms);
 }
 
@@ -134,7 +143,64 @@ bool SpeakerDirector::promote_locked(uint32_t participant_id, uint64_t now_ms)
     m_candidate_speaker_id = 0;
     m_candidate_since_ms = 0;
     m_last_switch_ms = now_ms;
+    m_forced_vacancy = false;
     return true;
+}
+
+// The chair is empty. This used to be the one path that promoted with NEITHER
+// hold NOR sensitivity applied, and on 2026-08-10 that produced active-speaker
+// cuts 0.3 s apart on a 2 s hold: a settings-precedence bug flapped the
+// exclusion list, enforce_incumbent_eligibility_locked() dethroned the
+// directed speaker on nearly every cycle, and each dethrone handed out another
+// free cut to whatever choose_candidate_locked() returned at that instant.
+//
+// Leaving an ineligible incumbent must still be instant — when an operator
+// excludes whoever is on air, they expect them off air now — so the fill stays
+// immediate for the cases that matter and is only rate-limited on repeats:
+//
+//   * cold start (reset(), first roster of a meeting): nothing is on air, so
+//     there is no cut to debounce. Take the first eligible speaker at once.
+//   * first forced vacancy in a hold window: immediate, as before. One
+//     operator action, one instant cut.
+//   * a second forced vacancy inside that same hold window: this is the flap
+//     signature, and the replacement is unvetted — it could be a cough or a
+//     half-second of cross-talk. Make it earn the shot through the normal
+//     sensitivity window first.
+//
+// Waiting costs no picture: while the director reports 0, an ActiveSpeaker
+// source keeps its current subscription (zoom-source.cpp), so the last speaker
+// stays on the program output instead of cutting to black.
+//
+// Deliberately NOT done here: falling back to m_last_speaker_id. Under the
+// exact failure mode being hardened — a flapping eligibility set — the last
+// speaker is the participant most likely to have just flapped back into
+// eligibility, so preferring them would trade the free-cut bug for a free
+// A→B→A ping-pong. Vetting has to be temporal (has this candidate held the
+// floor for sensitivity_ms?), not historical.
+bool SpeakerDirector::fill_vacancy_locked(uint32_t candidate, uint64_t now_ms)
+{
+    // Track the candidate even while the chair is empty, so the sensitivity
+    // clock runs and a candidate that changes mid-window re-arms it.
+    if (candidate != m_candidate_speaker_id) {
+        m_candidate_speaker_id = candidate;
+        m_candidate_since_ms = candidate != 0 ? now_ms : 0;
+    }
+    if (candidate == 0)
+        return false;
+
+    if (m_forced_vacancy) {
+        const bool immediate_fill_available =
+            m_last_forced_fill_ms == 0 || now_ms < m_last_forced_fill_ms ||
+            now_ms - m_last_forced_fill_ms >= m_hold_ms;
+        if (!immediate_fill_available &&
+            (now_ms < m_candidate_since_ms ||
+             now_ms - m_candidate_since_ms < m_sensitivity_ms)) {
+            return false;
+        }
+        m_last_forced_fill_ms = now_ms;
+    }
+
+    return promote_locked(candidate, now_ms);
 }
 
 bool SpeakerDirector::set_manual_speaker(uint32_t participant_id, uint64_t now_ms)
@@ -173,7 +239,7 @@ bool SpeakerDirector::update_roster(const std::vector<ParticipantInfo> &roster,
 
     const uint32_t candidate = choose_candidate_locked(raw_speaker_id);
     if (m_directed_speaker_id == 0)
-        return promote_locked(candidate, now_ms);
+        return fill_vacancy_locked(candidate, now_ms);
 
     if (candidate == 0 || candidate == m_directed_speaker_id) {
         m_candidate_speaker_id = 0;
@@ -195,8 +261,10 @@ bool SpeakerDirector::tick_locked(uint64_t now_ms)
     if (m_manual_speaker_id != 0)
         return promote_locked(m_manual_speaker_id, now_ms);
 
-    if (m_directed_speaker_id == 0)
-        return promote_locked(choose_candidate_locked(m_raw_speaker_id), now_ms);
+    if (m_directed_speaker_id == 0) {
+        return fill_vacancy_locked(choose_candidate_locked(m_raw_speaker_id),
+                                   now_ms);
+    }
 
     if (!participant_allowed_locked(m_candidate_speaker_id))
         return false;

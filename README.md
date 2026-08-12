@@ -79,7 +79,7 @@ Changelog: **[Release notes & version history ->](CHANGELOG.md)**
 
 | Platform | Status |
 |---|---|
-| **Windows 10/11 x64** | **Supported.** The only platform with a maintained release pipeline (`.github/workflows/release-windows.yml`): checksummed ZIP and NSIS installer, published to GitHub Releases. This is the only configuration the maintainers build, test, and run in production. |
+| **Windows 10/11 x64** | **Supported.** The only platform with a maintained release pipeline: checksummed ZIP and NSIS installer, built and published from a maintainer's machine with `scripts/release-local.ps1` (the Zoom Meeting SDK is license-restricted, so the package cannot be built on a public runner - see `docs/RELEASE_CHECKLIST.md`). This is the only configuration the maintainers build, test, and run in production. |
 | Windows arm64 | Source build only, untested. `CMakeLists.txt` auto-detects an arm64 Zoom SDK layout under `third_party/zoom-sdk/arm64` if present, but there is no arm64 CI job, no arm64 release artifact, and no maintainer testing on arm64 hardware. Treat it as "may compile," not "known to work." |
 | macOS (arm64 / x86_64) | Source build only, unsupported - **no official packages**. CI (`build.yml`, macOS job) only compiles the cross-platform engine/plugin sources with `-DCOREVIDEO_BUILD_PLUGIN=OFF -DCOREVIDEO_BUILD_ENGINE=OFF` to catch portability regressions; it does not build, link, or package the actual OBS plugin, and the CI artifact it produces is a compile-validation ZIP, not an installable macOS build (see below). There is no macOS Keychain-backed token storage yet (see Security), no notarization/signing, and no macOS QA. |
 | Linux | Source build only, unsupported - **no official packages**. CI (`build.yml`, Linux job) compiles and unit-tests only the cross-platform C++ (`BUILD_TESTING`) with the plugin/engine/sidecar all `OFF`; it never links against Qt6, OBS, or the Zoom SDK on Linux. There is no Linux packaging, no distro integration, and no libsecret-backed token storage yet (see Security). |
@@ -161,16 +161,20 @@ session) and on the [Releases page](https://github.com/iamfatness/CoreVideo/rele
 
 ### Windows release packaging
 
-GitHub Actions can validate the Windows build without the restricted Zoom
-runtime, but public client releases must include `ZoomObsEngine.exe`,
-`zoom-runtime\sdk.dll`, Qt TLS plugins, and the other bundled runtime files.
-CI fetches the license-restricted Zoom SDK from an asset on a **draft** GitHub
-release in this repository (draft releases are not publicly visible; the
-workflow token downloads the asset at build time). If the asset is missing, CI
-skips publishing a GitHub Release instead of shipping an incomplete package.
-Keep that release a draft — publishing it would make the SDK public.
+Windows packages are built and published locally, not by GitHub Actions: a
+public client release must include `ZoomObsEngine.exe`, `zoom-runtime\sdk.dll`,
+Qt TLS plugins, and the other bundled runtime files, and the Zoom SDK they come
+from is license-restricted. GitHub Actions runs cross-platform validation only
+(macOS compile, Linux/GCC unit tests, Companion module tests, CodeQL,
+Cppcheck/Flawfinder) and never publishes a release. See
+`docs/RELEASE_CHECKLIST.md` for the full process.
 
-For fast local releases from a machine that already has the Zoom runtime, use:
+The macOS validation job still fetches the license-restricted Zoom SDK from an
+asset on a **draft** GitHub release in this repository (draft releases are not
+publicly visible; the workflow token downloads the asset at build time). Keep
+that release a draft — publishing it would make the SDK public.
+
+To cut a release from a machine that has the Zoom runtime, use:
 
 ```powershell
 .\scripts\release-local.ps1 -Version v0.1.6 -Upload

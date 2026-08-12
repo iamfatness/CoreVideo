@@ -2,31 +2,47 @@
 
 Use this checklist before publishing a GitHub Release or installer.
 
+Windows releases are built and published **from a maintainer's Windows
+machine**, not from GitHub Actions. That is how every release to date has been
+cut: the plugin needs the license-restricted Zoom Meeting SDK, which cannot be
+handed to a public runner. GitHub Actions only runs cross-platform validation
+(macOS compile, Linux/GCC unit tests, Companion module tests, CodeQL,
+Cppcheck/Flawfinder); it builds no Windows package and publishes no release, and
+pushing a `v*` tag publishes nothing on its own.
+
 ## Build Inputs
 
 - `main` is up to date and all intended commits are pushed.
-- Zoom SDK runtime is available for the release job.
+- The Zoom SDK runtime is unpacked on the build machine at
+  `third_party/zoom-sdk` (or pass `-ZoomSdkDir`).
 - Windows build embeds the production Public Client ID:
   `y6sIWSwiTZe1JygMx4C9EQ`.
 - Windows build embeds the same value as the Meeting SDK public app key.
 - No OAuth or Meeting SDK client secret is embedded in the plugin binary.
 - FFmpeg runtime strategy is documented for ISO recording.
 
-## Local Validation
+## Local Build and Validation
 
-Run:
+Run the unit tests, then build and package:
 
 ```powershell
-cmake --build build-vs-release --config Release --target obs-zoom-plugin --parallel
-ctest --test-dir build-vs-release -C Release --output-on-failure
+ctest --test-dir build-rel -C Release --output-on-failure
 git diff --check
+.\scripts\release-local.ps1 -Version vX.Y.Z -BuildPath build-rel -Configuration Release
 ```
 
-For a local package:
+`release-local.ps1` builds, installs into a staging folder, runs
+`Test-CoreVideoPackage.ps1 -FullRuntime`, then writes the ZIP, the NSIS
+installer (when `makensis` is on PATH or installed in the default location),
+a `.sha256` beside each, and the install-layout manifest into `dist/`. Without
+`-Upload` it publishes nothing.
 
-```powershell
-.\scripts\release-local.ps1 -Version vX.Y.Z -SkipUpload
-```
+The build directory must already be configured. The first time, add
+`-Configure` together with the CMake paths for that machine (`-Generator`,
+`-CMakePrefixPath`, `-LibObsDir`, `-ObsFrontendApiDir`, `-QtRootDir`). If
+`C:\ffmpeg` holds a shared FFmpeg dev tree, hardware I420->NV12 conversion is
+enabled and those DLLs are bundled automatically; `-DisableFfmpegHwAccel`
+forces a CPU-only build.
 
 Confirm `scripts/Test-CoreVideoPackage.ps1` validates:
 
@@ -40,8 +56,7 @@ Confirm `scripts/Test-CoreVideoPackage.ps1` validates:
 - Embedded Meeting SDK public app key.
 - FFmpeg runtime consistency when FFmpeg DLLs are present.
 - A deterministic install-layout manifest:
-  `CoreVideo-Windows-x64-<version>.manifest.json` locally or
-  `CoreVideo-Windows-x64.manifest.json` in GitHub Actions.
+  `dist/CoreVideo-Windows-x64-<version>.manifest.json`.
 
 ## OBS Smoke Tests
 
@@ -121,12 +136,39 @@ automated OBS smoke, and sidecar release gates.
 - Sidecar content is clearly labeled as roadmap or architecture until it is
   production-ready.
 
-## Release Assets
+## Publish
 
-Publish:
+Everything published comes out of `dist/`:
 
-- Windows installer, when NSIS packaging succeeds.
-- Windows ZIP for manual/advanced installs.
-- SHA256 files for every downloadable asset.
-- Install-layout manifest JSON for comparing local and GitHub release contents.
-- Release notes with known limitations and upgrade notes.
+- `CoreVideo-Setup-vX.Y.Z.exe` - the recommended end-user installer.
+- `CoreVideo-Windows-x64-vX.Y.Z.zip` - for manual/advanced installs.
+- `CoreVideo-Setup-vX.Y.Z.exe.sha256` and
+  `CoreVideo-Windows-x64-vX.Y.Z.zip.sha256`.
+- `CoreVideo-Windows-x64-vX.Y.Z.manifest.json` - install-layout manifest, for
+  comparing a local install against the published package.
+
+Publish by rerunning the same command with `-Upload`:
+
+```powershell
+.\scripts\release-local.ps1 -Version vX.Y.Z -BuildPath build-rel -Configuration Release -Upload
+```
+
+`-Upload` reuses an existing release for that tag, or creates the release - and
+the tag, at the current `HEAD` - if there is none, with
+`generate_release_notes`, then uploads the five assets above (replacing any
+same-named asset). It authenticates through Git Credential Manager, so be
+signed in to GitHub with Git first. Assets can also be attached by hand from
+`dist/` if you prefer.
+
+Then add release notes with known limitations and upgrade notes.
+
+### Betas must be published as full releases
+
+`-Upload` marks the release as a prerelease whenever the version has a suffix
+(anything containing `-`, e.g. `v0.2.0-beta.1`). GitHub's `/releases/latest`
+excludes prereleases, and it is what both the plugin's startup update check
+(`src/cv-update-check.cpp`) and the website's `/download` link
+(`site-worker.js`) read. A prerelease therefore reaches nobody who already has
+CoreVideo installed. To ship a beta to existing installs, publish it as a
+**full** release - use a version without a `-` suffix, or clear the prerelease
+flag on the release afterwards.

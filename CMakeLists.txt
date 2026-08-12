@@ -26,8 +26,8 @@ configure_file(src/zoom-credentials.h.in
 
 # The project() version above is a development placeholder that only gets
 # hand-bumped occasionally; it drifts behind the git tags actual releases
-# are cut from (releases are tagged vX.Y.Z and published via
-# scripts/release-local.ps1 / .github/workflows/release-windows.yml). Rather
+# are cut from (releases are tagged vX.Y.Z and built and published locally
+# via scripts/release-local.ps1; CI publishes nothing). Rather
 # than keep them in sync by hand, packaging entry points pass the real
 # release tag through COREVIDEO_RELEASE_VERSION, and that value - not
 # PROJECT_VERSION - is what CoreVideo reports at runtime (logs, diagnostics
@@ -35,7 +35,7 @@ configure_file(src/zoom-credentials.h.in
 # fall back to PROJECT_VERSION.
 set(COREVIDEO_RELEASE_VERSION "" CACHE STRING
     "Release tag (e.g. v0.1.27) to report as the runtime plugin version. \
-Set by release-local.ps1/CI from the git tag being packaged; leave blank \
+Set by release-local.ps1 from the git tag being packaged; leave blank \
 for development builds.")
 if(COREVIDEO_RELEASE_VERSION)
     string(REGEX REPLACE "^[vV]" "" COREVIDEO_REPORTED_VERSION "${COREVIDEO_RELEASE_VERSION}")

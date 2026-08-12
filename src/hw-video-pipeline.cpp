@@ -211,10 +211,29 @@ bool HwVideoPipeline::build_filter_graph(int w, int h)
     const AVFilter *buf_src_flt  = avfilter_get_by_name("buffer");
     const AVFilter *buf_sink_flt = avfilter_get_by_name("buffersink");
 
-    if (avfilter_graph_create_filter(&m_buf_src, buf_src_flt, "in",
-                                     buf_args, nullptr, m_graph) < 0 ||
-        avfilter_graph_create_filter(&m_buf_sink, buf_sink_flt, "out",
-                                     nullptr, nullptr, m_graph) < 0) {
+    if (!buf_src_flt || !buf_sink_flt) {
+        blog(LOG_WARNING,
+             "[obs-zoom-plugin] HW accel: buffer/buffersink filter missing from this FFmpeg build");
+        teardown_graph();
+        return false;
+    }
+
+    if (int ret = avfilter_graph_create_filter(&m_buf_src, buf_src_flt, "in",
+                                               buf_args, nullptr, m_graph);
+        ret < 0) {
+        char errbuf[128] = {0};
+        av_strerror(ret, errbuf, sizeof(errbuf));
+        blog(LOG_WARNING,
+             "[obs-zoom-plugin] HW accel: buffer source create failed: %s (args: %s)",
+             errbuf, buf_args);
+        teardown_graph();
+        return false;
+    }
+
+    // Allocated but NOT initialised: pix_fmts below has to be set first.
+    m_buf_sink = avfilter_graph_alloc_filter(m_graph, buf_sink_flt, "out");
+    if (!m_buf_sink) {
+        blog(LOG_WARNING, "[obs-zoom-plugin] HW accel: buffersink alloc failed");
         teardown_graph();
         return false;
     }
@@ -228,11 +247,33 @@ bool HwVideoPipeline::build_filter_graph(int w, int h)
     // is what the macro expanded to, and it exists either side of the removal.
     // The size it wants counts the formats only, never the AV_PIX_FMT_NONE
     // terminator, so the array does not carry one.
+    // Set BEFORE avfilter_init_dict(). Current FFmpeg rejects this option once
+    // the filter is initialised — "Option 'pix_fmts' is not a runtime option
+    // and so cannot be set after the object has been initialized" — and the old
+    // code created the sink already-initialised via avfilter_graph_create_filter
+    // and set it afterwards. That returned EINVAL into an unlogged path, so
+    // every graph build failed and every source silently fell back to CPU
+    // conversion with nothing in the log but "filter graph build failed".
     const enum AVPixelFormat sink_fmts[] = { AV_PIX_FMT_NV12 };
-    if (av_opt_set_bin(m_buf_sink, "pix_fmts",
-                       reinterpret_cast<const uint8_t *>(sink_fmts),
-                       static_cast<int>(sizeof(sink_fmts)),
-                       AV_OPT_SEARCH_CHILDREN) < 0) {
+    if (int ret = av_opt_set_bin(m_buf_sink, "pix_fmts",
+                                 reinterpret_cast<const uint8_t *>(sink_fmts),
+                                 static_cast<int>(sizeof(sink_fmts)),
+                                 AV_OPT_SEARCH_CHILDREN);
+        ret < 0) {
+        char errbuf[128] = {0};
+        av_strerror(ret, errbuf, sizeof(errbuf));
+        blog(LOG_WARNING,
+             "[obs-zoom-plugin] HW accel: could not constrain buffersink to NV12: %s",
+             errbuf);
+        teardown_graph();
+        return false;
+    }
+
+    if (int ret = avfilter_init_dict(m_buf_sink, nullptr); ret < 0) {
+        char errbuf[128] = {0};
+        av_strerror(ret, errbuf, sizeof(errbuf));
+        blog(LOG_WARNING, "[obs-zoom-plugin] HW accel: buffersink init failed: %s",
+             errbuf);
         teardown_graph();
         return false;
     }
@@ -240,31 +281,22 @@ bool HwVideoPipeline::build_filter_graph(int w, int h)
     // Build chain: hwupload → <backend scale/convert> → hwdownload → format=nv12
     const std::string chain = std::string("hwupload,") + m_scale_str + ",hwdownload,format=nv12";
 
-    // `outputs` = what the parsed chain's open input connects FROM (buffersrc output).
-    // `inputs`  = what the parsed chain's open output connects TO (buffersink input).
-    AVFilterInOut *outputs = avfilter_inout_alloc();
-    AVFilterInOut *inputs  = avfilter_inout_alloc();
-    if (!outputs || !inputs) {
-        avfilter_inout_free(&outputs);
-        avfilter_inout_free(&inputs);
-        teardown_graph();
-        return false;
-    }
+    // Parse the chain in stages rather than with avfilter_graph_parse_ptr().
+    // parse_ptr() initialises the filters as it goes, and hwupload now refuses
+    // to initialise without a hardware device already attached ("A hardware
+    // device reference is required to upload frames to"). Attaching the device
+    // after the parse, as this used to, is too late. The segment API exists for
+    // exactly this: parse, create the filters uninitialised, configure them,
+    // then initialise.
+    auto log_averror = [](const char *what, int ret) {
+        char errbuf[128] = {0};
+        av_strerror(ret, errbuf, sizeof(errbuf));
+        blog(LOG_WARNING, "[obs-zoom-plugin] HW accel: %s: %s", what, errbuf);
+    };
 
-    outputs->name       = av_strdup("in");
-    outputs->filter_ctx = m_buf_src;
-    outputs->pad_idx    = 0;
-    outputs->next       = nullptr;
-
-    inputs->name        = av_strdup("out");
-    inputs->filter_ctx  = m_buf_sink;
-    inputs->pad_idx     = 0;
-    inputs->next        = nullptr;
-
-    int ret = avfilter_graph_parse_ptr(m_graph, chain.c_str(), &inputs, &outputs, nullptr);
-    avfilter_inout_free(&inputs);
-    avfilter_inout_free(&outputs);
-    if (ret < 0) {
+    AVFilterGraphSegment *seg = nullptr;
+    if (int ret = avfilter_graph_segment_parse(m_graph, chain.c_str(), 0, &seg);
+        ret < 0) {
         char errbuf[128] = {0};
         av_strerror(ret, errbuf, sizeof(errbuf));
         blog(LOG_WARNING,
@@ -274,8 +306,55 @@ bool HwVideoPipeline::build_filter_graph(int w, int h)
         return false;
     }
 
+    if (int ret = avfilter_graph_segment_create_filters(seg, 0); ret < 0) {
+        log_averror("segment create filters failed", ret);
+        avfilter_graph_segment_free(&seg);
+        teardown_graph();
+        return false;
+    }
+
     if (!attach_hw_device_to_upload_filters(m_graph, m_hw_device_ctx)) {
         blog(LOG_WARNING, "[obs-zoom-plugin] HW accel: hwupload filter did not accept a hardware device");
+        avfilter_graph_segment_free(&seg);
+        teardown_graph();
+        return false;
+    }
+
+    if (int ret = avfilter_graph_segment_apply_opts(seg, 0); ret < 0) {
+        log_averror("segment options failed", ret);
+        avfilter_graph_segment_free(&seg);
+        teardown_graph();
+        return false;
+    }
+
+    if (int ret = avfilter_graph_segment_init(seg, 0); ret < 0) {
+        log_averror("segment init failed", ret);
+        avfilter_graph_segment_free(&seg);
+        teardown_graph();
+        return false;
+    }
+
+    // segment_link() hands back the chain's own unconnected ends; joining them
+    // to our source and sink is ours to do.
+    AVFilterInOut *seg_in = nullptr, *seg_out = nullptr;
+    int link_ret = avfilter_graph_segment_link(seg, 0, &seg_in, &seg_out);
+    avfilter_graph_segment_free(&seg);
+    if (link_ret < 0 || !seg_in || !seg_out || !seg_in->filter_ctx ||
+        !seg_out->filter_ctx) {
+        log_averror("segment link failed", link_ret < 0 ? link_ret : AVERROR(EINVAL));
+        avfilter_inout_free(&seg_in);
+        avfilter_inout_free(&seg_out);
+        teardown_graph();
+        return false;
+    }
+
+    int ret = avfilter_link(m_buf_src, 0, seg_in->filter_ctx, seg_in->pad_idx);
+    if (ret >= 0)
+        ret = avfilter_link(seg_out->filter_ctx, seg_out->pad_idx, m_buf_sink, 0);
+    avfilter_inout_free(&seg_in);
+    avfilter_inout_free(&seg_out);
+    if (ret < 0) {
+        log_averror("could not link the chain to the buffer source and sink", ret);
         teardown_graph();
         return false;
     }

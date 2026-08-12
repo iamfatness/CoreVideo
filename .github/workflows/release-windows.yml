@@ -113,12 +113,28 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $assetName = "zoom-sdk-windows-7.1.5.43953.zip"
-          $assetId = gh api "repos/$env:GITHUB_REPOSITORY/releases" --jq ".[] | select(.draft) | .assets[] | select(.name==\"$assetName\") | .id" | Select-Object -First 1
+          # Filter in PowerShell, not in --jq. The jq filter needs a quoted
+          # string literal for the asset name, and there is no reliable way to
+          # get one through Windows PowerShell's native-argument handling: \"
+          # is not a PowerShell escape, so it ended the string early and gh saw
+          # the rest of the filter as extra positional arguments ("accepts 1
+          # arg(s), received 3"), while a correctly-quoted PowerShell string
+          # arrives at gh with the inner quotes stripped ("failed to parse jq
+          # expression"). The lookup found nothing either way, this step warned
+          # and exited 0, and the build carried on without the plugin until
+          # packaging failed on the missing DLL — which is how v0.1.37 ended up
+          # tagged with no release attached to it.
+          $releases = gh api "repos/$env:GITHUB_REPOSITORY/releases" | ConvertFrom-Json
+          $assetId = ($releases |
+              Where-Object { $_.draft } |
+              ForEach-Object { $_.assets } |
+              Where-Object { $_.name -eq $assetName } |
+              Select-Object -First 1).id
           if (-not $assetId) {
-            "COREVIDEO_HAS_ZOOM_RUNTIME=false" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-            "has_zoom_runtime=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-            Write-Warning "$assetName not found on any draft release (or token lacks access). Building a validation-only package without ZoomObsEngine runtime."
-            exit 0
+            # This workflow only ever runs to publish a release, so there is no
+            # legitimate runtime-less path here. Fail where the cause is
+            # visible instead of ten minutes later in package validation.
+            throw "$assetName not found on any draft release (or the token cannot see drafts). A release build cannot proceed without the Zoom runtime."
           }
           Write-Host "Fetching $assetName (asset id $assetId)"
           curl.exe -sSfL -H "Authorization: Bearer $env:GH_TOKEN" -H "Accept: application/octet-stream" "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$assetId" -o zoom-sdk.zip

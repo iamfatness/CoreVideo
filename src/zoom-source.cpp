@@ -1,5 +1,6 @@
 #include "zoom-source.h"
 #include "shm-resubscribe.h"
+#include "luma-range-probe.h"
 #include "speaker-director.h"
 #include "speaker-settings-merge.h"
 #include "zoom-engine-client.h"
@@ -1311,6 +1312,24 @@ bool ZoomSource::output_video_from_shared_memory(
     const auto *y_ptr = video_buf.data();
     const auto *u_ptr = y_ptr + y_len;
     const auto *v_ptr = u_ptr + y_len / 4;
+
+    // Ask the frame what range it actually uses. The engine requests
+    // VideoRawdataColorspace_BT709_F and set_yuv_frame_color_info() declares
+    // VIDEO_RANGE_FULL to match it, but nothing has ever verified that the SDK
+    // honours the request, and program output measured against mimoLive on
+    // 2026-08-11 looked limited-range: blacks floored near 21, whites capped
+    // near 200, saturation down ~40%. A limited-range frame floors at 16 and
+    // ceilings at 235; a full-range one uses 0..255. First frame always, so the
+    // answer is in the log without anyone having to enable anything.
+    if (m_frame_count == 0 ||
+        (cv_zoom_verbose_logging() && m_frame_count % 600 == 0)) {
+        const LumaRange luma = probe_luma_range(y_ptr, w, h, w, 8);
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] Luma range probe: source=%s participant=%u min=%u max=%u under16=%u over235=%u sampled=%u",
+             output_name().c_str(), resolved_participant_id,
+             static_cast<unsigned>(luma.min), static_cast<unsigned>(luma.max),
+             luma.below_16, luma.above_235, luma.sampled);
+    }
     const uint32_t observed_w = w;
     const uint32_t observed_h = h;
     const uint8_t *obs_y_ptr = y_ptr;

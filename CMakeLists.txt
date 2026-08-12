@@ -825,6 +825,17 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoSpeakerSettingsMerge
              COMMAND CoreVideoSpeakerSettingsMergeTest)
 
+    # Measures the luma range actually delivered by the SDK, so the full-range
+    # vs limited-range question is settled by measurement, not assumption.
+    add_executable(CoreVideoLumaRangeProbeTest
+        tests/luma-range-probe-test.cpp
+    )
+    target_include_directories(CoreVideoLumaRangeProbeTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoLumaRangeProbe
+             COMMAND CoreVideoLumaRangeProbeTest)
+
     # Per-slot left/right crop composed with the cover-crop. The composition
     # order is the point: the slot crop narrows the usable source first, and the
     # cover-crop then fills the tile from what is left. Reversing the two cuts a

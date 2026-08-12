@@ -71,17 +71,12 @@ static uint32_t target_participant_id(const CoreVideoAudioSource *ctx)
 {
     if (!ctx) return 0;
     if (ctx->kind == CoreVideoAudioKind::ActiveSpeaker) {
-        const ZoomPluginSettings settings = ZoomPluginSettings::load();
-        std::vector<uint32_t> excluded;
-        if (settings.speaker_exclude_participant_1 != 0)
-            excluded.push_back(settings.speaker_exclude_participant_1);
-        if (settings.speaker_exclude_participant_2 != 0 &&
-            settings.speaker_exclude_participant_2 !=
-                settings.speaker_exclude_participant_1)
-            excluded.push_back(settings.speaker_exclude_participant_2);
-        SpeakerDirector::instance().configure(
-            settings.speaker_sensitivity_ms, settings.speaker_hold_ms,
-            settings.speaker_require_video, excluded);
+        // Read the director, do not reconfigure it. This is called from the
+        // audio path, so loading settings here meant an obs_frontend call off
+        // the UI thread several times a second, re-applying the whole director
+        // config — timings and exclusions — on every audio tick. Configuration
+        // belongs where it changes: apply_settings(), subscribe(), the dock,
+        // and the control/OSC servers.
         return ZoomEngineClient::instance().active_speaker_id();
     }
     if (ctx->kind == CoreVideoAudioKind::Participant)

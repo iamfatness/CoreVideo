@@ -7,7 +7,39 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.37] - 2026-08-12
+
 ### Fixed
+- **The Active Speaker source no longer cuts several times a second.** During a
+  live show it could bounce between two people as little as 0.3s apart, against
+  a hold time set to 2s. The hold time was never at fault. Every source refresh
+  — and a refresh happens on load and on any property change, not just when you
+  edit something — wrote that source's own copy of the speaker settings over
+  the shared ones, and a source that had never been given an exclusion wrote an
+  empty one. The excluded participant then became eligible, went on air, and
+  was thrown off again as soon as the exclusion came back. Being thrown off
+  leaves the director with nobody selected, which is the one case where it
+  takes the next speaker instantly, ignoring both the hold and the sensitivity.
+  A source now writes only the settings it actually carries, so the exclusion
+  stays put and the hold applies to every cut.
+- **The active-speaker exclusion no longer clears itself.** The same cause: any
+  source without an exclusion of its own was quietly wiping the one you had
+  set from the dock.
+- **Participants no longer flash on air with no speaker change behind them.**
+  The Active Speaker source warms up the next speaker's video before cutting,
+  so the cut lands on a real frame instead of a gap — but every warm-up frame
+  was being sent to the program output, including frames that arrived after the
+  warm-up had moved on to somebody else, and frames the engine had already
+  queued when the cut finished. On air that was a face appearing for a frame
+  with nothing behind it, and when one of those late frames belonged to the
+  person you had just cut away from, it cut straight back to them. Only the
+  frame the cut is actually waiting for now reaches the output.
+- **Less work on the video and audio paths.** The plugin reloaded its settings
+  from OBS on two hot paths — once per roster update and once per active-speaker
+  audio tick, several times a second each — and re-applied the whole director
+  configuration every time. Settings are now applied where they change. This
+  also clears the deprecation warnings that were flooding the OBS log.
+
 - **Restarting the Zoom engine no longer leaves a source silent or dark.** If
   the engine process was replaced mid-show — a crash, a stall the watchdog
   caught, or a stop and start by hand — the fresh engine began numbering its
@@ -82,6 +114,10 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
   exactly which file is out of date and what to reinstall.
 
 ### Added
+- **Luma range diagnostics.** Each source logs the luma range of its first frame
+  (`Luma range probe: … min= max= under16= over235=`), which tells you whether
+  video is arriving from the Zoom SDK full-range or limited-range. Nothing to
+  enable.
 - **Tile shape.** "Tile shape" sets the shape of every tile on the wall —
   16:9, 4:3, 5:4, 1:1, 3:4 or 9:16 — with a "Custom ratio" entry for anything
   else. A narrower tile fed by a widescreen camera crops more off the sides,
@@ -440,7 +476,8 @@ sign-in, per-participant and screen-share sources, the Active Speaker
 Director, auto-reconnect, TCP/OSC control APIs, ISO recording, the Output
 Manager, and the initial Windows release packaging and CI pipeline.
 
-[Unreleased]: https://github.com/iamfatness/CoreVideo/compare/v0.1.27...HEAD
+[Unreleased]: https://github.com/iamfatness/CoreVideo/compare/v0.1.37...HEAD
+[0.1.37]: https://github.com/iamfatness/CoreVideo/compare/v0.1.36...v0.1.37
 [0.1.27]: https://github.com/iamfatness/CoreVideo/compare/v0.1.26...v0.1.27
 [0.1.26]: https://github.com/iamfatness/CoreVideo/compare/v0.1.25...v0.1.26
 [0.1.25]: https://github.com/iamfatness/CoreVideo/compare/v0.1.24...v0.1.25

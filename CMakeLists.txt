@@ -825,6 +825,19 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoSpeakerSettingsMerge
              COMMAND CoreVideoSpeakerSettingsMergeTest)
 
+    # Which frames the hidden director-preview subscription may put on air. It
+    # warms the next speaker only; a frame from anyone else is a stale in-flight
+    # frame and publishing it is the wrong face on a live broadcast — see the
+    # 2026-08-11 incident described in the test.
+    add_executable(CoreVideoDirectorPreviewFrameGuardTest
+        tests/director-preview-frame-guard-test.cpp
+    )
+    target_include_directories(CoreVideoDirectorPreviewFrameGuardTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoDirectorPreviewFrameGuard
+             COMMAND CoreVideoDirectorPreviewFrameGuardTest)
+
     # Measures the luma range actually delivered by the SDK, so the full-range
     # vs limited-range question is settled by measurement, not assumption.
     add_executable(CoreVideoLumaRangeProbeTest

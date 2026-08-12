@@ -493,6 +493,14 @@ Manager, and the initial Windows release packaging and CI pipeline.
 [Unreleased]: https://github.com/iamfatness/CoreVideo/compare/v0.1.38...HEAD
 [0.1.38]: https://github.com/iamfatness/CoreVideo/compare/v0.1.37...v0.1.38
 [0.1.37]: https://github.com/iamfatness/CoreVideo/compare/v0.1.36...v0.1.37
+[0.1.36]: https://github.com/iamfatness/CoreVideo/compare/v0.1.35...v0.1.36
+[0.1.35]: https://github.com/iamfatness/CoreVideo/compare/v0.1.34...v0.1.35
+[0.1.34]: https://github.com/iamfatness/CoreVideo/compare/v0.1.33...v0.1.34
+[0.1.33]: https://github.com/iamfatness/CoreVideo/compare/v0.1.31...v0.1.33
+[0.1.31]: https://github.com/iamfatness/CoreVideo/compare/v0.1.30...v0.1.31
+[0.1.30]: https://github.com/iamfatness/CoreVideo/compare/v0.1.29...v0.1.30
+[0.1.29]: https://github.com/iamfatness/CoreVideo/compare/v0.1.28...v0.1.29
+[0.1.28]: https://github.com/iamfatness/CoreVideo/compare/v0.1.27...v0.1.28
 [0.1.27]: https://github.com/iamfatness/CoreVideo/compare/v0.1.26...v0.1.27
 [0.1.26]: https://github.com/iamfatness/CoreVideo/compare/v0.1.25...v0.1.26
 [0.1.25]: https://github.com/iamfatness/CoreVideo/compare/v0.1.24...v0.1.25

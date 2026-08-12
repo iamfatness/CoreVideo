@@ -7,6 +7,133 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+### Fixed
+- **Restarting the Zoom engine no longer leaves a source silent or dark.** If
+  the engine process was replaced mid-show — a crash, a stall the watchdog
+  caught, or a stop and start by hand — the fresh engine began numbering its
+  buffers from scratch and asked for the same names it had used the first time,
+  while CoreVideo was still holding the old ones open. Any buffer that needed to
+  be larger the second time round could not be built, and audio in particular
+  had no way back: it went quiet for the rest of the session. Every source now
+  hands back the buffers it is holding before the replacement engine is even
+  launched — video, screen share, audio, active-speaker preview and every tile
+  on the Tiles wall together — so the new engine starts with a clear field.
+  Handing the buffers back is only half of it, and the other half is asking the
+  new engine for the feed again. Video sources were already re-subscribed on
+  recovery; the Participant Audio, Audience Audio and Active Speaker Audio
+  sources were not, and would sit silent on a subscription that had died with
+  the old engine. They now forget that subscription when the engine is
+  replaced and ask the new one for their audio as soon as it reports who is in
+  the meeting.
+- **Audio sources already on screen when OBS starts are no longer silent for
+  the session.** A Participant Audio or Audience Audio source that was in the
+  live scene before the Zoom engine had been requested asked for its audio
+  immediately, before there was anything to ask, and then recorded itself as
+  subscribed — so when the meeting was finally joined it never asked again and
+  stayed quiet until you hid and re-showed it. These sources now only count
+  themselves subscribed once the request has actually reached an engine, and
+  keep asking on each participant update until it has.
+- **"Zoom engine could not allocate shared memory" no longer strands a source.**
+  A feed that re-pointed often enough — the Active Speaker source re-points on
+  every speaker change — could reach a state where the engine kept failing to
+  build that source's video buffer, and its frames were dropped for the rest of
+  the session. Each rebuilt buffer was asking for a name the previous one had
+  used, which Windows refuses to resize while CoreVideo still has the old one
+  open. Buffers now move to a fresh name every time they are rebuilt, for
+  video, screen share, and audio alike, so a rebuild cannot collide with a
+  buffer still in use. This was the third time this fault reached air; it is
+  fixed at the mechanism rather than at the timing that exposed it.
+- **Feeds no longer flash bright garbage when they change participant.** On
+  air, every active-speaker change made the affected source flash a frame or
+  two of bright colour noise before settling. Any re-point of a source — an
+  active-speaker cut, a reassignment in the Output Manager, an automatic
+  recovery of a dropped feed — now hands the old video buffer back before
+  asking for the new one, so the engine can rebuild it at the new
+  participant's size instead of being blocked by the buffer CoreVideo was
+  still holding. Switches cut cleanly, on Zoom sources and on the Tiles wall
+  alike.
+- **A source no longer goes permanently silent after an active-speaker
+  change.** The same held-buffer problem could hit a source's audio on an
+  active-speaker cut, and audio had no way to recover on its own: the source
+  stayed silent for the rest of the session unless you hid and re-showed it.
+  It only bit when the incoming participant needed a larger audio buffer than
+  the outgoing one, which is why it survived casual testing.
+- **Requesting the Zoom engine works on the first attempt.** A `ZoomObsEngine`
+  left over from a previous OBS session keeps holding the Zoom SDK for a while
+  after OBS exits — the SDK's own shutdown runs long — so the new engine's
+  `InitSDK` failed with `SDKERR_OTHER_SDK_INSTANCE_RUNNING` and the request died
+  as an opaque authentication failure. CoreVideo now recognises that specific
+  collision and waits the leftover engine out (2s, 4s, then 8s a time, 78s in
+  total), replaying the handshake itself; the join you already asked for goes
+  through as soon as it succeeds.
+- **A failed engine request no longer leaves a dead engine behind.** If the
+  wait above runs out, CoreVideo stops its own engine before reporting the
+  failure, so requesting the engine again really does launch a fresh one.
+  Previously the engine process stayed alive but unauthenticated and every
+  further request was silently ignored. The error now names the other Zoom SDK
+  instance as the cause and says what to do about it.
+- **An out-of-date effect file no longer blanks the whole Tiles wall.** The
+  Tiles wall is drawn by a shader that ships beside the plugin, and an install
+  that updated the plugin without updating its data folder left the two out of
+  step. The wall then refused to draw anything at all — a black source in the
+  middle of a show — because one optional part of the newer shader was missing.
+  The wall now draws everything it still can: tiles, background, borders and
+  crop are unaffected, only the tile glow is switched off, and the log says
+  exactly which file is out of date and what to reinstall.
+
+### Added
+- **Tile shape.** "Tile shape" sets the shape of every tile on the wall —
+  16:9, 4:3, 5:4, 1:1, 3:4 or 9:16 — with a "Custom ratio" entry for anything
+  else. A narrower tile fed by a widescreen camera crops more off the sides,
+  because the tile is always filled and never letterboxed. Defaults to 16:9,
+  which is what the wall has always been.
+- **Wall spacing.** "Gap between tiles" and "Margin around the wall" are now
+  yours to set, each as a percentage of the canvas height so the spacing scales
+  with the canvas. Both default to 0.741%, which is the 8 px at 1080p the wall
+  has always used, so an untouched scene lays out exactly as it did.
+- **A background for the Tiles wall.** "Background colour" fills the gutters,
+  margins and any uncovered canvas, and "Background source" draws any
+  video-producing OBS source — an Image, a Media Source, a Browser Source —
+  behind the tiles and over that colour. Leave the source on "- none -" for
+  colour only. A background source that is deleted, or one that would render
+  itself (the wall, or a scene containing it), falls back to the colour
+  rather than breaking the wall.
+- **Tile borders.** "Border width" (0-64 px), "Border colour", and a "Corner
+  shape" of Square or Rounded with a "Corner radius" (0-128 px, shown only
+  for Rounded). Rounded corners cut the video itself, so the background shows
+  through them. Width defaults to 0, so existing walls look exactly as they
+  did until you move it.
+- **Tile glow.** Every tile can sit on a soft halo bleeding out into the
+  background: "Glow size" (0-256 px), "Glow colour", "Glow intensity" and
+  "Glow softness". Softness shapes how the halo falls away from the tile — 0%
+  is strongest right at the tile edge and drops off immediately, 100% holds it
+  just outside the tile before fading — so it can be matched against a
+  reference by eye. Size defaults to 0, so existing walls look exactly as they
+  did until you move it, and softness defaults to 0%. Note that the halo is at
+  full strength at the tile edge whatever the softness; a Photoshop-style outer
+  glow sits around half strength there, so start at roughly 50% intensity if
+  you are matching one.
+- **Per-tile crop.** A collapsible "Per-tile crop" group gives every tile its
+  own left and right crop, as a percentage of the source width (0-45% a side),
+  for reframing a guest sitting too far off-centre without disturbing the grid
+  or any other tile. Crops belong to the tile position, not to whoever is in
+  it, so they apply in Auto mode too. All crops default to 0.
+- Tiles can now create and maintain one Zoom participant audio source per tile,
+  inside a group you nominate, so each person gets a live fader and an ISO
+  track without building the wall twice. Off until you name a group. The wall
+  itself stays silent, so cutting between scenes never swaps audio. Tracks 2-6
+  carry five ISO stems; past that, participants are on the program track only.
+  Clearing the group again switches the feature off properly: the sources it
+  made are muted rather than deleted, so your faders and filters survive and
+  naming a group again brings back whoever is on the wall.
+  **Use the audio group on one Tiles source only.** If you run a second wall —
+  a panel wall beside a main one, say — leave its "Participant audio group"
+  blank. Audio for each person belongs to whichever wall created it, so on a
+  second wall someone who drops off that wall can be left muted while still on
+  screen on the other one, and both walls number their ISO stems from track 2
+  up, which can put two people on the same stem in the recording. The plugin
+  logs a warning if it sees a second wall with a group set.
+
 ## [0.1.36] - 2026-08-09
 
 ### Fixed

@@ -6,6 +6,7 @@
 #include <mutex>
 #include <vector>
 #include "../../src/engine-ipc.h"
+#include "../../src/shm-generation.h"
 #if __has_include(<zoom_sdk_raw_data_def.h>)
 #include <zoom_sdk_raw_data_def.h>
 #else
@@ -49,8 +50,11 @@ private:
         IpcFd e2p_fd;
         ShmRegion shm;
         uint64_t frame_count = 0;
-        // Increments each time the SHM region is (re)created; sent with every
-        // frame event so the plugin can detect an orphaned mapping.
+        // The generation the CURRENT region was created under; sent with every
+        // frame event so the plugin can detect an orphaned mapping. This is a
+        // record of what was published, NOT the counter — the counter must
+        // survive this struct being destroyed on a re-subscribe and lives in
+        // the process-wide table (src/shm-generation.h).
         uint32_t shm_gen = 0;
         // True after an ensure_shm() failure has been surfaced as an error —
         // avoids re-emitting once per frame while the failure persists.

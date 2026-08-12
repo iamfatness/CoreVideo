@@ -1,5 +1,6 @@
 #include "engine-video.h"
 #include "engine-writer.h"
+#include "tile-clock-log.h"
 #if __has_include(<rawdata/zoom_rawdata_api.h>)
 #include <rawdata/zoom_rawdata_api.h>
 #else
@@ -192,11 +193,22 @@ bool ParticipantSubscription::ensure_shm(SourceTarget &target,
     // Bump the generation BEFORE creating and bake it into the name: a
     // resize under the old name deadlocks while the plugin still maps the
     // old (smaller) section (see shm_region_name in engine-ipc.h).
-    const uint32_t next_gen = target.shm_gen + 1;
-    const std::string region_name =
-        shm_region_name(IPC_SHM_PREFIX + source_uuid, next_gen);
-    if (!shm_region_create(target.shm, region_name, total)) return false;
-    target.shm_gen = next_gen; // old plugin-side mappings are now stale
+    //
+    // The counter is NOT a member of this target. A re-subscribe destroys the
+    // target (EngineVideo::subscribe -> unsubscribe_locked -> remove_source),
+    // so a per-target counter restarted at 0 and put every re-created region
+    // back on the legacy unsuffixed name — which is how the resize race kept
+    // reaching production. See src/shm-generation.h.
+    const ShmRegionAllocation region =
+        shm_next_region(shm_generations(), IPC_SHM_PREFIX + source_uuid);
+    if (!shm_region_create(target.shm, region.name, total)) return false;
+    target.shm_gen = region.gen; // old plugin-side mappings are now stale
+    EngineIpc::write(
+        R"({"cmd":"debug","stage":"video_shm_created","source_uuid":")" +
+        source_uuid + R"(","participant_id":)" +
+        std::to_string(m_participant_id) + R"(,"shm_gen":)" +
+        std::to_string(region.gen) + R"(,"bytes":)" +
+        std::to_string(total) + "}");
     return true;
 }
 
@@ -213,6 +225,7 @@ void ParticipantSubscription::onRawDataFrameReceived(YUVRawDataI420 *data)
             std::to_string(w) + R"(,"h":)" + std::to_string(h) + "}");
         return;
     }
+    tile_clock_log(m_participant_id, data->GetTimeStamp(), tile_clock_now_ns(), "v");
 
     std::lock_guard<std::mutex> lock(m_targets_mtx);
     for (auto &entry : m_targets) {
@@ -231,7 +244,13 @@ void ParticipantSubscription::onRawDataFrameReceived(YUVRawDataI420 *data)
                     std::to_string(m_participant_id) + R"(,"w":)" +
                     std::to_string(w) + R"(,"h":)" + std::to_string(h) +
                     R"(,"last_error":)" +
-                    std::to_string(target.shm.last_error) + "}");
+                    std::to_string(target.shm.last_error) +
+                    // Which generation the failed create actually attempted. A
+                    // failure on a _gN name is a different bug from a failure
+                    // on the legacy name — do not make the next incident guess.
+                    R"(,"attempted_gen":)" +
+                    std::to_string(shm_generations().issued(
+                        IPC_SHM_PREFIX + source_uuid)) + "}");
                 EngineIpc::write(
                     R"({"cmd":"error","msg":"shm_create_failed","source_uuid":")" +
                     source_uuid + R"(","participant_id":)" +

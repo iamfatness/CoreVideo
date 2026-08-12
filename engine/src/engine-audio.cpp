@@ -1,5 +1,6 @@
 #include "engine-audio.h"
 #include "engine-writer.h"
+#include "tile-clock-log.h"
 #if __has_include(<rawdata/zoom_rawdata_api.h>)
 #include <rawdata/zoom_rawdata_api.h>
 #else
@@ -166,11 +167,22 @@ bool EngineAudio::ensure_shm(AudioTarget &target,
     // Bump the generation BEFORE creating and bake it into the name: a
     // resize under the old name deadlocks while the plugin still maps the
     // old (smaller) section (see shm_region_name in engine-ipc.h).
-    const uint32_t next_gen = target.shm_gen + 1;
-    const std::string region_name =
-        shm_region_name(IPC_SHM_PREFIX + source_uuid + "_audio", next_gen);
-    if (!shm_region_create(target.shm, region_name, total)) return false;
-    target.shm_gen = next_gen;
+    //
+    // The counter is NOT a member of this target: EngineAudio::remove()
+    // destroys it, and main.cpp calls that on every Unsubscribe and on every
+    // video-only Subscribe, so a per-target counter restarted at 0 and put
+    // every re-created region back on the legacy unsuffixed name. The "_audio"
+    // base name gives audio its own counter without a special case — the table
+    // is keyed by base name. See src/shm-generation.h.
+    const ShmRegionAllocation region =
+        shm_next_region(shm_generations(),
+                        IPC_SHM_PREFIX + source_uuid + "_audio");
+    if (!shm_region_create(target.shm, region.name, total)) return false;
+    target.shm_gen = region.gen; // old plugin-side mappings are now stale
+    EngineIpc::write(
+        R"({"cmd":"debug","stage":"audio_shm_created","source_uuid":")" +
+        source_uuid + R"(","shm_gen":)" + std::to_string(region.gen) +
+        R"(,"bytes":)" + std::to_string(total) + "}");
     return true;
 }
 
@@ -191,7 +203,11 @@ void EngineAudio::output_audio_frame(AudioTarget &target,
                 R"({"cmd":"debug","stage":"audio_shm_create_failed","source_uuid":")" +
                 source_uuid + R"(","byte_len":)" +
                 std::to_string(byte_len) + R"(,"last_error":)" +
-                std::to_string(target.shm.last_error) + "}");
+                std::to_string(target.shm.last_error) +
+                // Which generation the failed create actually attempted.
+                R"(,"attempted_gen":)" +
+                std::to_string(shm_generations().issued(
+                    IPC_SHM_PREFIX + source_uuid + "_audio")) + "}");
             EngineIpc::write(
                 R"({"cmd":"error","msg":"shm_create_failed","source_uuid":")" +
                 source_uuid + R"(","byte_len":)" +
@@ -242,6 +258,8 @@ void EngineAudio::output_audio_frame(AudioTarget &target,
 void EngineAudio::onMixedAudioRawDataReceived(AudioRawData *data)
 {
     if (!data || m_e2p_fd == kIpcInvalidFd || data->GetBufferLen() == 0) return;
+    // Feed id 0: the mixed stream legitimately has no single participant.
+    tile_clock_log(0, data->GetTimeStamp(), tile_clock_now_ns(), "a");
 
     std::lock_guard<std::mutex> lock(m_targets_mtx);
     for (auto &entry : m_targets) {
@@ -256,6 +274,7 @@ void EngineAudio::onMixedAudioRawDataReceived(AudioRawData *data)
 void EngineAudio::onOneWayAudioRawDataReceived(AudioRawData *data, uint32_t user_id)
 {
     if (!data || m_e2p_fd == kIpcInvalidFd || data->GetBufferLen() == 0) return;
+    tile_clock_log(user_id, data->GetTimeStamp(), tile_clock_now_ns(), "a");
 
     std::lock_guard<std::mutex> lock(m_targets_mtx);
 

@@ -1,8 +1,11 @@
 #pragma once
+#include <atomic>
 #include <string>
 #include <cstddef>
 #include <cstdint>
 #include <cerrno>
+#include <cstring>
+#include <vector>
 
 // ── IPC command / event tokens ────────────────────────────────────────────────
 #define IPC_CMD_INIT        "init"
@@ -230,6 +233,108 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
        return true;
    }
 #endif
+
+// ── I420 frame reader ─────────────────────────────────────────────────────────
+enum class ShmFrameRead {
+    Ok,          // dst holds one complete, consistent I420 frame
+    OpenFailed,  // region absent or not yet published by the engine
+    TooSmall,    // the announced frame does not fit the mapped region
+    Invalid,     // unusable header dimensions, or every attempt read a torn frame
+};
+
+// Copies the newest complete I420 frame out of `region`, opening (or reopening)
+// it whenever the mapping is absent, too small, or a generation behind.
+//
+// Two protocols are folded in here so that every consumer of engine frames gets
+// both without restating either:
+//
+//  1. The seqlock. The engine bumps `sequence` to odd before writing pixels and
+//     back to even after, so a reader that sees the same even value on both
+//     sides of its copy knows the copy was not torn.
+//  2. Region generations. A Windows named section cannot be recreated at a
+//     larger size while any process still maps the old one, so the engine moves
+//     to a generation-suffixed name on every resize (see shm_region_name). A
+//     reader that ignores this keeps reading an orphaned region and shows a
+//     frozen frame forever. Pass the generation from the frame event as
+//     `event_shm_gen`; `mapped_shm_gen` is the caller's record of which
+//     generation its mapping was opened against and is updated on reopen.
+//     event_shm_gen == 0 means the engine did not report one (older binary).
+//
+// On Ok, dst holds the Y plane in [0, y_len) followed by U then V, each
+// y_len/4 bytes. `dst` grows as needed and is never shrunk, so a caller that
+// reuses one buffer stops allocating after the first frame. out_w/out_h/
+// out_y_len are filled from the header whenever it was readable (including the
+// TooSmall case, so callers can report the shortfall); dst is only meaningful
+// on Ok.
+inline ShmFrameRead shm_read_i420_frame(ShmRegion &region,
+                                        const std::string &base_name,
+                                        uint32_t event_width,
+                                        uint32_t event_height,
+                                        uint32_t event_shm_gen,
+                                        uint32_t &mapped_shm_gen,
+                                        std::vector<uint8_t> &dst,
+                                        uint32_t &out_w,
+                                        uint32_t &out_h,
+                                        uint32_t &out_y_len)
+{
+    out_w = 0;
+    out_h = 0;
+    out_y_len = 0;
+    if (event_width == 0 || event_height == 0) return ShmFrameRead::Invalid;
+
+    const size_t frame_bytes = sizeof(ShmFrameHeader) +
+        static_cast<size_t>(event_width) * event_height * 3 / 2;
+
+    if (shm_mapping_stale(region.ptr, region.size, frame_bytes, event_shm_gen,
+                          mapped_shm_gen)) {
+        // A generation change means the engine recreated the region — our
+        // mapping points at an orphaned one that will never be written again.
+        // Drop it before opening: holding it is also what blocks an engine that
+        // still uses the legacy name from recreating at a larger size.
+        if (region.ptr && event_shm_gen != 0 && event_shm_gen != mapped_shm_gen)
+            shm_region_destroy(region);
+        if (!shm_region_open_read(region, shm_region_name(base_name, event_shm_gen),
+                                  frame_bytes) &&
+            // Engines predating suffixed names recreate the legacy name for
+            // every generation — fall back to it.
+            (event_shm_gen <= 1 ||
+             !shm_region_open_read(region, base_name, frame_bytes)))
+            return ShmFrameRead::OpenFailed;
+        mapped_shm_gen = event_shm_gen;
+    }
+
+    const auto *hdr = static_cast<const ShmFrameHeader *>(region.ptr);
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const uint32_t seq1 = hdr->sequence;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if ((seq1 & 1u) != 0) continue;  // writer is mid-update
+
+        const uint32_t w = hdr->width;
+        const uint32_t h = hdr->height;
+        const uint32_t y_len = hdr->y_len;
+        out_w = w;
+        out_h = h;
+        out_y_len = y_len;
+        // 64-bit compare: a 32-bit w*h could wrap and match a bogus y_len.
+        if (w == 0 || h == 0 ||
+            static_cast<uint64_t>(w) * h != static_cast<uint64_t>(y_len))
+            return ShmFrameRead::Invalid;
+
+        const size_t payload = static_cast<size_t>(y_len) +
+            static_cast<size_t>(y_len) / 2;
+        if (sizeof(ShmFrameHeader) + payload > region.size)
+            return ShmFrameRead::TooSmall;
+
+        if (dst.size() < payload) dst.resize(payload);
+        std::memcpy(dst.data(),
+                    static_cast<const uint8_t *>(region.ptr) + sizeof(ShmFrameHeader),
+                    payload);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        const uint32_t seq2 = hdr->sequence;
+        if (seq1 == seq2 && (seq2 & 1u) == 0) return ShmFrameRead::Ok;
+    }
+    return ShmFrameRead::Invalid;
+}
 
 // ── Line-oriented I/O helpers ─────────────────────────────────────────────────
 // Returns false on EOF, I/O error, or if the line exceeds max_len bytes.

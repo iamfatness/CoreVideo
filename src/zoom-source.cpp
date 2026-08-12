@@ -1,5 +1,8 @@
 #include "zoom-source.h"
+#include "shm-resubscribe.h"
+#include "luma-range-probe.h"
 #include "speaker-director.h"
+#include "speaker-settings-merge.h"
 #include "zoom-engine-client.h"
 #include "zoom-iso-recorder.h"
 #include "zoom-settings.h"
@@ -456,12 +459,38 @@ void ZoomSource::apply_settings(obs_data_t *settings)
         obs_data_get_int(settings, PROP_ASSIGNMENT_MODE) ==
             static_cast<int>(AssignmentMode::ActiveSpeaker)) {
         ZoomPluginSettings plugin_settings = ZoomPluginSettings::load();
-        plugin_settings.speaker_sensitivity_ms = speaker_sensitivity_ms;
-        plugin_settings.speaker_hold_ms = speaker_hold_ms;
-        plugin_settings.speaker_exclude_participant_1 = static_cast<uint32_t>(
+        // Only push values this source actually carries. apply_settings() runs
+        // on every source load and property refresh, not just on a user edit,
+        // so mirroring unset properties into the global settings let a source
+        // that never had an exclusion configured wipe the one the dock holds.
+        // The precedence rule and the on-air consequence of getting it wrong
+        // are in tests/speaker-settings-merge-test.cpp.
+        SpeakerSourceValues carried;
+        carried.has_sensitivity =
+            obs_data_has_user_value(settings, PROP_SPEAKER_SENSITIVITY);
+        carried.sensitivity_ms = speaker_sensitivity_ms;
+        carried.has_hold = obs_data_has_user_value(settings, PROP_SPEAKER_HOLD);
+        carried.hold_ms = speaker_hold_ms;
+        carried.has_exclude_1 =
+            obs_data_has_user_value(settings, PROP_SPEAKER_EXCLUDE_1);
+        carried.exclude_1 = static_cast<uint32_t>(
             obs_data_get_int(settings, PROP_SPEAKER_EXCLUDE_1));
-        plugin_settings.speaker_exclude_participant_2 = static_cast<uint32_t>(
+        carried.has_exclude_2 =
+            obs_data_has_user_value(settings, PROP_SPEAKER_EXCLUDE_2);
+        carried.exclude_2 = static_cast<uint32_t>(
             obs_data_get_int(settings, PROP_SPEAKER_EXCLUDE_2));
+
+        SpeakerGlobalSettings merged;
+        merged.sensitivity_ms = plugin_settings.speaker_sensitivity_ms;
+        merged.hold_ms        = plugin_settings.speaker_hold_ms;
+        merged.exclude_1      = plugin_settings.speaker_exclude_participant_1;
+        merged.exclude_2      = plugin_settings.speaker_exclude_participant_2;
+        merged = merge_speaker_settings(merged, carried);
+
+        plugin_settings.speaker_sensitivity_ms         = merged.sensitivity_ms;
+        plugin_settings.speaker_hold_ms                = merged.hold_ms;
+        plugin_settings.speaker_exclude_participant_1  = merged.exclude_1;
+        plugin_settings.speaker_exclude_participant_2  = merged.exclude_2;
         plugin_settings.save();
         configure_speaker_director_from_settings(plugin_settings);
     }
@@ -732,6 +761,15 @@ void ZoomSource::subscribe()
     switch (mode) {
     case AssignmentMode::SpotlightIndex: {
         const uint32_t slot = spotlight_slot.load(std::memory_order_acquire);
+        // Release BEFORE the subscribe reaches the engine, every time, not just
+        // when we can see the target change. Any subscribe for a uuid the
+        // engine already holds can make it destroy and rebuild that uuid's
+        // SourceTarget — whose SHM generation then restarts at the legacy
+        // unsuffixed name — and a live mapping of ours blocks the recreate.
+        // See shm-resubscribe.h. Cost when the engine treats the subscribe as a
+        // no-op is one remap on the next frame event; the on-air cost of
+        // getting this wrong is a white flash on every speaker change.
+        release_video_shm();
         ZoomEngineClient::instance().subscribe_spotlight(source_uuid, slot);
         // Use a sentinel so on_roster_changed re-subscribes only when we
         // actually want to change the dispatch.
@@ -741,6 +779,7 @@ void ZoomSource::subscribe()
         return;
     }
     case AssignmentMode::ScreenShare:
+        release_video_shm();  // before the subscribe — see shm-resubscribe.h
         ZoomEngineClient::instance().subscribe_screenshare(source_uuid);
         m_current_subscription_id = 0xFFFFFFFFu;
         m_last_subscribe_ns.store(os_gettime_ns(), std::memory_order_release);
@@ -790,10 +829,12 @@ void ZoomSource::subscribe()
             m_current_subscription_id = 0;
             return;
         }
-        if (target != 0)
+        if (target != 0) {
+            release_video_shm();  // before the subscribe — see shm-resubscribe.h
             ZoomEngineClient::instance().subscribe(source_uuid, target,
                                                    isolate_audio, audience_audio,
                                                    resolution);
+        }
         blog(LOG_INFO,
              "[obs-zoom-plugin] Zoom source subscription: source=%s uuid=%s participant_id=%u",
              output_name().c_str(), source_uuid.c_str(), target);
@@ -1116,9 +1157,13 @@ void ZoomSource::maybe_update_director_subscription()
     if (m_director_preview_uuid.empty())
         m_director_preview_uuid = make_source_uuid();
 
-    const ZoomPluginSettings settings = ZoomPluginSettings::load();
-    configure_speaker_director_from_settings(settings);
-
+    // No settings reload here. on_roster_changed() drives this ~9x/second, and
+    // ZoomPluginSettings::load() goes through obs_frontend_get_global_config()
+    // — an obs_frontend call, off the UI thread, once per roster update. Every
+    // one of those re-applied the whole director config, so any momentarily
+    // stale read republished a config the dock had already moved on from. The
+    // director is configured where it changes instead: apply_settings(),
+    // subscribe(), the dock, and the control/OSC servers.
     const uint32_t directed_id = ZoomEngineClient::instance().active_speaker_id();
     const uint32_t current_id =
         m_current_subscription_id.load(std::memory_order_acquire);
@@ -1131,7 +1176,13 @@ void ZoomSource::maybe_update_director_subscription()
     }
 
     ZoomEngineClient::instance().unsubscribe(m_director_preview_uuid);
-    shm_region_destroy(m_director_preview_shm);
+    // Between the unsubscribe and the subscribe, so the preview region's name
+    // is free when the engine rebuilds it (shm-resubscribe.h). This already
+    // dropped the mapping; it now also forgets the generation and takes m_mtx
+    // while doing so, because on_director_preview_frame() reads this same
+    // region under m_mtx. The lock is scoped to the release alone — m_mtx is
+    // never held across the engine writes either side of it.
+    release_director_preview_shm();
     ZoomEngineClient::instance().subscribe(m_director_preview_uuid, directed_id,
                                            isolate_audio, audience_audio,
                                            resolution);
@@ -1160,6 +1211,29 @@ void ZoomSource::on_director_preview_frame(uint32_t event_width,
                                            uint32_t resolved_participant_id,
                                            uint32_t shm_generation)
 {
+    // The preview slot only exists to warm the next speaker's region so the cut
+    // publishes a real frame instead of a gap. But output_video_from_shared_
+    // memory() pushes whatever it is handed straight to the program output, so
+    // a frame from anyone other than the participant we are currently waiting
+    // on puts the wrong face on air. Two of those arrive routinely: frames
+    // still in flight for the previous target after
+    // maybe_update_director_subscription() re-points the slot, and frames the
+    // engine had already queued when the cut unsubscribed it below. On air that
+    // read as a participant flashing up with no speaker change behind it, and
+    // when such a late frame carried a different id than the one we had just
+    // cut to, the commit below cut straight back to it — the sub-second A->B->A
+    // pairs. Publish only the frame that belongs to the live preview target;
+    // that frame, and only that frame, is the cut.
+    const uint32_t awaited =
+        m_director_preview_subscription_id.load(std::memory_order_acquire);
+    if (awaited == 0 || resolved_participant_id != awaited) {
+        if (cv_zoom_verbose_logging()) {
+            blog(LOG_INFO,
+                 "[obs-zoom-plugin] Dropped stale director preview frame: source=%s participant=%u awaited=%u",
+                 output_name().c_str(), resolved_participant_id, awaited);
+        }
+        return;
+    }
     std::lock_guard<std::mutex> lk(m_mtx);
     output_video_from_shared_memory(m_director_preview_uuid,
                                     m_director_preview_shm,
@@ -1183,88 +1257,54 @@ bool ZoomSource::output_video_from_shared_memory(
     uint32_t event_shm_gen,
     bool commit_director_cut)
 {
+    if (event_width == 0 || event_height == 0 || !source) return false;
+
     // From generation 2 on, the engine creates the region under a
     // generation-suffixed name so a resize is never blocked by our old
-    // mapping (see shm_region_name in engine-ipc.h).
-    const std::string shm_name =
-        shm_region_name(IPC_SHM_PREFIX + uuid, event_shm_gen);
-    if (event_width == 0 || event_height == 0) return false;
-    const size_t frame_bytes = sizeof(ShmFrameHeader) +
-        static_cast<size_t>(event_width) * event_height * 3 / 2;
-    if (shm_mapping_stale(video_shm.ptr, video_shm.size, frame_bytes,
-                          event_shm_gen, video_shm_gen)) {
-        // A generation change means the engine recreated the region (e.g.
-        // after a restart or a resolution increase) — our old mapping points
-        // at an orphaned region that will never update again, so drop it and
-        // re-open by name.
-        if (video_shm.ptr && event_shm_gen != 0 &&
-            event_shm_gen != video_shm_gen) {
-            blog(LOG_INFO,
-                 "[obs-zoom-plugin] Re-opening video shared memory after engine generation change: source=%s uuid=%s gen %u -> %u",
-                 output_name().c_str(), uuid.c_str(), video_shm_gen,
-                 event_shm_gen);
-            shm_region_destroy(video_shm);
-        }
-        if (!shm_region_open_read(video_shm, shm_name, frame_bytes) &&
-            // Engines predating suffixed names recreate the legacy name for
-            // every generation — fall back to it.
-            (event_shm_gen <= 1 ||
-             !shm_region_open_read(video_shm, IPC_SHM_PREFIX + uuid,
-                                   frame_bytes))) {
-            if (m_frame_count == 0) {
-                blog(LOG_WARNING,
-                     "[obs-zoom-plugin] Failed to open video shared memory: source=%s uuid=%s w=%u h=%u bytes=%zu gen=%u",
-                     output_name().c_str(), uuid.c_str(), event_width,
-                     event_height, frame_bytes, event_shm_gen);
-            }
-            return false;
-        }
-        video_shm_gen = event_shm_gen;
+    // mapping. shm_read_i420_frame() handles the reopen; log it first, while
+    // the old generation is still readable.
+    if (video_shm.ptr && event_shm_gen != 0 && event_shm_gen != video_shm_gen) {
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] Re-opening video shared memory after engine generation change: source=%s uuid=%s gen %u -> %u",
+             output_name().c_str(), uuid.c_str(), video_shm_gen, event_shm_gen);
     }
 
-    auto *hdr = static_cast<const ShmFrameHeader *>(video_shm.ptr);
     uint32_t w = 0;
     uint32_t h = 0;
     uint32_t y_len = 0;
-    bool copied = false;
-    for (int attempt = 0; attempt < 3; ++attempt) {
-        const uint32_t seq1 = hdr->sequence;
-        std::atomic_thread_fence(std::memory_order_acquire);
-        if ((seq1 & 1u) != 0) continue;
-        w = hdr->width;
-        h = hdr->height;
-        y_len = hdr->y_len;
-        if (!source || w == 0 || h == 0 || y_len != w * h) break;
-        const size_t needed_bytes = sizeof(ShmFrameHeader) +
-            static_cast<size_t>(y_len) + static_cast<size_t>(y_len) / 2;
-        if (needed_bytes > video_shm.size) {
-            if (m_frame_count == 0) {
+    const ShmFrameRead read_status =
+        shm_read_i420_frame(video_shm, IPC_SHM_PREFIX + uuid, event_width,
+                            event_height, event_shm_gen, video_shm_gen,
+                            video_buf, w, h, y_len);
+    if (read_status != ShmFrameRead::Ok) {
+        if (m_frame_count == 0) {
+            switch (read_status) {
+            case ShmFrameRead::OpenFailed:
+                blog(LOG_WARNING,
+                     "[obs-zoom-plugin] Failed to open video shared memory: source=%s uuid=%s w=%u h=%u bytes=%zu gen=%u",
+                     output_name().c_str(), uuid.c_str(), event_width,
+                     event_height,
+                     sizeof(ShmFrameHeader) +
+                         static_cast<size_t>(event_width) * event_height * 3 / 2,
+                     event_shm_gen);
+                break;
+            case ShmFrameRead::TooSmall:
                 blog(LOG_WARNING,
                      "[obs-zoom-plugin] Video shared memory too small: source=%s uuid=%s need=%zu have=%zu",
-                     output_name().c_str(), uuid.c_str(), needed_bytes,
+                     output_name().c_str(), uuid.c_str(),
+                     sizeof(ShmFrameHeader) + static_cast<size_t>(y_len) +
+                         static_cast<size_t>(y_len) / 2,
                      video_shm.size);
+                break;
+            default:
+                // `uuid`, the parameter, not the source_uuid member: this
+                // helper also serves the director-preview feed, whose uuid is
+                // m_director_preview_uuid. Matches both sibling branches.
+                blog(LOG_WARNING,
+                     "[obs-zoom-plugin] Incomplete video frame skipped: source=%s uuid=%s w=%u h=%u y_len=%u",
+                     output_name().c_str(), uuid.c_str(), w, h, y_len);
+                break;
             }
-            return false;
-        }
-        const auto *pixels = static_cast<const uint8_t *>(video_shm.ptr) +
-            sizeof(ShmFrameHeader);
-        const size_t payload_size = static_cast<size_t>(y_len) +
-            static_cast<size_t>(y_len) / 2;
-        if (video_buf.size() < payload_size)
-            video_buf.resize(payload_size);
-        std::memcpy(video_buf.data(), pixels, payload_size);
-        std::atomic_thread_fence(std::memory_order_acquire);
-        const uint32_t seq2 = hdr->sequence;
-        if (seq1 == seq2 && (seq2 & 1u) == 0) {
-            copied = true;
-            break;
-        }
-    }
-    if (!copied) {
-        if (m_frame_count == 0) {
-            blog(LOG_WARNING,
-                 "[obs-zoom-plugin] Incomplete video frame skipped: source=%s uuid=%s w=%u h=%u y_len=%u",
-                 output_name().c_str(), source_uuid.c_str(), w, h, y_len);
         }
         return false;
     }
@@ -1272,6 +1312,24 @@ bool ZoomSource::output_video_from_shared_memory(
     const auto *y_ptr = video_buf.data();
     const auto *u_ptr = y_ptr + y_len;
     const auto *v_ptr = u_ptr + y_len / 4;
+
+    // Ask the frame what range it actually uses. The engine requests
+    // VideoRawdataColorspace_BT709_F and set_yuv_frame_color_info() declares
+    // VIDEO_RANGE_FULL to match it, but nothing has ever verified that the SDK
+    // honours the request, and program output measured against mimoLive on
+    // 2026-08-11 looked limited-range: blacks floored near 21, whites capped
+    // near 200, saturation down ~40%. A limited-range frame floors at 16 and
+    // ceilings at 235; a full-range one uses 0..255. First frame always, so the
+    // answer is in the log without anyone having to enable anything.
+    if (m_frame_count == 0 ||
+        (cv_zoom_verbose_logging() && m_frame_count % 600 == 0)) {
+        const LumaRange luma = probe_luma_range(y_ptr, w, h, w, 8);
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] Luma range probe: source=%s participant=%u min=%u max=%u under16=%u over235=%u sampled=%u",
+             output_name().c_str(), resolved_participant_id,
+             static_cast<unsigned>(luma.min), static_cast<unsigned>(luma.max),
+             luma.below_16, luma.above_235, luma.sampled);
+    }
     const uint32_t observed_w = w;
     const uint32_t observed_h = h;
     const uint8_t *obs_y_ptr = y_ptr;
@@ -1344,6 +1402,33 @@ bool ZoomSource::output_video_from_shared_memory(
             m_current_subscription_id.load(std::memory_order_acquire);
         if (previous_id != resolved_participant_id) {
             ZoomEngineClient::instance().unsubscribe(source_uuid);
+            // The on-air defect (2026-08-10): this cut re-points source_uuid at
+            // a new participant, so the engine destroys and rebuilds that
+            // uuid's SourceTarget and its SHM region — but we went on holding
+            // the old mapping, which blocks the recreate at a larger size and
+            // leaves the read side on a region that no longer matches. That is
+            // why participants flashed white on every speaker change. Release
+            // first; see shm-resubscribe.h.
+            //
+            // Audio too, and ONLY here. The unsubscribe on the line above makes
+            // the engine destroy this uuid's AudioTarget as well, so its region
+            // is rebuilt from generation 1 under the legacy unsuffixed
+            // "..._audio" name exactly as the video one is. If it needs to grow,
+            // our live mapping blocks the create and the source goes
+            // permanently silent — a failed ensure_shm() emits no audio event,
+            // so nothing would ever prompt us to reopen. See
+            // release_audio_shm_locked(). The three sends in subscribe() do not
+            // need this: with no unsubscribe the engine updates the AudioTarget
+            // in place.
+            //
+            // _locked: our caller (on_director_preview_frame) holds m_mtx for
+            // the whole call, and m_mtx is what guards both regions against the
+            // frame/audio callbacks. These only unmap memory — no engine IPC —
+            // so they add nothing blocking under the lock. Neither region is
+            // the one this frame was read from (that is m_director_preview_shm),
+            // so the frame just published above is unaffected.
+            release_video_shm_locked();
+            release_audio_shm_locked();
             ZoomEngineClient::instance().subscribe(source_uuid,
                                                    resolved_participant_id,
                                                    isolate_audio,
@@ -1605,15 +1690,109 @@ void ZoomSource::clear_preview_cb()
     m_preview_cb = nullptr;
 }
 
+// Teardown: clearing the assignment, and zoom_source_destroy(). Deliberately
+// silent, and deliberately NOT routed through the logging _locked forms below.
+// Those call output_name() -> obs_source_get_name(), and this runs inside
+// obs_source_info::destroy, where the source is mid-teardown. The log line
+// would say nothing useful on a path where the source is going away anyway, so
+// there is nothing to weigh against touching the source object there.
+//
+// The engine-restart release is a different case — the trail is the whole point
+// there — and has its own entry point below.
 void ZoomSource::release_shared_memory()
 {
     std::lock_guard<std::mutex> lk(m_mtx);
-    shm_region_destroy(m_video_shm);
-    shm_region_destroy(m_director_preview_shm);
-    shm_region_destroy(m_audio_shm);
-    m_video_shm_gen = 0;
-    m_director_preview_shm_gen = 0;
-    m_audio_shm_gen = 0;
+    shm_release_for_resubscribe(m_video_shm, m_video_shm_gen);
+    shm_release_for_resubscribe(m_director_preview_shm, m_director_preview_shm_gen);
+    shm_release_for_resubscribe(m_audio_shm, m_audio_shm_gen);
+}
+
+// A new ZoomObsEngine process is about to serve this source, and its SHM
+// generation table is empty: its first create for any of our three regions asks
+// for generation 1, the legacy unsuffixed name, whatever the dead engine had
+// climbed to. Every mapping we hold is standing on a name it is about to ask
+// for, so all three go — video, director preview and audio alike. Audio matters
+// most: no subscribe path releases it, and a blocked audio create publishes no
+// event, so nothing would ever prompt us to reopen and the source would stay
+// silent for the rest of the session. See ZoomEngineClient::SourceCallbacks.
+//
+// Logged per region, through the _locked forms. When a source goes quiet after
+// an engine restart, "which mappings did we actually drop, and at which
+// generation" is the first question and the operator's log has to answer it.
+void ZoomSource::release_shared_memory_for_new_engine()
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    release_video_shm_locked();
+    release_director_preview_shm_locked();
+    release_audio_shm_locked();
+}
+
+// Each of these logs the generation it dropped. Without that line a release is
+// invisible: it nulls the mapping, and the "Re-opening video shared memory
+// after engine generation change: gen N -> M" line below is guarded on a
+// non-null pointer, so it stops firing. That reopen line is how the 2026-08-10
+// white-flash incident was root-caused — keep a trail here or the next
+// recurrence has none.
+void ZoomSource::release_video_shm_locked()
+{
+    const uint32_t dropped_gen = m_video_shm_gen;
+    if (!shm_release_for_resubscribe(m_video_shm, m_video_shm_gen)) return;
+    blog(LOG_INFO,
+         "[obs-zoom-plugin] Released video shared memory before re-subscribe: source=%s uuid=%s dropped_gen=%u",
+         output_name().c_str(), source_uuid.c_str(), dropped_gen);
+}
+
+void ZoomSource::release_video_shm()
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    release_video_shm_locked();
+}
+
+// Audio has the SAME defect as video, but ONLY on paths that send an explicit
+// unsubscribe first. The engine handles Unsubscribe with
+// EngineAudio::instance().remove(uuid) (engine/src/main.cpp), which erases the
+// AudioTarget and with it its shm_gen (engine/src/engine-audio.cpp). The
+// replacement target therefore restarts at 0, and ensure_shm() creates
+// generation 1 — the legacy unsuffixed "..._audio" name we are still mapping.
+// When the new participant's buffers are larger the create fails, the engine
+// emits audio_shm_create_failed, and because a failed ensure_shm() publishes no
+// audio event there is nothing left to make us reopen: that source goes
+// PERMANENTLY silent. Equal-or-smaller buffers reuse the section and look fine,
+// which is why this survives casual testing.
+//
+// A bare subscribe (no unsubscribe) is different: EngineAudio::subscribe_if_needed()
+// updates an existing AudioTarget in place, so nothing is recreated and no
+// release is needed. That is why this is NOT called from subscribe().
+//
+// The other caller is release_shared_memory_for_new_engine(), for the case a
+// per-subscribe release could never cover: a new engine PROCESS. Its table
+// is empty, so its first create for this region asks for generation 1 — the
+// legacy unsuffixed name we are still holding — whatever the previous engine
+// had climbed to. See ZoomEngineClient::SourceCallbacks.
+void ZoomSource::release_audio_shm_locked()
+{
+    const uint32_t dropped_gen = m_audio_shm_gen;
+    if (!shm_release_for_resubscribe(m_audio_shm, m_audio_shm_gen)) return;
+    blog(LOG_INFO,
+         "[obs-zoom-plugin] Released audio shared memory before re-subscribe: source=%s uuid=%s dropped_gen=%u",
+         output_name().c_str(), source_uuid.c_str(), dropped_gen);
+}
+
+void ZoomSource::release_director_preview_shm_locked()
+{
+    const uint32_t dropped_gen = m_director_preview_shm_gen;
+    if (!shm_release_for_resubscribe(m_director_preview_shm,
+                                     m_director_preview_shm_gen))
+        return;
+    blog(LOG_INFO,
+         "[obs-zoom-plugin] Released director preview shared memory before re-subscribe: source=%s uuid=%s dropped_gen=%u",
+         output_name().c_str(), m_director_preview_uuid.c_str(), dropped_gen);
+}
+
+void ZoomSource::release_director_preview_shm()
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    release_director_preview_shm_locked();
 }
 
 static const char *zoom_source_get_name(void *)
@@ -1667,6 +1846,15 @@ static void *zoom_source_create_common(obs_data_t *settings, obs_source_t *sourc
             std::lock_guard<std::mutex> callback_lock(gate->mtx);
             if (!gate->alive) return;
             ctx->on_engine_audio(byte_len, participant_id, shm_gen);
+        },
+        // A new engine process restarts the SHM generation counter, so every
+        // name we hold is one it is about to reuse. Drop all three mappings —
+        // audio included, which no subscribe path releases. Same lock order as
+        // the two callbacks above: the gate, then the source's own m_mtx inside.
+        [ctx, gate = ctx->m_callback_gate]() {
+            std::lock_guard<std::mutex> callback_lock(gate->mtx);
+            if (!gate->alive) return;
+            ctx->release_shared_memory_for_new_engine();
         }
     });
     if (dedicated_active_speaker) {
@@ -1683,6 +1871,16 @@ static void *zoom_source_create_common(obs_data_t *settings, obs_source_t *sourc
                 if (!gate->alive) return;
                 // Audio cuts follow the committed current slot. The preview
                 // slot is video-only so it can warm a frame before the cut.
+            },
+            // Deliberately the same wholesale release as the main uuid above,
+            // not a preview-only one. It is idempotent — the second call finds
+            // nothing mapped, drops nothing and logs nothing — and registering
+            // it on both uuids means neither registration silently depends on
+            // the other still existing.
+            [ctx, gate = ctx->m_callback_gate]() {
+                std::lock_guard<std::mutex> callback_lock(gate->mtx);
+                if (!gate->alive) return;
+                ctx->release_shared_memory_for_new_engine();
             }
         });
     }

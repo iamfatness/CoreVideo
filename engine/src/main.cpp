@@ -1,4 +1,5 @@
 #include "../../src/engine-ipc.h"
+#include "../../src/engine-command.h"
 #include "engine-writer.h"
 #include "engine-video.h"
 #include "engine-share.h"
@@ -1159,10 +1160,16 @@ int main()
 #endif
         if (line.empty()) continue;
 
-        if (line.find(IPC_CMD_QUIT) != std::string::npos) {
+        // Exact match on the declared "cmd" field, never a substring of the
+        // line: "unsubscribe" contains "subscribe", and testing substrings in
+        // source order routed every unsubscribe into the subscribe branch.
+        // See src/engine-command.h.
+        const IpcCommand command = ipc_command_of(line);
+
+        if (command == IpcCommand::Quit) {
             running = false;
 
-        } else if (line.find(IPC_CMD_INIT) != std::string::npos) {
+        } else if (command == IpcCommand::Init) {
             std::string jwt = json_str(line, "jwt");
             std::string public_app_key = json_str(line, "public_app_key");
             EngineIpc::write(R"({"cmd":"debug","stage":"init_received"})");
@@ -1229,7 +1236,7 @@ int main()
                     std::to_string(static_cast<int>(err)) + "}");
             }
 
-        } else if (line.find(IPC_CMD_JOIN) != std::string::npos) {
+        } else if (command == IpcCommand::Join) {
             std::string meeting_id   = json_str(line, "meeting_id");
             std::string passcode     = json_str(line, "passcode");
             std::string display_name = json_str(line, "display_name");
@@ -1289,17 +1296,17 @@ int main()
                     std::to_string(static_cast<int>(err)) + "}");
             }
 
-        } else if (line.find(IPC_CMD_LEAVE) != std::string::npos) {
+        } else if (command == IpcCommand::Leave) {
             if (meeting_svc)
                 meeting_svc->Leave(ZOOMSDK::LEAVE_MEETING);
 
-        } else if (line.find(IPC_CMD_START_MEDIA) != std::string::npos) {
+        } else if (command == IpcCommand::StartMedia) {
             meeting_event.start_raw_media("manual_start");
 
-        } else if (line.find(IPC_CMD_STOP_MEDIA) != std::string::npos) {
+        } else if (command == IpcCommand::StopMedia) {
             meeting_event.stop_raw_media("manual_stop");
 
-        } else if (line.find(IPC_CMD_SUBSCRIBE_AUDIO) != std::string::npos) {
+        } else if (command == IpcCommand::SubscribeAudio) {
             std::string uuid = json_str(line, "source_uuid");
             uint32_t    pid  = json_uint(line, "participant_id");
             const bool isolate_audio =
@@ -1311,7 +1318,7 @@ int main()
                                              isolate_audio, audience_audio);
             }
 
-        } else if (line.find(IPC_CMD_SUBSCRIBE) != std::string::npos) {
+        } else if (command == IpcCommand::Subscribe) {
             std::string uuid = json_str(line, "source_uuid");
             uint32_t    pid  = json_uint(line, "participant_id");
             uint32_t    res  = json_uint(line, "resolution");
@@ -1320,18 +1327,32 @@ int main()
                 line.find(R"("isolate_audio":true)") != std::string::npos;
             const bool audience_audio =
                 line.find(R"("audience_audio":true)") != std::string::npos;
+            // Opt-in, default off: a source that only wants video says so, and
+            // the engine skips registering it as an audio target. Without it
+            // every subscriber received mixed meeting audio — an SHM write plus
+            // an {"cmd":"audio"} IPC line per audio buffer — even when it had no
+            // use for a single sample. See ipc_subscribe_is_video_only().
+            const bool video_only = ipc_subscribe_is_video_only(line);
             if (is_valid_source_uuid(uuid)) {
                 const std::string mode = json_str(line, "mode");
                 if (mode == "screenshare") {
                     share_engine.subscribe(uuid, e2p);
                 } else {
                     video_engine.subscribe(pid, uuid, e2p, res);
-                    EngineAudio::instance().init(e2p, uuid, pid,
-                                                 isolate_audio, audience_audio);
+                    if (video_only) {
+                        // Drop any target a previous non-video-only subscribe
+                        // of this uuid left behind, so switching a source to
+                        // video-only actually stops the audio traffic.
+                        EngineAudio::instance().remove(uuid);
+                    } else {
+                        EngineAudio::instance().init(e2p, uuid, pid,
+                                                     isolate_audio,
+                                                     audience_audio);
+                    }
                 }
             }
 
-        } else if (line.find(IPC_CMD_UNSUBSCRIBE) != std::string::npos) {
+        } else if (command == IpcCommand::Unsubscribe) {
             std::string uuid = json_str(line, "source_uuid");
             if (is_valid_source_uuid(uuid)) {
                 video_engine.unsubscribe(uuid);

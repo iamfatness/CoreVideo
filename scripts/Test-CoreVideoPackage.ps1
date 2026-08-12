@@ -50,7 +50,17 @@ $required = @(
     "obs-plugins\64bit\plugins\platforms\qwindows.dll",
     "obs-plugins\64bit\plugins\tls\qcertonlybackend.dll",
     "obs-plugins\64bit\plugins\tls\qschannelbackend.dll",
-    "data\obs-plugins\obs-zoom-plugin\locale\en-US.ini"
+    "data\obs-plugins\obs-zoom-plugin\locale\en-US.ini",
+    # The Tiles wall's shader. It ships via the install(DIRECTORY data/ ...)
+    # rule, the same way the locale file above does, and until now nothing
+    # verified it — which is how a package missing it would reach an operator.
+    # A Tiles source whose effect is absent cannot draw at all (see
+    # src/zoom-tiles-effect-policy.h), so a missing file here must fail the
+    # build rather than be discovered on air. This only proves the file
+    # exists, though — it says nothing about whether its contents are
+    # current; an existing-but-stale effect file passes this check and would
+    # only show up as a degraded wall at runtime, not a build failure.
+    "data\obs-plugins\obs-zoom-plugin\effects\corevideo-tiles.effect"
 )
 
 foreach ($file in $required) {

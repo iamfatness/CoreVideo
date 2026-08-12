@@ -2,6 +2,7 @@
 #include "speaker-director.h"
 #include "zoom-join-decision.h"
 #include "zoom-reconnect.h"
+#include "zoom-sdk-init-retry.h"
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -232,6 +233,81 @@ ZoomEngineClient::~ZoomEngineClient()
     stop();
 }
 
+// The fourth and last shape of one defect class: a plugin-side SHM read mapping
+// that outlives the engine which named it.
+//
+// Two fixes already landed. The engine's generation counter moved into a
+// process-wide table (src/shm-generation.h) so a rebuilt target keeps climbing
+// instead of restarting at the legacy unsuffixed name, and the plugin releases
+// its video mapping before every subscribe (src/zoom-source.cpp) and before
+// every tile re-point (src/zoom-supersource.cpp). Both are scoped to ONE engine
+// process.
+//
+// An engine restart escapes both. The new process starts with an empty table,
+// so its first create for any region asks for generation 1 — the legacy
+// unsuffixed name — and every mapping the plugin carried across the restart is
+// sitting on exactly that name. On Windows the create then fails with
+// ERROR_ACCESS_DENIED whenever the new region has to be larger than the one we
+// are holding (src/shm-resubscribe.h has the operating-system rule in full).
+//
+// Video mostly survives that because resubscribe_all() re-subscribes through
+// ZoomSource::subscribe(), which releases first. Audio does not: nothing on the
+// restart path releases an audio mapping, and audio has no self-healing
+// fallback — a failed ensure_shm() publishes no audio event
+// (engine/src/engine-audio.cpp), so nothing ever prompts the plugin to reopen
+// and that source stays silent for the rest of the session. The dedicated
+// CoreVideo audio sources (src/zoom-participant-audio-source.cpp) release only
+// in audio_destroy() — teardown, not recovery — so nothing lets go of their
+// mapping while the source is alive.
+//
+// WHY THE TRIGGER IS THE RESTART AND NOT THE SUBSCRIBE. The obvious repair is
+// to release audio on every subscribe path the way video does. That is wrong on
+// cost and wrong on coverage. On cost: a bare subscribe makes the engine update
+// its AudioTarget in place (EngineAudio::subscribe_if_needed) and recreate
+// nothing, so a release there buys nothing and pays a remap on every
+// active-speaker change, of which a show has thousands. On coverage: the
+// subscribe paths are not the whole set of mapping holders — the tiles wall,
+// the director preview and the dedicated audio sources each reach the engine by
+// a different route, and each would need its own copy of the rule.
+//
+// One release per engine process, dispatched to every registered source, is
+// cheaper than one release per subscribe AND covers more: video, share, audio,
+// director preview and tiles together, on the single event that actually
+// invalidates the whole name space.
+//
+// RELEASING IS ONLY HALF OF RECOVERY, and this function does only that half.
+// It clears the way for the new engine's first create; something still has to
+// ask the new engine for the feed. Video is asked for by
+// ZoomOutputManager::resubscribe_all() on the reconnect path. The dedicated
+// CoreVideo audio sources are not in that sweep — it iterates ZoomSource — so
+// they clear their own stale subscription state inside their callback here and
+// re-subscribe from the new engine's first roster
+// (forget_subscription_for_new_engine() in
+// src/zoom-participant-audio-source.cpp says why that is the trigger).
+void ZoomEngineClient::release_source_mappings_for_new_engine()
+{
+    std::vector<std::function<void()>> callbacks;
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        for (const auto &entry : m_sources)
+            if (entry.second.on_new_engine_process)
+                callbacks.push_back(entry.second.on_new_engine_process);
+    }
+    // m_mtx is released here — a callback takes its own source's lock and may
+    // re-enter this client, and m_mtx is not recursive. Same rule as
+    // update_roster_state_and_notify().
+    for (const auto &cb : callbacks) cb();
+
+    // Logged unconditionally, including the zero case. A restart that released
+    // nothing is itself the evidence that no source was registered at the time,
+    // which is what any future "it went silent after the engine restarted"
+    // report needs to distinguish from "we released and it still broke".
+    blog(LOG_INFO,
+         "[obs-zoom-plugin] New ZoomObsEngine process: released shared-memory "
+         "mappings for %zu registered source(s) before launching it",
+         callbacks.size());
+}
+
 bool ZoomEngineClient::start(const std::string &jwt_token,
                              const std::string &public_app_key)
 {
@@ -247,10 +323,39 @@ bool ZoomEngineClient::start(const std::string &jwt_token,
     m_user_leaving.store(false, std::memory_order_release);
     m_authenticated.store(false, std::memory_order_release);
     m_media_active.store(false, std::memory_order_release);
-
     // Join threads from any previous session (e.g. after a crash).
     if (m_reader.joinable())  m_reader.join();
     if (m_monitor.joinable()) m_monitor.join();
+
+    // Fresh engine session: no init retry is owed. This must come AFTER the
+    // joins above — the previous session's reader thread owns these fields and
+    // can still be inside handle_event() until it is joined.
+    m_init_retry_due_ms.store(0, std::memory_order_release);
+    m_init_teardown_pending.store(false, std::memory_order_release);
+    m_init_retry_attempts = 0;
+    m_init_retry_waited_ms = 0;
+
+    // Everything the plugin still has mapped is standing on a name the next
+    // engine process is about to reuse, so drop it all now — BEFORE that
+    // process exists.
+    //
+    // Before the new engine's first create is necessary but not sufficient.
+    // A subscribe reaches the engine through write_json(), which checks only
+    // the pipe; the m_running gate is read earlier, by the caller. A thread
+    // that passed that gate while the old engine was alive and then parked can
+    // resume any time after connect_ipc() installs the new pipe, and its stale
+    // subscribe would be the new engine's first prompt to create a region —
+    // ahead of a release still queued behind it. Releasing before launch_engine()
+    // puts the release ahead of everything the new process can be told, so that
+    // race has no window left to run in rather than a small one.
+    //
+    // Nothing here needs the new engine: every on_new_engine_process callback
+    // unmaps and does no more (that is a documented precondition of the
+    // callback), so it is safe this early. And if the launch below fails, the
+    // release cost nothing — the mappings belonged to a process that is already
+    // dead, and the regions are reopened from the first frame or audio event
+    // whenever an engine does come up.
+    release_source_mappings_for_new_engine();
 
     if (!launch_engine() || !connect_ipc()) {
         disconnect_ipc();
@@ -278,18 +383,26 @@ bool ZoomEngineClient::start(const std::string &jwt_token,
     m_running.store(true, std::memory_order_release);
     m_reader  = std::thread([this]() { reader_loop(); });
     m_monitor = std::thread([this]() { monitor_loop(); });
+    std::string init_json;
     if (!public_app_key.empty()) {
         blog(LOG_INFO,
              "[obs-zoom-plugin] Zoom engine init auth=public_app_key public_app_key_tail=%s jwt_present=0",
              redacted_tail(public_app_key).c_str());
-        write_json(R"({"cmd":"init","public_app_key":")" +
-                   json_escape(public_app_key) + "\"}");
+        init_json = R"({"cmd":"init","public_app_key":")" +
+                    json_escape(public_app_key) + "\"}";
     } else {
         blog(LOG_INFO,
              "[obs-zoom-plugin] Zoom engine init auth=jwt public_app_key_tail=empty jwt_present=%d",
              jwt_token.empty() ? 0 : 1);
-        write_json(R"({"cmd":"init","jwt":")" + json_escape(jwt_token) + "\"}");
+        init_json = R"({"cmd":"init","jwt":")" + json_escape(jwt_token) + "\"}";
     }
+    {
+        // Kept so monitor_loop() can replay it verbatim if the engine's first
+        // InitSDK loses the race against an orphaned engine holding the SDK.
+        std::lock_guard<std::mutex> lk(m_mtx);
+        m_init_payload = init_json;
+    }
+    write_json(init_json);
     return true;
 }
 
@@ -312,6 +425,17 @@ void ZoomEngineClient::stop_for_reconnect()
     // Always join both threads — safe even if they already exited.
     if (m_reader.joinable())  m_reader.join();
     if (m_monitor.joinable()) m_monitor.join(); // also reaps the child process
+    // Drop any pending SDK-init retry. The monitor thread owned the wait and is
+    // joined by now, so nothing can fire it; clearing the payload also drops the
+    // SDK credential it carries. start() repopulates both.
+    m_init_retry_due_ms.store(0, std::memory_order_release);
+    m_init_teardown_pending.store(false, std::memory_order_release);
+    m_init_retry_attempts = 0;
+    m_init_retry_waited_ms = 0;
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        m_init_payload.clear();
+    }
     m_authenticated.store(false, std::memory_order_release);
     m_media_active.store(false, std::memory_order_release);
     m_state.store(MeetingState::Idle, std::memory_order_release);
@@ -372,11 +496,56 @@ void ZoomEngineClient::monitor_loop()
                 break;
             }
         }
+
+        // The reader thread ran out of SDK-init retries and handed us the
+        // teardown, because it cannot stop the engine from the thread stop()
+        // joins. This exits monitor_loop() without triggering recovery: an
+        // auth failure is permanent, retries are already spent.
+        if (m_init_teardown_pending.load(std::memory_order_acquire)) {
+            fail_after_init_retries_exhausted();
+            return;
+        }
+
+        // Deliver a due SDK-init retry (see the m_init_retry_due_ms comment in
+        // the header for why the wait lives on this thread). The engine is
+        // still up and idle after a failed InitSDK — it logged auth_fail and
+        // went back to reading commands — so replaying the init command is all
+        // that is needed; no relaunch. This loop's ~1s tick is the resolution
+        // of the wait, which is fine for a 2s/4s/8s schedule.
+        const uint64_t due = m_init_retry_due_ms.load(std::memory_order_acquire);
+        if (due != 0 && (os_gettime_ns() / 1000000ULL) >= due &&
+            m_running.load(std::memory_order_acquire)) {
+            uint64_t expected = due;
+            if (m_init_retry_due_ms.compare_exchange_strong(
+                    expected, 0, std::memory_order_acq_rel)) {
+                std::string payload;
+                {
+                    std::lock_guard<std::mutex> lk(m_mtx);
+                    payload = m_init_payload;
+                }
+                // write_json() takes m_mtx, so it is called with the lock above
+                // already released.
+                if (!payload.empty()) {
+                    blog(LOG_INFO,
+                         "[obs-zoom-plugin] Retrying Zoom SDK init (waiting out another "
+                         "SDK instance)");
+                    write_json(payload);
+                }
+            }
+        }
     }
 
     // If m_running is still true the engine exited (or went silent) without
     // being asked to.
     if (m_running.exchange(false, std::memory_order_acq_rel)) {
+        // ...unless we broke out of the loop while an exhausted-init teardown
+        // was in flight (the engine exited or went silent in that window). That
+        // failure still wins: it explains what actually happened, and it is not
+        // a crash to reconnect from.
+        if (m_init_teardown_pending.load(std::memory_order_acquire)) {
+            fail_after_init_retries_exhausted();
+            return;
+        }
         if (heartbeat_timeout) {
             blog(LOG_ERROR,
                  "[obs-zoom-plugin] ZoomObsEngine stopped responding (no IPC for >%llums)",
@@ -504,7 +673,8 @@ void ZoomEngineClient::subscribe(const std::string &source_uuid,
                                  uint32_t participant_id,
                                  bool isolate_audio,
                                  bool audience_audio,
-                                 VideoResolution video_resolution)
+                                 VideoResolution video_resolution,
+                                 bool video_only)
 {
     if (!m_running.load(std::memory_order_acquire) || source_uuid.empty()) return;
     write_json(R"({"cmd":"subscribe","source_uuid":")" + json_escape(source_uuid) +
@@ -512,16 +682,18 @@ void ZoomEngineClient::subscribe(const std::string &source_uuid,
         R"(,"resolution":)" + std::to_string(static_cast<int>(video_resolution)) +
         R"(,"isolate_audio":)" + std::string(isolate_audio ? "true" : "false") +
         R"(,"audience_audio":)" + std::string(audience_audio ? "true" : "false") +
+        R"(,"video_only":)" + std::string(video_only ? "true" : "false") +
         "}");
 }
 
-void ZoomEngineClient::subscribe_audio(const std::string &source_uuid,
+bool ZoomEngineClient::subscribe_audio(const std::string &source_uuid,
                                        uint32_t participant_id,
                                        bool isolate_audio,
                                        bool audience_audio)
 {
-    if (!m_running.load(std::memory_order_acquire) || source_uuid.empty()) return;
-    write_json(R"({"cmd":"subscribe_audio","source_uuid":")" + json_escape(source_uuid) +
+    if (!m_running.load(std::memory_order_acquire) || source_uuid.empty())
+        return false;
+    return write_json(R"({"cmd":"subscribe_audio","source_uuid":")" + json_escape(source_uuid) +
         R"(","participant_id":)" + std::to_string(participant_id) +
         R"(,"isolate_audio":)" + std::string(isolate_audio ? "true" : "false") +
         R"(,"audience_audio":)" + std::string(audience_audio ? "true" : "false") +
@@ -658,6 +830,80 @@ void ZoomEngineClient::set_last_error(const std::string &message)
     m_last_error = message;
 }
 
+void ZoomEngineClient::fail_after_init_retries_exhausted()
+{
+    // Monitor thread only.
+    const std::string message =
+        sdk_init_other_instance_message(m_init_retry_waited_ms);
+
+    // Clearing m_running FIRST is deliberate. It is what makes a subsequent
+    // start() work: that call joins this thread (so it waits for the teardown
+    // below to finish) and then relaunches. If we cleared it last, a request
+    // arriving mid-teardown would early-return and be silently swallowed.
+    m_running.store(false, std::memory_order_release);
+    write_json(R"({"cmd":"quit"})");
+#if defined(WIN32)
+    if (m_process) {
+        if (WaitForSingleObject(static_cast<HANDLE>(m_process), 3000) !=
+            WAIT_OBJECT_0) {
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] ZoomObsEngine did not exit on quit after a failed "
+                 "SDK init; terminating it so the next request can relaunch");
+            TerminateProcess(static_cast<HANDLE>(m_process), 1);
+            WaitForSingleObject(static_cast<HANDLE>(m_process), 3000);
+        }
+        CloseHandle(static_cast<HANDLE>(m_process));
+        m_process = nullptr;
+    }
+#else
+    if (m_pid > 0) {
+        kill(m_pid, SIGTERM);
+        waitpid(m_pid, nullptr, 0);
+        m_pid = -1;
+    }
+#endif
+    disconnect_ipc(); // unblocks reader_loop so it exits cleanly
+
+    m_authenticated.store(false, std::memory_order_release);
+    m_media_active.store(false, std::memory_order_release);
+    m_init_retry_due_ms.store(0, std::memory_order_release);
+    // m_init_retry_attempts / m_init_retry_waited_ms are deliberately NOT reset
+    // here: disconnect_ipc() above may still let the reader thread run one more
+    // handle_event() on a buffered line before it observes m_running == false,
+    // and that thread owns these two non-atomic fields. Resetting them here would
+    // race with it. start() and stop_for_reconnect() both join the reader thread
+    // before resetting these fields, so the reset still always happens before
+    // the next session can use them.
+    m_init_teardown_pending.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        m_init_payload.clear();
+    }
+
+    // Surface the failure only AFTER the teardown: a failing write_json() or a
+    // broken pipe on the way out overwrites m_last_error with "Lost connection
+    // to Zoom engine", which would bury the message that actually explains
+    // this. Same permanent disposition as any other auth_fail — only the text
+    // the operator reads is different.
+    blog(LOG_ERROR, "[obs-zoom-plugin] %s", message.c_str());
+    set_error_and_notify(message);
+    m_state.store(MeetingState::Failed, std::memory_order_release);
+    ZoomReconnectManager::instance().on_join_failed(true);
+}
+
+void ZoomEngineClient::set_error_and_notify(const std::string &message)
+{
+    std::vector<ErrorCallback> callbacks;
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        m_last_error = message;
+        for (const auto &entry : m_error_callbacks)
+            if (entry.second) callbacks.push_back(entry.second);
+    }
+    // m_mtx is released here — a callback may call back into this client.
+    for (const auto &cb : callbacks) cb(message);
+}
+
 void ZoomEngineClient::reader_loop()
 {
     std::string line;
@@ -740,6 +986,49 @@ void ZoomEngineClient::handle_event(const std::string &line)
         return;
     }
     if (cmd == "error" || cmd == "auth_fail") {
+        // SDKERR_OTHER_SDK_INSTANCE_RUNNING out of InitSDK is a transient
+        // collision, not an authentication failure: an orphaned ZoomObsEngine
+        // from a previous OBS session still holds the Zoom SDK and exits on its
+        // own moments later. That is what made the first "request engine" of a
+        // session fail while the second worked. Wait it out (bounded) and
+        // replay the init command instead of failing, and if the wait runs out
+        // tell the operator what is actually wrong. Every other code and stage
+        // falls straight through to the unchanged path below.
+        if (cmd == "auth_fail") {
+            const SdkInitRetryDecision retry_decision = decide_sdk_init_retry(
+                obj.value("stage").toString().toStdString(),
+                obj.value("code").toInt(0), m_init_retry_attempts);
+            if (retry_decision.retry) {
+                ++m_init_retry_attempts;
+                m_init_retry_waited_ms += retry_decision.delay_ms;
+                blog(LOG_WARNING,
+                     "[obs-zoom-plugin] Zoom SDK init lost the race with another SDK "
+                     "instance (SDKERR_OTHER_SDK_INSTANCE_RUNNING, code %d) — likely an "
+                     "orphaned ZoomObsEngine. Retrying init in %llu ms (attempt %d/%d): %s",
+                     kSdkErrOtherSdkInstanceRunning,
+                     static_cast<unsigned long long>(retry_decision.delay_ms),
+                     m_init_retry_attempts, kSdkInitRetryMaxAttempts, line.c_str());
+                m_init_retry_due_ms.store(os_gettime_ns() / 1000000ULL +
+                                              retry_decision.delay_ms,
+                                          std::memory_order_release);
+                return;
+            }
+            if (retry_decision.exhausted) {
+                blog(LOG_ERROR,
+                     "[obs-zoom-plugin] Zoom SDK init still blocked by another SDK "
+                     "instance after %d attempts over %llus — stopping the engine so "
+                     "the next request can relaunch it: %s",
+                     kSdkInitRetryMaxAttempts,
+                     static_cast<unsigned long long>(m_init_retry_waited_ms / 1000),
+                     line.c_str());
+                m_init_retry_due_ms.store(0, std::memory_order_release);
+                // Hand the teardown and the operator-facing failure to the
+                // monitor thread. This is the reader thread: stopping the
+                // engine from here would self-join it.
+                m_init_teardown_pending.store(true, std::memory_order_release);
+                return;
+            }
+        }
         blog(LOG_ERROR, "[obs-zoom-plugin] Zoom engine event: %s", line.c_str());
         const QString emsg = obj.value("msg").toString();
         // Media-path errors: the meeting itself is still healthy, so surface
@@ -763,27 +1052,12 @@ void ZoomEngineClient::handle_event(const std::string &line)
                     (limit > 0 ? " (limit " + std::to_string(limit) + ")"
                                : std::string());
             }
-            std::vector<ErrorCallback> error_callbacks;
-            {
-                std::lock_guard<std::mutex> lk(m_mtx);
-                m_last_error = error_message;
-                for (const auto &entry : m_error_callbacks)
-                    if (entry.second) error_callbacks.push_back(entry.second);
-            }
-            for (const auto &cb : error_callbacks) cb(error_message);
+            set_error_and_notify(error_message);
             return;
         }
         const QString reason = obj.value("reason").toString();
         const int code = obj.value("code").toInt(0);
-        std::vector<ErrorCallback> error_callbacks;
-        const std::string error_message = zoom_error_message(obj);
-        {
-            std::lock_guard<std::mutex> lk(m_mtx);
-            m_last_error = error_message;
-            for (const auto &entry : m_error_callbacks)
-                if (entry.second) error_callbacks.push_back(entry.second);
-        }
-        for (const auto &cb : error_callbacks) cb(error_message);
+        set_error_and_notify(zoom_error_message(obj));
         // Permanent failures: auth, license, host-ended.
         if (cmd == "auth_fail" || reason == "auth_fail") {
             m_state.store(MeetingState::Failed, std::memory_order_release);
@@ -812,9 +1086,9 @@ void ZoomEngineClient::handle_event(const std::string &line)
     }
 
     if (cmd == "participants") {
-        std::vector<RosterCallback> callbacks;
-        {
-            std::lock_guard<std::mutex> lk(m_mtx);
+        // Roster callbacks are dispatched by the helper with m_mtx released;
+        // see update_roster_state_and_notify() for why that is mandatory.
+        update_roster_state_and_notify([this, &obj] {
             m_active_speaker_id = static_cast<uint32_t>(
                 obj.value("active_speaker_id").toInt());
             m_roster.clear();
@@ -837,26 +1111,18 @@ void ZoomEngineClient::handle_event(const std::string &line)
             }
             SpeakerDirector::instance().update_roster(
                 m_roster, m_active_speaker_id, os_gettime_ns() / 1000000ULL);
-            for (const auto &entry : m_roster_callbacks)
-                if (entry.second) callbacks.push_back(entry.second);
-        }
-        for (const auto &cb : callbacks) cb();
+        });
         return;
     }
     if (cmd == "active_speaker") {
-        std::vector<RosterCallback> callbacks;
-        {
-            std::lock_guard<std::mutex> lk(m_mtx);
+        update_roster_state_and_notify([this, &obj] {
             m_active_speaker_id = static_cast<uint32_t>(
                 obj.value("participant_id").toInt());
             for (auto &p : m_roster)
                 p.is_talking = p.user_id == m_active_speaker_id;
             SpeakerDirector::instance().update_roster(
                 m_roster, m_active_speaker_id, os_gettime_ns() / 1000000ULL);
-            for (const auto &entry : m_roster_callbacks)
-                if (entry.second) callbacks.push_back(entry.second);
-        }
-        for (const auto &cb : callbacks) cb();
+        });
         return;
     }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../src/engine-ipc.h"
+#include "../../src/shm-generation.h"
 
 #include <cstdint>
 #include <memory>
@@ -72,8 +73,10 @@ private:
         IpcFd e2p_fd;
         ShmRegion shm;
         uint64_t frame_count = 0;
-        // Increments each time the SHM region is (re)created; sent with every
-        // frame event so the plugin can detect an orphaned mapping.
+        // The generation the CURRENT region was created under; sent with every
+        // frame event so the plugin can detect an orphaned mapping. A record of
+        // what was published, NOT the counter — the counter survives this
+        // struct in the process-wide table (src/shm-generation.h).
         uint32_t shm_gen = 0;
         // True after an ensure_shm() failure has been surfaced as an error —
         // avoids re-emitting once per frame while the failure persists.

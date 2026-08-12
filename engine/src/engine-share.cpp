@@ -257,11 +257,21 @@ bool EngineShare::ensure_shm(ShareTarget &target,
     // Bump the generation BEFORE creating and bake it into the name: a
     // resize under the old name deadlocks while the plugin still maps the
     // old (smaller) section (see shm_region_name in engine-ipc.h).
-    const uint32_t next_gen = target.shm_gen + 1;
-    const std::string region_name =
-        shm_region_name(IPC_SHM_PREFIX + source_uuid, next_gen);
-    if (!shm_region_create(target.shm, region_name, total)) return false;
-    target.shm_gen = next_gen; // old plugin-side mappings are now stale
+    //
+    // The counter is NOT a member of this target — EngineShare::unsubscribe()
+    // destroys it, and a per-target counter restarted at 0. It is also the
+    // SAME counter the video path uses, deliberately: both name their regions
+    // IPC_SHM_PREFIX + source_uuid and main.cpp can route one uuid to either,
+    // so two counters could hand two live regions one name. See
+    // src/shm-generation.h.
+    const ShmRegionAllocation region =
+        shm_next_region(shm_generations(), IPC_SHM_PREFIX + source_uuid);
+    if (!shm_region_create(target.shm, region.name, total)) return false;
+    target.shm_gen = region.gen; // old plugin-side mappings are now stale
+    EngineIpc::write(
+        R"({"cmd":"debug","stage":"share_shm_created","source_uuid":")" +
+        source_uuid + R"(","shm_gen":)" + std::to_string(region.gen) +
+        R"(,"bytes":)" + std::to_string(total) + "}");
     return true;
 }
 
@@ -311,6 +321,10 @@ void EngineShare::onRawDataFrameReceived(YUVRawDataI420 *data)
                 EngineIpc::write(
                     R"({"cmd":"debug","stage":"share_shm_create_failed","last_error":)" +
                     std::to_string(target.shm.last_error) +
+                    // Which generation the failed create actually attempted.
+                    R"(,"attempted_gen":)" +
+                    std::to_string(shm_generations().issued(
+                        IPC_SHM_PREFIX + source_uuid)) +
                     R"(,"source_uuid":")" +
                     source_uuid + R"(","w":)" + std::to_string(w) +
                     R"(,"h":)" + std::to_string(h) + "}");

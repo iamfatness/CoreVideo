@@ -265,6 +265,11 @@ if(COREVIDEO_BUILD_PLUGIN)
         src/plugin-main.cpp
         src/zoom-source.cpp
         src/zoom-participant-audio-source.cpp
+        src/zoom-supersource.cpp
+        src/zoom-tiles-background.cpp
+        src/zoom-tiles-audio.cpp
+        src/zoom-tiles-effect.cpp
+        src/zoom-tile-grid.cpp
         src/zoom-engine-client.cpp
         src/speaker-director.cpp
         src/zoom-reconnect.cpp
@@ -591,6 +596,104 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoIpcHardening
              COMMAND CoreVideoIpcHardeningTest)
 
+    # Plugin->engine command routing. Pins that "unsubscribe" does not route to
+    # the subscribe branch (it did, because "unsubscribe" contains "subscribe"
+    # and the dispatch tested substrings in source order).
+    add_executable(CoreVideoEngineCommandTest
+        tests/engine-command-test.cpp
+    )
+    target_include_directories(CoreVideoEngineCommandTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoEngineCommand
+             COMMAND CoreVideoEngineCommandTest)
+
+    # The shared seqlock frame reader: tear-free copies plus the region
+    # generation handling that keeps a resized feed from freezing. Uses real
+    # shared memory and a concurrent writer thread, so it needs Threads (and
+    # librt for shm_open on Linux).
+    find_package(Threads REQUIRED)
+    add_executable(CoreVideoShmFrameReaderTest
+        tests/shm-frame-reader-test.cpp
+    )
+    target_include_directories(CoreVideoShmFrameReaderTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    target_link_libraries(CoreVideoShmFrameReaderTest PRIVATE Threads::Threads)
+    if(NOT WIN32 AND NOT APPLE)
+        target_link_libraries(CoreVideoShmFrameReaderTest PRIVATE rt)
+    endif()
+    add_test(NAME CoreVideoShmFrameReader
+             COMMAND CoreVideoShmFrameReaderTest)
+
+    # Release-before-resubscribe: the rule that stops a re-pointed source_uuid
+    # from being read through a mapping of the region the engine just rebuilt
+    # (the 2026-08-10 white-flash-on-speaker-change incident). Uses real shared
+    # memory, so it needs librt for shm_open on Linux.
+    add_executable(CoreVideoShmResubscribeTest
+        tests/shm-resubscribe-test.cpp
+    )
+    target_include_directories(CoreVideoShmResubscribeTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    if(NOT WIN32 AND NOT APPLE)
+        target_link_libraries(CoreVideoShmResubscribeTest PRIVATE rt)
+    endif()
+    add_test(NAME CoreVideoShmResubscribe
+             COMMAND CoreVideoShmResubscribeTest)
+
+    # Monotonic SHM region generations (src/shm-generation.h): the counter that
+    # keeps a resize off a name another process may still map must survive the
+    # per-source target struct being destroyed on a re-subscribe. Third
+    # production incident from that one defect. Threads for the concurrency
+    # case, real shared memory on Windows for the ACCESS_DENIED reproduction.
+    add_executable(CoreVideoShmGenerationTest
+        tests/shm-generation-test.cpp
+    )
+    target_include_directories(CoreVideoShmGenerationTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    target_link_libraries(CoreVideoShmGenerationTest PRIVATE Threads::Threads)
+    if(NOT WIN32 AND NOT APPLE)
+        target_link_libraries(CoreVideoShmGenerationTest PRIVATE rt)
+    endif()
+    add_test(NAME CoreVideoShmGeneration
+             COMMAND CoreVideoShmGenerationTest)
+
+    # The last residual of the same defect class: the generation table is
+    # per engine PROCESS, so an engine restart puts the next create back on the
+    # legacy unsuffixed name whatever the dead engine had climbed to. Pins why
+    # the plugin must drop every mapping when a new engine comes up, and why
+    # releasing only the region a re-subscribe touches leaves audio blocked.
+    # Real shared memory on Windows for the ACCESS_DENIED reproduction.
+    add_executable(CoreVideoShmEngineRestartTest
+        tests/shm-engine-restart-test.cpp
+    )
+    target_include_directories(CoreVideoShmEngineRestartTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    if(NOT WIN32 AND NOT APPLE)
+        target_link_libraries(CoreVideoShmEngineRestartTest PRIVATE rt)
+    endif()
+    add_test(NAME CoreVideoShmEngineRestart
+             COMMAND CoreVideoShmEngineRestartTest)
+
+    # The other half of surviving an engine restart (src/audio-subscription-
+    # state.h). Releasing the mapping unblocks the new engine's first create;
+    # something still has to ask it for the feed. Video is re-subscribed by
+    # ZoomOutputManager::resubscribe_all(), which iterates ZoomSource only — the
+    # dedicated CoreVideo audio sources are not in it, and a `subscribed` flag
+    # left over from the dead engine made their one re-subscribe path a no-op,
+    # so they went silent for the session. Header-only logic; no Qt/OBS.
+    add_executable(CoreVideoAudioSubscriptionStateTest
+        tests/audio-subscription-state-test.cpp
+    )
+    target_include_directories(CoreVideoAudioSubscriptionStateTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoAudioSubscriptionState
+             COMMAND CoreVideoAudioSubscriptionStateTest)
+
     # Centralized Zoom auth/join decision path + error catalog (issue #89).
     # Header-only logic; no Qt/OBS/SDK dependencies, no secrets.
     add_executable(CoreVideoJoinDecisionTest
@@ -626,6 +729,17 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoReconnectBackoff
              COMMAND CoreVideoReconnectBackoffTest)
 
+    # Retry rules for the Zoom SDK init handshake when an orphaned engine still
+    # holds the SDK (SDKERR_OTHER_SDK_INSTANCE_RUNNING). Pure logic, no Qt/OBS.
+    add_executable(CoreVideoSdkInitRetryTest
+        tests/zoom-sdk-init-retry-test.cpp
+    )
+    target_include_directories(CoreVideoSdkInitRetryTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoSdkInitRetry
+             COMMAND CoreVideoSdkInitRetryTest)
+
     add_executable(CoreVideoReconnectScheduleTest
         tests/zoom-reconnect-schedule-test.cpp
     )
@@ -634,6 +748,180 @@ if(BUILD_TESTING)
     )
     add_test(NAME CoreVideoReconnectSchedule
              COMMAND CoreVideoReconnectScheduleTest)
+
+    # CoreVideo Tiles: the pure units behind the tile wall. None of these link
+    # Qt, OBS, or the Zoom SDK, so they run in every job.
+    add_executable(CoreVideoTileClockProbeTest
+        tests/tile-clock-probe-test.cpp
+        src/tile-clock-probe.cpp
+    )
+    target_include_directories(CoreVideoTileClockProbeTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTileClockProbe
+             COMMAND CoreVideoTileClockProbeTest)
+
+    add_executable(CoreVideoTileGridTest
+        tests/tile-grid-test.cpp
+        src/zoom-tile-grid.cpp
+    )
+    target_include_directories(CoreVideoTileGridTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTileGrid
+             COMMAND CoreVideoTileGridTest)
+
+    # Tile-slot reassignment ordering — exercised with concurrent threads.
+    add_executable(CoreVideoTileSlotTest
+        tests/tile-slot-test.cpp
+    )
+    target_include_directories(CoreVideoTileSlotTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    target_link_libraries(CoreVideoTileSlotTest PRIVATE Threads::Threads)
+    add_test(NAME CoreVideoTileSlot
+             COMMAND CoreVideoTileSlotTest)
+
+    add_executable(CoreVideoTileFillTest
+        tests/tile-fill-test.cpp
+    )
+    target_include_directories(CoreVideoTileFillTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTileFill
+             COMMAND CoreVideoTileFillTest)
+
+    # When a tile's plane textures must be recreated, and when their pixels are
+    # actually stale. Pure rules, so they are testable without a GPU device.
+    add_executable(CoreVideoTileTextureTest
+        tests/tile-texture-test.cpp
+    )
+    target_include_directories(CoreVideoTileTextureTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTileTexture
+             COMMAND CoreVideoTileTextureTest)
+
+    # Border width / corner radius clamping against the tile they are drawn on.
+    # Both are operator-reachable and both degenerate the tile if trusted.
+    add_executable(CoreVideoTileBorderTest
+        tests/tile-border-test.cpp
+    )
+    target_include_directories(CoreVideoTileBorderTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTileBorder
+             COMMAND CoreVideoTileBorderTest)
+
+    # Precedence between a source's own speaker properties and the dock-owned
+    # global settings. A source that carries nothing must not overwrite them —
+    # see the 2026-08-11 live-show incident described in the test.
+    add_executable(CoreVideoSpeakerSettingsMergeTest
+        tests/speaker-settings-merge-test.cpp
+    )
+    target_include_directories(CoreVideoSpeakerSettingsMergeTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoSpeakerSettingsMerge
+             COMMAND CoreVideoSpeakerSettingsMergeTest)
+
+    # Measures the luma range actually delivered by the SDK, so the full-range
+    # vs limited-range question is settled by measurement, not assumption.
+    add_executable(CoreVideoLumaRangeProbeTest
+        tests/luma-range-probe-test.cpp
+    )
+    target_include_directories(CoreVideoLumaRangeProbeTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoLumaRangeProbe
+             COMMAND CoreVideoLumaRangeProbeTest)
+
+    # Per-slot left/right crop composed with the cover-crop. The composition
+    # order is the point: the slot crop narrows the usable source first, and the
+    # cover-crop then fills the tile from what is left. Reversing the two cuts a
+    # different part of the frame and only shows on an off-centre subject, so it
+    # is pinned by a test rather than by eye. zoom-tile-grid.cpp is needed
+    # because solve_cover_crop lives there.
+    add_executable(CoreVideoTileCropTest
+        tests/tile-crop-test.cpp
+        src/zoom-tile-grid.cpp
+    )
+    target_include_directories(CoreVideoTileCropTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTileCrop
+             COMMAND CoreVideoTileCropTest)
+
+    # Tile shape presets and the gutter/margin percentages. The exactness of
+    # the default spacing is the point: it has to reproduce the wall's shipped
+    # canvas_height / 135.0 bit-for-bit, or every existing scene reflows.
+    # zoom-tile-grid.cpp is needed because the crop registration check at the
+    # end calls solve_slot_crop, which calls solve_cover_crop.
+    add_executable(CoreVideoTileShapeTest
+        tests/tile-shape-test.cpp
+        src/zoom-tile-grid.cpp
+    )
+    target_include_directories(CoreVideoTileShapeTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTileShape
+             COMMAND CoreVideoTileShapeTest)
+
+    # The outer glow's quad geometry: a tile rect expanded by the glow size and
+    # clamped to the canvas. The clamping is the point — a tile against the
+    # canvas edge produces an expanded rect that runs off it, and the tile's
+    # position inside the clamped quad is what keeps the halo registered against
+    # the tile rather than sliding by however much was clipped.
+    # zoom-tile-grid.cpp is needed because the invariant sweep at the end runs
+    # over real solved walls via solve_tile_grid / snap_tile_grid_even.
+    add_executable(CoreVideoTileGlowTest
+        tests/tile-glow-test.cpp
+        src/zoom-tile-grid.cpp
+    )
+    target_include_directories(CoreVideoTileGlowTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTileGlow
+             COMMAND CoreVideoTileGlowTest)
+
+    # Per-participant audio reconciliation. Pure — no libobs — because every
+    # action it emits mutates the operator's scene collection, and the two
+    # rules that matter (never duplicate a participant another Tiles source
+    # owns, never delete anyone) have to be provable off-rig.
+    add_executable(CoreVideoTilesAudioPlanTest
+        tests/tiles-audio-plan-test.cpp
+    )
+    target_include_directories(CoreVideoTilesAudioPlanTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTilesAudioPlan
+             COMMAND CoreVideoTilesAudioPlanTest)
+
+    # Which missing effect handles are fatal and which only cost a feature.
+    # Pure policy — no libobs — because the consequence is operational, not
+    # graphical: the DLL and data/effects/corevideo-tiles.effect install
+    # independently, and treating a stale effect file as fatal would cost a live
+    # operator the whole wall rather than the one feature the old file predates.
+    add_executable(CoreVideoTilesEffectPolicyTest
+        tests/tiles-effect-policy-test.cpp
+    )
+    target_include_directories(CoreVideoTilesEffectPolicyTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTilesEffectPolicy
+             COMMAND CoreVideoTilesEffectPolicyTest)
+
+    # Retry pacing for the tiles silent-slot sweep: the sweep interval and the
+    # per-slot exponential backoff / attempt cap that stop an unbounded
+    # renderer create-destroy loop in the engine.
+    add_executable(CoreVideoTileRetryTest
+        tests/tile-retry-test.cpp
+    )
+    target_include_directories(CoreVideoTileRetryTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTileRetry
+             COMMAND CoreVideoTileRetryTest)
 
     # OSC wire-format and TCP control-request parsing. These use QByteArray /
     # QJsonObject / QString, so they only build where Qt6::Core is available

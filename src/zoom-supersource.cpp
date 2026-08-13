@@ -1130,8 +1130,16 @@ static void tiles_source_render(void *data, gs_effect_t *)
     const std::vector<TileRect> solved = solve_tile_grid(feeds.size(), params);
     std::vector<DesiredTile> desired;
     desired.reserve(feeds.size());
-    for (size_t i = 0; i < feeds.size() && i < solved.size(); ++i)
-        desired.push_back(DesiredTile{feeds[i]->slot.participant_id(), solved[i]});
+    for (size_t i = 0; i < feeds.size() && i < solved.size(); ++i) {
+        // Defensive, not reachable today: plan_feeds_locked() only ever
+        // pushes make_shared<TileFeed>(), so feeds[i] is never null. Guarded
+        // anyway for consistency with the null checks further down in this
+        // function (the live-tile lookup in the motion branch, and the main
+        // draw loop), so the file has one answer to "can a feed be null
+        // here", not two that could quietly drift apart.
+        const uint32_t pid = feeds[i] ? feeds[i]->slot.participant_id() : 0;
+        desired.push_back(DesiredTile{pid, solved[i]});
+    }
 
     AnimationSettings anim;
     anim.enabled = ctx->animate.load(std::memory_order_acquire);
@@ -1147,14 +1155,33 @@ static void tiles_source_render(void *data, gs_effect_t *)
     // Computed in THIS pass, from the same frame the layout was solved in. If
     // `departed` lags `desired` by even one frame, the exit exception silently
     // never fires and the whole fade becomes dead code.
-    const std::vector<ParticipantInfo> roster = ZoomEngineClient::instance().roster();
+    //
+    // Gated on `tracked` being non-empty — which it always is when animation
+    // is off, since the disabled bypass clears m_tiles — so the render path
+    // does not take ZoomEngineClient's roster mutex when it has nothing to
+    // ask it. That mutex is hot: the engine reader thread takes it for every
+    // "frame" and "audio" message across every source in the plugin (see
+    // zoom-engine-client.h's own warning on stalling that dispatch), and
+    // roster() deep-copies the whole participant list, one std::string
+    // allocation per participant, while holding it. Before this feature
+    // existed the draw path took exactly one lock, for an O(1) pointer copy;
+    // this guard is what keeps that true when the toggle is off, rather than
+    // adding a lock + N allocations on the graphics thread unconditionally.
+    // Do not remove this as "redundant" — it is the difference between
+    // "disabled costs nothing" and "disabled costs a roster copy every
+    // frame".
     std::vector<uint32_t> departed;
-    for (const uint32_t id : ctx->animator.tracked_ids()) {
-        const bool in_roster = std::any_of(
-            roster.begin(), roster.end(),
-            [id](const ParticipantInfo &p) { return p.user_id == id; });
-        if (!in_roster)
-            departed.push_back(id);
+    const std::vector<uint32_t> tracked = ctx->animator.tracked_ids();
+    if (!tracked.empty()) {
+        const std::vector<ParticipantInfo> roster =
+            ZoomEngineClient::instance().roster();
+        for (const uint32_t id : tracked) {
+            const bool in_roster = std::any_of(
+                roster.begin(), roster.end(),
+                [id](const ParticipantInfo &p) { return p.user_id == id; });
+            if (!in_roster)
+                departed.push_back(id);
+        }
     }
 
     const std::vector<AnimatedTile> animated =

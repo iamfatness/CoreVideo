@@ -254,6 +254,11 @@ struct tiles_source {
     // percentage. 0 is the curve the glow shipped with, so this control is
     // inert until the operator moves it. See kMaxGlowSoftness.
     std::atomic<uint32_t> glow_softness{0};
+    // Layout animation: whether tile moves ease instead of snapping, and the
+    // duration in milliseconds. Same atomic-not-mutex reasoning as bg_color
+    // above. Off by default — see tiles_source_get_defaults.
+    std::atomic<bool>     animate{false};
+    std::atomic<uint32_t> animate_ms{350};
     // The wall's geometry: tile shape (width / height, already resolved from
     // the preset and the custom ratio) and the gutter and margin as
     // percentages of canvas height. Same atomic-not-mutex reasoning as
@@ -1432,6 +1437,11 @@ static constexpr const char *PROP_GLOW_SIZE      = "glow_size";
 static constexpr const char *PROP_GLOW_COLOR     = "glow_color";
 static constexpr const char *PROP_GLOW_INTENSITY = "glow_intensity";
 static constexpr const char *PROP_GLOW_SOFTNESS  = "glow_softness";
+// Layout animation: whether tile moves/joins/departures ease instead of
+// snapping, and how long that eases over. See PROP_ANIMATE default below —
+// off is a complete bypass, not a fast setting.
+static constexpr const char *PROP_ANIMATE    = "animate_layout";
+static constexpr const char *PROP_ANIMATE_MS = "animate_duration_ms";
 // Tile shape: a preset, plus the ratio the Custom entry reveals. Two keys
 // rather than one so switching to a preset and back keeps the ratio the
 // operator typed, exactly as the corner radius survives a switch to Square.
@@ -1919,6 +1929,12 @@ static void tiles_source_update(void *data, obs_data_t *settings)
             std::max<int64_t>(raw_glow_soft, 0), kMaxGlowSoftness)),
         std::memory_order_release);
 
+    ctx->animate.store(obs_data_get_bool(settings, PROP_ANIMATE),
+                       std::memory_order_release);
+    ctx->animate_ms.store(
+        static_cast<uint32_t>(obs_data_get_int(settings, PROP_ANIMATE_MS)),
+        std::memory_order_release);
+
     // Tile shape and spacing. resolve_tile_aspect() already refuses a ratio of
     // zero or less (and a NaN) and falls back to 16:9; the clamp here is the
     // same bound the slider carries, applied to scene data too because
@@ -2261,6 +2277,13 @@ static void tiles_source_get_defaults(obs_data_t *settings)
     // guarantee the size default carries, and the reason the default is 0
     // rather than whatever eventually matches the reference best.
     obs_data_set_default_int(settings, PROP_GLOW_SOFTNESS, 0);
+    // Off by default: the animator's "off" is a complete bypass (it clears
+    // its state and emits the solver's rects verbatim), so a scene saved
+    // before this control existed renders through exactly the path it
+    // renders through today. The duration default is only what the operator
+    // sees when they first switch animation on.
+    obs_data_set_default_bool(settings, PROP_ANIMATE, false);
+    obs_data_set_default_int(settings, PROP_ANIMATE_MS, 350);
     // 16:9 tiles and a canvas_height/135 gutter and margin: exactly what the
     // wall was hard-coded to before these controls existed, so a scene saved
     // before them renders byte-for-byte as it did. The spacing default is a
@@ -2498,6 +2521,17 @@ static obs_properties_t *tiles_source_get_properties(void *data)
     obs_properties_add_int_slider(props, PROP_GLOW_SOFTNESS,
         obs_module_text("CoreVideoTiles.GlowSoftness"),
         0, static_cast<int>(kMaxGlowSoftness), 1);
+
+    // Off by default: upgrading must not change how any existing scene
+    // looks. The animator's "off" is a complete bypass — it clears its state
+    // and emits the solver's rects verbatim — so a scene saved before this
+    // control existed renders through exactly the path it renders through
+    // today.
+    obs_properties_add_bool(props, PROP_ANIMATE,
+                            obs_module_text("CoreVideoTiles.Animate"));
+    obs_properties_add_int_slider(props, PROP_ANIMATE_MS,
+                                  obs_module_text("CoreVideoTiles.AnimateMs"),
+                                  100, 1000, 10);
 
     // Per-slot left/right crop, for reframing a badly-framed guest without
     // touching the grid. Eighteen sliders inline would swamp a dialog that

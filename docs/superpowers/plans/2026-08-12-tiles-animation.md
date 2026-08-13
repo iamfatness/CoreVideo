@@ -1063,14 +1063,17 @@ with:
     // slot (instant cut, no fade) — the distinction the exit invariants in
     // src/zoom-tile-slot.h rest on. Hardcoding it empty would make the exit
     // path dead code on the wall.
+    // Computed in THIS pass, from the same frame the layout was solved in. If
+    // `departed` lags `desired` by even one frame, the exit exception silently
+    // never fires and the whole fade becomes dead code.
     const std::vector<ParticipantInfo> roster = ZoomEngineClient::instance().roster();
     std::vector<uint32_t> departed;
-    for (const auto &d : desired_ids_previously_tracked) {
+    for (const uint32_t id : ctx->animator.tracked_ids()) {
         const bool in_roster = std::any_of(
             roster.begin(), roster.end(),
-            [&](const ParticipantInfo &p) { return p.user_id == d; });
+            [id](const ParticipantInfo &p) { return p.user_id == id; });
         if (!in_roster)
-            departed.push_back(d);
+            departed.push_back(id);
     }
 
     const std::vector<AnimatedTile> animated =

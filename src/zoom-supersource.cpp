@@ -352,6 +352,14 @@ struct tiles_source {
     // only tiles_source_render() ever touches it. See
     // src/zoom-tile-animator.h.
     TileAnimator animator;
+    // Participant ids this source has observed in a ZoomEngineClient roster
+    // snapshot. The evidence classify_departures() needs to tell a genuine
+    // departure from an operator repointing a slot away from someone who was
+    // never in the meeting at all — which Manual fill mode allows, and which
+    // would otherwise start an exit animation and break invariants 1 and 2.
+    // Render-thread only, like `animator`. Pruned every time it is written, so
+    // it stays the size of the meeting rather than growing with its length.
+    std::vector<uint32_t> roster_seen;
     // The intermediate render target a tile IN MOTION is composited through
     // before being drawn at a fractional position — see
     // ensure_motion_texrender() and the draw loop in tiles_source_render().
@@ -1398,26 +1406,42 @@ static void tiles_source_render(void *data, gs_effect_t *)
     // animation costs a locked roster copy on every frame forever".
     std::vector<uint32_t> departed;
     const std::vector<uint32_t> tracked = ctx->animator.tracked_ids();
-    std::vector<uint32_t> absent_from_layout;
-    if (anim.enabled) {
-        for (const uint32_t id : tracked) {
-            const bool in_layout = std::any_of(
-                desired.begin(), desired.end(),
-                [id](const DesiredTile &d) { return d.participant_id == id; });
-            if (!in_layout)
-                absent_from_layout.push_back(id);
-        }
-    }
-    if (!absent_from_layout.empty()) {
+    std::vector<uint32_t> layout_ids;
+    layout_ids.reserve(desired.size());
+    for (const auto &d : desired) layout_ids.push_back(d.participant_id);
+
+    if (anim.enabled && layout_disagrees_with_tracking(tracked, layout_ids)) {
         const std::vector<ParticipantInfo> roster =
             ZoomEngineClient::instance().roster();
-        for (const uint32_t id : absent_from_layout) {
-            const bool in_roster = std::any_of(
-                roster.begin(), roster.end(),
-                [id](const ParticipantInfo &p) { return p.user_id == id; });
-            if (!in_roster)
-                departed.push_back(id);
-        }
+        std::vector<uint32_t> roster_ids;
+        roster_ids.reserve(roster.size());
+        for (const ParticipantInfo &p : roster) roster_ids.push_back(p.user_id);
+
+        // Everyone visible in this snapshot is now known to have been in the
+        // meeting. That record is what lets a later absence be told apart from
+        // a Manual-cast participant who was never here — see
+        // classify_departures(). Recorded on ARRIVAL frames as well as
+        // departure ones, which is why the gate above tests both directions.
+        for (const uint32_t id : roster_ids)
+            if (std::find(ctx->roster_seen.begin(), ctx->roster_seen.end(), id) ==
+                ctx->roster_seen.end())
+                ctx->roster_seen.push_back(id);
+
+        departed = classify_departures(tracked, layout_ids, roster_ids,
+                                       ctx->roster_seen);
+
+        // Bounded: a long meeting must not accumulate every id it ever saw.
+        // Anyone still in the meeting or still on the wall is kept; the rest
+        // can no longer depart from anything.
+        ctx->roster_seen.erase(
+            std::remove_if(ctx->roster_seen.begin(), ctx->roster_seen.end(),
+                           [&](uint32_t id) {
+                               return std::find(roster_ids.begin(), roster_ids.end(),
+                                                id) == roster_ids.end() &&
+                                      std::find(tracked.begin(), tracked.end(), id) ==
+                                          tracked.end();
+                           }),
+            ctx->roster_seen.end());
     }
 
     const std::vector<AnimatedTile> animated =
@@ -1507,20 +1531,28 @@ static void tiles_source_render(void *data, gs_effect_t *)
         // an index that happened not to line up. The reflow animation is
         // fully functional without them; only exit fades are not drawn yet.
         //
-        // `live` is non-null for every non-null feed: the animator withholds
-        // nothing, so every entry of `desired` — which is built one-for-one
-        // from `feeds` above — gets exactly one live entry back. The empty
-        // SnappedTileRect below is the null-feed fallback only. It has width
+        // Resolved from `desired` — the ids captured ONCE, above — never by
+        // re-reading each feed's live slot state here. `render_feeds` holds
+        // shared_ptrs to objects the writer still mutates, and this path
+        // dropped ctx->mutex before drawing, so plan_feeds_locked() can
+        // repoint a slot between the two reads. The lookup then either missed
+        // (that slot lost tile, border AND glow for a frame) or collided with
+        // another feed, painting a retired feed's grey placeholder over a live
+        // tile. See resolve_animated_for_desired(), which takes `desired` and
+        // nothing else so the second read cannot come back.
+        //
+        // `live` is non-null for every entry of `desired`: the animator
+        // withholds nothing, so every entry gets exactly one back. The empty
+        // SnappedTileRect below covers a feed with no `desired` entry at all
+        // (a null feed, or a solve shorter than the feed list). It has width
         // 0, so the glow loop and the tile loop both skip that feed on the
         // same `width < 2` rule they already apply.
+        const std::vector<const AnimatedTile *> resolved =
+            resolve_animated_for_desired(desired, animated);
         rects.reserve(feeds.size());
         moving.reserve(feeds.size());
-        for (const TileFeedPtr &feed : feeds) {
-            const uint32_t pid = feed ? feed->slot.participant_id() : 0;
-            const AnimatedTile *live = nullptr;
-            for (const auto &t : animated) {
-                if (t.participant_id == pid) { live = &t; break; }
-            }
+        for (size_t i = 0; i < feeds.size(); ++i) {
+            const AnimatedTile *live = i < resolved.size() ? resolved[i] : nullptr;
             rects.push_back(live ? snap_tile_independently(live->rect)
                                   : SnappedTileRect{});
 
@@ -1718,8 +1750,17 @@ static void tiles_source_render(void *data, gs_effect_t *)
                                                                  : 1.0;
             if (tile_alpha <= 0.0) continue;   // nothing to draw yet
 
+            // Solved from the SAME rect the tile is drawn at. For a composited
+            // tile that is its true fractional rect, not the 2px-quantised one
+            // in `rects` — otherwise the halo steps on the 2px grid while the
+            // tile glides smoothly, which is the exact artefact the sub-pixel
+            // path exists to remove.
+            const bool composited = i < moving.size() && moving[i].needs_composite;
             const GlowQuad q =
-                solve_glow_quad(r, glow_size_px, canvas_w, canvas_h);
+                composited ? solve_glow_quad(moving[i].x, moving[i].y,
+                                             moving[i].width, moving[i].height,
+                                             glow_size_px, canvas_w, canvas_h)
+                           : solve_glow_quad(r, glow_size_px, canvas_w, canvas_h);
             if (!q.visible) continue;  // clamped away to nothing
 
             // The tile's own clamped radius, not the raw setting: the halo has
@@ -2630,8 +2671,13 @@ static void tiles_source_update(void *data, obs_data_t *settings)
 
     ctx->animate.store(obs_data_get_bool(settings, PROP_ANIMATE),
                        std::memory_order_release);
+    // Clamped on the same threat model as every other setting here: scene
+    // files are hand-editable and obs_data_get_int returns an int64. A
+    // negative value wrapped to 4294967295 ms, which parks every tile at
+    // alpha ~0 forever — the wall renders as background only and settled()
+    // never becomes true, so it stays on the composite path indefinitely.
     ctx->animate_ms.store(
-        static_cast<uint32_t>(obs_data_get_int(settings, PROP_ANIMATE_MS)),
+        clamp_animate_duration_ms(obs_data_get_int(settings, PROP_ANIMATE_MS)),
         std::memory_order_release);
 
     // Tile shape and spacing. resolve_tile_aspect() already refuses a ratio of

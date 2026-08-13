@@ -55,6 +55,9 @@ public:
             m_tiles.clear();
             m_last_ns = 0;
             m_has_last = false;
+            // Cleared with everything else, so the NEXT enabled frame adopts
+            // the wall it finds at rest instead of fading it up from nothing.
+            m_seeded = false;
             std::vector<AnimatedTile> out;
             out.reserve(desired.size());
             for (const auto &d : desired)
@@ -202,7 +205,34 @@ public:
             // grid generation the rest of the wall has left.
         }
 
+        // A participant appearing on the animator's FIRST populated frame is
+        // not a join — it is the wall that was already there. Adopting it at
+        // rest is what stops the Animate toggle from blanking a live show:
+        // the disabled bypass clears m_tiles on every disabled call, so the
+        // first enabled frame sees an empty map and would otherwise treat
+        // every tile as first sight and fade the entire wall up from nothing,
+        // with no roster change at all. Same on a scene load. Only a tile
+        // that appears while the animator already had state is a genuine
+        // join.
+        const bool adopt_at_rest = !m_seeded;
+
+        std::vector<uint32_t> emitted;
+        emitted.reserve(desired.size());
+
         for (const auto &d : desired) {
+            // A duplicate id would drive ONE Motion twice per frame, from two
+            // targets, so it would oscillate and never settle — and a tile
+            // that never settles never returns to the pixel-exact blit. The
+            // settings path de-duplicates (resolve_tile_assignments()), so
+            // this is unreachable from there; it is here because a map-keyed
+            // API that silently mis-handles a duplicate key is a trap, and
+            // because the render path's own first-match lookup would hand
+            // both feeds the same rect anyway. First entry wins.
+            if (std::find(emitted.begin(), emitted.end(), d.participant_id) !=
+                emitted.end())
+                continue;
+            emitted.push_back(d.participant_id);
+
             auto it = m_tiles.find(d.participant_id);
             if (it == m_tiles.end()) {
                 // First sight: start at the target rather than flying in
@@ -216,7 +246,7 @@ public:
                 m.w = {d.rect.width, 0.0};
                 m.h = {d.rect.height, 0.0};
                 m.target = d.rect;
-                m.entering = true;
+                m.entering = !adopt_at_rest;
                 m.entered_ns = now_ns;
                 it = m_tiles.emplace(d.participant_id, m).first;
             }
@@ -249,6 +279,8 @@ public:
             out.push_back(AnimatedTile{d.participant_id, r, entry_alpha(m, now_ns, settings),
                                        at_rest});
         }
+
+        if (!m_tiles.empty()) m_seeded = true;
 
         return out;
     }
@@ -358,4 +390,119 @@ private:
     std::map<uint32_t, Motion> m_tiles;
     uint64_t m_last_ns  = 0;
     bool     m_has_last = false;
+    // Has this animator ever carried tiles? Distinguishes "the wall was
+    // already there" from "somebody joined" — see adopt_at_rest in advance().
+    bool     m_seeded   = false;
 };
+
+// ── Caller-side helpers ──────────────────────────────────────────────────────
+//
+// These are the two ends of advance()'s contract — what produces its
+// `departed` argument, and what consumes its output — kept here, pure and
+// testable, rather than inline in the render path where neither could be.
+
+// One entry per `desired` index: the tile advance() emitted for that
+// participant, or nullptr if it emitted none.
+//
+// Index-aligned with `desired` BY CONSTRUCTION, and that is the point. The
+// render path used to re-read each feed's participant id from live slot state
+// to do this lookup, having already read it once to build `desired` — and
+// `plan_feeds_locked()` can repoint a slot between the two reads, because the
+// render path copies shared_ptrs and drops the mutex before drawing. The
+// lookup then either missed (that slot lost its tile, border and glow for a
+// frame) or collided with another feed (a retired feed's grey placeholder
+// painted over a live tile). Taking `desired` and nothing else means one read
+// serves both, and re-introducing the second read would require changing this
+// signature.
+inline std::vector<const AnimatedTile *> resolve_animated_for_desired(
+    const std::vector<DesiredTile> &desired,
+    const std::vector<AnimatedTile> &animated)
+{
+    std::vector<const AnimatedTile *> out;
+    out.reserve(desired.size());
+    for (const auto &d : desired) {
+        const AnimatedTile *found = nullptr;
+        for (const auto &t : animated) {
+            if (t.participant_id == d.participant_id) { found = &t; break; }
+        }
+        out.push_back(found);
+    }
+    return out;
+}
+
+// Does this frame's layout disagree with what the animator is tracking, in
+// EITHER direction? The roster is only worth consulting on such a frame: on
+// every other one the answer cannot change anything, and the query is a
+// locked deep copy of the participant list on the graphics thread.
+//
+// Both directions matter. Absences are what `departed` is computed from;
+// arrivals are what lets a participant's roster membership be recorded while
+// they are still in the meeting, which is what classify_departures() needs to
+// tell a departure from a repoint later.
+inline bool layout_disagrees_with_tracking(const std::vector<uint32_t> &tracked,
+                                           const std::vector<uint32_t> &layout_ids)
+{
+    for (const uint32_t id : tracked)
+        if (std::find(layout_ids.begin(), layout_ids.end(), id) == layout_ids.end())
+            return true;
+    for (const uint32_t id : layout_ids)
+        if (std::find(tracked.begin(), tracked.end(), id) == tracked.end())
+            return true;
+    return false;
+}
+
+// Which tracked participants have genuinely LEFT THE MEETING — the only thing
+// that may begin an exit (invariant 1).
+//
+// Requires positive evidence of a departure rather than absence of evidence of
+// presence. "Absent from the layout and absent from the roster" is not enough:
+// in Manual fill mode the roster is deliberately not consulted when choosing
+// tiles (src/zoom-tile-fill.h — "an operator who cast a tile keeps it even
+// while that participant's camera is off"), so an operator can cast someone
+// who never joined the meeting at all. Repointing that slot away satisfies
+// both conditions, and the animator would start an exit for a participant who
+// never departed — invariants 1 and 2 broken by one operator action. The same
+// hole opens whenever the roster is momentarily empty or stale, such as
+// between an engine restart and the first roster tick.
+//
+// `ever_in_roster` is the evidence: ids observed in some earlier roster
+// snapshot. An id that has never been seen in one cannot have departed from
+// it. The failure direction is deliberate — an unrecorded genuine departure is
+// treated as a repoint, which cuts instantly and puts nothing on air, whereas
+// the reverse animates a face that never left.
+inline std::vector<uint32_t> classify_departures(
+    const std::vector<uint32_t> &tracked,
+    const std::vector<uint32_t> &layout_ids,
+    const std::vector<uint32_t> &roster_ids,
+    const std::vector<uint32_t> &ever_in_roster)
+{
+    std::vector<uint32_t> departed;
+    for (const uint32_t id : tracked) {
+        if (std::find(layout_ids.begin(), layout_ids.end(), id) != layout_ids.end())
+            continue;                                   // still on the wall
+        if (std::find(roster_ids.begin(), roster_ids.end(), id) != roster_ids.end())
+            continue;                                   // still in the meeting
+        if (std::find(ever_in_roster.begin(), ever_in_roster.end(), id) ==
+            ever_in_roster.end())
+            continue;                                   // never was in the meeting
+        departed.push_back(id);
+    }
+    return departed;
+}
+
+// The animation duration, bounded to the range the slider offers. The only
+// setting on this source that was not clamped: obs_data_get_int returns an
+// int64 and scene files are hand-editable, so a negative value wrapped to
+// 4294967295 ms and every tile sat at alpha ~0 forever — the wall rendering as
+// background only, permanently on the composite path because settled() could
+// never become true. Clamped rather than dropped, on the same reading as the
+// neighbouring settings: a number outside the range is a request for the
+// nearest end of it.
+inline uint32_t clamp_animate_duration_ms(int64_t raw)
+{
+    constexpr int64_t kMinMs = 100;
+    constexpr int64_t kMaxMs = 1000;
+    if (raw < kMinMs) return static_cast<uint32_t>(kMinMs);
+    if (raw > kMaxMs) return static_cast<uint32_t>(kMaxMs);
+    return static_cast<uint32_t>(raw);
+}

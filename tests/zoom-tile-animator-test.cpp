@@ -104,30 +104,45 @@ int main()
               "disabled animator reported motion");
     }
 
-    // First frame with animation on: tiles appear at their target, not from
-    // 0,0 — and they ENTER, fading from transparent to opaque in place rather
-    // than popping on at full brightness. The fade is what makes an immediate
-    // join safe: the newcomer is at its slot in the new grid while every other
-    // tile is still at its old one, so it is drawn over them on that first
-    // frame, and alpha ~0 is what makes that invisible.
+    // The animator's FIRST populated frame is the wall that was already there,
+    // not a join: tiles appear at their target, at full opacity, at rest. That
+    // is what stops the Animate toggle — which clears all state on every
+    // disabled call — from fading a live show up from nothing. See the
+    // toggle test further down.
+    //
+    // A participant who arrives AFTER that enters: alpha 0 to 1 in place. The
+    // fade is what makes an immediate join safe, since the newcomer is at its
+    // slot in the new grid while every other tile is still at its old one and
+    // is therefore drawn over them on that first frame.
     {
         TileAnimator a;
-        const std::vector<DesiredTile> desired{{1, rect(50, 60, 100, 100)}};
-        const auto out = a.advance(0, desired, on, {});
+        const std::vector<DesiredTile> first{{1, rect(50, 60, 100, 100)}};
+        const auto out = a.advance(0, first, on, {});
         check(out.size() == 1 && find(out, 1)->rect.x == 50.0,
               "a newly seen tile did not start at its target position");
-        check(find(out, 1)->alpha < 0.001,
-              "a newly seen tile appeared at full opacity instead of fading in");
+        check(find(out, 1)->alpha == 1.0 && find(out, 1)->at_rest,
+              "the animator's first populated frame faded the wall up instead of "
+              "adopting it as already on screen");
+        check(a.settled(), "the wall the animator started with was not settled");
+
+        // Participant 2 joins 100ms later. This one is a genuine join.
+        const std::vector<DesiredTile> both{{1, rect(50, 60, 100, 100)},
+                                            {2, rect(400, 60, 100, 100)}};
+        const auto joined = a.advance(100 * kMs, both, on, {});
+        check(find(joined, 2) != nullptr && find(joined, 2)->rect.x == 400.0,
+              "a joining tile did not start at its target position");
+        check(find(joined, 2)->alpha < 0.001,
+              "a joining tile appeared at full opacity instead of fading in");
 
         // Reaches full opacity by duration_seconds, and stays there.
-        const auto mid = a.advance(175 * kMs, desired, on, {});
-        check(find(mid, 1)->alpha > 0.4 && find(mid, 1)->alpha < 0.6,
+        const auto mid = a.advance(275 * kMs, both, on, {});
+        check(find(mid, 2)->alpha > 0.4 && find(mid, 2)->alpha < 0.6,
               "the entry fade is not linear in time across its duration");
-        const auto done = a.advance(350 * kMs, desired, on, {});
-        check(find(done, 1)->alpha == 1.0,
+        const auto done = a.advance(450 * kMs, both, on, {});
+        check(find(done, 2)->alpha == 1.0,
               "the entry fade did not reach full opacity by duration_seconds");
-        const auto after = a.advance(400 * kMs, desired, on, {});
-        check(find(after, 1)->alpha == 1.0,
+        const auto after = a.advance(500 * kMs, both, on, {});
+        check(find(after, 2)->alpha == 1.0,
               "a tile that finished entering did not stay opaque");
         check(a.settled(),
               "the wall was not settled once every entry fade had finished");
@@ -665,10 +680,17 @@ int main()
         const std::vector<DesiredTile> start{{1, rect(0, 0, 100, 100)},
                                              {2, rect(100, 0, 100, 100)}};
         a.advance(0, start, on, {});
+        check(a.settled(),
+              "the animator's first populated frame was not settled — it adopts "
+              "the wall it finds, so there is nothing to wait for");
+        // A genuine join IS unsettled while it fades, because the whole-grid
+        // snap has no alpha and would drop the fade entirely.
+        a.advance(16 * kMs, {{1, rect(0, 0, 100, 100)}, {2, rect(100, 0, 100, 100)},
+                             {3, rect(200, 0, 100, 100)}}, on, {});
         check(!a.settled(),
-              "a wall whose tiles are still fading in was reported settled — the "
+              "a wall with a tile still fading in was reported settled — the "
               "whole-grid snap has no alpha, so that would drop every entry fade");
-        uint64_t t = settle_in(a, start, on, 0) * kMs;
+        uint64_t t = settle_in(a, start, on, 16) * kMs;
         check(a.settled(), "a joined, arrived, fully-faded-in wall was not reported settled");
 
         auto step = [&](const std::vector<DesiredTile> &d, const std::vector<uint32_t> &dep) {
@@ -1042,6 +1064,362 @@ int main()
                   "tiles at rest, both at full opacity");
             check(a.settled(), "the wall never settled after the repoint sequence");
         }
+    }
+
+    // ── Final review fixes ───────────────────────────────────────────────────
+
+    // Important 4 / finding 3: flipping the Animate toggle ON mid-show must
+    // not touch the wall. The disabled bypass clears every tile, so the first
+    // enabled frame sees an empty map — and before this fix treated every one
+    // of them as first sight and faded the WHOLE WALL up from alpha 0 over the
+    // configured duration, up to a second, with no roster change at all. An
+    // operator ticking a checkbox is not a join.
+    {
+        const std::vector<DesiredTile> wall{
+            {1, three_a}, {2, three_b}, {3, three_c}};
+
+        TileAnimator a;
+        // Running with the toggle OFF, as a show that never enabled it would.
+        a.advance(0, wall, off, {});
+        a.advance(16 * kMs, wall, off, {});
+        check(a.settled(), "test setup: a disabled animator is always settled");
+
+        // The frame the operator flips it on.
+        const auto flipped = a.advance(32 * kMs, wall, on, {});
+        check(flipped.size() == 3, "the wall lost tiles when Animate was enabled");
+        for (const auto &t : flipped) {
+            check(t.alpha == 1.0,
+                  "enabling Animate faded the existing wall up from transparent "
+                  "— nothing about the roster changed");
+            check(t.at_rest,
+                  "enabling Animate set an existing tile in motion");
+        }
+        check(std::fabs(find(flipped, 1)->rect.x - three_a.x) < 0.001 &&
+                  std::fabs(find(flipped, 1)->rect.width - three_a.width) < 0.001,
+              "enabling Animate moved a tile off its slot");
+        check(a.settled(),
+              "the wall was not settled on the frame Animate was enabled, so the "
+              "render path left the pixel-exact blit for a transition that is "
+              "not happening");
+
+        // A genuine join AFTER that still enters, so the fix cannot have been
+        // "never fade anything".
+        const auto joined = a.advance(48 * kMs,
+                                      {{1, four_a}, {2, four_b}, {3, four_c}, {4, four_d}},
+                                      on, {});
+        check(find(joined, 4) != nullptr && find(joined, 4)->alpha < 0.001,
+              "a genuine join stopped entering — the first-frame adoption is too "
+              "broad");
+
+        // And the reverse direction lands cleanly on today's geometry rather
+        // than freezing mid-flight.
+        const auto disabled = a.advance(64 * kMs, wall, off, {});
+        check(disabled.size() == 3, "the disabled bypass dropped tiles mid-motion");
+        for (size_t i = 0; i < disabled.size(); ++i) {
+            check(disabled[i].alpha == 1.0 && disabled[i].at_rest,
+                  "toggling Animate off mid-motion did not land at full opacity, "
+                  "at rest");
+            check(disabled[i].participant_id == wall[i].participant_id &&
+                      std::fabs(disabled[i].rect.x - wall[i].rect.x) < 0.001 &&
+                      std::fabs(disabled[i].rect.width - wall[i].rect.width) < 0.001,
+                  "toggling Animate off froze a tile mid-flight instead of "
+                  "emitting the desired layout verbatim");
+        }
+        check(a.settled(), "the animator was not settled after being disabled");
+    }
+
+    // Important 6 / finding 4: motion must be ELAPSED-TIME based, at the
+    // animator level and not only in the spring. The same elapsed time
+    // advanced in 16ms steps and in 32ms steps has to reach the same geometry.
+    //
+    // Sampled MID-FLIGHT. A dt derivation that ignores elapsed time and
+    // assumes a fixed frame interval passed every one of this suite's tests,
+    // because every other test advances on a single fixed step and cannot see
+    // it — and it made a reflow take 1353ms at 30fps against 656ms at 60.
+    // 160ms is 10 steps of 16 and 5 of 32 exactly, so the two runs compare the
+    // same instant rather than two nearby ones.
+    {
+        const std::vector<DesiredTile> before{{1, three_a}, {2, three_b}, {3, three_c}};
+        const std::vector<DesiredTile> after{
+            {1, four_a}, {2, four_b}, {3, four_c}, {4, four_d}};
+
+        auto run = [&](uint64_t step_ms) {
+            TileAnimator a;
+            a.advance(0, before, on, {});
+            const uint64_t t0 = settle_in(a, before, on, 0);
+            std::vector<AnimatedTile> out;
+            for (uint64_t k = 1; k * step_ms <= 160; ++k)
+                out = a.advance((t0 + k * step_ms) * kMs, after, on, {});
+            return out;
+        };
+
+        const auto fast = run(16);   // 10 steps
+        const auto slow = run(32);   //  5 steps
+        check(fast.size() == slow.size() && fast.size() == 4,
+              "test setup: both runs should carry the whole four-up wall");
+
+        double worst = 0.0;
+        bool mid_flight = false;
+        for (const auto &f : fast) {
+            const AnimatedTile *s = find(slow, f.participant_id);
+            check(s != nullptr, "a participant was missing from the 32ms run");
+            if (s == nullptr) continue;
+            worst = std::fmax(worst, std::fabs(f.rect.x - s->rect.x));
+            worst = std::fmax(worst, std::fabs(f.rect.y - s->rect.y));
+            worst = std::fmax(worst, std::fabs(f.rect.width - s->rect.width));
+            worst = std::fmax(worst, std::fabs(f.rect.height - s->rect.height));
+            if (!f.at_rest) mid_flight = true;
+        }
+        check(mid_flight,
+              "test setup: the sample point is not mid-flight, so this cannot "
+              "distinguish elapsed-time motion from frame-counted motion");
+        check(worst < 0.01,
+              "60fps and 30fps reached different geometry for the same elapsed "
+              "time — the animator is counting frames, not measuring time");
+    }
+
+    // Minor 9 / finding 6: kRestEpsilon is load-bearing and was untested.
+    // at_rest decides needs_composite, which decides whether a tile takes the
+    // pixel-exact blit and is snapped to its slot — so a loose epsilon snaps a
+    // tile that has NOT arrived, a visible jump at the end of every
+    // transition. Loosened to 8.0 the whole suite stayed green while a tile
+    // 6.78px from its slot was declared arrived.
+    {
+        TileAnimator a;
+        const std::vector<DesiredTile> before{{1, three_a}, {2, three_b}, {3, three_c}};
+        const std::vector<DesiredTile> after{
+            {1, four_a}, {2, four_b}, {3, four_c}, {4, four_d}};
+        a.advance(0, before, on, {});
+        uint64_t ms = settle_in(a, before, on, 0);
+
+        double worst_at_rest_error = 0.0;
+        bool saw_moving = false;
+        for (int i = 0; i < 80; ++i) {
+            ms += 16;
+            const auto out = a.advance(ms * kMs, after, on, {});
+            for (const auto &t : out) {
+                const DesiredTile *want = nullptr;
+                for (const auto &d : after)
+                    if (d.participant_id == t.participant_id) want = &d;
+                if (want == nullptr) continue;      // an exiting tile
+                if (!t.at_rest) { saw_moving = true; continue; }
+                worst_at_rest_error = std::fmax(
+                    worst_at_rest_error,
+                    std::fmax(std::fabs(t.rect.x - want->rect.x),
+                              std::fabs(t.rect.width - want->rect.width)));
+            }
+        }
+        check(saw_moving,
+              "test setup: nothing ever moved, so at_rest was never a claim "
+              "about anything");
+        check(worst_at_rest_error < 0.1,
+              "a tile reported at_rest while measurably off its slot — it will "
+              "be snapped there by the pixel-exact blit, which is a visible "
+              "jump at the end of the transition");
+    }
+
+    // Minor 10 / finding 7: a duplicate participant id in `desired` must not
+    // drive one Motion twice. Before this fix both entries retargeted and
+    // advanced the same spring in the same frame, so it oscillated between the
+    // two targets and never converged — and a tile that never settles never
+    // returns to the pixel-exact path.
+    {
+        TileAnimator a;
+        const std::vector<DesiredTile> dup{
+            {1, three_a}, {2, three_b}, {2, three_c}};
+        a.advance(0, dup, on, {});
+        uint64_t ms = 0;
+        for (int i = 0; i < 60; ++i) {
+            ms += 16;
+            const auto out = a.advance(ms * kMs, dup, on, {});
+            int n = 0;
+            for (const auto &t : out) if (t.participant_id == 2) ++n;
+            check(n == 1,
+                  "a duplicate participant id was emitted twice, so the render "
+                  "path's first-match lookup would hand two feeds one rect");
+        }
+        check(a.settled(),
+              "a wall carrying a duplicate participant id never settled");
+    }
+
+    // Important 1 / finding 1: the rect lookup must resolve from the ids
+    // captured in `desired`, never from live slot state re-read mid-render.
+    // The race itself needs OBS to reproduce; what is pinned here is the
+    // contract that makes it impossible — one entry per `desired` index,
+    // matched by THAT entry's id.
+    {
+        const std::vector<DesiredTile> desired{
+            {1, three_a}, {7, three_b}, {4, three_c}};
+        const std::vector<AnimatedTile> animated{
+            {1, three_a, 1.0, true}, {7, three_b, 1.0, true}, {4, three_c, 1.0, true}};
+
+        const auto resolved = resolve_animated_for_desired(desired, animated);
+        check(resolved.size() == desired.size(),
+              "the resolver did not return one entry per desired tile");
+        for (size_t i = 0; i < resolved.size(); ++i) {
+            check(resolved[i] != nullptr, "a desired tile resolved to nothing");
+            check(resolved[i] != nullptr &&
+                      resolved[i]->participant_id == desired[i].participant_id,
+                  "a desired tile resolved to another participant's rect — the "
+                  "lookup is not index-aligned with the ids it was built from");
+        }
+
+        // The emission order the animator actually produces puts exiting tiles
+        // first, so index-alignment cannot come from position.
+        const std::vector<AnimatedTile> with_ghost{
+            {9, three_c, 0.5, false},                       // an exiting tile
+            {1, three_a, 1.0, true}, {7, three_b, 1.0, true}, {4, three_c, 1.0, true}};
+        const auto r2 = resolve_animated_for_desired(desired, with_ghost);
+        for (size_t i = 0; i < r2.size(); ++i)
+            check(r2[i] != nullptr &&
+                      r2[i]->participant_id == desired[i].participant_id,
+                  "an exiting tile ahead of the live ones broke the lookup");
+
+        // A participant with no entry resolves to nothing rather than to
+        // somebody else's rect.
+        const std::vector<AnimatedTile> missing{
+            {1, three_a, 1.0, true}, {4, three_c, 1.0, true}};
+        const auto r3 = resolve_animated_for_desired(desired, missing);
+        check(r3.size() == 3 && r3[0] != nullptr && r3[1] == nullptr &&
+                  r3[2] != nullptr && r3[2]->participant_id == 4,
+              "a missing participant did not resolve to nothing");
+    }
+
+    // Important 2 / finding 2: invariant 1. An exit may begin ONLY on a
+    // genuine roster departure. Manual fill mode does not consult the roster,
+    // so an operator can cast someone who never joined the meeting; repointing
+    // that slot away used to satisfy "absent from the layout and absent from
+    // the roster" and start an exit — invariants 1 and 2 broken by one
+    // operator action. Departure now needs positive evidence.
+    {
+        // 555 was cast manually and never appeared in a roster snapshot.
+        // 1 and 2 are real participants.
+        const std::vector<uint32_t> tracked{1, 2, 555};
+        const std::vector<uint32_t> layout{1, 2};        // 555 repointed away
+        const std::vector<uint32_t> roster{1, 2};
+        const std::vector<uint32_t> seen{1, 2};
+
+        const auto departed = classify_departures(tracked, layout, roster, seen);
+        check(departed.empty(),
+              "invariant 1: repointing away from a participant who was never in "
+              "the meeting was classified as a departure, so a reassignment "
+              "would begin an exit animation");
+
+        // A genuine departure is still classified as one.
+        const std::vector<uint32_t> layout2{1};
+        const std::vector<uint32_t> roster2{1};
+        const std::vector<uint32_t> seen2{1, 2};
+        const auto departed2 =
+            classify_departures(tracked, layout2, roster2, seen2);
+        check(departed2.size() == 1 && departed2[0] == 2,
+              "a participant who really left the meeting was not classified as "
+              "departed — the evidence test is too strict");
+
+        // An empty or stale roster must not turn the whole wall into
+        // departures either.
+        const auto departed3 = classify_departures(tracked, layout, {}, {});
+        check(departed3.empty(),
+              "an empty roster snapshot classified live participants as departed");
+
+        // And the gate that decides whether the roster is worth reading at all
+        // has to fire on arrivals too, or a participant's membership is never
+        // recorded while they are still in the meeting.
+        check(layout_disagrees_with_tracking({1, 2}, {1, 2, 3}),
+              "an arrival did not count as a disagreement, so the roster would "
+              "never be sampled while a new participant is present");
+        check(layout_disagrees_with_tracking({1, 2, 3}, {1, 2}),
+              "an absence did not count as a disagreement");
+        check(!layout_disagrees_with_tracking({1, 2}, {1, 2}),
+              "a steady wall was reported as disagreeing, which would take the "
+              "roster mutex on every frame");
+    }
+
+    // Minor 8 / finding 5: animate_duration_ms was the one unclamped setting.
+    // A negative value in a hand-edited scene file wrapped to 4294967295 ms and
+    // parked every tile at alpha ~0 forever.
+    {
+        check(clamp_animate_duration_ms(-1) == 100,
+              "a negative duration was not clamped — it wraps to 4294967295ms "
+              "and the wall renders permanently blank");
+        check(clamp_animate_duration_ms(0) == 100, "zero was not clamped");
+        check(clamp_animate_duration_ms(-1000000) == 100,
+              "a large negative duration was not clamped");
+        check(clamp_animate_duration_ms(50) == 100, "below the slider minimum");
+        check(clamp_animate_duration_ms(100) == 100, "the minimum was altered");
+        check(clamp_animate_duration_ms(350) == 350, "a valid duration was altered");
+        check(clamp_animate_duration_ms(1000) == 1000, "the maximum was altered");
+        check(clamp_animate_duration_ms(5000) == 1000, "above the slider maximum");
+        check(clamp_animate_duration_ms(4294967296LL) == 1000,
+              "a value beyond uint32 was not clamped");
+    }
+
+    // NOT A FIX — a MEASUREMENT, recorded so it can be seen to move.
+    //
+    // Two fully-opaque incumbents cross during an ordinary reflow when the
+    // row/column arrangement changes: on a 4->5 join, participants 3 and 4
+    // swap sides and overlap by 56.4% of a tile at full opacity for about
+    // 100ms. The entry fade covers the NEWCOMER; nothing covers two tiles that
+    // were already there. This is a motion-design question the owner is
+    // evaluating on a live soak, and the answer may change the motion model,
+    // so nothing is asserted about whether it SHOULD happen — only that it has
+    // not got worse. Tighten these bounds when it is addressed.
+    {
+        const TileRect five_a = rect(326.0, 182.0, 628.0, 354.0);
+        const TileRect five_b = rect(964.0, 182.0, 628.0, 354.0);
+        const TileRect five_c = rect(1280.0, 182.0, 628.0, 354.0);
+        const TileRect five_d = rect(326.0, 544.0, 628.0, 354.0);
+        const TileRect five_e = rect(964.0, 544.0, 628.0, 354.0);
+
+        const std::vector<DesiredTile> four{
+            {1, four_a}, {2, four_b}, {3, four_c}, {4, four_d}};
+        const std::vector<DesiredTile> five{
+            {1, five_a}, {2, five_b}, {3, five_c}, {4, five_d}, {5, five_e}};
+
+        // Worst overlap between two tiles that are BOTH fully opaque.
+        auto worst_opaque = [](const std::vector<AnimatedTile> &out) {
+            double w = 0.0;
+            for (size_t i = 0; i < out.size(); ++i)
+                for (size_t j = i + 1; j < out.size(); ++j)
+                    if (out[i].alpha >= 1.0 && out[j].alpha >= 1.0)
+                        w = std::fmax(w, overlap_area(out[i].rect, out[j].rect));
+            return w;
+        };
+
+        double join_peak = 0.0;
+        {
+            TileAnimator a;
+            a.advance(0, four, on, {});
+            uint64_t ms = settle_in(a, four, on, 0);
+            for (int i = 0; i < 60; ++i) {
+                ms += 16;
+                join_peak = std::fmax(join_peak, worst_opaque(a.advance(ms * kMs, five, on, {})));
+            }
+        }
+        double leave_peak = 0.0;
+        {
+            TileAnimator a;
+            a.advance(0, five, on, {});
+            uint64_t ms = settle_in(a, five, on, 0);
+            for (int i = 0; i < 60; ++i) {
+                ms += 16;
+                leave_peak = std::fmax(leave_peak, worst_opaque(a.advance(ms * kMs, four, on, {5})));
+            }
+        }
+
+        // Measured at the time of writing: 4->5 join 202751 px^2 (56.4% of a
+        // 628x354 tile), 5->4 departure 203385 px^2 (56.9%). Bounded a little
+        // above so ordinary numerical drift does not fail the suite, and far
+        // below the tile area so a genuine worsening does.
+        check(join_peak <= 215000.0,
+              "opaque-vs-opaque overlap on a 4->5 join got worse than the "
+              "recorded measurement");
+        check(leave_peak <= 215000.0,
+              "opaque-vs-opaque overlap on a 5->4 departure got worse than the "
+              "recorded measurement");
+        check(join_peak > 0.0 && leave_peak > 0.0,
+              "test setup: the crossing no longer happens at all — if that is "
+              "deliberate, this measurement should become an assertion that it "
+              "is zero");
     }
 
     // settled() reflects the disabled bypass unconditionally: advance() clears

@@ -69,6 +69,26 @@ int main()
         check(s.velocity == 0.0, "zero settle time left residual velocity");
     }
 
+    // A zero or negative dt is a no-op: no time passed, so nothing about the
+    // spring should change. This is distinct from settle_seconds <= 0, which
+    // legitimately snaps — a duplicate timestamp, first frame, or resume
+    // from pause must not teleport a tile mid-flight to its target.
+    {
+        Spring1D s{0.0, 0.0};
+        s = run(s, 100.0, 0.35, 0.1, 1.0 / 60.0);
+        const double pos_before = s.position;
+        const double vel_before = s.velocity;
+        check(vel_before > 1.0, "test setup: spring should be moving before the zero-dt call");
+
+        spring_advance(s, 100.0, 0.35, 0.0);
+        check(s.position == pos_before, "zero dt changed position — should be a no-op");
+        check(s.velocity == vel_before, "zero dt changed velocity — should be a no-op");
+
+        spring_advance(s, 100.0, 0.35, -1.0 / 60.0);
+        check(s.position == pos_before, "negative dt changed position — should be a no-op");
+        check(s.velocity == vel_before, "negative dt changed velocity — should be a no-op");
+    }
+
     if (failures == 0) std::cout << "tile-motion tests passed\n";
     return failures == 0 ? 0 : 1;
 }

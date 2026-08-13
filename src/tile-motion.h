@@ -11,13 +11,23 @@ struct Spring1D {
 inline void spring_advance(Spring1D &s, double target, double settle_seconds,
                            double dt_seconds)
 {
-    // Snap when there is no time to travel in, rather than dividing by zero.
-    // This is also the path taken when the operator sets duration to 0.
-    if (settle_seconds <= 0.0 || dt_seconds <= 0.0) {
+    // No duration to travel in: this is what the operator gets by setting
+    // duration to 0, and there is no meaningful "in flight" to preserve, so
+    // snap straight to the target.
+    if (settle_seconds <= 0.0) {
         s.position = target;
         s.velocity = 0.0;
         return;
     }
+
+    // No time has passed: leave the spring exactly where it is. The exact
+    // closed form below never divides by dt_seconds — it only appears inside
+    // exp(-omega*dt) and as a multiplier, both of which are well-defined and
+    // vanish cleanly at dt=0 — so this is a true no-op, not a special case
+    // worked around for division safety. A duplicate timestamp, first frame,
+    // or resume-from-pause must not teleport a tile mid-flight to its target.
+    if (dt_seconds <= 0.0)
+        return;
 
     // Exact solution of the critically damped spring, not a numerical
     // integrator. An approximate integrator overshoots — measurably, and by an

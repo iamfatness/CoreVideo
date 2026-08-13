@@ -923,9 +923,15 @@ int main()
         const std::vector<DesiredTile> four_up{
             {1, four_a}, {2, four_b}, {4, four_c}, {3, four_d}};
 
+        // The window below runs from the frame 3 returns to the frame the
+        // 4-up layout commits, which is also the frame the guest's own clock
+        // expires. Both clocks were started by the same event here, so they
+        // fire together and the guest goes straight from yielding to
+        // committed. That is NOT guaranteed in general — see the KNOWN GAP
+        // block that follows, which drives the two apart deliberately.
         double worst_overlap = 0.0;
         bool saw_three = false;
-        for (uint64_t ms = 1032; ms < 1288; ms += 16) {   // the hold
+        for (uint64_t ms = 1032; ms < 1288; ms += 16) {
             const auto out = a.advance(ms * kMs, four_up, on, {});
             if (find(out, 3) != nullptr) saw_three = true;
             for (size_t i = 0; i < out.size(); ++i)
@@ -938,9 +944,9 @@ int main()
               "test setup: participant 3 should be back on the wall throughout "
               "the hold, otherwise there is nothing for a guest to cover");
         check(worst_overlap == 0.0,
-              "two live tiles were emitted at overlapping rects during the "
-              "settle hold — a returning participant's face and a newcomer's "
-              "stacked in one slot");
+              "two live tiles were emitted at overlapping rects while the guest "
+              "was still yielding — a returning participant's face and a "
+              "newcomer's stacked in one slot");
 
         // And the guest is not simply lost: once the 4-up layout commits it
         // takes its place, and the wall reflows to four disjoint slots.
@@ -960,6 +966,122 @@ int main()
                     settled_overlap, overlap_area(settled_out[i].rect, settled_out[j].rect));
         check(settled_overlap == 0.0,
               "the settled four-up wall still had overlapping tiles");
+    }
+
+    // Fix round 3, CRITICAL: a guest must yield to another GUEST, not only to
+    // a committed tile.
+    //
+    // The first version of the yield test dropped every provisional tile from
+    // the set a guest is measured against, reasoning that "two guests are
+    // slots in the same grid and are disjoint by construction". False: guests
+    // released at different moments are seeded against different PROPOSALS,
+    // so different grids, so nothing makes them disjoint.
+    //
+    // The two people who turn their cameras on first, within one settle
+    // window of each other, are enough — no churn, no repoint, no departure.
+    // The wall is empty; participant 1 arrives and is released into the 1-up
+    // layout, because an empty wall has nothing to cover. A frame later
+    // participant 2 arrives, and the layout now proposed is the 2-up one, so
+    // 2's slot is measured against a grid 1 is not in. Drawn, it sits
+    // entirely inside participant 1: 500080 px^2, 99% of its own area, and
+    // neither tile is moving, so it stays exactly like that for the window.
+    // Zero on every earlier commit including the pre-branch baseline.
+    {
+        const TileRect one_of_one   = rect(14.0, 8.0, 1890.0, 1064.0);
+        const TileRect two_of_two_a = rect(8.0, 274.0, 948.0, 532.0);
+        const TileRect two_of_two_b = rect(964.0, 274.0, 948.0, 532.0);
+
+        TileAnimator a;
+        // The wall genuinely settles on zero first — nobody has video on yet.
+        // This is what makes participant 1 a GUEST when it arrives rather
+        // than a committed tile: a first-ever frame is adopted outright, and
+        // then the defect cannot appear, because the tile the second camera
+        // must not cover is committed and was never dropped from the set a
+        // guest is measured against.
+        a.advance(0, {}, on, {});
+
+        a.advance(1280 * kMs, {{1, one_of_one}}, on, {});   // first camera on
+
+        double worst_overlap = 0.0;
+        bool saw_one = false;
+        for (uint64_t ms = 1296; ms < 1536; ms += 16) {     // second camera on
+            const auto out =
+                a.advance(ms * kMs, {{1, two_of_two_a}, {2, two_of_two_b}}, on, {});
+            if (find(out, 1) != nullptr) saw_one = true;
+            for (size_t i = 0; i < out.size(); ++i)
+                for (size_t j = i + 1; j < out.size(); ++j)
+                    worst_overlap =
+                        std::fmax(worst_overlap, overlap_area(out[i].rect, out[j].rect));
+        }
+
+        check(saw_one,
+              "test setup: participant 1 should stay on the wall throughout, "
+              "otherwise there is nothing for participant 2 to cover");
+        check(worst_overlap == 0.0,
+              "the second camera to come on was drawn inside the first: a guest "
+              "was measured against a set that excluded tiles already on the "
+              "wall");
+    }
+
+    // KNOWN GAP, recorded rather than fixed — the repo owner is deciding on
+    // it. The yield above is NOT a guarantee that two live tiles never
+    // overlap during a hold. Promotion-on-clock-expiry re-creates the overlap
+    // whenever a guest's own clock and the whole-set settle clock do not
+    // expire on the same frame, because only the latter is re-stamped by
+    // roster churn. One unrelated blip is enough to drive them apart.
+    //
+    // This is inherited from the round-1 bound ("a brief overlap is a far
+    // better failure than a participant who joined and never appeared"), not
+    // introduced by the guest rule: the promotion is exactly what stops a
+    // yielding guest from being suppressed forever. But the two requirements
+    // genuinely conflict, and the honest statement of the property is "a
+    // guest yields while it would cover, until its clock runs out", not "two
+    // live tiles never overlap".
+    //
+    // Measured under sustained churn: 284 consecutive frames — 4.5 seconds —
+    // at 495264 px^2. This test pins the shape so nobody reads the block
+    // above as a stronger guarantee than it is.
+    {
+        const TileRect four_a = rect(18.0, 8.0, 938.0, 528.0);
+        const TileRect four_b = rect(964.0, 8.0, 938.0, 528.0);
+        const TileRect four_c = rect(18.0, 544.0, 938.0, 528.0);
+        const TileRect four_d = rect(964.0, 544.0, 938.0, 528.0);
+        const std::vector<DesiredTile> four_up{
+            {1, four_a}, {2, four_b}, {4, four_c}, {3, four_d}};
+
+        TileAnimator a;
+        a.advance(0, {{1, three_a}, {2, three_b}, {3, three_c}}, on, {});
+        a.advance(1016 * kMs, {{1, three_a}, {2, three_b}, {4, three_c}}, on, {});
+
+        double overlap_after_promotion = 0.0;
+        int frames_overlapping = 0;
+        for (uint64_t ms = 1032; ms <= 1500; ms += 16) {
+            // One unrelated blip at 1128: participant 2 drops for a frame.
+            // That re-stamps the whole-set settle clock, pushing commit out,
+            // but leaves the guest's own clock — started at 1032, when it
+            // first yielded — untouched. The guest is therefore promoted
+            // before the layout that would have made room for it commits.
+            std::vector<DesiredTile> d = four_up;
+            if (ms == 1128) d.erase(d.begin() + 1);
+
+            const auto out = a.advance(ms * kMs, d, on, {});
+            double frame_worst = 0.0;
+            for (size_t i = 0; i < out.size(); ++i)
+                for (size_t j = i + 1; j < out.size(); ++j)
+                    frame_worst =
+                        std::fmax(frame_worst, overlap_area(out[i].rect, out[j].rect));
+            if (frame_worst > 0.0) ++frames_overlapping;
+            overlap_after_promotion = std::fmax(overlap_after_promotion, frame_worst);
+        }
+
+        check(overlap_after_promotion > 0.0 && frames_overlapping > 0,
+              "test setup: this block exists to document that promotion "
+              "re-creates the overlap — if it no longer does, the gap has been "
+              "closed and this block should become a real assertion");
+        // It does terminate: the layout commits and reflows the guest away.
+        check(frames_overlapping < 20,
+              "the post-promotion overlap did not end — the commit is supposed "
+              "to reflow the guest out of the space it took");
     }
 
     // Fix wave re-review, part 1: a withheld newcomer's suppression must be

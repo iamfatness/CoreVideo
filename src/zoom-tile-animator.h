@@ -325,34 +325,45 @@ public:
         // invisible, at exactly the rect the incoming one wants, so every
         // repoint would look like an overlap and be delayed.
         //
+        // Guests already on the wall ARE in here, and carry their id so the
+        // tile being tested can skip itself. An earlier version excluded
+        // every provisional tile, on the reasoning that "two guests are slots
+        // in the same grid and are disjoint by construction". That premise is
+        // false: guests released at different moments are seeded against
+        // different PROPOSALS, so different grids, so nothing makes them
+        // disjoint. The two people who turn their cameras on first, within
+        // one settle window of each other, are enough — the first is released
+        // into the 1-up layout at (14,8 1890x1064) and the second into the
+        // 2-up layout at (964,274 948x532), entirely inside it: 500080 px^2,
+        // 99% of the second tile, frozen for the whole window. Excluding only
+        // self is what makes the earlier guest keep the space it already
+        // holds and the later one wait, instead of both being blind to each
+        // other.
+        //
         // Read before the springs below advance, so a tile is measured where
         // it was at the end of the previous frame rather than one step into
         // this one. The difference cannot matter for the cases this decides:
         // a never-seen tile only exists while a set change is pending, and a
         // pending change is exactly when committed tiles are NOT retargeted.
-        std::vector<TileRect> live_rects;
+        std::vector<std::pair<uint32_t, TileRect>> live_rects;
         live_rects.reserve(desired.size());
         for (const auto &d : desired) {
             auto it = m_tiles.find(d.participant_id);
             if (it != m_tiles.end()) {
-                // A provisional tile is itself a guest of this layout, so it
-                // is not something another guest must yield to. Two guests
-                // are slots in the same grid and are disjoint by
-                // construction anyway.
-                if (it->second.provisional) continue;
                 TileRect r;
                 r.x = it->second.x.position; r.y = it->second.y.position;
                 r.width = it->second.w.position; r.height = it->second.h.position;
-                live_rects.push_back(r);
+                live_rects.emplace_back(d.participant_id, r);
                 continue;
             }
             // No motion state. A committed one is created at its target
             // further down and drawn there this frame; an uncommitted one is
-            // a newcomer, which is a guest and is handled below.
+            // a newcomer with nothing on screen yet, so it holds no space for
+            // anyone else to yield to.
             const bool committed =
                 std::find(m_committed_ids.begin(), m_committed_ids.end(),
                           d.participant_id) != m_committed_ids.end();
-            if (committed) live_rects.push_back(d.rect);
+            if (committed) live_rects.emplace_back(d.participant_id, d.rect);
         }
 
         for (const auto &d : desired) {
@@ -475,8 +486,15 @@ public:
                 bool courtesy_expired = false;
                 if (never_seen || tile->second.provisional) {
                     bool covers_someone = false;
-                    for (const TileRect &r : live_rects) {
-                        if (rects_overlap(would_draw, r)) { covers_someone = true; break; }
+                    for (const auto &r : live_rects) {
+                        // Self, not a collision. Deleting this skip instead
+                        // of narrowing the loop above makes every guest
+                        // compare against its own rect and yield to itself.
+                        if (r.first == d.participant_id) continue;
+                        if (rects_overlap(would_draw, r.second)) {
+                            covers_someone = true;
+                            break;
+                        }
                     }
                     if (!covers_someone) {
                         // Clear as this frame stands. Its clock is cleared
@@ -485,12 +503,45 @@ public:
                         // later yield is measured from when THAT yield began.
                         m_withheld_since.erase(d.participant_id);
                     } else {
+                        // KNOWN COST, recorded rather than fixed — the repo
+                        // owner is deciding on it. A guest that is ALREADY on
+                        // screen goes dark here: it was drawn while its slot
+                        // was free, and yields the moment something claims
+                        // that space. Over 3000 randomised runs that produced
+                        // 1474 dark episodes, 22% of them after only 1 to 3
+                        // visible frames — a face flashes for ~32ms and the
+                        // slot drops to background for up to 256ms. Neither
+                        // the unconditional withhold nor the first
+                        // disjointness release did that. It is bounded, not a
+                        // ping-pong: the clock below guarantees promotion, so
+                        // it is a flash and a gap, never an oscillation. But
+                        // it is the same artefact shape rejected elsewhere in
+                        // this file, and the alternative — keeping a guest on
+                        // screen once drawn — puts it back under the face
+                        // that claimed the space.
                         auto since = m_withheld_since.find(d.participant_id);
                         if (since == m_withheld_since.end())
                             since = m_withheld_since
                                         .emplace(d.participant_id, now_ns).first;
                         if ((now_ns - since->second) < kSettleNs)
                             continue;                    // yielding
+
+                        // KNOWN GAP, same status. Promoting here re-creates
+                        // the very overlap the yield above prevents, whenever
+                        // this clock and the whole-set settle clock do not
+                        // expire together — only the latter is re-stamped by
+                        // roster churn, so one unrelated blip drives them
+                        // apart. Measured under sustained churn: 284
+                        // consecutive frames, 4.5 seconds, at 495264 px^2.
+                        // The promotion is not optional — it is what stops a
+                        // yielding guest being suppressed forever, which an
+                        // earlier round required after a joiner was measured
+                        // never appearing in 30 seconds — so the two
+                        // requirements genuinely conflict and this resolves
+                        // toward liveness. The honest statement of what this
+                        // branch guarantees is "a guest yields while it would
+                        // cover, until its clock runs out", NOT "two live
+                        // tiles never overlap".
                         m_withheld_since.erase(since);
                         courtesy_expired = true;
                     }

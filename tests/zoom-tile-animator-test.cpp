@@ -206,17 +206,38 @@ int main()
               "the sharp empty-roster proposal skipped the settle hold instead of staying in flight");
     }
 
-    // Invariant 1 + 4: a genuine departure begins fading only once the 250ms
-    // settle window has committed the smaller roster — not the instant the
-    // departure is first observed — and is fully gone once its own duration
+    // Invariant 1 + 4: a genuine departure holds its last frame — unfaded,
+    // never absent — for the whole 250ms settle window, begins fading only
+    // once that window commits the smaller roster (not the instant the
+    // departure is first observed), and is fully gone once its own duration
     // has elapsed. `departed` is a state, not a one-shot event: a real caller
     // recomputes it every frame and keeps passing it for as long as the
     // participant remains absent, so the test does the same rather than
     // passing it once and letting it lapse.
+    //
+    // The 300/549ms checks guard against the "hold has a hole" defect found
+    // in review: `desired` drops the tile immediately, but `wanted` (still
+    // keyed off the pre-commit `m_committed_ids`) does not go false until
+    // commit, so without an explicit held-emission for this window the tile
+    // is in neither emission set — cut, then popped back at 100% opacity
+    // when the fade starts, which is worse than the single-frame cut this
+    // whole feature exists to avoid.
     {
         TileAnimator a;
         a.advance(0, {{1, rect(0, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});
-        a.advance(300 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {2});  // departure proposed: pending
+
+        const auto proposed = a.advance(300 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {2});
+        const AnimatedTile *held = find(proposed, 2);
+        const bool held_at_full_alpha = held != nullptr && held->alpha == 1.0;
+        check(held_at_full_alpha,
+              "invariant 1: a departing tile vanished during the settle window instead of holding its last frame");
+
+        const auto still_pending = a.advance(549 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {2});
+        const AnimatedTile *still_held = find(still_pending, 2);
+        const bool still_held_at_full_alpha = still_held != nullptr && still_held->alpha == 1.0;
+        check(still_held_at_full_alpha,
+              "invariant 1: a departing tile vanished 249ms into the settle window, one ms short of commit");
+
         const auto committed =
             a.advance(560 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {2});  // held 260ms >= 250ms: commits here
         const AnimatedTile *just_started = find(committed, 2);
@@ -240,14 +261,21 @@ int main()
               "invariant 4: an exit outlived its configured duration");
     }
 
-    // Invariant 2: a reassignment cuts instantly — no fade at all, at any of
-    // the timestamps at which invariant 1's test shows a genuine departure
-    // fading. `departed` stays empty throughout: participant 2 disappeared
-    // from the layout but never left the roster.
+    // Invariant 2: a reassignment cuts instantly — no fade, and no hold
+    // either, at any of the timestamps at which invariant 1's test shows a
+    // genuine departure present (mid-settle-hold, at commit, mid-fade, or
+    // after). `departed` stays empty throughout: participant 2 disappeared
+    // from the layout but never left the roster. The 300ms check is inside
+    // the settle window — exactly where a careless "hold the departing tile"
+    // patch (the Invariant-1 fix above) would start emitting a reassigned
+    // participant too, if it held on committed-set membership instead of
+    // `departed`.
     {
         TileAnimator a;
         a.advance(0, {{1, rect(0, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});
-        a.advance(300 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {});
+        const auto pending = a.advance(300 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {});
+        check(find(pending, 2) == nullptr,
+              "invariant 2: a reassigned slot was held during the settle window");
         const auto committed = a.advance(560 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {});
         check(find(committed, 2) == nullptr,
               "invariant 2: a reassigned slot was still present once its set change committed");
@@ -259,12 +287,13 @@ int main()
               "invariant 2: a reassigned slot lingered past a duration it should never have had");
     }
 
-    // Invariant 3: a repoint cancels a running exit immediately. Let a
-    // genuine exit begin and reach mid-fade exactly as in invariant 1's
-    // test, then bring the participant back into `desired` with `departed`
-    // no longer listing it. It must stop fading at once — not finish out its
-    // remaining duration, and not linger as a second, stale entry alongside
-    // the fresh one.
+    // Invariant 3: a repoint cancels a running exit immediately — even when
+    // the participant is repointed back into the *layout* while still
+    // absent from the meeting *roster*. `departed` is roster-absence state
+    // (see the header comment on `wanted`), so a correct caller keeps
+    // reporting participant 2 as departed even after a slot shows them
+    // again; this test does too, rather than testing only the easier case
+    // where the caller conveniently clears `departed` on repoint.
     {
         TileAnimator a;
         a.advance(0, {{1, rect(0, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});
@@ -275,21 +304,37 @@ int main()
         const bool setup_ok = fading != nullptr && fading->alpha < 1.0 && fading->alpha > 0.0;
         check(setup_ok, "test setup: participant 2 should be mid-exit before the repoint");
 
-        // Repoint: 2 is back in the layout, and the caller correctly no
-        // longer lists it in `departed`.
+        auto count_id2 = [](const std::vector<AnimatedTile> &tiles) {
+            int n = 0;
+            for (const auto &t : tiles)
+                if (t.participant_id == 2) ++n;
+            return n;
+        };
+
+        // Repoint: 2 is back in `desired`. `departed` still lists it — a
+        // slot showing it again does not mean it rejoined the meeting.
         const auto out = a.advance(
-            670 * kMs, {{1, rect(0, 0, 200, 200)}, {2, rect(100, 0, 150, 150)}}, on, {});
-        int count2 = 0;
-        double alpha2 = -1.0;
-        for (const auto &t : out) {
-            if (t.participant_id == 2) { ++count2; alpha2 = t.alpha; }
-        }
-        check(count2 == 1,
-              "invariant 3: a repointed participant was emitted more than once — "
-              "a stale exit leaked through alongside the fresh tile");
-        const bool cancelled = count2 == 1 && alpha2 == 1.0;
-        check(cancelled,
+            670 * kMs, {{1, rect(0, 0, 200, 200)}, {2, rect(100, 0, 150, 150)}}, on, {2});
+        check(count_id2(out) == 1,
+              "invariant 3: a repointed participant was emitted more than once at the repoint frame");
+        const AnimatedTile *repointed = find(out, 2);
+        const bool cancelled_at_repoint = repointed != nullptr && repointed->alpha == 1.0;
+        check(cancelled_at_repoint,
               "invariant 3: a running exit survived the slot being repointed");
+
+        // Advance past the repointed set's own settle commit (250ms after
+        // 670ms). This is where a stale `exiting` flag — left true because
+        // the `wanted` branch never reset it — would surface as a permanent
+        // duplicate: itself a standing invariant-4 violation, an exit that
+        // never ends.
+        const auto after_commit = a.advance(
+            920 * kMs, {{1, rect(0, 0, 200, 200)}, {2, rect(100, 0, 150, 150)}}, on, {2});
+        check(count_id2(after_commit) == 1,
+              "invariant 3: a stale exit produced a permanent duplicate once the repoint's own settle window committed");
+        const AnimatedTile *settled = find(after_commit, 2);
+        const bool no_lingering_fade = settled != nullptr && settled->alpha == 1.0;
+        check(no_lingering_fade,
+              "invariant 3: the repointed participant was still fading after its own settle window committed");
     }
 
     if (failures == 0) std::cout << "zoom-tile-animator tests passed\n";

@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <iterator>
 #include <map>
 #include <vector>
 
@@ -109,8 +108,23 @@ public:
         //   2. a reassignment cuts instantly, no hold and no fade
         //   3. any repoint cancels a running exit immediately
         //   4. an exit can never outlive its duration
+        //
+        // "wanted" is presence in the *layout* — this frame's `desired`, or
+        // the settled set the wall is committed to — not committed-set
+        // membership alone. `departed` is roster-absence state, not a
+        // one-shot event, so a participant can be in both `desired` and
+        // `departed` at once: repointed back into a slot while still absent
+        // from the meeting roster. A correct caller cannot drop them from
+        // `departed` just because a slot shows them again, so committed-set
+        // membership by itself cannot be trusted to mean "still exiting" —
+        // presence in `desired` must cancel a running exit immediately,
+        // regardless of what the settle window has or hasn't committed to
+        // yet. (Invariant 2 is unaffected: a reassigned participant is by
+        // definition never back in `desired`, so this addition never applies
+        // to it.)
         for (auto it = m_tiles.begin(); it != m_tiles.end();) {
             const bool wanted =
+                std::find(incoming.begin(), incoming.end(), it->first) != incoming.end() ||
                 std::find(m_committed_ids.begin(), m_committed_ids.end(),
                           it->first) != m_committed_ids.end();
             if (wanted) {
@@ -140,7 +154,9 @@ public:
         }
 
         std::vector<AnimatedTile> out;
-        out.reserve(desired.size());
+        // Upper bound: every desired tile, plus every tracked tile the loop
+        // below might append (exiting, or held mid-departure).
+        out.reserve(desired.size() + m_tiles.size());
         for (const auto &d : desired) {
             const bool committed =
                 std::find(m_committed_ids.begin(), m_committed_ids.end(),
@@ -204,11 +220,48 @@ public:
         }
 
         for (const auto &entry : m_tiles) {
-            if (!entry.second.exiting) continue;
+            if (entry.second.exiting) {
+                // Fading. Deliberately not gated on presence in `desired`:
+                // that invariant — a tile the loop above just placed back in
+                // `desired` always has `exiting == false` by construction,
+                // because "wanted" already forced it false — is exactly what
+                // must hold for this to never double-emit a repointed
+                // participant. Gating this check on `desired` membership
+                // would paper over a broken reset above instead of relying
+                // on it, and silently hide the exact bug invariant 3 exists
+                // to catch.
+                TileRect r;
+                r.x = entry.second.x.position; r.y = entry.second.y.position;
+                r.width = entry.second.w.position; r.height = entry.second.h.position;
+                out.push_back(AnimatedTile{entry.first, r, entry.second.alpha, false});
+                continue;
+            }
+
+            // Not exiting. Anything present in `desired` this frame was
+            // already emitted by the loop above; only tracked tiles absent
+            // from `desired` are relevant below.
+            const bool in_desired =
+                std::find(incoming.begin(), incoming.end(), entry.first) != incoming.end();
+            if (in_desired) continue;
+
+            // Still "wanted" (see above) but missing from this frame's
+            // `desired` — reachable only while a roster-set change is
+            // pending, i.e. inside the 250ms settle window. `departed` is
+            // what tells a genuine departure mid-settle apart from a
+            // reassignment mid-settle: only the former holds its last frame
+            // here, unfaded, until the removal commits and the exit above
+            // begins. A reassignment is never in `departed`, so it stays cut
+            // for the whole window — exactly as it already was — rather than
+            // being held for up to 250ms, which would itself be an
+            // invariant-2 violation (the wrong face held on air).
+            const bool left_roster =
+                std::find(departed.begin(), departed.end(), entry.first) != departed.end();
+            if (!left_roster) continue;
+
             TileRect r;
             r.x = entry.second.x.position; r.y = entry.second.y.position;
             r.width = entry.second.w.position; r.height = entry.second.h.position;
-            out.push_back(AnimatedTile{entry.first, r, entry.second.alpha, false});
+            out.push_back(AnimatedTile{entry.first, r, 1.0, true});
         }
 
         return out;

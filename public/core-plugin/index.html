@@ -3,19 +3,34 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CoreVideo (OBS Plugin) | CoreVideo</title>
-  <meta name="description" content="CoreVideo OBS plugin workflows, control examples, and ISO recording.">
+  <title>CoreVideo OBS Plugin Guide - Zoom ISO Recording &amp; Routing</title>
+  <meta name="description" content="How to route Zoom participants to OBS sources: per-participant video and audio, active-speaker follow, spotlight slots, screen share, and ISO recording.">
   <meta name="theme-color" content="#0a0b0c">
   <link rel="icon" href="/favicon.svg">
   <link rel="preload" href="/assets/fonts/SpaceGrotesk-var.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/assets/fonts/IBMPlexMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="canonical" href="https://corevideo.io/core-plugin/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="CoreVideo">
+  <meta property="og:title" content="CoreVideo OBS Plugin Guide - Zoom ISO Recording &amp; Routing">
+  <meta property="og:description" content="How to route Zoom participants to OBS sources: per-participant video and audio, active-speaker follow, spotlight slots, screen share, and ISO recording.">
+  <meta property="og:image" content="https://corevideo.io/assets/corevideo-share.jpg">
+  <meta property="og:image:alt" content="CoreVideo - Zoom participant video and audio as native OBS Studio sources">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:url" content="https://corevideo.io/core-plugin/">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="CoreVideo OBS Plugin Guide - Zoom ISO Recording &amp; Routing">
+  <meta name="twitter:description" content="How to route Zoom participants to OBS sources: per-participant video and audio, active-speaker follow, spotlight slots, screen share, and ISO recording.">
+  <meta name="twitter:image" content="https://corevideo.io/assets/corevideo-share.jpg">
+  <meta name="twitter:image:alt" content="CoreVideo - Zoom participant video and audio as native OBS Studio sources">
   <link rel="stylesheet" href="/assets/site.css">
 </head>
 <body class="document-page">
   <header class="site-header">
     <a class="brand" href="/"><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
-    <nav><a href="/">Home</a><a href="/pro/">CoreVideo Pro</a><a href="/pro/documentation/">Pro Docs</a><a href="/documentation/">Plugin Docs</a><a href="/core-plugin/" aria-current="page">Core Plugin</a><a href="/download">Download</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a></nav>
+    <nav><a href="/">Home</a><a href="/pro/">CoreVideo Pro</a><a href="/pro/documentation/">Pro Docs</a><a href="/documentation/">Plugin Docs</a><a href="/core-plugin/" aria-current="page">Core Plugin</a><a href="/download/">Download</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a></nav>
   </header>
   <main class="content">
     <h1>Core Plugin Functionality</h1>
@@ -55,6 +70,24 @@
 }</code></pre>
 <p>OSC parity is available for hardware panels and show-control systems: <code>/zoom/status</code> replies with <code>/zoom/status/screen_share ,is</code>, subscribers receive <code>/zoom/event/screen_share ,is</code> when the active sharer changes, and <code>/zoom/list_participants</code> emits <code>/zoom/participant/detail</code> packets with the <code>is_sharing_screen</code> flag plus host, co-host, raised-hand, and spotlight state.</p>
 <p>For a single directed speaker-follow output, add the dedicated <strong>CoreVideo Active Speaker</strong> OBS source. It follows the central Active Speaker Director and uses a two-slot handoff internally: the current participant remains visible while the next participant warms on a hidden slot, then the source cuts only after a valid frame is available.</p>
+<h2>CoreVideo Tiles</h2>
+<p><strong>CoreVideo Tiles</strong> is one OBS source that draws every participant as a gallery wall. Where a participant source is one person, Tiles is the whole grid: it picks the layout for the number of people on screen, and repaints itself as people join and leave. Add it from <strong>Sources -&gt; Add -&gt; CoreVideo Tiles</strong>.</p>
+<p>Every tile is filled, never letterboxed. A tile narrower than the camera feeding it crops the sides rather than adding bars, which is what keeps a wall of mixed cameras looking even.</p>
+<h3>Filling the wall</h3>
+<table><thead><tr><th>Control</th><th>Does</th></tr></thead><tbody><tr><td><strong>Fill mode</strong></td><td><code>Auto - everyone with video</code> fills the wall with whoever currently has video, in roster order. <code>Manual - choose per tile</code> gives you a <strong>Tile 1..N</strong> dropdown per position, so you place people yourself.</td></tr><tr><td><strong>Maximum tiles</strong></td><td>Upper bound on how many tiles Auto mode will draw.</td></tr><tr><td><strong>Never show</strong></td><td>Participants Auto mode skips — the stage camera, a recording bot, anyone who should never land on the wall.</td></tr><tr><td><strong>Refresh participant list</strong></td><td>Re-reads the roster if someone joined while the properties dialog was open.</td></tr></tbody></table>
+<h3>Shape and spacing</h3>
+<table><thead><tr><th>Control</th><th>Default</th><th>Does</th></tr></thead><tbody><tr><td><strong>Tile shape</strong></td><td><code>16:9 (widescreen)</code></td><td>Shape of every tile: 16:9, 4:3, 5:4, 1:1 (square), 3:4 (portrait), 9:16 (vertical), or <code>Custom ratio</code>.</td></tr><tr><td><strong>Custom ratio (width / height)</strong></td><td>16:9</td><td>Used only when Tile shape is <code>Custom ratio</code>.</td></tr><tr><td><strong>Gap between tiles (% of canvas height)</strong></td><td>0.741%</td><td>Space between tiles. A percentage of canvas height, so spacing scales with the canvas — 0.741% is the 8 px at 1080p the wall has always used.</td></tr><tr><td><strong>Margin around the wall (% of canvas height)</strong></td><td>0.741%</td><td>Space between the wall and the canvas edge.</td></tr></tbody></table>
+<h3>Background</h3>
+<p><strong>Background colour</strong> fills the gutters, the margin, and any canvas the wall does not cover. <strong>Background source</strong> draws any video-producing OBS source — an Image, a Media Source, a Browser Source — behind the tiles and over that colour; leave it on <code>- none -</code> for colour only. A background source that is deleted, or one that would render itself (the wall, or a scene containing it), falls back to the colour rather than breaking the wall.</p>
+<h3>Borders and glow</h3>
+<table><thead><tr><th>Control</th><th>Default</th><th>Does</th></tr></thead><tbody><tr><td><strong>Border width</strong></td><td>0 (off)</td><td>Border drawn inside each tile's edge.</td></tr><tr><td><strong>Border colour</strong></td><td>black</td><td></td></tr><tr><td><strong>Corner shape</strong></td><td>Square</td><td><code>Square</code> or <code>Rounded</code>.</td></tr><tr><td><strong>Corner radius</strong></td><td>16</td><td>Shown only when Corner shape is <code>Rounded</code>.</td></tr><tr><td><strong>Glow size</strong></td><td>0 (off)</td><td>Outer glow drawn around each tile, in a pass behind the tiles.</td></tr><tr><td><strong>Glow colour</strong></td><td>white</td><td></td></tr><tr><td><strong>Glow intensity (%)</strong></td><td>100</td><td></td></tr><tr><td><strong>Glow softness (%)</strong></td><td>0</td><td>How gradually the glow falls off.</td></tr></tbody></table>
+<p>Border width and corner radius are clamped against the tile they are drawn on — past half the shorter side there is no interior left — so an extreme value degrades gracefully instead of inverting the tile.</p>
+<h3>Per-tile crop</h3>
+<p><strong>Per-tile crop</strong> gives each tile its own <code>crop left %</code> and <code>crop right %</code>, for trimming a participant who is sitting off-centre without touching the others.</p>
+<h3>Per-participant audio</h3>
+<p>The wall itself carries no audio. <strong>Participant audio scene or group</strong> names a scene or group in which the wall creates one Zoom participant audio source per tile, so every person on the wall gets their own fader and their own ISO track. Leave it blank and nothing is created.</p>
+<p>Points worth knowing before you switch it on:</p>
+<ul><li><strong>Add that scene or group to every scene.</strong> Audio then stays put while you cut between scenes, instead of appearing and disappearing with the wall.</li><li><strong>A nested scene is safer than a group.</strong> A group can be dissolved with <strong>Ungroup</strong>, which scatters the sources inside it.</li><li><strong>Use the audio group on one Tiles source only.</strong> If you run a second wall — a panel wall beside a main one — leave its audio field blank. Audio for each person belongs to whichever wall created it, so on a second wall someone who drops off that wall can be left muted while still on screen on the other one, and both walls number their ISO stems from track 2 up, which can put two people on the same stem in the recording. The plugin logs a warning if it sees a second wall with a group set.</li></ul>
 <h2>Active Speaker Director</h2>
 <p>The Active Speaker Director is controlled from the Zoom Control dock. It is not just a pass-through of Zoom's raw active-speaker event; it builds CoreVideo's own production decision from the raw speaker signal.</p>
 <p>The dock shows:</p>

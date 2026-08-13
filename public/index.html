@@ -3,45 +3,106 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CoreVideo | CoreVideo</title>
-  <meta name="description" content="CoreVideo: the OBS plugin for live Zoom video, and CoreVideo Pro, a standalone app for producing online conversations.">
+  <title>CoreVideo - Zoom Video &amp; Audio as Native OBS Sources</title>
+  <meta name="description" content="Free open-source OBS Studio plugin: Zoom participant video, audio, and screen share as native OBS sources. No NDI, virtual camera, or screen capture.">
   <meta name="theme-color" content="#0a0b0c">
   <link rel="icon" href="/favicon.svg">
   <link rel="preload" href="/assets/fonts/SpaceGrotesk-var.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/assets/fonts/IBMPlexMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="canonical" href="https://corevideo.io/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="CoreVideo">
+  <meta property="og:title" content="CoreVideo - Zoom Video &amp; Audio as Native OBS Sources">
+  <meta property="og:description" content="Free open-source OBS Studio plugin: Zoom participant video, audio, and screen share as native OBS sources. No NDI, virtual camera, or screen capture.">
+  <meta property="og:image" content="https://corevideo.io/assets/corevideo-share.jpg">
+  <meta property="og:image:alt" content="CoreVideo - Zoom participant video and audio as native OBS Studio sources">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:url" content="https://corevideo.io/">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="CoreVideo - Zoom Video &amp; Audio as Native OBS Sources">
+  <meta name="twitter:description" content="Free open-source OBS Studio plugin: Zoom participant video, audio, and screen share as native OBS sources. No NDI, virtual camera, or screen capture.">
+  <meta name="twitter:image" content="https://corevideo.io/assets/corevideo-share.jpg">
+  <meta name="twitter:image:alt" content="CoreVideo - Zoom participant video and audio as native OBS Studio sources">
   <link rel="stylesheet" href="/assets/site.css">
+  <script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "SoftwareApplication",
+      "name": "CoreVideo",
+      "alternateName": "CoreVideo OBS Plugin",
+      "applicationCategory": "MultimediaApplication",
+      "applicationSubCategory": "OBS Studio plugin",
+      "operatingSystem": "Windows 10, Windows 11, macOS (Apple Silicon beta)",
+      "description": "OBS Studio plugin that captures Zoom meeting participants as native OBS sources - per-participant video and audio, screen share, interpretation audio, and ISO recording - using the Zoom Meeting SDK rather than NDI, a virtual camera, or screen capture.",
+      "url": "https://corevideo.io/",
+      "downloadUrl": "https://corevideo.io/download/",
+      "installUrl": "https://corevideo.io/download/",
+      "softwareHelp": "https://corevideo.io/documentation/",
+      "license": "https://opensource.org/licenses/MIT",
+      "isAccessibleForFree": true,
+      "image": "https://corevideo.io/assets/corevideo-share.jpg",
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD",
+        "availability": "https://schema.org/InStock"
+      },
+      "softwareVersion": "0.1.38"
+    },
+    {
+      "@type": "WebSite",
+      "name": "CoreVideo",
+      "url": "https://corevideo.io/"
+    }
+  ]
+}
+  </script>
 </head>
 <body class="home-page">
   <header class="site-header">
     <a class="brand" href="/"><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
-    <nav><a href="/" aria-current="page">Home</a><a href="/pro/">CoreVideo Pro</a><a href="/pro/documentation/">Pro Docs</a><a href="/documentation/">Plugin Docs</a><a href="/core-plugin/">Core Plugin</a><a href="/download">Download</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a></nav>
+    <nav><a href="/" aria-current="page">Home</a><a href="/pro/">CoreVideo Pro</a><a href="/pro/documentation/">Pro Docs</a><a href="/documentation/">Plugin Docs</a><a href="/core-plugin/">Core Plugin</a><a href="/download/">Download</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a></nav>
   </header>
   <main class="content">
     <section class="hero">
   <figure class="hero-media">
     <div class="console">
-      <div class="console-bar"><span class="tally tally-live">Live</span><span>Multiview 01</span><span class="tc">1080p60 &middot; 00:00:00:00</span></div>
-      <div class="console-screen center"><div class="brand-lockup"><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><div class="wordmark">CoreVideo</div><div class="brand-sub">Live production studio</div></div></div>
+      <div class="console-bar"><span class="tally tally-live">Live</span><span>Program</span><span class="tc">1080p60 &middot; 6 Zoom sources</span></div>
+      <div class="console-screen"><img src="/assets/dynamic-gallery.webp" alt="A six-participant gallery composed in OBS from individual CoreVideo sources, each guest in their own rounded, bordered tile on a branded background"></div>
     </div>
   </figure>
   <div class="hero-copy">
-    <p class="eyebrow">Live Zoom production &mdash; from free plugin to full studio</p>
-    <h1>Produce broadcast-grade Zoom shows in one studio app.</h1>
-    <p class="lede">CoreVideo Pro is the complete standalone production studio for live Zoom conversations &mdash; scenes, participants, AI direction, recording, and streaming in a single premium app. Already working in OBS? The free CoreVideo plugin brings the same clean participant capture to your existing rig.</p>
+    <p class="eyebrow">Free, open-source OBS Studio plugin</p>
+    <h1>Bring Zoom participants into OBS as native sources.</h1>
+    <p class="lede">CoreVideo joins the meeting through the Zoom Meeting SDK and hands OBS each participant's own video and audio as a real source &mdash; no NDI, no virtual camera, no screen capture, and no second machine. Follow the active speaker, pin spotlight slots, take the screen share, and record every guest to an isolated file.</p>
     <div class="hero-actions">
-      <a class="button primary" href="/pro/">Explore CoreVideo Pro</a>
-      <a class="button" href="/core-plugin/">Free OBS plugin</a>
-      <a class="button" href="/documentation/">Plugin Docs</a>
+      <a class="button primary" href="/download/">Download v0.1.38 for Windows</a>
+      <a class="button" href="/core-plugin/">How it works</a>
+      <a class="button" href="https://github.com/iamfatness/CoreVideo">View source</a>
     </div>
   </div>
 </section>
+<section class="link-grid" aria-label="What the plugin does">
+  <div><strong>One source per participant</strong><span>Each Zoom participant becomes a separate OBS source at up to 1080p, with their audio on its own track &mdash; not a crop out of a gallery screenshot.</span></div>
+  <div><strong>Active speaker &amp; spotlight</strong><span>Point a source at whoever is talking, at Zoom spotlight slot 1&hellip;N, or at a fixed guest with an automatic failover if they drop.</span></div>
+  <div><strong>Screen share &amp; interpretation</strong><span>Subscribe to the live screen share, and pull existing Zoom interpretation audio channels in as dedicated sources.</span></div>
+  <div><strong>ISO recording</strong><span>Record every assigned participant to their own muxed MP4 with matching PCM audio, alongside the main program recording.</span></div>
+</section>
+<figure class="doc-image">
+  <img src="/assets/obs-multiview.webp" alt="OBS Studio multiview: preview and program above four scenes built from individual Zoom participant sources - the host alone, the host with a reader, the host with the active speaker, and the active speaker full frame" loading="lazy">
+  <figcaption>Every guest arrives as their own OBS source, so scenes, transitions, and the multiview all work the way they already do &mdash; this is stock OBS, cutting between Zoom participants.</figcaption>
+</figure>
 <section class="link-grid products" aria-label="CoreVideo products">
-  <a class="featured" href="/pro/"><span class="tier tier-premium">Premium &middot; Standalone app</span><strong>CoreVideo Pro</strong><span>The complete production studio for live Zoom conversations: multi-scene production, participant management, AI auto-direct, recording, and multi-destination streaming in one polished app.</span></a>
-  <a href="/core-plugin/"><span class="tier">Free &middot; OBS plugin</span><strong>CoreVideo (OBS Plugin)</strong><span>The free building block: clean Zoom participant video, audio, screen share, and ISO recording as native sources inside OBS Studio.</span></a>
+  <a href="/download/"><span class="tier">Free &middot; OBS plugin</span><strong>CoreVideo for OBS</strong><span>The plugin on this page: Zoom participant video, audio, screen share, interpretation, and ISO recording as native sources in the OBS you already run. MIT licensed.</span></a>
+  <a class="featured" href="/pro/"><span class="tier tier-premium">Premium &middot; Standalone app</span><strong>CoreVideo Pro</strong><span>Want the whole console instead of a plugin? Pro is a standalone studio: multi-scene production, participant management, AI auto-direct, recording, and multi-destination streaming.</span></a>
 </section>
 <section class="link-grid" aria-label="CoreVideo resources">
   <a href="/documentation/"><strong>Plugin Docs</strong><span>Architecture, setup, control APIs, and operating notes.</span></a>
+  <a href="/documentation/#mac-beta"><strong>macOS Beta (Apple Silicon)</strong><span>Install the CoreVideo OBS plugin beta on Apple Silicon Macs.</span></a>
   <a href="/core-plugin/"><strong>Core Plugin Guide</strong><span>OBS workflows, participant routing, isolated audio, and ISO recording.</span></a>
   <a href="/pro/"><strong>CoreVideo Pro</strong><span>Standalone production app for live and recorded conversations.</span></a>
   <a href="/pro/documentation/"><strong>CoreVideo Pro Architecture</strong><span>Native media core, typed IPC, capture, AI direction, and outputs &mdash; with diagrams.</span></a>

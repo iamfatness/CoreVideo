@@ -1,6 +1,37 @@
 # CoreVideo
 
-> **ZOOM RAW DATA AND BANDWIDTH LIMITS - READ BEFORE USE**
+**Bring Zoom participants into OBS Studio as native sources - no NDI, no virtual camera, no screen capture.**
+
+[![Latest release](https://img.shields.io/github/v/release/iamfatness/CoreVideo?label=release)](https://github.com/iamfatness/CoreVideo/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20(beta)-blue)](https://corevideo.io/download/)
+[![OBS Studio](https://img.shields.io/badge/OBS%20Studio-30%2B-302E31)](https://obsproject.com/)
+
+![OBS Studio multiview showing preview and program alongside four scenes built from individual Zoom participant sources](site-assets/obs-multiview.webp)
+
+CoreVideo joins your meeting through the Zoom Meeting SDK and hands OBS each
+participant's own video and audio as a real source. Follow the active speaker,
+pin spotlight slots, take the screen share, capture Zoom interpretation audio
+channels, and record every guest to an isolated file.
+
+**[Download for Windows ->](https://corevideo.io/download/)**
+
+Docs: **[Full Documentation & Architecture Diagrams ->](https://corevideo.io/documentation/)**
+Guide: **[Core Plugin Guide & Examples ->](https://corevideo.io/core-plugin/)**
+Operator Quickstart: **[Install, sign in, assign outputs, record ISO ->](docs/OPERATOR_QUICKSTART.md)**
+Changelog: **[Release notes & version history ->](CHANGELOG.md)**
+
+### How it works
+
+The SDK runs in a dedicated `ZoomObsEngine` child process; the OBS plugin
+communicates with it through a `ZoomEngineClient` singleton over cross-platform
+IPC (named pipes on Windows, Unix sockets on macOS/Linux) with frame data
+delivered through named shared memory. A built-in dockable control panel manages
+joining, and a `ZoomReconnectManager` handles automatic recovery after crashes or
+disconnects.
+
+> [!IMPORTANT]
+> **Zoom raw data and bandwidth limits - read before deploying.**
 >
 > CoreVideo uses the Zoom Meeting SDK raw data APIs. Raw data access is available
 > through Meeting SDK apps; negotiated quality follows the signed-in Zoom account
@@ -13,15 +44,6 @@
 > Contact your Zoom account representative or visit
 > [Zoom Plans](https://zoom.us/pricing) to verify production quality,
 > bandwidth, and developer/app entitlements before deploying this plugin.
-
-**OBS Studio plugin for live Zoom meeting video, audio, screen share, and Zoom interpretation audio channel capture.**
-
-CoreVideo integrates the Zoom Meeting SDK into OBS - no screen capture or virtual camera required. The SDK runs in a dedicated `ZoomObsEngine` child process; the OBS plugin communicates with it through a `ZoomEngineClient` singleton over cross-platform IPC (named pipes on Windows, Unix sockets on macOS/Linux) with frame data delivered through named shared memory. A built-in dockable control panel manages joining, and a `ZoomReconnectManager` handles automatic recovery after crashes or disconnects.
-
-Docs: **[Full Documentation & Architecture Diagrams ->](https://corevideo.iamfatness.us/documentation/)**
-Guide: **[Core Plugin Guide & Examples ->](https://corevideo.iamfatness.us/core-plugin/)**
-Operator Quickstart: **[Install, sign in, assign outputs, record ISO ->](docs/OPERATOR_QUICKSTART.md)**
-Changelog: **[Release notes & version history ->](CHANGELOG.md)**
 
 ---
 
@@ -537,7 +559,7 @@ CoreVideoOAuthCallback  (thin helper binary - ships beside the plugin)
              same forwarding behaviour
 ```
 
-See the **[full documentation](https://corevideo.iamfatness.us/documentation/)** for all architecture diagrams including the ZoomEngineClient deep-dive, OAuth PKCE flow, assignment mode flows, auto-reconnect, hardware video acceleration, TCP + OSC API references, output profile format, and full IPC protocol reference.
+See the **[full documentation](https://corevideo.io/documentation/)** for all architecture diagrams including the ZoomEngineClient deep-dive, OAuth PKCE flow, assignment mode flows, auto-reconnect, hardware video acceleration, TCP + OSC API references, output profile format, and full IPC protocol reference.
 
 See the **[product roadmap](docs/PRODUCT_ROADMAP.md)** for the phased plan that
 tracks the highest-impact missing features, bugs, and production-readiness work.

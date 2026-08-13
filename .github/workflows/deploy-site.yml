@@ -8,6 +8,7 @@ on:
       - "wiki/**"
       - "site-assets/**"
       - "scripts/build-site.mjs"
+      - "scripts/check-site-seo.mjs"
       - "public/**"
       - "site-worker.js"
       - "wrangler.jsonc"
@@ -37,6 +38,12 @@ jobs:
 
       - name: Build static site
         run: node scripts/build-site.mjs
+
+      # Missing canonicals, duplicate titles, or absent social cards fail
+      # silently in production - the page ships and simply never ranks or
+      # renders a link preview. Block the deploy instead.
+      - name: Check site SEO invariants
+        run: node scripts/check-site-seo.mjs
 
       - name: Validate Cloudflare configuration
         id: cloudflare_config

@@ -631,6 +631,10 @@ In `src/zoom-tile-animator.h`, add to the private section:
     std::vector<uint32_t> m_committed_ids;   // the set the wall is laid out for
     std::vector<uint32_t> m_pending_ids;     // a candidate set, not yet settled
     uint64_t m_pending_since_ns = 0;
+    // Explicit, not `m_committed_ids.empty()`: an empty committed set is also
+    // what a legitimately vacated wall looks like, and conflating the two lets a
+    // vacate-and-return blip skip the hold entirely.
+    bool m_has_committed = false;
 ```
 
 Add this helper to the private section:
@@ -655,8 +659,9 @@ In `advance()`, immediately after `m_last_ns = now_ns;`, insert the settle gate:
         // only adopted once it has held for kSettleNs; a reversal inside that
         // window is forgotten and nothing moves.
         const std::vector<uint32_t> incoming = ids_of(desired);
-        if (m_committed_ids.empty() && m_pending_ids.empty()) {
+        if (!m_has_committed) {
             m_committed_ids = incoming;          // first frame: adopt at once
+            m_has_committed = true;
         } else if (incoming != m_committed_ids) {
             if (incoming != m_pending_ids) {
                 m_pending_ids = incoming;
@@ -695,7 +700,37 @@ Then filter what is animated to the committed set. Replace the `for (const auto 
             }
 ```
 
-and target the springs at the rect the *committed* layout implies — which, while a change is pending, is the tile's existing target. Keep the rest of the loop body unchanged.
+**The target a tile springs toward is remembered, not taken from `desired` every frame.** This is the part the settle window actually turns on. `desired` is solved for whatever participant set the caller currently sees, so the moment a blip starts, the incoming rects describe a layout the wall has *not* agreed to. Springing toward them is the very reflow the settle window exists to suppress.
+
+Give `Motion` a remembered target and only adopt a new one when no change is pending:
+
+```cpp
+    struct Motion { Spring1D x, y, w, h; TileRect target; };
+```
+
+Seed it when a tile is first seen (`m.target = d.rect;` beside the spring seeding), and in the loop body replace the direct use of `d.rect` as the spring target with:
+
+```cpp
+            // Adopt a new target only when the layout in hand was solved for
+            // the set the wall has committed to. While a change is pending, the
+            // incoming rects belong to a layout that may never happen — a blip
+            // that reverts must leave every tile exactly where it was.
+            if (!change_pending && committed)
+                m.target = d.rect;
+
+            spring_advance(m.x, m.target.x,      settings.duration_seconds, dt);
+            spring_advance(m.y, m.target.y,      settings.duration_seconds, dt);
+            spring_advance(m.w, m.target.width,  settings.duration_seconds, dt);
+            spring_advance(m.h, m.target.height, settings.duration_seconds, dt);
+```
+
+where `change_pending` is computed once, immediately after the settle gate:
+
+```cpp
+        const bool change_pending = !m_pending_ids.empty();
+```
+
+**`at_rest` must be measured against `m.target`, not `d.rect`.** A tile held through a pending change sits exactly on its remembered target while `d.rect` says otherwise; comparing against `d.rect` would report it in motion forever and push it onto the sub-pixel render path for no reason.
 
 Finally, in the cleanup loop at the end, only erase participants absent from `m_committed_ids` (not merely absent from `desired`), so a blipped participant keeps its motion state:
 

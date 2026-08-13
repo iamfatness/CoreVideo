@@ -7,6 +7,32 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.39] - 2026-08-13
+
+### Added
+- **The Tiles wall can animate when people join and leave.** Until now a join or
+  a departure re-solved the grid and every tile jumped to its new size and
+  position on a single frame. Turn on **Animate layout changes** in the Tiles
+  source properties and the whole wall eases instead, over a duration you set
+  (default 350ms). It is **off by default**, so nothing about an existing show
+  changes until you ask for it.
+
+  Two things are worth knowing about how it behaves. A newcomer fades in at its
+  final slot rather than flying in from an edge, so tiles never cross the frame
+  to get where they are going. And a roster blip — someone dropping and
+  rejoining within a moment — now reflows the wall out and back rather than
+  popping, which reads as a wobble rather than a jump.
+
+  The still image is unchanged by construction. A tile that is not moving draws
+  through exactly the same even-snapped path it always has, down to the byte; a
+  tile only takes the sub-pixel path while it is actually in motion, and returns
+  to the pixel-exact one the moment it settles. With the toggle off the animator
+  never runs at all. This matters more than it sounds: I420 chroma is subsampled
+  2x2, so a tile edge on an odd pixel has no valid chroma sample to reconstruct
+  from, and animating through that constraint directly would have quantised the
+  motion to two pixels — juddering worst on exactly the slow, gentle reflows the
+  feature exists to produce.
+
 ### Fixed
 - **Active speaker can no longer cut faster than the hold time when someone
   becomes ineligible.** Excluding whoever is on air still moves off them
@@ -503,7 +529,8 @@ sign-in, per-participant and screen-share sources, the Active Speaker
 Director, auto-reconnect, TCP/OSC control APIs, ISO recording, the Output
 Manager, and the initial Windows release packaging and CI pipeline.
 
-[Unreleased]: https://github.com/iamfatness/CoreVideo/compare/v0.1.38...HEAD
+[Unreleased]: https://github.com/iamfatness/CoreVideo/compare/v0.1.39...HEAD
+[0.1.39]: https://github.com/iamfatness/CoreVideo/compare/v0.1.38...v0.1.39
 [0.1.38]: https://github.com/iamfatness/CoreVideo/compare/v0.1.37...v0.1.38
 [0.1.37]: https://github.com/iamfatness/CoreVideo/compare/v0.1.36...v0.1.37
 [0.1.36]: https://github.com/iamfatness/CoreVideo/compare/v0.1.35...v0.1.36

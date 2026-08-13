@@ -1,7 +1,55 @@
 # CoreVideo Tiles — layout animation design
 
-Status: approved design, not yet planned or implemented.
-Date: 2026-08-12.
+Status: implemented and shipped in v0.1.39.
+Date: 2026-08-12. Amended 2026-08-13 (see "What implementation changed").
+
+## What implementation changed
+
+Two of the five decisions below did not survive implementation. Both are
+recorded here rather than edited away, because each looks obviously correct in
+isolation and someone will otherwise reintroduce it.
+
+### Decision 4's settle window was deleted
+
+The window existed so that a roster blip could not produce a full exit
+animation followed by a full entry. Once decision 3 was dropped and exits are
+not drawn (below), it was guarding against something that can no longer happen.
+
+It was not merely redundant, it was harmful. Holding a change back means a
+tile's target belongs to the grid generation that was current when the hold
+began. A tile absent at commit time therefore kept a target from an older
+generation, and if it returned during someone else's hold it was neither
+withheld nor retargeted — so two tiles ended up placed on two different grids
+and **overlapped while both were at rest**. That is the defect the animator
+exists to avoid, and five rounds of narrowing the window each fixed one
+sequence and exposed another.
+
+Deleting it makes the class unrepresentable: every set change commits on the
+frame it arrives, so there is only ever one grid generation live, and a tile at
+rest is by construction at its slot in the layout being solved this frame.
+Slots from a single solve are disjoint, so at-rest overlap is structurally zero
+rather than tested-for. Verified at 1.44M simulated frames, including a
+degenerate geometry with no gutter at all.
+
+The cost is the one the window was buying off: a roster blip now reflows the
+wall out and back. It reads as a wobble rather than a pop. The owner evaluated
+this on a live soak and accepted it.
+
+### Decision 3 — a leaving tile holding its last frame — is not implemented
+
+Exits are never drawn. A departing tile is removed on the frame it goes absent
+and the wall reflows immediately.
+
+The exit lifecycle and its four invariants below are still implemented and
+still tested, because they bound a real capability the code retains. But
+nothing currently reaches air through that path, which is why the safest
+possible failure direction was chosen throughout: anything ambiguous degrades
+to a repoint, and a repoint cuts instantly and shows nothing stale.
+
+If exits are ever drawn, re-read the exit invariants as safety-critical before
+touching anything. One latent bug was found and fixed during review precisely
+because it was harmless only while exits stay undrawn — a Manual-mode cast
+participant who never joined the meeting was classified as a departure.
 
 ## Goal
 
@@ -45,6 +93,8 @@ construction. The additional cost exists only during a transition.
 
 ### 3. A leaving tile holds its last frame, bounded to genuine departures
 
+> **Not implemented.** See "What implementation changed" above.
+
 The natural look, and what comparable products do. It requires a bounded
 exception to the rule `src/zoom-tile-slot.h` exists to enforce — that a stored
 frame stops being shown the instant a slot is repointed, written after the wrong
@@ -52,6 +102,9 @@ face reached air. The exception is scoped by four invariants in "Exit
 invariants" below.
 
 ### 4. Retarget in flight, behind a settle window
+
+> **The settle window was deleted.** Retargeting in flight is implemented as
+> described; the window is not. See "What implementation changed" above.
 
 Changes that arrive mid-transition re-aim the tiles from wherever they currently
 are; they never queue and never restart. Before any transition begins, a roster
@@ -142,6 +195,10 @@ Entering tiles fade in at their final position rather than flying in, so tiles
 never cross one another.
 
 ### Settle window
+
+> **Deleted — this section describes what was designed, not what shipped.** See
+> "What implementation changed" above for why holding a change back placed two
+> tiles on two different grid generations.
 
 The settle window is **250 ms**, fixed in code and not exposed as a setting. It
 is a correctness mechanism rather than a taste one: exposing it would let an

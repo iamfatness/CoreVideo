@@ -203,6 +203,35 @@ Border width and corner radius are clamped against the tile they are drawn on �
 past half the shorter side there is no interior left — so an extreme value
 degrades gracefully instead of inverting the tile.
 
+### Animating layout changes
+
+| Control | Default | Does |
+| --- | --- | --- |
+| **Animate layout changes** | off | Eases the whole wall when the layout changes, instead of jumping on one frame. |
+| **Animation duration (ms)** | 350 | How long the wall takes to settle. 100–1000. |
+
+With it off, the wall behaves exactly as it always has and the animator never
+runs — this is not a cosmetic setting, it is a different render path.
+
+With it on, a join or a departure re-solves the grid and every tile eases to its
+new position and size. A departure is not one tile vanishing: five people
+becoming four turns a 3x2 grid into a 2x2, so every remaining tile moves and
+resizes regardless, and animating only the tile that changed would leave the
+most visible part of the change as a hard cut.
+
+Three behaviours worth knowing before you put it on air:
+
+- **A newcomer fades in at its final slot** rather than flying in from an edge,
+  so tiles never travel across one another to reach their positions.
+- **A departure reflows immediately** — the leaving tile is not held on screen.
+- **A roster blip reflows the wall out and back.** Someone dropping and
+  rejoining within a moment produces a wobble rather than a pop. This is the
+  deliberate trade for the wall never being behind reality.
+
+A tile that is not moving draws through the same even-snapped path it always
+has, byte for byte. Only a tile actually in motion takes the sub-pixel path, and
+it returns to the pixel-exact one as soon as it settles.
+
 ### Per-tile crop
 
 **Per-tile crop** gives each tile its own `crop left %` and `crop right %`, for

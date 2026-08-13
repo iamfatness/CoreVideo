@@ -57,6 +57,38 @@ changing the Zoom sign-in or meeting-join path.
 - Add a second Tiles source with an audio group set and confirm the plugin logs
   a warning about the second wall.
 
+## Tiles Layout Animation
+
+Every check here needs the wall on program or in a full-size preview — the
+motion is the thing being validated, and a small preview hides it.
+
+- With **Animate layout changes** off, join and leave and confirm the wall still
+  changes on a single frame exactly as before.
+- Toggle it **on while the wall is live** and confirm nothing moves, fades, or
+  blanks: the wall should simply carry on. Toggle it **off mid-reflow** and
+  confirm the wall lands on its final layout rather than freezing mid-motion.
+- Join a participant and confirm the newcomer **fades in at its final slot**
+  while the other tiles ease around it — it should never fly in from an edge.
+- Leave a participant and confirm the wall reflows immediately, with no tile
+  held on screen after the person has gone.
+- Watch a **join on a wall of four or more** and confirm tiles passing one
+  another during the reflow still looks acceptable on air. This is a judgement
+  call, not a pass/fail: tiles are opaque and do briefly overlap in transit.
+- Compare a tile **at rest against the same tile mid-motion** for any shift in
+  colour, level, or sharpness. A tile in motion composites through an
+  intermediate texture; at rest it does not. They must match. Check at 1:1 scene
+  scale — a scaled scene resamples twice and softens by design.
+- Confirm the wall **before a reflow and after it settles** is identical.
+- With **Glow** enabled, join a participant and confirm the halo fades in with
+  its tile rather than appearing at full strength around an invisible one.
+- Change **Animation duration** across its range and confirm the wall settles
+  proportionally, with no judder at the slow end.
+- Run a **roster blip** — someone dropping and rejoining within a moment — and
+  confirm the wall reflows out and back as a wobble. This is expected
+  behaviour, not a defect.
+- With eight feeds, watch CPU and GPU through several reflows and confirm no
+  sustained cost outside the transitions themselves.
+
 ## OBS Lifecycle And Reopen
 
 - Start OBS with the plugin installed.

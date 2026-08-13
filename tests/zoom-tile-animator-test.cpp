@@ -71,8 +71,9 @@ int main()
         const auto out = a.advance(16 * kMs, {{7, rect(0, 0, 200, 200)}}, on);
         const AnimatedTile *t = find(out, 7);
         check(t != nullptr, "participant 7 was lost when participant 1 left");
-        check(t->rect.x > 0.0,
-              "participant 7 teleported to participant 1's old slot — keyed by index, not identity");
+        check(t->rect.x > 0.0 && t->rect.x < 100.0,
+              "participant 7 did not continue animating from its own prior position toward its new target");
+        check(!t->at_rest, "participant 7 reported at rest despite being retargeted");
     }
 
     if (failures == 0) std::cout << "zoom-tile-animator tests passed\n";

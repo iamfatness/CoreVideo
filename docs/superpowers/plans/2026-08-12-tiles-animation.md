@@ -218,21 +218,30 @@ inline void spring_advance(Spring1D &s, double target, double settle_seconds,
         return;
     }
 
-    // Critically damped spring, integrated implicitly so it is stable at any
-    // dt — an explicit integrator diverges when a frame is long. omega is
-    // chosen so the spring is within ~1% of the target after settle_seconds.
-    constexpr double kSettleFactor = 4.6;  // -ln(0.01)
+    // Exact solution of the critically damped spring, not a numerical
+    // integrator. An approximate integrator overshoots — measurably, and by an
+    // amount that does not vanish as dt shrinks — and overshoot on a tile means
+    // it sails past its slot and comes back, which is precisely the cheap look
+    // this feature exists to avoid. The closed form also makes the result
+    // identical at any frame rate by construction rather than by tolerance.
+    //
+    // kSettleFactor is the critically damped 1%-remaining constant, the root of
+    // (1 + k)e^-k = 0.01. It is NOT 4.6: that is the first-order constant, and
+    // a second-order critically damped system decays as (1 + wt)e^-wt, which at
+    // 4.6 is still 5.6% short of its target.
+    constexpr double kSettleFactor = 6.6384;
     const double omega = kSettleFactor / settle_seconds;
 
-    const double denom = 1.0 + omega * dt_seconds +
-                         0.5 * omega * omega * dt_seconds * dt_seconds;
     const double delta = s.position - target;
-    const double next_velocity =
-        (s.velocity - omega * omega * dt_seconds * delta) / denom;
-    s.position = target + (delta + dt_seconds * next_velocity) / denom;
-    s.velocity = next_velocity;
+    const double decay = std::exp(-omega * dt_seconds);
+    const double c     = s.velocity + omega * delta;
+
+    s.position = target + (delta + c * dt_seconds) * decay;
+    s.velocity = (s.velocity - omega * c * dt_seconds) * decay;
 }
 ```
+
+`src/tile-motion.h` needs `#include <cmath>` for `std::exp`.
 
 - [ ] **Step 4: Run the test to verify it passes**
 

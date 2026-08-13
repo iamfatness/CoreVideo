@@ -32,7 +32,8 @@ class TileAnimator {
 public:
     std::vector<AnimatedTile> advance(uint64_t now_ns,
                                       const std::vector<DesiredTile> &desired,
-                                      const AnimationSettings &settings)
+                                      const AnimationSettings &settings,
+                                      const std::vector<uint32_t> &departed)
     {
         // Disabled is a bypass, not a fast setting: no state is touched and the
         // desired layout is emitted verbatim, so the renderer takes exactly the
@@ -101,6 +102,43 @@ public:
         // this must read the flag, not the vector's emptiness.
         const bool change_pending = m_has_pending;
 
+        // Exit lifecycle. These four rules bound the exception to the rule in
+        // zoom-tile-slot.h — that a stored frame stops being shown the instant a
+        // slot is repointed, written after the wrong face reached air:
+        //   1. only a genuine roster departure may start an exit
+        //   2. a reassignment cuts instantly, no hold and no fade
+        //   3. any repoint cancels a running exit immediately
+        //   4. an exit can never outlive its duration
+        for (auto it = m_tiles.begin(); it != m_tiles.end();) {
+            const bool wanted =
+                std::find(m_committed_ids.begin(), m_committed_ids.end(),
+                          it->first) != m_committed_ids.end();
+            if (wanted) {
+                it->second.exiting = false;      // (3) back in the layout
+                it->second.alpha = 1.0;
+                ++it;
+                continue;
+            }
+            const bool left_roster =
+                std::find(departed.begin(), departed.end(), it->first) != departed.end();
+            if (!left_roster) {
+                it = m_tiles.erase(it);          // (2) reassignment: instant
+                continue;
+            }
+            if (!it->second.exiting) {           // (1) departure: begin fading
+                it->second.exiting = true;
+                it->second.exit_started_ns = now_ns;
+            }
+            const double elapsed =
+                static_cast<double>(now_ns - it->second.exit_started_ns) / 1e9;
+            if (elapsed >= settings.duration_seconds) {
+                it = m_tiles.erase(it);          // (4) time-boxed
+                continue;
+            }
+            it->second.alpha = 1.0 - elapsed / settings.duration_seconds;
+            ++it;
+        }
+
         std::vector<AnimatedTile> out;
         out.reserve(desired.size());
         for (const auto &d : desired) {
@@ -165,22 +203,25 @@ public:
             out.push_back(AnimatedTile{d.participant_id, r, 1.0, at_rest});
         }
 
-        // Forget participants no longer committed. Task 4 replaces this with
-        // the exit lifecycle. Absence from `desired` alone does not erase a
-        // tile's motion state: a blipped participant keeps it until the
-        // settle window either adopts or forgets the change.
-        for (auto it = m_tiles.begin(); it != m_tiles.end();) {
-            const bool keep =
-                std::find(m_committed_ids.begin(), m_committed_ids.end(),
-                          it->first) != m_committed_ids.end();
-            it = keep ? std::next(it) : m_tiles.erase(it);
+        for (const auto &entry : m_tiles) {
+            if (!entry.second.exiting) continue;
+            TileRect r;
+            r.x = entry.second.x.position; r.y = entry.second.y.position;
+            r.width = entry.second.w.position; r.height = entry.second.h.position;
+            out.push_back(AnimatedTile{entry.first, r, entry.second.alpha, false});
         }
 
         return out;
     }
 
 private:
-    struct Motion { Spring1D x, y, w, h; TileRect target; };
+    struct Motion {
+        Spring1D x, y, w, h;
+        TileRect target;
+        double   alpha         = 1.0;
+        bool     exiting       = false;
+        uint64_t exit_started_ns = 0;
+    };
 
     static std::vector<uint32_t> ids_of(const std::vector<DesiredTile> &d)
     {

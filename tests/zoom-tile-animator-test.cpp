@@ -33,7 +33,7 @@ int main()
         TileAnimator a;
         const std::vector<DesiredTile> desired{{1, rect(0, 0, 100, 100)},
                                                {2, rect(100, 0, 100, 100)}};
-        const auto out = a.advance(0, desired, off);
+        const auto out = a.advance(0, desired, off, {});
         check(out.size() == 2, "disabled animator dropped tiles");
         check(find(out, 1) && find(out, 1)->rect.x == 0.0 &&
               find(out, 2) && find(out, 2)->rect.x == 100.0,
@@ -46,7 +46,7 @@ int main()
     {
         TileAnimator a;
         const std::vector<DesiredTile> desired{{1, rect(50, 60, 100, 100)}};
-        const auto out = a.advance(0, desired, on);
+        const auto out = a.advance(0, desired, on, {});
         check(out.size() == 1 && find(out, 1)->rect.x == 50.0,
               "a newly seen tile did not start at its target position");
     }
@@ -54,8 +54,8 @@ int main()
     // A tile that moves is reported not-at-rest and travels toward the target.
     {
         TileAnimator a;
-        a.advance(0, {{1, rect(0, 0, 100, 100)}}, on);
-        const auto out = a.advance(16 * kMs, {{1, rect(400, 0, 100, 100)}}, on);
+        a.advance(0, {{1, rect(0, 0, 100, 100)}}, on, {});
+        const auto out = a.advance(16 * kMs, {{1, rect(400, 0, 100, 100)}}, on, {});
         const AnimatedTile *t = find(out, 1);
         check(t != nullptr, "tile disappeared when retargeted");
         check(!t->at_rest, "a moving tile reported itself at rest");
@@ -72,8 +72,8 @@ int main()
     // participant 1's slot.
     {
         TileAnimator a;
-        a.advance(0, {{1, rect(0, 0, 100, 100)}, {7, rect(100, 0, 100, 100)}}, on);
-        const auto out = a.advance(16 * kMs, {{7, rect(0, 0, 200, 200)}}, on);
+        a.advance(0, {{1, rect(0, 0, 100, 100)}, {7, rect(100, 0, 100, 100)}}, on, {});
+        const auto out = a.advance(16 * kMs, {{7, rect(0, 0, 200, 200)}}, on, {});
         const AnimatedTile *t = find(out, 7);
         check(t != nullptr, "participant 7 was lost when participant 1 left");
         check(std::fabs(t->rect.x - 100.0) < 0.001,
@@ -81,7 +81,7 @@ int main()
         check(t->at_rest,
               "participant 7 reported motion before the departure had settled");
 
-        const auto settled = a.advance(300 * kMs, {{7, rect(0, 0, 200, 200)}}, on);
+        const auto settled = a.advance(300 * kMs, {{7, rect(0, 0, 200, 200)}}, on, {});
         const AnimatedTile *t2 = find(settled, 7);
         check(t2 != nullptr, "participant 7 was lost once the departure settled");
         check(t2->rect.x > 0.0 && t2->rect.x < 100.0,
@@ -98,14 +98,14 @@ int main()
         const std::vector<DesiredTile> two{{1, rect(0, 0, 100, 100)},
                                            {2, rect(100, 0, 100, 100)}};
         const std::vector<DesiredTile> one{{1, rect(0, 0, 200, 200)}};
-        a.advance(0, two, on);
-        a.advance(100 * kMs, one, on);          // 2 disappears
-        const auto mid = a.advance(125 * kMs, one, on);    // still gone, mid-window
+        a.advance(0, two, on, {});
+        a.advance(100 * kMs, one, on, {});          // 2 disappears
+        const auto mid = a.advance(125 * kMs, one, on, {});    // still gone, mid-window
         const AnimatedTile *tm = find(mid, 1);
         check(tm != nullptr, "participant 1 lost mid-window during a blip");
         check(std::fabs(tm->rect.width - 100.0) < 0.001,
               "participant 1 drifted mid-window while the blip was still pending");
-        const auto back = a.advance(150 * kMs, two, on);  // and returns
+        const auto back = a.advance(150 * kMs, two, on, {});  // and returns
         const AnimatedTile *t = find(back, 1);
         check(t != nullptr, "participant 1 lost during a blip");
         check(std::fabs(t->rect.width - 100.0) < 0.001,
@@ -116,9 +116,9 @@ int main()
     // A change that holds past the settle window is acted on.
     {
         TileAnimator a;
-        a.advance(0, {{1, rect(0, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on);
-        a.advance(100 * kMs, {{1, rect(0, 0, 200, 200)}}, on);
-        const auto out = a.advance(400 * kMs, {{1, rect(0, 0, 200, 200)}}, on);
+        a.advance(0, {{1, rect(0, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});
+        a.advance(100 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {});
+        const auto out = a.advance(400 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {});
         const AnimatedTile *t = find(out, 1);
         check(t != nullptr && t->rect.width > 100.0,
               "a settled departure did not start the reflow");
@@ -135,9 +135,9 @@ int main()
         TileAnimator a;
         const std::vector<DesiredTile> two{{1, rect(0, 0, 100, 100)},
                                            {2, rect(100, 0, 100, 100)}};
-        a.advance(0, two, on);
-        a.advance(100 * kMs, {}, on);              // everyone leaves
-        const auto mid = a.advance(125 * kMs, two, on);    // queried mid-window
+        a.advance(0, two, on, {});
+        a.advance(100 * kMs, {}, on, {});              // everyone leaves
+        const auto mid = a.advance(125 * kMs, two, on, {});    // queried mid-window
         const AnimatedTile *m1 = find(mid, 1);
         const AnimatedTile *m2 = find(mid, 2);
         check(m1 != nullptr && m2 != nullptr,
@@ -145,7 +145,7 @@ int main()
         check(std::fabs(m1->rect.width - 100.0) < 0.001 &&
               std::fabs(m2->rect.width - 100.0) < 0.001,
               "the wall had already reflowed mid-window for a full-vacate blip");
-        const auto back = a.advance(150 * kMs, two, on);  // and returns
+        const auto back = a.advance(150 * kMs, two, on, {});  // and returns
         const AnimatedTile *t1 = find(back, 1);
         const AnimatedTile *t2 = find(back, 2);
         check(t1 != nullptr && t2 != nullptr,
@@ -169,11 +169,11 @@ int main()
     // for a fresh start and already committed to it.
     {
         TileAnimator a;
-        a.advance(0, {{1, rect(0, 0, 100, 100)}}, on);
-        a.advance(300 * kMs, {}, on);                          // empty proposed
-        a.advance(560 * kMs, {}, on);                          // held 260ms: now genuinely settled on zero
-        a.advance(570 * kMs, {{1, rect(0, 0, 100, 100)}}, on);  // returns, 10ms later
-        const auto out = a.advance(580 * kMs, {{1, rect(0, 0, 300, 300)}}, on);
+        a.advance(0, {{1, rect(0, 0, 100, 100)}}, on, {});
+        a.advance(300 * kMs, {}, on, {});                          // empty proposed
+        a.advance(560 * kMs, {}, on, {});                          // held 260ms: now genuinely settled on zero
+        a.advance(570 * kMs, {{1, rect(0, 0, 100, 100)}}, on, {});  // returns, 10ms later
+        const auto out = a.advance(580 * kMs, {{1, rect(0, 0, 300, 300)}}, on, {});
         const AnimatedTile *t = find(out, 1);
         check(t != nullptr, "the returning participant was dropped");
         check(t->at_rest,
@@ -194,16 +194,102 @@ int main()
     // is virtually always.
     {
         TileAnimator a;
-        a.advance(0, {{1, rect(0, 0, 100, 100)}}, on);
-        a.advance(260 * kMs, {}, on);                           // empty proposed well past 250ms of uptime
-        a.advance(270 * kMs, {{1, rect(0, 0, 100, 100)}}, on);  // returns, 10ms later
-        const auto out = a.advance(280 * kMs, {{1, rect(0, 0, 300, 300)}}, on); // rect changes, 10ms later
+        a.advance(0, {{1, rect(0, 0, 100, 100)}}, on, {});
+        a.advance(260 * kMs, {}, on, {});                           // empty proposed well past 250ms of uptime
+        a.advance(270 * kMs, {{1, rect(0, 0, 100, 100)}}, on, {});  // returns, 10ms later
+        const auto out = a.advance(280 * kMs, {{1, rect(0, 0, 300, 300)}}, on, {}); // rect changes, 10ms later
         const AnimatedTile *t = find(out, 1);
         check(t != nullptr, "the returning participant was dropped");
         check(!t->at_rest,
               "the sharp empty-roster proposal was adopted instantly, teleporting the returning tile");
         check(t->rect.width > 100.0 && t->rect.width < 300.0,
               "the sharp empty-roster proposal skipped the settle hold instead of staying in flight");
+    }
+
+    // Invariant 1 + 4: a genuine departure begins fading only once the 250ms
+    // settle window has committed the smaller roster — not the instant the
+    // departure is first observed — and is fully gone once its own duration
+    // has elapsed. `departed` is a state, not a one-shot event: a real caller
+    // recomputes it every frame and keeps passing it for as long as the
+    // participant remains absent, so the test does the same rather than
+    // passing it once and letting it lapse.
+    {
+        TileAnimator a;
+        a.advance(0, {{1, rect(0, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});
+        a.advance(300 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {2});  // departure proposed: pending
+        const auto committed =
+            a.advance(560 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {2});  // held 260ms >= 250ms: commits here
+        const AnimatedTile *just_started = find(committed, 2);
+        check(just_started != nullptr,
+              "invariant 1: a departure did not begin exiting the instant its roster change committed");
+        const bool started_at_full_alpha = just_started != nullptr && just_started->alpha == 1.0;
+        check(started_at_full_alpha,
+              "invariant 1: an exit did not start at full alpha at the moment it began "
+              "(it must begin at commit, not at the earlier moment the departure was first observed)");
+
+        const auto mid =
+            a.advance(660 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {2});  // 100ms into a 350ms fade
+        const AnimatedTile *leaving = find(mid, 2);
+        check(leaving != nullptr, "invariant 1: a departing tile vanished instead of fading");
+        const bool mid_fade = leaving != nullptr && leaving->alpha < 1.0 && leaving->alpha > 0.0;
+        check(mid_fade, "invariant 1: a departing tile was not mid-fade");
+
+        const auto after =
+            a.advance(960 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {2});  // 400ms > 350ms duration
+        check(find(after, 2) == nullptr,
+              "invariant 4: an exit outlived its configured duration");
+    }
+
+    // Invariant 2: a reassignment cuts instantly — no fade at all, at any of
+    // the timestamps at which invariant 1's test shows a genuine departure
+    // fading. `departed` stays empty throughout: participant 2 disappeared
+    // from the layout but never left the roster.
+    {
+        TileAnimator a;
+        a.advance(0, {{1, rect(0, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});
+        a.advance(300 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {});
+        const auto committed = a.advance(560 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {});
+        check(find(committed, 2) == nullptr,
+              "invariant 2: a reassigned slot was still present once its set change committed");
+        const auto mid = a.advance(660 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {});
+        check(find(mid, 2) == nullptr,
+              "invariant 2: a reassigned slot faded instead of cutting");
+        const auto after = a.advance(960 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {});
+        check(find(after, 2) == nullptr,
+              "invariant 2: a reassigned slot lingered past a duration it should never have had");
+    }
+
+    // Invariant 3: a repoint cancels a running exit immediately. Let a
+    // genuine exit begin and reach mid-fade exactly as in invariant 1's
+    // test, then bring the participant back into `desired` with `departed`
+    // no longer listing it. It must stop fading at once — not finish out its
+    // remaining duration, and not linger as a second, stale entry alongside
+    // the fresh one.
+    {
+        TileAnimator a;
+        a.advance(0, {{1, rect(0, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});
+        a.advance(300 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {2});
+        a.advance(560 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {2});  // commits, exit begins
+        const auto mid = a.advance(660 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {2});  // mid-fade
+        const AnimatedTile *fading = find(mid, 2);
+        const bool setup_ok = fading != nullptr && fading->alpha < 1.0 && fading->alpha > 0.0;
+        check(setup_ok, "test setup: participant 2 should be mid-exit before the repoint");
+
+        // Repoint: 2 is back in the layout, and the caller correctly no
+        // longer lists it in `departed`.
+        const auto out = a.advance(
+            670 * kMs, {{1, rect(0, 0, 200, 200)}, {2, rect(100, 0, 150, 150)}}, on, {});
+        int count2 = 0;
+        double alpha2 = -1.0;
+        for (const auto &t : out) {
+            if (t.participant_id == 2) { ++count2; alpha2 = t.alpha; }
+        }
+        check(count2 == 1,
+              "invariant 3: a repointed participant was emitted more than once — "
+              "a stale exit leaked through alongside the fresh tile");
+        const bool cancelled = count2 == 1 && alpha2 == 1.0;
+        check(cancelled,
+              "invariant 3: a running exit survived the slot being repointed");
     }
 
     if (failures == 0) std::cout << "zoom-tile-animator tests passed\n";

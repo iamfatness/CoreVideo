@@ -338,6 +338,21 @@ public:
         return out;
     }
 
+    // Read-only: which participant ids currently have tracked motion state
+    // (in flight, held, or exiting). The caller uses this, once per frame in
+    // the same pass the layout is solved and advance() is called, to compute
+    // `departed` (roster-absence for every id this animator is still
+    // carrying) without this class needing to know anything about the
+    // roster itself. Empty right after construction, and cleared along with
+    // everything else by the disabled bypass in advance() above.
+    std::vector<uint32_t> tracked_ids() const
+    {
+        std::vector<uint32_t> ids;
+        ids.reserve(m_tiles.size());
+        for (const auto &entry : m_tiles) ids.push_back(entry.first);
+        return ids;
+    }
+
 private:
     struct Motion {
         Spring1D x, y, w, h;

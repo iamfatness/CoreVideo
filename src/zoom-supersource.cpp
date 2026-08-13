@@ -2,6 +2,7 @@
 #include "engine-ipc.h"
 #include "shm-resubscribe.h"
 #include "zoom-engine-client.h"
+#include "zoom-tile-animator.h"
 #include "zoom-tile-border.h"
 #include "zoom-tile-crop.h"
 #include "zoom-tile-fill.h"
@@ -22,6 +23,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <memory>
@@ -344,6 +346,12 @@ struct tiles_source {
     // allocating on the draw path.
     std::vector<TileScratch> render_scratches;
     uint64_t    rendered_frames = 0;
+    // Layout animation state, keyed by participant id across frames so a
+    // tile's motion survives its slot being repointed to someone else and
+    // back. Render-thread only, like the rest of this block — no lock:
+    // only tiles_source_render() ever touches it. See
+    // src/zoom-tile-animator.h.
+    TileAnimator animator;
 
     std::shared_ptr<TilesCallbackGate> gate =
         std::make_shared<TilesCallbackGate>();
@@ -1027,6 +1035,46 @@ static void tiles_draw_neutral(gs_technique_t *tech, uint32_t x, uint32_t y,
     gs_technique_end_pass(tech);
 }
 
+// Even-rounds one value onto a valid I420 chroma boundary — the same need
+// snap_tile_grid_even() (src/zoom-tile-grid.cpp) exists for, applied to one
+// tile in isolation rather than a whole grid. Mirrors that file's
+// even_floor/even_round split without reusing it (both are file-local
+// there): sizes are floored so an independently snapped tile never grows
+// past the animator's own rect, positions are rounded to the nearest even
+// value so they stay close to the animator's true position rather than
+// always shifting toward the origin. See snap_tile_independently() below for
+// why this exists instead of just calling snap_tile_grid_even().
+static uint32_t even_floor_px(double v)
+{
+    if (v <= 0.0) return 0;
+    return static_cast<uint32_t>(v) & ~1u;
+}
+
+static uint32_t even_round_px(double v)
+{
+    if (v <= 0.0) return 0;
+    return static_cast<uint32_t>(std::lround(v / 2.0)) * 2u;
+}
+
+// Snaps one tile's rect to even pixel boundaries independently of every
+// other tile on the wall. Used only while something is in motion — see the
+// mode-split comment in tiles_source_render() for why snap_tile_grid_even()
+// cannot be used there. This loses that function's guarantee of identical
+// gaps between neighbours (already meaningless mid-reflow, since tiles are
+// at different positions and sizes by definition while they move) and
+// quantises position and size to 2px steps. Task 7 replaces this with
+// sub-pixel rendering for tiles that are not at rest; the quantisation here
+// is a known, deliberate, temporary property of this task.
+static SnappedTileRect snap_tile_independently(const TileRect &r)
+{
+    SnappedTileRect s;
+    s.x      = even_round_px(r.x);
+    s.y      = even_round_px(r.y);
+    s.width  = even_floor_px(r.width);
+    s.height = even_floor_px(r.height);
+    return s;
+}
+
 // Draws the wall. Runs on the OBS graphics thread with the graphics context
 // already entered — do not nest obs_enter_graphics() in here.
 static void tiles_source_render(void *data, gs_effect_t *)
@@ -1079,8 +1127,122 @@ static void tiles_source_render(void *data, gs_effect_t *)
         ctx->gutter_pct.load(std::memory_order_acquire), canvas_h_d);
     params.margin        = resolve_spacing_px(
         ctx->margin_pct.load(std::memory_order_acquire), canvas_h_d);
-    const std::vector<SnappedTileRect> rects =
-        snap_tile_grid_even(solve_tile_grid(feeds.size(), params), params);
+    const std::vector<TileRect> solved = solve_tile_grid(feeds.size(), params);
+    std::vector<DesiredTile> desired;
+    desired.reserve(feeds.size());
+    for (size_t i = 0; i < feeds.size() && i < solved.size(); ++i)
+        desired.push_back(DesiredTile{feeds[i]->slot.participant_id(), solved[i]});
+
+    AnimationSettings anim;
+    anim.enabled = ctx->animate.load(std::memory_order_acquire);
+    anim.duration_seconds =
+        static_cast<double>(ctx->animate_ms.load(std::memory_order_acquire)) / 1000.0;
+
+    // `departed` is a STATE, not an event: which tracked participants are gone
+    // from the meeting roster right now, recomputed every frame. It is what
+    // separates a genuine departure (fade out) from an operator repointing a
+    // slot (instant cut, no fade) — the distinction the exit invariants in
+    // src/zoom-tile-slot.h rest on. Hardcoding it empty would make the exit
+    // path dead code on the wall.
+    // Computed in THIS pass, from the same frame the layout was solved in. If
+    // `departed` lags `desired` by even one frame, the exit exception silently
+    // never fires and the whole fade becomes dead code.
+    const std::vector<ParticipantInfo> roster = ZoomEngineClient::instance().roster();
+    std::vector<uint32_t> departed;
+    for (const uint32_t id : ctx->animator.tracked_ids()) {
+        const bool in_roster = std::any_of(
+            roster.begin(), roster.end(),
+            [id](const ParticipantInfo &p) { return p.user_id == id; });
+        if (!in_roster)
+            departed.push_back(id);
+    }
+
+    const std::vector<AnimatedTile> animated =
+        ctx->animator.advance(os_gettime_ns(), desired, anim, departed);
+
+    // ── Mode split: pixel-exact at rest, approximate only while moving ──────
+    //
+    // snap_tile_grid_even() assumes a UNIFORM grid: one tile size, one gutter,
+    // every tile at a whole multiple of (size+gutter) from its row origin (see
+    // zoom-tile-grid.cpp — it derives the single tile_w/tile_h it uses for
+    // EVERY row from rects[0] alone). That holds for the solver's own output,
+    // but not for the animator's in general: a tile that has just joined is
+    // seeded at ITS target size while the others are still springing from the
+    // old one ("a newly seen tile starts at its target position" — see
+    // TileAnimator::advance()), so mid-reflow the tiles the animator returns
+    // can legitimately differ in size from each other. Feeding a mixed-size
+    // list to a function that derives ONE size from its first element
+    // silently mis-sizes every tile but the first for as long as the reflow
+    // lasts — confirmed against this exact code with a standalone repro
+    // before this split existed; see task-6-report.md.
+    //
+    // The fix mirrors the design's own principle: pixel-exact at rest,
+    // approximate only while moving.
+    const bool all_at_rest = std::all_of(
+        animated.begin(), animated.end(),
+        [](const AnimatedTile &t) { return t.at_rest; });
+
+    // `rects`, below, ends up index-aligned with `feeds` — one rect per feed,
+    // in feed order — exactly the shape this file has always drawn from, so
+    // the glow loop, the tile loop and the log line after it are UNCHANGED
+    // from before this feature existed. Only how each entry is computed
+    // differs, by branch:
+    std::vector<SnappedTileRect> rects;
+    if (all_at_rest) {
+        // Disabled, or every tile the animator returned is at rest: solve
+        // and snap FRESH from `solved`/`params` — the exact call this file
+        // has always made — rather than routing the animator's rects
+        // through the snap. That makes this the SAME call as before this
+        // feature existed, so parity holds by construction rather than by
+        // the coincidence that the animator's numbers happen to match. It
+        // is also deliberately ONE branch for both "disabled" and
+        // "settled", not two that have to be kept in agreement: the
+        // disabled bypass in advance() always reports every tile at_rest
+        // (see its own header comment), so disabled is simply a case of
+        // this condition rather than a separate path. `solved` has exactly
+        // one entry per feed (or is empty — solve_tile_grid() is all-or-
+        // nothing), so this is index-aligned with `feeds` the same way the
+        // pre-animation code was, with no held/exiting entries to consider:
+        // `solved` never contains one, since a departed participant is
+        // already gone from `feeds` by the time it shrinks the count this
+        // is solved from (see the mode-split comment above).
+        rects = snap_tile_grid_even(solved, params);
+    } else {
+        // Something is in motion: snap_tile_grid_even()'s single-shared-size
+        // assumption does not hold (see the mode-split comment above), so
+        // each tile is snapped independently instead, one rect per feed.
+        //
+        // The rect for feed i is found by searching `animated` for the
+        // entry whose participant id matches feed i's — not by position —
+        // which is what makes skipping held and exiting tiles deliberate
+        // rather than an accident of array shape. Held and exiting tiles
+        // (see the ordering contract on TileAnimator::advance()) have no
+        // entry in `feeds` and no defined pixel source: a repointed slot's
+        // stored frame is exactly what src/zoom-tile-slot.h invalidates on
+        // purpose. What they should draw is still an open decision with the
+        // repo owner, so this task draws live tiles only; searching from
+        // `feeds` outward means a held or exiting entry in `animated` is
+        // simply never looked at here, rather than silently dropped through
+        // an index that happened not to line up. The reflow animation is
+        // fully functional without them; only exit fades are not drawn yet.
+        //
+        // `live` is non-null whenever feed is non-null: `desired` is built
+        // one-for-one from `feeds` above, and advance()'s live-tile loop
+        // emits exactly one output entry for every entry of `desired`,
+        // pending or committed alike — so every feed has exactly one
+        // matching entry in `animated`. The null fallback below is only for
+        // a null feed pointer.
+        rects.reserve(feeds.size());
+        for (const TileFeedPtr &feed : feeds) {
+            const uint32_t pid = feed ? feed->slot.participant_id() : 0;
+            const AnimatedTile *live = nullptr;
+            for (const auto &t : animated) {
+                if (t.participant_id == pid) { live = &t; break; }
+            }
+            rects.push_back(live ? snap_tile_independently(live->rect)
+                                  : SnappedTileRect{});
+        }
+    }
 
     // Background first, so tiles and their borders draw over it. This replaces
     // what used to be a fixed neutral fill drawn through the I420 technique

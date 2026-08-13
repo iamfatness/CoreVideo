@@ -1351,37 +1351,62 @@ static void tiles_source_render(void *data, gs_effect_t *)
     // `departed` lags `desired` by even one frame, the exit exception silently
     // never fires and the whole fade becomes dead code.
     //
-    // Gated on `anim.enabled` AND `tracked` being non-empty — either half
-    // missing and the render path must not take ZoomEngineClient's roster
-    // mutex when it has nothing to ask it. That mutex is hot: the engine
-    // reader thread takes it for every "frame" and "audio" message across
-    // every source in the plugin (see zoom-engine-client.h's own warning on
-    // stalling that dispatch), and roster() deep-copies the whole
-    // participant list, one std::string allocation per participant, while
-    // holding it. Before this feature existed the draw path took exactly
-    // one lock, for an O(1) pointer copy; this guard is what keeps that
-    // true when the toggle is off, rather than adding a lock + N
-    // allocations on the graphics thread unconditionally. Do not remove
-    // either half as "redundant" — it is the difference between "disabled
-    // costs nothing" and "disabled costs a roster copy every frame".
+    // Gated on `anim.enabled` AND on some tracked participant being MISSING
+    // from this frame's layout — either half missing and the render path must
+    // not take ZoomEngineClient's roster mutex when it has nothing to ask it.
+    // That mutex is hot: the engine reader thread takes it for every "frame"
+    // and "audio" message across every source in the plugin (see
+    // zoom-engine-client.h's own warning on stalling that dispatch), and
+    // roster() deep-copies the whole participant list, one std::string
+    // allocation per participant, while holding it. Before this feature
+    // existed the draw path took exactly one lock, for an O(1) pointer copy.
     //
-    // `anim.enabled` is not implied by `tracked.empty()`: tracked_ids()
-    // reflects `m_tiles` as of the END of the PREVIOUS frame's advance()
-    // call, and only advance()'s own disabled branch clears it. So on the
-    // very first frame after the operator flips the toggle off while
-    // anything was mid-flight, `tracked` is still non-empty from last
-    // frame — `!tracked.empty()` alone would pass and pay for a roster
-    // copy that `advance()`'s disabled branch is about to discard unread
-    // (it never looks at `departed`). Checking `anim.enabled` directly
-    // closes that one-frame gap. On the enabled path `anim.enabled` is
-    // always true, so the condition reduces to exactly `!tracked.empty()`,
-    // unchanged from before.
+    // The `anim.enabled` half is what keeps that true when the toggle is
+    // OFF. It is not implied by the other half: tracked_ids() reflects
+    // `m_tiles` as of the END of the PREVIOUS frame's advance() call, and
+    // only advance()'s own disabled branch clears it. So on the very first
+    // frame after the operator flips the toggle off while anything was
+    // mid-flight, `tracked` is still populated from last frame and a
+    // tracked-state test alone would pass, paying for a roster copy that
+    // `advance()`'s disabled branch is about to discard unread (it never
+    // looks at `departed`). Checking `anim.enabled` directly closes that
+    // one-frame gap.
+    //
+    // The second half is what keeps it true when the toggle is ON. It used
+    // to be `!tracked.empty()`, which is non-empty on EVERY frame once
+    // anything at all has committed — not just during transitions — so
+    // turning the animation on bought a locked, allocating roster copy on
+    // every one of 60 frames a second, for the entire life of the source. It
+    // is now "does some tracked id have no entry in `desired` this frame",
+    // which is exactly, and only, the question `departed` is ever consulted
+    // to answer: TileAnimator reads it in two places and both are already
+    // past a `present in desired` check (the lifecycle loop's retention test
+    // and the held-tile emission), so an id that IS in `desired` can never
+    // change any outcome by appearing in `departed`. Restricting the query
+    // to the ids that can matter is therefore behaviour-preserving, and it
+    // reduces the roster copy from every frame to the handful of frames
+    // where the layout and the animator's tracked set actually disagree —
+    // a departure, a repoint, or a blip.
+    //
+    // Do not weaken either half. Together they are the difference between
+    // "the animation costs something while the wall is changing" and "the
+    // animation costs a locked roster copy on every frame forever".
     std::vector<uint32_t> departed;
     const std::vector<uint32_t> tracked = ctx->animator.tracked_ids();
-    if (anim.enabled && !tracked.empty()) {
+    std::vector<uint32_t> absent_from_layout;
+    if (anim.enabled) {
+        for (const uint32_t id : tracked) {
+            const bool in_layout = std::any_of(
+                desired.begin(), desired.end(),
+                [id](const DesiredTile &d) { return d.participant_id == id; });
+            if (!in_layout)
+                absent_from_layout.push_back(id);
+        }
+    }
+    if (!absent_from_layout.empty()) {
         const std::vector<ParticipantInfo> roster =
             ZoomEngineClient::instance().roster();
-        for (const uint32_t id : tracked) {
+        for (const uint32_t id : absent_from_layout) {
             const bool in_roster = std::any_of(
                 roster.begin(), roster.end(),
                 [id](const ParticipantInfo &p) { return p.user_id == id; });

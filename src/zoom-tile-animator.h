@@ -45,6 +45,7 @@ public:
             m_pending_ids.clear();
             m_pending_since_ns = 0;
             m_has_committed = false;
+            m_has_pending = false;
             std::vector<AnimatedTile> out;
             out.reserve(desired.size());
             for (const auto &d : desired)
@@ -76,17 +77,29 @@ public:
             m_committed_ids = incoming;
             m_has_committed = true;
         } else if (incoming != m_committed_ids) {
-            if (incoming != m_pending_ids) {
+            // m_has_pending, not "m_pending_ids is non-empty": an empty roster
+            // is a legitimate proposal — everyone dropping out at once is the
+            // flicker case this gate exists for — and it is indistinguishable
+            // from the default-empty vector. Without the flag, an empty
+            // proposal falls through to the elapsed-time branch and is measured
+            // against a stale m_pending_since_ns, so it is adopted with no hold
+            // at all.
+            if (!m_has_pending || incoming != m_pending_ids) {
                 m_pending_ids = incoming;
                 m_pending_since_ns = now_ns;
+                m_has_pending = true;
             } else if (now_ns - m_pending_since_ns >= kSettleNs) {
-                m_committed_ids = incoming;      // held long enough: adopt
+                m_committed_ids = incoming;
                 m_pending_ids.clear();
+                m_has_pending = false;
             }
         } else {
-            m_pending_ids.clear();               // reverted: forget the change
+            m_pending_ids.clear();
+            m_has_pending = false;
         }
-        const bool change_pending = !m_pending_ids.empty();
+        // Same reason as above: an empty proposal is still a pending change, so
+        // this must read the flag, not the vector's emptiness.
+        const bool change_pending = m_has_pending;
 
         std::vector<AnimatedTile> out;
         out.reserve(desired.size());
@@ -194,4 +207,7 @@ private:
     std::vector<uint32_t> m_pending_ids;     // a candidate set, not yet settled
     uint64_t m_pending_since_ns = 0;
     bool     m_has_committed = false;
+
+    // Distinguishes "an empty roster is proposed" from "nothing is proposed".
+    bool m_has_pending = false;
 };

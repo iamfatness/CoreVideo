@@ -823,6 +823,16 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoTileMotion
              COMMAND CoreVideoTileMotionTest)
 
+    # Identity-keyed animation state: reflow, blips, phases, exit invariants.
+    add_executable(CoreVideoTileAnimatorTest
+        tests/zoom-tile-animator-test.cpp
+    )
+    target_include_directories(CoreVideoTileAnimatorTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTileAnimator
+             COMMAND CoreVideoTileAnimatorTest)
+
     # Precedence between a source's own speaker properties and the dock-owned
     # global settings. A source that carries nothing must not overwrite them —
     # see the 2026-08-11 live-show incident described in the test.

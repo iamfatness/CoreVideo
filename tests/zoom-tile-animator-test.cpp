@@ -418,6 +418,78 @@ int main()
               "under unrelated roster churn — the hold-plus-fade ceiling is too loose");
     }
 
+    // Final review, IMPORTANT 2: a reassignment whose hold clock expires must
+    // be ERASED, not merely kept out of the output. The distinction is
+    // invisible until the same participant later genuinely leaves the
+    // meeting, and it is the difference between nothing happening and a
+    // seconds-old frozen frame going on air at full opacity.
+    //
+    // The sequence is one an operator produces without trying: repoint a
+    // slot away from participant 2 at t=100ms (a reassignment — 2 is still in
+    // the meeting, so `departed` is empty), with unrelated roster churn so
+    // the whole-set settle window never commits. 2's own hold clock expires
+    // 250ms later and the tile is erased. Two seconds after that, 2 genuinely
+    // leaves the meeting: a correct caller computes `departed` from
+    // tracked_ids(), so a build that erased 2 never reports it and nothing
+    // happens — which is the only correct outcome, because the frame that
+    // tile is still holding is from before the repoint and shows the wrong
+    // face by construction (the rule src/zoom-tile-slot.h exists to enforce).
+    //
+    // A build that instead retains the tile — `if (committed) { ++it;
+    // continue; }` in place of the reassignment erase — passes every other
+    // test in this file: the tile is retained but never emitted, so nothing
+    // observes it, until `departed` finally names it and it begins a full
+    // exit at alpha 1.0 from a rect two seconds stale. That mutant was
+    // written and confirmed to survive the whole suite; this test is what
+    // kills it.
+    {
+        TileAnimator a;
+        a.advance(0, {{1, rect(0, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});
+
+        constexpr uint64_t kReassignedAtMs = 100;
+        constexpr uint64_t kLeftMeetingAtMs = 2100;
+        constexpr uint64_t kGridMs = 100;
+
+        bool emitted_after_reassign = false;
+        bool emitted_after_departure = false;
+        bool wall_alive = true;
+
+        for (uint64_t ms = kReassignedAtMs; ms <= 4000; ms += kGridMs) {
+            // Participant 9 flaps in and out on every sample, so the proposed
+            // set differs from the last one seen on every call and the
+            // whole-set settle timer is re-stamped forever. Nothing ever
+            // commits, which is the condition that makes the erase and the
+            // retain indistinguishable to every other test.
+            std::vector<DesiredTile> d{{1, rect(0, 0, 100, 100)}};
+            if ((ms / kGridMs) % 2) d.push_back({9, rect(100, 0, 100, 100)});
+
+            // Roster-absence state, recomputed every frame by a real caller:
+            // empty while 2 is merely repointed away, naming 2 once 2 has
+            // actually left the meeting.
+            const std::vector<uint32_t> departed =
+                ms >= kLeftMeetingAtMs ? std::vector<uint32_t>{2}
+                                       : std::vector<uint32_t>{};
+
+            const auto out = a.advance(ms * kMs, d, on, departed);
+            if (find(out, 1) == nullptr) wall_alive = false;
+            if (find(out, 2) != nullptr) {
+                emitted_after_reassign = true;
+                if (ms >= kLeftMeetingAtMs) emitted_after_departure = true;
+            }
+        }
+
+        check(wall_alive,
+              "test setup: participant 1 stopped being emitted, so the run below "
+              "proves nothing about participant 2");
+        check(!emitted_after_reassign,
+              "invariant 2: a reassigned participant was put on screen at some "
+              "point after the repoint");
+        check(!emitted_after_departure,
+              "a participant reassigned away 2 seconds earlier was resurrected "
+              "when they later left the meeting — a stale frame from before the "
+              "repoint went on air at full opacity and faded");
+    }
+
     // Fix round 2, NEW Important 2: held and exiting tiles must be emitted
     // before live tiles, so a live tile painted after them draws on top
     // rather than being hidden under a departed participant's frozen or

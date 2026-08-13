@@ -201,6 +201,17 @@ public:
                 const bool left_roster =
                     std::find(departed.begin(), departed.end(), it->first) != departed.end();
                 if (!left_roster) {
+                    // ERASED, not merely withheld from the output. A tile
+                    // kept here would be invisible — nothing emits a
+                    // reassigned participant — right up until that
+                    // participant later leaves the meeting for real, at which
+                    // point `departed` names it and it begins a full-opacity
+                    // exit from a frame recorded before the repoint: the
+                    // wrong face on air, which is exactly what
+                    // src/zoom-tile-slot.h exists to prevent. The
+                    // corresponding test is the one that pins this shape;
+                    // every other test in the suite passes with the tile
+                    // retained instead.
                     it = m_tiles.erase(it);      // (2) reassignment: instant, now that it is genuinely resolved
                     continue;
                 }

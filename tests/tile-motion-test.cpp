@@ -53,12 +53,40 @@ int main()
     }
 
     // Frame-rate independence: same elapsed time, same place.
+    //
+    // Sampled MID-FLIGHT, at 0.1s of a 0.35s settle, where the spring is
+    // travelling at roughly 540 px/s and any dependence on step size has
+    // somewhere to show. The earlier version of this check sampled at 0.5s —
+    // 1.43x the settle time — where both springs are within 0.1px of the
+    // target no matter how they got there, so it passed for any advance
+    // function that eventually converges. Replacing spring_advance()'s closed
+    // form with a fixed per-frame lerp that ignores dt entirely passed it,
+    // and the whole rest of this file.
+    //
+    // Stepped by explicit COUNT rather than through run(), which accumulates
+    // `t += dt` until it passes a wall-clock bound: 6 * (1/60) evaluates to
+    // slightly under 0.1 in binary floating point, so that loop takes a
+    // seventh step and the two rates end up comparing different elapsed
+    // times. 1/30 is exactly 2 * (1/60) — a power-of-two scaling, so exact —
+    // which makes 3 steps and 6 steps the same 0.1s to the last bit.
     {
         Spring1D a{0.0, 0.0}, b{0.0, 0.0};
-        a = run(a, 100.0, 0.35, 0.5, 1.0 / 60.0);
-        b = run(b, 100.0, 0.35, 0.5, 1.0 / 30.0);
-        check(std::fabs(a.position - b.position) < 1.0,
-              "60fps and 30fps diverged — motion is frame-rate dependent");
+        for (int i = 0; i < 6; ++i) spring_advance(a, 100.0, 0.35, 1.0 / 60.0);
+        for (int i = 0; i < 3; ++i) spring_advance(b, 100.0, 0.35, 1.0 / 30.0);
+
+        check(a.position > 20.0 && a.position < 90.0,
+              "test setup: the sample point is not mid-flight, so this check "
+              "cannot distinguish frame-rate dependence from convergence");
+        check(a.velocity > 100.0,
+              "test setup: the spring is barely moving at the sample point");
+
+        // Measured divergence here is 2e-14 px; a dt-ignoring lerp diverges
+        // by 22.5 px. The bound is set orders of magnitude away from both.
+        check(std::fabs(a.position - b.position) < 1e-6,
+              "60fps and 30fps diverged mid-flight — motion is frame-rate dependent");
+        check(std::fabs(a.velocity - b.velocity) < 1e-6,
+              "60fps and 30fps disagreed on velocity mid-flight — a tile "
+              "retargeted at this instant would move differently at each rate");
     }
 
     // A zero or negative settle time snaps rather than dividing by zero.

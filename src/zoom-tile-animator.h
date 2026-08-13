@@ -42,9 +42,15 @@ public:
                                       const AnimationSettings &settings,
                                       const std::vector<uint32_t> &departed)
     {
-        // Disabled is a bypass, not a fast setting: no state is touched and the
-        // desired layout is emitted verbatim, so the renderer takes exactly the
-        // path it took before this feature existed.
+        // Disabled is a bypass, not a fast setting: every piece of animation
+        // state is discarded — not merely left alone, which would let a
+        // stale in-flight position or a half-expired settle window resume the
+        // moment the toggle came back — and the desired layout is emitted
+        // verbatim, so the renderer takes exactly the path it took before
+        // this feature existed. Clearing it here is also what makes
+        // settled() unconditionally true straight after a disabled call,
+        // which is what lets the render path treat "disabled" as simply a
+        // case of "settled" rather than as a second branch to keep in step.
         if (!settings.enabled) {
             m_tiles.clear();
             m_last_ns = 0;
@@ -278,19 +284,54 @@ public:
                 std::find(m_committed_ids.begin(), m_committed_ids.end(),
                           d.participant_id) != m_committed_ids.end();
             if (!committed) {
-                // Present but not yet adopted: hold it wherever it already is,
-                // or emit it at its target if it is new, without disturbing the
-                // rest of the wall.
+                // Present in the layout but not yet adopted by the settle
+                // window. A tile that already has motion state is held
+                // exactly where it is, without disturbing the rest of the
+                // wall — that is the blip case, and it must not move.
+                //
+                // A tile with NO motion state has never been on the wall, and
+                // it is WITHHELD rather than emitted at its target. Emitting
+                // it would put one tile in the layout solved for the NEW set
+                // while every committed tile is deliberately still sitting on
+                // its OLD target (see the retarget gate below) — two
+                // different grids on screen at once. Because the grids are
+                // solved for different counts, the newcomer's slot lands on
+                // top of a participant who is still legitimately drawn in the
+                // old one, and the renderer draws in feed order with
+                // newcomers appended last, so the newcomer paints OVER that
+                // participant's face for the whole settle window. Measured
+                // against the real solve_tile_grid() at 1920x1080, every join
+                // from 1->2 through 8->9 overlaps an existing tile by 25% to
+                // 100% of the newcomer's area (1->2: 502203 px^2, 99%).
+                // Departures do not have this problem — nothing new appears —
+                // which is why this is a join-only defect.
+                //
+                // The cost of withholding is the one the settle window
+                // already declares in the design: "the wall reacts one settle
+                // window later". A joining participant is drawn 250ms after
+                // the layout first proposes them, in the same frame the rest
+                // of the wall starts reflowing to make room. The one case
+                // that gets visibly slower rather than merely later is an
+                // operator repointing a slot from one participant to another:
+                // the outgoing participant is cut instantly (invariant 2) and
+                // the incoming one is withheld, so that slot shows the
+                // background for the settle window instead of cutting
+                // straight over. That is the same delay every other roster
+                // change already pays, and it is preferable to covering a
+                // face that is still on air.
+                //
+                // The render side needs nothing for this: a feed with no
+                // matching entry in the animator's output gets an empty
+                // SnappedTileRect and is skipped by the width < 2 guard that
+                // both the glow loop and the tile loop already apply.
                 auto held = m_tiles.find(d.participant_id);
-                if (held == m_tiles.end()) {
-                    out.push_back(AnimatedTile{d.participant_id, d.rect, 1.0, true});
-                } else {
-                    TileRect r;
-                    r.x = held->second.x.position; r.y = held->second.y.position;
-                    r.width = held->second.w.position;
-                    r.height = held->second.h.position;
-                    out.push_back(AnimatedTile{d.participant_id, r, 1.0, true});
-                }
+                if (held == m_tiles.end())
+                    continue;
+                TileRect r;
+                r.x = held->second.x.position; r.y = held->second.y.position;
+                r.width = held->second.w.position;
+                r.height = held->second.h.position;
+                out.push_back(AnimatedTile{d.participant_id, r, 1.0, true});
                 continue;
             }
 
@@ -368,12 +409,13 @@ public:
     //     the NEW, smaller grid, because feed-list resizing is not gated on
     //     this animator's settle window at all. Drawing the fresh solve
     //     during this window shows the wrong size.
-    //   - During a join's settle hold, symmetrically: a not-yet-committed
-    //     newcomer is held at its own target (see "a newly seen tile starts
-    //     at its target") while the already-committed tiles hold THEIR old
-    //     targets — again everything reports at_rest, and this time
-    //     `animated.size() == desired.size()`, so a count check would not
-    //     catch it either.
+    //   - During a join's settle hold, symmetrically: every already-committed
+    //     tile holds its OLD target and reports at_rest, while a fresh solve
+    //     already describes the LARGER grid the newcomer will join. (The
+    //     newcomer itself is withheld until the join commits — see the
+    //     not-committed branch in advance() — so it is not in the output to
+    //     report anything.) Nothing in the emitted tiles distinguishes this
+    //     from a settled wall.
     //
     // Only when nothing is pending AND every tracked tile is a plain, fully
     // arrived, non-held, non-exiting entry does the fresh solve match what

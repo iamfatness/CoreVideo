@@ -1362,10 +1362,11 @@ static void tiles_source_render(void *data, gs_effect_t *)
     // at_rest, while the survivors sit on their OLD targets, also at_rest,
     // while a fresh solve already reflects the new smaller grid — feed-list
     // resizing is not gated on this animator's own settle window at all),
-    // and symmetrically a join's settle hold (a not-yet-committed newcomer
-    // is held at its own target while the already-committed tiles hold
-    // THEIR old ones — everything at_rest, and `animated.size() ==
-    // desired.size()`, so a count check would not catch this case either).
+    // and symmetrically a join's settle hold (the already-committed tiles
+    // hold THEIR old targets, all at_rest, while a fresh solve already
+    // describes the larger grid — the newcomer itself is withheld until the
+    // join commits, so nothing in the emitted tiles marks this frame as
+    // different from a settled one).
     // Both were caught by re-running the repro below after implementing the
     // naive `all_of(at_rest)` version first; see task-6-report.md. settled()
     // is false in both cases (pending set change, or a held/exiting tile
@@ -1427,12 +1428,18 @@ static void tiles_source_render(void *data, gs_effect_t *)
         // an index that happened not to line up. The reflow animation is
         // fully functional without them; only exit fades are not drawn yet.
         //
-        // `live` is non-null whenever feed is non-null: `desired` is built
-        // one-for-one from `feeds` above, and advance()'s live-tile loop
-        // emits exactly one output entry for every entry of `desired`,
-        // pending or committed alike — so every feed has exactly one
-        // matching entry in `animated`. The null fallback below is only for
-        // a null feed pointer.
+        // `live` can legitimately be null even for a non-null feed, and the
+        // empty SnappedTileRect below is the correct answer when it is: a
+        // participant the animator has never carried motion state for is
+        // WITHHELD from its output until the settle window commits their
+        // join, precisely so their new-grid slot is not painted over a
+        // participant still drawn in the old grid (see the not-committed
+        // branch of TileAnimator::advance()). An empty rect has width 0, so
+        // the glow loop and the tile loop both skip that feed on the same
+        // `width < 2` rule they already apply — the slot shows the
+        // background until the join commits, one settle window later, which
+        // is the cost the design already declares for every roster change.
+        // The same fallback covers a null feed pointer.
         rects.reserve(feeds.size());
         moving.reserve(feeds.size());
         for (const TileFeedPtr &feed : feeds) {

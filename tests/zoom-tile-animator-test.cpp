@@ -172,23 +172,32 @@ int main()
     // enough to "genuinely settle" on it; that would just be the proposal,
     // still pending until it is held and reconfirmed.) Proven by proposing a
     // layout change for the returning participant only 10ms after it
-    // reappears: while that return is still pending, the change must sit
-    // exactly at the proposed target, untouched (at_rest) — not partially
-    // interpolated the way it would be if the wall had mistaken the return
-    // for a fresh start and already committed to it.
+    // reappears: while that return is still pending, the participant must not
+    // be emitted at all — the vacate erased its motion state, so it is a
+    // never-before-seen tile and is withheld until commit (see CRITICAL 1
+    // below) — and it must appear at the proposed target, untouched
+    // (at_rest), only once the return commits. Either half failing means the
+    // wall mistook the return for a fresh start and committed to it
+    // immediately.
     {
         TileAnimator a;
         a.advance(0, {{1, rect(0, 0, 100, 100)}}, on, {});
         a.advance(300 * kMs, {}, on, {});                          // empty proposed
         a.advance(560 * kMs, {}, on, {});                          // held 260ms: now genuinely settled on zero
         a.advance(570 * kMs, {{1, rect(0, 0, 100, 100)}}, on, {});  // returns, 10ms later
-        const auto out = a.advance(580 * kMs, {{1, rect(0, 0, 300, 300)}}, on, {});
+        const auto pending = a.advance(580 * kMs, {{1, rect(0, 0, 300, 300)}}, on, {});
+        check(find(pending, 1) == nullptr,
+              "a still-pending return was already on the wall — the return was "
+              "treated as a fresh start instead of holding its own settle window");
+
+        // 570ms + 250ms = 820ms: this is the frame the return commits on.
+        const auto out = a.advance(830 * kMs, {{1, rect(0, 0, 300, 300)}}, on, {});
         const AnimatedTile *t = find(out, 1);
         check(t != nullptr, "the returning participant was dropped");
-        check(t->at_rest,
-              "a still-pending return was already animating a layout change");
-        check(std::fabs(t->rect.width - 300.0) < 0.001,
-              "a still-pending return partially reflowed instead of holding at the proposed target");
+        check(t != nullptr && t->at_rest,
+              "a committed return was interpolating instead of starting at its target");
+        check(t != nullptr && std::fabs(t->rect.width - 300.0) < 0.001,
+              "a committed return did not start at the target it was proposed at");
     }
 
     // The "sharp" case found in review: an empty roster proposed after the
@@ -392,6 +401,15 @@ int main()
             t += kGridMs * kMs;
         }
 
+        // Both bounds below are on the LAST time participant 2 was seen, and
+        // both counters start at 0 — so a build that never emitted the tile at
+        // all would satisfy them vacuously, and this is the test that bounds a
+        // departed participant's time on air. Pin that the tile was in fact
+        // emitted first, so the two ceilings are measuring something.
+        check(last_seen_ms > 0,
+              "test setup: participant 2 was never emitted at all, so the hold "
+              "ceilings below would pass vacuously");
+
         check(last_full_opacity_ms <= kDepartedAtMs + kSettleMs + kGridMs,
               "invariant 1: a departed tile was held at full opacity well past kSettleNs "
               "under unrelated roster churn — the hold ceiling is too loose");
@@ -415,14 +433,16 @@ int main()
         a.advance(0, {{1, slotA}, {2, slotB}}, on, {});
 
         // 2 departs, 3 joins into slotB — 2's old rect. Still pending: 2 is
-        // held.
+        // held, and 3 — never seen before — is withheld until the change
+        // commits (CRITICAL 1), so during the hold there is no live tile at
+        // slotB at all. The ordering contract still governs the moment the
+        // change commits, below, which is when the two can first coincide.
         const auto pending = a.advance(300 * kMs, {{1, slotA}, {3, slotB}}, on, {2});
-        const bool held_behind_live =
-            index_of(pending, 2) >= 0 && index_of(pending, 3) >= 0 &&
-            index_of(pending, 2) < index_of(pending, 3);
-        check(held_behind_live,
-              "ordering contract: a held departing tile was emitted after the live tile "
-              "occupying its rect, instead of before it");
+        check(index_of(pending, 2) >= 0,
+              "a departing tile was not held through its settle window");
+        check(index_of(pending, 3) < 0,
+              "a joining tile was emitted into the departing tile's rect before "
+              "the change committed");
 
         // Commits at 560ms (260ms >= 250ms): exit begins, 2 is now fading.
         const auto exiting_phase = a.advance(560 * kMs, {{1, slotA}, {3, slotB}}, on, {2});
@@ -560,15 +580,42 @@ int main()
               "spring arrived");
     }
 
-    // settled() during a pending JOIN, not just a departure: a not-yet-
-    // committed newcomer is held at its own target ("a newly seen tile
-    // starts at its target") while an already-committed tile holds its own
-    // unchanged target — both at_rest, and animated.size() == desired.size()
-    // (no extra held/exiting entry to catch this by count), so only the
-    // pending-set-change check catches it.
+    // Final review, CRITICAL 1: a never-before-seen tile must be WITHHELD
+    // until its set change commits, not emitted at its target in the
+    // meantime.
+    //
+    // While a change is pending, every committed tile deliberately stays on
+    // its OLD target (see the "a blip never moves the wall" contract). A
+    // newcomer has no old target, so emitting it at its new one puts one
+    // tile in the NEW grid while the whole rest of the wall is still in the
+    // OLD one — and the two grids are solved for different counts, so the
+    // newcomer's slot lands squarely on top of a participant who is still
+    // legitimately on air there. The renderer draws in feed order with
+    // newcomers appended last, so the newcomer paints OVER that participant
+    // for the whole 250ms window.
+    //
+    // The rects below are the real 1920x1080 geometry, not convenient
+    // synthetic ones: solve_tile_grid() at the shipped defaults (16:9,
+    // gutter and margin = canvas_height/135 = 8) for one tile and for two.
+    // Measured against those exact numbers, the 1->2 newcomer covers
+    // 502203 px^2 of participant 1 — 99% of the newcomer's own area. Every
+    // count from 1 to 8 overlaps by 25-100%; departures overlap by 0.
+    // The earlier version of this test used {1:(0,0,200,200)} and
+    // {2:(200,0,100,100)}, which happen not to overlap at all, and so
+    // asserted the defect was correct behaviour.
+    //
+    // Withholding is what the spec already buys: "the wall reacts one
+    // settle window later" is the stated cost of the settle window, and a
+    // join is exactly that. The render side needs nothing: a feed with no
+    // matching animated entry gets SnappedTileRect{} and is skipped by the
+    // width < 2 guard in tiles_source_render().
     {
+        const TileRect one_of_one   = rect(14.2222, 8.0, 1891.5556, 1064.0);
+        const TileRect two_of_two_a = rect(8.0, 273.375, 948.0, 533.25);
+        const TileRect two_of_two_b = rect(964.0, 273.375, 948.0, 533.25);
+
         TileAnimator a;
-        a.advance(0, {{1, rect(0, 0, 200, 200)}}, on, {});
+        a.advance(0, {{1, one_of_one}}, on, {});
         check(a.settled(), "a single settled participant was not reported settled");
 
         uint64_t t = 0;
@@ -577,29 +624,53 @@ int main()
             return a.advance(t, d, on, {});
         };
 
-        bool saw_all_at_rest_during_hold = false;
-        for (int i = 0; i < 12; ++i) {  // 240ms: inside the 250ms hold
+        // Steps land on t = 20, 40, ... 260ms. The join is first proposed on
+        // the t=20ms step, so the last of these is 240ms into the 250ms hold.
+        for (int i = 0; i < 13; ++i) {
             const auto out =
-                step({{1, rect(0, 0, 200, 200)}, {2, rect(200, 0, 100, 100)}});
-            if (std::all_of(out.begin(), out.end(),
-                             [](const AnimatedTile &x) { return x.at_rest; }))
-                saw_all_at_rest_during_hold = true;
+                step({{1, two_of_two_a}, {2, two_of_two_b}});
+
+            const AnimatedTile *newcomer = find(out, 2);
+            check(newcomer == nullptr,
+                  "a never-before-seen tile was emitted during the settle "
+                  "window, stamping the new grid's slot over a participant "
+                  "still drawn in the old one");
+
+            // The incumbent is still exactly where it was, in the OLD grid —
+            // which is the whole reason the newcomer cannot be drawn yet.
+            const AnimatedTile *incumbent = find(out, 1);
+            check(incumbent != nullptr, "the incumbent was lost during a pending join");
+            check(incumbent != nullptr &&
+                      std::fabs(incumbent->rect.x - one_of_one.x) < 0.001 &&
+                      std::fabs(incumbent->rect.width - one_of_one.width) < 0.001,
+                  "the incumbent moved before the join had settled");
+
             check(!a.settled(),
                   "settled() was true while a join was still pending, where a "
                   "fresh solve for the new count would already disagree with "
                   "the wall");
         }
-        check(saw_all_at_rest_during_hold,
-              "test setup: the newcomer should be held at its own target, "
-              "still at_rest, throughout the hold — exactly what settled() "
-              "must NOT rely on");
 
-        for (int i = 0; i < 5; ++i)  // cross the 250ms hold: join commits
-            step({{1, rect(0, 0, 200, 200)}, {2, rect(200, 0, 100, 100)}});
+        // t is 260ms here; the change was proposed at 20ms, so the next step
+        // (280ms, 260ms later) is the frame it commits on. The newcomer must
+        // appear on exactly that frame — withheld, not dropped — and at its
+        // own target, since it has nowhere to travel from.
+        const auto committed = step({{1, two_of_two_a}, {2, two_of_two_b}});
+        const AnimatedTile *arrived = find(committed, 2);
+        check(arrived != nullptr,
+              "the newcomer did not appear on the frame its join committed");
+        check(arrived != nullptr &&
+                  std::fabs(arrived->rect.x - two_of_two_b.x) < 0.001 &&
+                  std::fabs(arrived->rect.y - two_of_two_b.y) < 0.001,
+              "the newcomer did not appear at its own target once the join committed");
+
+        // The incumbent reflows into the two-up grid from where it was. Run
+        // well past the 350ms settle time and the wall is settled again.
+        for (int i = 0; i < 40; ++i)
+            step({{1, two_of_two_a}, {2, two_of_two_b}});
         check(a.settled(),
-              "settled() was false once a join committed with nothing left to "
-              "move (participant 1's target never changed, and the newcomer "
-              "starts at its own target by construction)");
+              "settled() was still false long after the join committed and the "
+              "incumbent's spring had arrived");
     }
 
     // settled() reflects the disabled bypass unconditionally: advance()

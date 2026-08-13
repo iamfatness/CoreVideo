@@ -1443,9 +1443,10 @@ static void tiles_source_render(void *data, gs_effect_t *)
     // resizing is not gated on this animator's own settle window at all),
     // and symmetrically a join's settle hold (the already-committed tiles
     // hold THEIR old targets, all at_rest, while a fresh solve already
-    // describes the larger grid — the newcomer itself is withheld until the
-    // join commits, so nothing in the emitted tiles marks this frame as
-    // different from a settled one).
+    // describes the larger grid — and the newcomer is either withheld, or
+    // released early and sitting still in a slot the OLD grid left free, so
+    // either way nothing in the emitted tiles marks this frame as different
+    // from a settled one).
     // Both were caught by re-running the repro below after implementing the
     // naive `all_of(at_rest)` version first; see task-6-report.md. settled()
     // is false in both cases (pending set change, or a held/exiting tile
@@ -1509,17 +1510,19 @@ static void tiles_source_render(void *data, gs_effect_t *)
         // fully functional without them; only exit fades are not drawn yet.
         //
         // `live` can legitimately be null even for a non-null feed, and the
-        // empty SnappedTileRect below is the correct answer when it is: a
-        // participant the animator has never carried motion state for is
-        // WITHHELD from its output until the settle window commits their
-        // join, precisely so their new-grid slot is not painted over a
-        // participant still drawn in the old grid (see the not-committed
-        // branch of TileAnimator::advance()). An empty rect has width 0, so
-        // the glow loop and the tile loop both skip that feed on the same
-        // `width < 2` rule they already apply — the slot shows the
-        // background until the join commits, one settle window later, which
-        // is the cost the design already declares for every roster change.
-        // The same fallback covers a null feed pointer.
+        // empty SnappedTileRect below is the correct answer when it is. The
+        // animator WITHHOLDS a participant whose slot would be painted over
+        // one still drawn in the layout the wall has committed to — a
+        // joiner before the wall has made room, or a tile released early
+        // whose slot the committed layout has since wanted back (see the
+        // not-committed branch of TileAnimator::advance()). It is not
+        // withheld for a fixed period: it appears as soon as its slot is
+        // clear, or at the latest one settle window later, whichever comes
+        // first, so a joiner whose slot was already free is drawn on the
+        // frame it arrives. An empty rect has width 0, so the glow loop and
+        // the tile loop both skip that feed on the same `width < 2` rule they
+        // already apply, and the slot shows the background until then. The
+        // same fallback covers a null feed pointer.
         rects.reserve(feeds.size());
         moving.reserve(feeds.size());
         for (const TileFeedPtr &feed : feeds) {

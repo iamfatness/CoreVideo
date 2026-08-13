@@ -233,19 +233,21 @@ public:
             ++it;
         }
 
-        // The withheld-newcomer clocks (see the withholding branch below)
-        // live only for as long as a tile is both proposed and unreleased.
-        // This sweep is their single owner, so no other site has to remember
-        // to clean up: an id that has left the layout is no longer being
-        // withheld, and one that now has motion state has been released —
-        // either by its own clock, or by the settle window committing it. A
-        // proposal that comes back later is a fresh withholding and gets a
-        // fresh clock, exactly as `held` is reset for a tile that returns to
-        // `desired` on the departure side.
+        // The withhold clocks (see the withholding branch below) live only
+        // for as long as a tile is proposed and still yielding. The branch
+        // itself clears an entry the moment its tile is drawn; this sweep
+        // covers the two cases that branch never sees again — an id that has
+        // left the layout, and one that has stopped being a guest because it
+        // was committed. A proposal that comes back later is a fresh
+        // withholding and gets a fresh clock, exactly as `held` is reset for
+        // a tile that returns to `desired` on the departure side.
         for (auto it = m_withheld_since.begin(); it != m_withheld_since.end();) {
             const bool in_layout =
                 std::find(incoming.begin(), incoming.end(), it->first) != incoming.end();
-            if (!in_layout || m_tiles.find(it->first) != m_tiles.end())
+            const auto tile = m_tiles.find(it->first);
+            const bool no_longer_a_guest =
+                tile != m_tiles.end() && !tile->second.provisional;
+            if (!in_layout || no_longer_a_guest)
                 it = m_withheld_since.erase(it);
             else
                 ++it;
@@ -333,6 +335,11 @@ public:
         for (const auto &d : desired) {
             auto it = m_tiles.find(d.participant_id);
             if (it != m_tiles.end()) {
+                // A provisional tile is itself a guest of this layout, so it
+                // is not something another guest must yield to. Two guests
+                // are slots in the same grid and are disjoint by
+                // construction anyway.
+                if (it->second.provisional) continue;
                 TileRect r;
                 r.x = it->second.x.position; r.y = it->second.y.position;
                 r.width = it->second.w.position; r.height = it->second.h.position;
@@ -341,9 +348,7 @@ public:
             }
             // No motion state. A committed one is created at its target
             // further down and drawn there this frame; an uncommitted one is
-            // a newcomer, and two newcomers are slots in the same grid, so
-            // they are disjoint from each other by construction and need not
-            // be considered here.
+            // a newcomer, which is a guest and is handled below.
             const bool committed =
                 std::find(m_committed_ids.begin(), m_committed_ids.end(),
                           d.participant_id) != m_committed_ids.end();
@@ -411,46 +416,99 @@ public:
                 //     which is a far worse failure than a brief overlap.
                 //     Without churn the same join took 256ms.
                 //
-                // The clock is kept beside m_tiles rather than by creating
-                // the Motion early and flagging it: a Motion seeded on first
-                // sight would carry the rect from that first frame, and the
-                // proposal can change while the tile is withheld, so a
-                // clock-released tile would appear at a stale rect. Created
-                // on release instead, it is always seeded at the target the
-                // layout is proposing right now.
-                auto held = m_tiles.find(d.participant_id);
-                if (held == m_tiles.end()) {
-                    auto since = m_withheld_since.find(d.participant_id);
-                    if (since == m_withheld_since.end())
-                        since = m_withheld_since
-                                    .emplace(d.participant_id, now_ns).first;
+                // The clock is kept beside m_tiles rather than as a flag on a
+                // Motion created early: a Motion seeded on first sight would
+                // carry the rect from that first frame, and the proposal can
+                // change while the tile is withheld, so a clock-released tile
+                // would appear at a stale rect. Created on release instead,
+                // it is always seeded at the target the layout is proposing
+                // right now.
+                //
+                // Releasing a tile early makes it a GUEST of a layout that
+                // has not adopted it, and the test above has to keep holding
+                // for as long as it stays one — a single check at release
+                // time is not enough. Two camera toggles inside 250ms are all
+                // it takes: participant 3 drops out, newcomer 4 is released
+                // into 3's vacated slot because that slot is now free, then 3
+                // comes back. 3 is committed, so it is redrawn frozen at that
+                // same slot — a pending change must not retarget it — and the
+                // release decision for 4 was made a frame earlier, when 3 was
+                // retained but invisible and so in neither the live set nor
+                // the emitted one. Both are live, both are drawn, both at the
+                // identical rect: measured 495264 px^2, 100% overlap, held
+                // for the whole settle window, with the incoming grid's
+                // fourth slot blank meanwhile.
+                //
+                // So a guest is re-tested every frame, against where it would
+                // actually be drawn, and yields the moment the committed
+                // layout wants that space back. It stops being a guest — and
+                // stops yielding forever after — when it is committed, or
+                // when its own clock expires, whichever comes first. That
+                // second promotion is what keeps the bound from part 1
+                // intact: under churn that never commits, the joiner still
+                // appears within kSettleNs and is not strobed off again on
+                // the next frame.
+                //
+                // Letting a released guest track the current proposal instead
+                // of freezing it was considered and rejected. It moves the
+                // guest into the NEW grid while every committed tile is still
+                // in the OLD one — which is the two-grids-at-once defect this
+                // whole branch exists to prevent. Measured on the repro
+                // above, it converges to 246048 px^2, a SUSTAINED 50%
+                // overlap, on top of a ~100% transient: better than 100% for
+                // the full window, but squarely back in the 25-100% band that
+                // made this a defect in the first place. Yielding measures 0.
+                auto tile = m_tiles.find(d.participant_id);
+                const bool never_seen = (tile == m_tiles.end());
 
-                    const bool clock_expired =
-                        (now_ns - since->second) >= kSettleNs;
+                // Where it would be drawn if it were emitted this frame: a
+                // never-seen tile would be seeded at its target, and anything
+                // else is frozen where it already is.
+                TileRect would_draw = d.rect;
+                if (!never_seen) {
+                    would_draw.x      = tile->second.x.position;
+                    would_draw.y      = tile->second.y.position;
+                    would_draw.width  = tile->second.w.position;
+                    would_draw.height = tile->second.h.position;
+                }
+
+                bool courtesy_expired = false;
+                if (never_seen || tile->second.provisional) {
                     bool covers_someone = false;
                     for (const TileRect &r : live_rects) {
-                        if (rects_overlap(d.rect, r)) { covers_someone = true; break; }
+                        if (rects_overlap(would_draw, r)) { covers_someone = true; break; }
                     }
-                    if (covers_someone && !clock_expired)
-                        continue;
+                    if (!covers_someone) {
+                        // Clear as this frame stands. Its clock is cleared
+                        // too, exactly as `held` is cleared for a tile that
+                        // returns to `desired` on the departure side, so a
+                        // later yield is measured from when THAT yield began.
+                        m_withheld_since.erase(d.participant_id);
+                    } else {
+                        auto since = m_withheld_since.find(d.participant_id);
+                        if (since == m_withheld_since.end())
+                            since = m_withheld_since
+                                        .emplace(d.participant_id, now_ns).first;
+                        if ((now_ns - since->second) < kSettleNs)
+                            continue;                    // yielding
+                        m_withheld_since.erase(since);
+                        courtesy_expired = true;
+                    }
+                }
 
-                    // Released. Seeded at its target: it has nowhere to
-                    // travel from, exactly like the first-sight case below.
+                if (never_seen) {
                     Motion m;
                     m.x = {d.rect.x, 0.0};
                     m.y = {d.rect.y, 0.0};
                     m.w = {d.rect.width, 0.0};
                     m.h = {d.rect.height, 0.0};
                     m.target = d.rect;
+                    m.provisional = !courtesy_expired;
                     m_tiles.emplace(d.participant_id, m);
-                    out.push_back(AnimatedTile{d.participant_id, d.rect, 1.0, true});
-                    continue;
+                } else if (courtesy_expired) {
+                    tile->second.provisional = false;
                 }
-                TileRect r;
-                r.x = held->second.x.position; r.y = held->second.y.position;
-                r.width = held->second.w.position;
-                r.height = held->second.h.position;
-                out.push_back(AnimatedTile{d.participant_id, r, 1.0, true});
+                out.push_back(AnimatedTile{d.participant_id, would_draw, 1.0, true});
                 continue;
             }
 
@@ -468,6 +526,10 @@ public:
             }
 
             Motion &m = it->second;
+
+            // Committed: the wall's layout now includes this tile, so it is
+            // no longer a guest on someone else's and never yields again.
+            m.provisional = false;
 
             // Adopt a new target only when the layout in hand was solved for
             // the set the wall has committed to. While a change is pending, the
@@ -530,11 +592,13 @@ public:
     //     during this window shows the wrong size.
     //   - During a join's settle hold, symmetrically: every already-committed
     //     tile holds its OLD target and reports at_rest, while a fresh solve
-    //     already describes the LARGER grid the newcomer will join. (The
-    //     newcomer itself is withheld until the join commits — see the
-    //     not-committed branch in advance() — so it is not in the output to
-    //     report anything.) Nothing in the emitted tiles distinguishes this
-    //     from a settled wall.
+    //     already describes the LARGER grid the newcomer will join. The
+    //     newcomer is either withheld — see the not-committed branch in
+    //     advance(), where it yields for as long as it would cover a tile the
+    //     committed layout is drawing — or released early into a slot that
+    //     layout left free, in which case it sits perfectly still and reports
+    //     at_rest like everything else. Either way nothing in the emitted
+    //     tiles distinguishes this frame from a settled wall.
     //
     // Only when nothing is pending AND every tracked tile is a plain, fully
     // arrived, non-held, non-exiting entry does the fresh solve match what
@@ -569,6 +633,14 @@ private:
         // whole-set settle timer instead.
         bool     held            = false;
         uint64_t held_since_ns   = 0;
+        // Created by an early release — the animator put this tile on the
+        // wall ahead of the settle window adopting it, because its slot was
+        // free (or because its withhold clock ran out). A provisional tile is
+        // a GUEST in the committed layout: it yields to any tile that layout
+        // is actually drawing. Cleared the moment the tile is committed, and
+        // when its withhold clock expires. See the withholding branch in
+        // advance().
+        bool     provisional     = false;
     };
 
     // Do the two rects share more than a sliver? Used to decide whether a

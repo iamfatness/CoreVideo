@@ -22,6 +22,18 @@ static const AnimatedTile *find(const std::vector<AnimatedTile> &tiles, uint32_t
     return nullptr;
 }
 
+// Shared area of two rects, 0 when they do not overlap. Used to assert that
+// no two tiles the animator emits as live are ever stacked.
+static double overlap_area(const TileRect &a, const TileRect &b)
+{
+    const double left   = std::fmax(a.x, b.x);
+    const double top    = std::fmax(a.y, b.y);
+    const double right  = std::fmin(a.x + a.width,  b.x + b.width);
+    const double bottom = std::fmin(a.y + a.height, b.y + b.height);
+    if (right <= left || bottom <= top) return 0.0;
+    return (right - left) * (bottom - top);
+}
+
 // -1 if absent. Used to check relative draw order, not just presence.
 static int index_of(const std::vector<AnimatedTile> &tiles, uint32_t id)
 {
@@ -866,6 +878,90 @@ int main()
               "happened not to change");
     }
 
+    // Fix round 2, CRITICAL: two LIVE participants must never be emitted at
+    // overlapping rects during a settle hold.
+    //
+    // Two camera toggles inside 250ms are all it takes. Four people, 1/2/3 on
+    // camera and 4 off, steady 3-up wall. Participant 3's camera goes off and
+    // 4's comes on in one roster update: same count, so 4's slot is disjoint
+    // from every other and it is released instantly into the slot 3 just
+    // vacated. One frame later 3's camera comes back. 3 is committed, so it
+    // is redrawn — frozen at its old target, because a pending change must
+    // not retarget it — which is the very slot 4 was released into. 4's
+    // release decision was made a frame earlier, when 3 was retained but
+    // invisible and so in neither the live set nor the emitted one.
+    //
+    // Both are live, both are in `feeds`, both are drawn, at the identical
+    // rect: 495264 px^2, 100% overlap, for the whole window. Feed order
+    // decides whose face survives, and the incoming grid's fourth slot sits
+    // blank meanwhile. Measured at each commit on this exact sequence: 49%
+    // before any withholding existed, 0% with the unconditional withhold,
+    // 100% once the disjointness release was added — worse than either.
+    //
+    // The fix is that an early release makes a tile a GUEST rather than a
+    // resident: it is re-tested every frame against where it would actually
+    // be drawn, and yields the moment the committed layout wants that space
+    // back. Letting it track the current proposal instead was rejected on
+    // measurement — that converges to a SUSTAINED 50% overlap (246048 px^2),
+    // because it puts the guest in the new grid while every committed tile is
+    // still in the old one, which is the defect class this all started with.
+    {
+        const TileRect four_a = rect(18.0, 8.0, 938.0, 528.0);
+        const TileRect four_b = rect(964.0, 8.0, 938.0, 528.0);
+        const TileRect four_c = rect(18.0, 544.0, 938.0, 528.0);
+        const TileRect four_d = rect(964.0, 544.0, 938.0, 528.0);
+
+        TileAnimator a;
+        a.advance(0, {{1, three_a}, {2, three_b}, {3, three_c}}, on, {});
+        check(a.settled(), "test setup: the three-up wall should start settled");
+
+        // 3's camera off and 4's on, in one update: layout [1,2,4].
+        a.advance(1016 * kMs, {{1, three_a}, {2, three_b}, {4, three_c}}, on, {});
+
+        // 3's camera back on, 16ms later: layout [1,2,4,3]. Everything below
+        // proposes the 4-up grid, which stays pending for 250ms.
+        const std::vector<DesiredTile> four_up{
+            {1, four_a}, {2, four_b}, {4, four_c}, {3, four_d}};
+
+        double worst_overlap = 0.0;
+        bool saw_three = false;
+        for (uint64_t ms = 1032; ms < 1288; ms += 16) {   // the hold
+            const auto out = a.advance(ms * kMs, four_up, on, {});
+            if (find(out, 3) != nullptr) saw_three = true;
+            for (size_t i = 0; i < out.size(); ++i)
+                for (size_t j = i + 1; j < out.size(); ++j)
+                    worst_overlap =
+                        std::fmax(worst_overlap, overlap_area(out[i].rect, out[j].rect));
+        }
+
+        check(saw_three,
+              "test setup: participant 3 should be back on the wall throughout "
+              "the hold, otherwise there is nothing for a guest to cover");
+        check(worst_overlap == 0.0,
+              "two live tiles were emitted at overlapping rects during the "
+              "settle hold — a returning participant's face and a newcomer's "
+              "stacked in one slot");
+
+        // And the guest is not simply lost: once the 4-up layout commits it
+        // takes its place, and the wall reflows to four disjoint slots.
+        const auto committed = a.advance(1288 * kMs, four_up, on, {});
+        check(find(committed, 4) != nullptr,
+              "the guest never arrived once the layout that includes it committed");
+
+        for (uint64_t ms = 1304; ms <= 2200; ms += 16)
+            a.advance(ms * kMs, four_up, on, {});
+        const auto settled_out = a.advance(2216 * kMs, four_up, on, {});
+        check(settled_out.size() == 4,
+              "the settled four-up wall did not carry all four participants");
+        double settled_overlap = 0.0;
+        for (size_t i = 0; i < settled_out.size(); ++i)
+            for (size_t j = i + 1; j < settled_out.size(); ++j)
+                settled_overlap = std::fmax(
+                    settled_overlap, overlap_area(settled_out[i].rect, settled_out[j].rect));
+        check(settled_overlap == 0.0,
+              "the settled four-up wall still had overlapping tiles");
+    }
+
     // Fix wave re-review, part 1: a withheld newcomer's suppression must be
     // BOUNDED.
     //
@@ -895,6 +991,8 @@ int main()
         constexpr uint64_t kSettleMs   = 250;   // kSettleNs, in ms
 
         uint64_t first_seen_ms = 0;
+        uint64_t frames_after_first_seen = 0;
+        uint64_t frames_missing_after_first_seen = 0;
         for (uint64_t ms = kJoinedAtMs; ms <= 30000; ms += kFrameMs) {
             // 4 is continuously proposed. 9 flaps in and out, so the proposed
             // set differs from the last one on every single call and the
@@ -903,7 +1001,12 @@ int main()
             if ((ms / kFrameMs) % 2) d.push_back({9, rect(1500, 900, 100, 100)});
 
             const auto out = a.advance(ms * kMs, d, on, {});
-            if (first_seen_ms == 0 && find(out, 4) != nullptr) first_seen_ms = ms;
+            const bool seen = find(out, 4) != nullptr;
+            if (first_seen_ms == 0 && seen) first_seen_ms = ms;
+            else if (first_seen_ms != 0) {
+                ++frames_after_first_seen;
+                if (!seen) ++frames_missing_after_first_seen;
+            }
         }
 
         check(first_seen_ms != 0,
@@ -914,6 +1017,20 @@ int main()
               "a withheld newcomer was released well past kSettleNs under "
               "unrelated churn — its clock is being re-stamped by the "
               "whole-set settle timer instead of running on its own");
+
+        // Once its clock has released it, the tile stops being a guest for
+        // good and never yields again. Without that promotion the overlap
+        // test would withhold it on the very next frame — 4's rect covers
+        // participant 1's held rect by 99% here, which is why the clock had
+        // to release it in the first place — and it would strobe one frame
+        // visible for every kSettleNs invisible, for as long as the churn
+        // lasted. That is a worse artefact than the overlap the release
+        // deliberately accepts.
+        check(frames_after_first_seen > 1000,
+              "test setup: the run should continue well past the first sighting");
+        check(frames_missing_after_first_seen == 0,
+              "a newcomer released by its own clock was withheld again "
+              "afterwards — it strobes on and off instead of staying on the wall");
     }
 
     // settled() reflects the disabled bypass unconditionally: advance()

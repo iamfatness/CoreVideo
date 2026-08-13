@@ -635,6 +635,8 @@ In `src/zoom-tile-animator.h`, add to the private section:
     // what a legitimately vacated wall looks like, and conflating the two lets a
     // vacate-and-return blip skip the hold entirely.
     bool m_has_committed = false;
+    // Distinguishes "an empty roster is proposed" from "nothing is proposed".
+    bool m_has_pending = false;
 ```
 
 Add this helper to the private section:
@@ -663,15 +665,25 @@ In `advance()`, immediately after `m_last_ns = now_ns;`, insert the settle gate:
             m_committed_ids = incoming;          // first frame: adopt at once
             m_has_committed = true;
         } else if (incoming != m_committed_ids) {
-            if (incoming != m_pending_ids) {
+            // m_has_pending, not "m_pending_ids is non-empty": an empty roster
+            // is a legitimate proposal — everyone dropping out at once is the
+            // flicker case this gate exists for — and it is indistinguishable
+            // from the default-empty vector. Without the flag, an empty
+            // proposal falls through to the elapsed-time branch and is measured
+            // against a stale m_pending_since_ns, so it is adopted with no hold
+            // at all.
+            if (!m_has_pending || incoming != m_pending_ids) {
                 m_pending_ids = incoming;
                 m_pending_since_ns = now_ns;
+                m_has_pending = true;
             } else if (now_ns - m_pending_since_ns >= kSettleNs) {
                 m_committed_ids = incoming;      // held long enough: adopt
                 m_pending_ids.clear();
+                m_has_pending = false;
             }
         } else {
             m_pending_ids.clear();               // reverted: forget the change
+            m_has_pending = false;
         }
 ```
 
@@ -727,7 +739,9 @@ Seed it when a tile is first seen (`m.target = d.rect;` beside the spring seedin
 where `change_pending` is computed once, immediately after the settle gate:
 
 ```cpp
-        const bool change_pending = !m_pending_ids.empty();
+        // Same reason as above: an empty proposal is still a pending change, so
+        // this must read the flag, not the vector's emptiness.
+        const bool change_pending = m_has_pending;
 ```
 
 **`at_rest` must be measured against `m.target`, not `d.rect`.** A tile held through a pending change sits exactly on its remembered target while `d.rect` says otherwise; comparing against `d.rect` would report it in motion forever and push it onto the sub-pixel render path for no reason.

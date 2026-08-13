@@ -1156,23 +1156,34 @@ static void tiles_source_render(void *data, gs_effect_t *)
     // `departed` lags `desired` by even one frame, the exit exception silently
     // never fires and the whole fade becomes dead code.
     //
-    // Gated on `tracked` being non-empty — which it always is when animation
-    // is off, since the disabled bypass clears m_tiles — so the render path
-    // does not take ZoomEngineClient's roster mutex when it has nothing to
-    // ask it. That mutex is hot: the engine reader thread takes it for every
-    // "frame" and "audio" message across every source in the plugin (see
-    // zoom-engine-client.h's own warning on stalling that dispatch), and
-    // roster() deep-copies the whole participant list, one std::string
-    // allocation per participant, while holding it. Before this feature
-    // existed the draw path took exactly one lock, for an O(1) pointer copy;
-    // this guard is what keeps that true when the toggle is off, rather than
-    // adding a lock + N allocations on the graphics thread unconditionally.
-    // Do not remove this as "redundant" — it is the difference between
-    // "disabled costs nothing" and "disabled costs a roster copy every
-    // frame".
+    // Gated on `anim.enabled` AND `tracked` being non-empty — either half
+    // missing and the render path must not take ZoomEngineClient's roster
+    // mutex when it has nothing to ask it. That mutex is hot: the engine
+    // reader thread takes it for every "frame" and "audio" message across
+    // every source in the plugin (see zoom-engine-client.h's own warning on
+    // stalling that dispatch), and roster() deep-copies the whole
+    // participant list, one std::string allocation per participant, while
+    // holding it. Before this feature existed the draw path took exactly
+    // one lock, for an O(1) pointer copy; this guard is what keeps that
+    // true when the toggle is off, rather than adding a lock + N
+    // allocations on the graphics thread unconditionally. Do not remove
+    // either half as "redundant" — it is the difference between "disabled
+    // costs nothing" and "disabled costs a roster copy every frame".
+    //
+    // `anim.enabled` is not implied by `tracked.empty()`: tracked_ids()
+    // reflects `m_tiles` as of the END of the PREVIOUS frame's advance()
+    // call, and only advance()'s own disabled branch clears it. So on the
+    // very first frame after the operator flips the toggle off while
+    // anything was mid-flight, `tracked` is still non-empty from last
+    // frame — `!tracked.empty()` alone would pass and pay for a roster
+    // copy that `advance()`'s disabled branch is about to discard unread
+    // (it never looks at `departed`). Checking `anim.enabled` directly
+    // closes that one-frame gap. On the enabled path `anim.enabled` is
+    // always true, so the condition reduces to exactly `!tracked.empty()`,
+    // unchanged from before.
     std::vector<uint32_t> departed;
     const std::vector<uint32_t> tracked = ctx->animator.tracked_ids();
-    if (!tracked.empty()) {
+    if (anim.enabled && !tracked.empty()) {
         const std::vector<ParticipantInfo> roster =
             ZoomEngineClient::instance().roster();
         for (const uint32_t id : tracked) {

@@ -1074,7 +1074,22 @@ static void tiles_draw_neutral(gs_technique_t *tech, uint32_t x, uint32_t y,
 static uint32_t even_floor_px(double v)
 {
     if (v <= 0.0) return 0;
-    return static_cast<uint32_t>(v) & ~1u;
+    // The 0.05 is TileAnimator's own kRestEpsilon, and it is load-bearing
+    // rather than defensive. A spring approaches its target asymptotically
+    // and from below, so a tile that has arrived at an even integer target
+    // sits at (target - 1e-8), not at target. A plain floor turns that into
+    // target - 1, and the &~1 then drops it a further pixel: a tile that has
+    // finished growing to 1064 draws 1062, two pixels short, for every frame
+    // between arriving and the wall as a whole becoming settled(). Measured
+    // across 2->1 through 12->11 reflows at 1920x1080, that hits five of the
+    // eleven counts. Widening the floor by exactly the band the animator
+    // itself calls "arrived" makes an arrived tile snap to the size the
+    // settled frame draws, and changes nothing for a tile that is genuinely
+    // still in flight — 0.05px from an even boundary is 1/40th of the 2px
+    // step this function quantises to. It can overshoot the animator's true
+    // rect, but by at most that same 0.05px, where flooring undershoots it
+    // by up to 1.95.
+    return static_cast<uint32_t>(v + 0.05) & ~1u;
 }
 
 static uint32_t even_round_px(double v)
@@ -1269,6 +1284,38 @@ static void tiles_source_render(void *data, gs_effect_t *)
     params.margin        = resolve_spacing_px(
         ctx->margin_pct.load(std::memory_order_acquire), canvas_h_d);
     const std::vector<TileRect> solved = solve_tile_grid(feeds.size(), params);
+
+    // Snapped ONCE per frame, here, and used for two things: the animator's
+    // targets just below, and the settled frame further down. It used to be
+    // computed inside the settled branch alone; hoisting it changes nothing
+    // about that branch — same function, same arguments, same result — and
+    // makes the two uses the same numbers by construction rather than by two
+    // calls that have to be kept in agreement.
+    //
+    // Feeding the animator the SNAPPED rects, rather than the raw `solved`
+    // ones, is what makes motion converge on the geometry the resting frame
+    // actually draws. A moving tile is drawn at its exact fractional rect,
+    // but the settled frame draws snap_tile_grid_even(solved, params) — so
+    // with `solved` as the target, every reflow ended with a single-frame
+    // jump from where the spring arrived to where the snap puts it. Measured
+    // at 1920x1080 across 1..16 tiles, that trailing jump reaches |dx| 2.67,
+    // |dy| 2.67, |dw| 1.56 and |dh| 1.33 px (worst at 5..9 tiles, the common
+    // wall sizes) — larger than the 1.947 px trailing-edge step the sub-pixel
+    // path went to trouble to eliminate, and in the same place: the last
+    // frame of the transition, where the eye has just finished following the
+    // tile. Targeting the snapped rect removes it: the spring arrives on the
+    // exact integers the settled frame then draws.
+    //
+    // `snap_usable` is the all-or-nothing contract of snap_tile_grid_even():
+    // it returns either one rect per input or an empty vector (no rects, a
+    // tile that snaps below 2px, or a canvas smaller than one tile). In that
+    // degenerate case the animator keeps the unsnapped targets, exactly as
+    // before, and `rects` below ends up empty and nothing is drawn — also
+    // exactly as before.
+    const std::vector<SnappedTileRect> snapped =
+        snap_tile_grid_even(solved, params);
+    const bool snap_usable = snapped.size() == solved.size();
+
     std::vector<DesiredTile> desired;
     desired.reserve(feeds.size());
     for (size_t i = 0; i < feeds.size() && i < solved.size(); ++i) {
@@ -1279,7 +1326,14 @@ static void tiles_source_render(void *data, gs_effect_t *)
         // draw loop), so the file has one answer to "can a feed be null
         // here", not two that could quietly drift apart.
         const uint32_t pid = feeds[i] ? feeds[i]->slot.participant_id() : 0;
-        desired.push_back(DesiredTile{pid, solved[i]});
+        TileRect target = solved[i];
+        if (snap_usable) {
+            target.x      = static_cast<double>(snapped[i].x);
+            target.y      = static_cast<double>(snapped[i].y);
+            target.width  = static_cast<double>(snapped[i].width);
+            target.height = static_cast<double>(snapped[i].height);
+        }
+        desired.push_back(DesiredTile{pid, target});
     }
 
     AnimationSettings anim;
@@ -1389,8 +1443,9 @@ static void tiles_source_render(void *data, gs_effect_t *)
     if (ctx->animator.settled()) {
         // Disabled, or settled — no pending set change, nothing held or
         // exiting, every spring at its own target (see TileAnimator::
-        // settled()): solve and snap FRESH from `solved`/`params` — the
-        // exact call this file has always made — rather than routing the
+        // settled()): draw the whole-grid snap of `solved`/`params` — the
+        // exact call this file has always made, hoisted above only so the
+        // animator can target the same numbers — rather than routing the
         // animator's rects through the snap. That makes this the SAME call
         // as before this feature existed, so parity holds by construction
         // rather than by the coincidence that the animator's numbers happen
@@ -1406,7 +1461,7 @@ static void tiles_source_render(void *data, gs_effect_t *)
         // was, with no held/exiting entries to consider: `solved` never
         // contains one, since a departed participant is already gone from
         // `feeds` by the time it shrinks the count this is solved from.
-        rects = snap_tile_grid_even(solved, params);
+        rects = snapped;
     } else {
         // Not settled — a set change is pending, or something is held,
         // exiting, or still springing: snap_tile_grid_even()'s single-

@@ -352,6 +352,18 @@ struct tiles_source {
     // only tiles_source_render() ever touches it. See
     // src/zoom-tile-animator.h.
     TileAnimator animator;
+    // The intermediate render target a tile IN MOTION is composited through
+    // before being drawn at a fractional position — see
+    // ensure_motion_texrender() and the draw loop in tiles_source_render().
+    //
+    // Null until the first frame a tile actually moves, and therefore null for
+    // the whole life of a source whose animation toggle is off: nothing on
+    // that path reaches the code that creates it. That is deliberate and is
+    // part of this feature's no-regression guarantee — off costs no GPU
+    // memory, not even an unused texture. Render-thread only, like the rest of
+    // this block; freed in tiles_source_destroy() with the graphics context
+    // entered.
+    gs_texrender_t *motion_render = nullptr;
 
     std::shared_ptr<TilesCallbackGate> gate =
         std::make_shared<TilesCallbackGate>();
@@ -860,6 +872,12 @@ static bool s_glow_pass_failed_logged = false;
 // operator actually notices (they moved the size off zero and saw nothing), so
 // it points back at that line rather than repeating it every frame.
 static bool s_glow_unavailable_logged = false;
+// The intermediate render target for tiles in motion could not be created, at
+// all or at a particular size. Once, not once per vsync, for the same reason
+// as the flags above — and essential at least once, because the visible
+// symptom (motion stepping on the 2px grid again) is subtle enough that
+// nobody would think to look for a graphics failure behind it.
+static bool s_motion_render_failed_logged = false;
 
 // Frees one feed's plane textures and forgets what they held. The caller must
 // already hold the graphics context.
@@ -1062,9 +1080,16 @@ static uint32_t even_round_px(double v)
 // cannot be used there. This loses that function's guarantee of identical
 // gaps between neighbours (already meaningless mid-reflow, since tiles are
 // at different positions and sizes by definition while they move) and
-// quantises position and size to 2px steps. Task 7 replaces this with
-// sub-pixel rendering for tiles that are not at rest; the quantisation here
-// is a known, deliberate, temporary property of this task.
+// quantises position and size to 2px steps.
+//
+// A tile that is actually MOVING no longer draws at the position this
+// returns: the sub-pixel path in tiles_source_render() takes only the even
+// SIZE from here — which is what the intermediate texture has to be, for the
+// same I420 chroma reason — and draws at the animator's true fractional
+// position instead. The position this computes still matters for the tiles
+// this file draws directly: everything on a wall that is not settled but is
+// itself at rest (a newcomer seeded at its target while its neighbours
+// reflow), and any tile whose composite could not be made.
 static SnappedTileRect snap_tile_independently(const TileRect &r)
 {
     SnappedTileRect s;
@@ -1073,6 +1098,103 @@ static SnappedTileRect snap_tile_independently(const TileRect &r)
     s.width  = even_floor_px(r.width);
     s.height = even_floor_px(r.height);
     return s;
+}
+
+// Where a tile in motion actually is, as opposed to the even-boundary rect it
+// was snapped to. One entry per feed, index-aligned with the `rects` the draw
+// loop reads.
+//
+// The vector this fills is EMPTY whenever the wall is settled — which includes
+// every single frame the animation toggle is off, since the disabled bypass in
+// TileAnimator::advance() leaves settled() unconditionally true. That
+// emptiness is what keeps this whole feature out of the disabled path: the
+// draw loop's only reference to it is `i >= moving.size()`, which is true for
+// every tile, so no branch is taken, no intermediate texture is created, and
+// the draw calls are the ones this file has always made.
+struct MovingTile {
+    bool   moving = false;  // false: draw at the snapped rect, exactly as before
+    double x = 0.0;         // the animator's true, unsnapped canvas position
+    double y = 0.0;
+    double alpha = 1.0;     // the animator's own per-tile alpha
+};
+
+// The intermediate render target a tile in motion is composited through.
+// Created on the first frame a tile actually moves, reused for the rest of the
+// source's life, and destroyed in tiles_source_destroy(). Its texture is
+// (re)allocated by gs_texrender_begin() whenever the requested size changes,
+// which during a reflow is most frames — a tile's size is part of what is
+// being animated. That cost is bounded (one small texture per distinct tile
+// size per frame, and only while something is moving) and is why this is not
+// reached at all when nothing is.
+//
+// GS_RGBA, deliberately 8-bit rather than GS_RGBA16F: OBS's own SDR render
+// texture is 8-bit (GS_BGRA — obs_init_textures(), libobs/obs.c), so an 8-bit
+// intermediate quantises on exactly the same grid the direct path's write
+// does, and round-to-8-bit is idempotent — the round trip through this texture
+// reproduces the direct path's own bytes. A 16-bit float intermediate would
+// round onto a finer grid first and the 8-bit one second, which flips the last
+// bit on a small percentage of pixels: a smaller error per pixel, but a real
+// difference between two paths that currently have none. See task-7-report.md.
+//
+// The caller must already hold the graphics context; video_render does.
+static gs_texrender_t *ensure_motion_texrender(tiles_source *ctx)
+{
+    if (!ctx->motion_render) {
+        ctx->motion_render = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+        if (!ctx->motion_render && !s_motion_render_failed_logged) {
+            s_motion_render_failed_logged = true;
+            blog(LOG_ERROR,
+                 "[obs-zoom-plugin] Tiles: could not create the intermediate "
+                 "render target for layout animation; tiles in motion will "
+                 "step on the 2px chroma grid instead of moving smoothly");
+        }
+    }
+    return ctx->motion_render;
+}
+
+// Scales what has already been drawn into the bound render target by `alpha`:
+// the colour is left exactly as it is, and dst.a becomes alpha * dst.a.
+//
+// This is how the sub-pixel path honours AnimatedTile::alpha. It is a second
+// quad rather than a shader uniform because the I420 technique has no
+// global-alpha parameter, and adding one means changing
+// data/effects/corevideo-tiles.effect — which a stale effect file beside a new
+// DLL would then not have (see zoom-tiles-effect-policy.h). The blend factors
+// do the multiply instead: ZERO/ONE for colour leaves the destination
+// untouched, ZERO/SRCALPHA for alpha replaces dst.a with src.a * dst.a, and
+// the Solid technique supplies src.a from fill_color's alpha byte.
+//
+// Not reachable today, and deliberately so rather than by oversight: every
+// tile this path draws is a LIVE tile, and TileAnimator::advance() hardcodes
+// 1.0 for every live tile it emits. The only tiles that fade are exiting ones,
+// which this task does not draw at all — their pixel source is an open
+// decision with the repo owner. This exists so the alpha the animator computes
+// is honoured rather than silently dropped the day those tiles do get drawn,
+// and the caller skips it entirely at alpha == 1.0, so the live path pays
+// nothing for it.
+static void fade_tile_alpha(uint32_t w, uint32_t h, double alpha)
+{
+    const double clamped = alpha < 0.0 ? 0.0 : (alpha > 1.0 ? 1.0 : alpha);
+    const uint32_t a8 = static_cast<uint32_t>(std::lround(clamped * 255.0));
+    // gs_effect_set_color() takes 0xAARRGGBB and reads the alpha from the top
+    // byte (vec4_from_bgra, graphics/vec4.h); the colour bytes are zero here
+    // because the ZERO/ONE colour factors discard them anyway.
+    gs_effect_set_color(s_tiles_effect.param_color, a8 << 24);
+
+    gs_enable_blending(true);
+    gs_blend_function_separate(GS_BLEND_ZERO, GS_BLEND_ONE,
+                               GS_BLEND_ZERO, GS_BLEND_SRCALPHA);
+    gs_technique_t *const solid = s_tiles_effect.tech_solid;
+    gs_technique_begin(solid);
+    if (gs_technique_begin_pass(solid, 0)) {
+        gs_draw_sprite(nullptr, 0, w, h);
+        gs_technique_end_pass(solid);
+    }
+    gs_technique_end(solid);
+    // Back to how the composite left it. The caller's gs_blend_state_pop()
+    // restores the factors as well; this only keeps the enable flag honest for
+    // anything drawn between here and there.
+    gs_enable_blending(false);
 }
 
 // Draws the wall. Runs on the OBS graphics thread with the graphics context
@@ -1236,7 +1358,14 @@ static void tiles_source_render(void *data, gs_effect_t *)
     // the glow loop, the tile loop and the log line after it are UNCHANGED
     // from before this feature existed. Only how each entry is computed
     // differs, by branch:
+    //
+    // `moving`, alongside it, records which of those tiles the animator says
+    // are actually in motion, and where they truly are before the snap. It
+    // stays EMPTY on the settled branch — so it is empty on every frame the
+    // toggle is off — and the draw loop treats an absent entry as "not
+    // moving", which is the pre-feature behaviour exactly.
     std::vector<SnappedTileRect> rects;
+    std::vector<MovingTile> moving;
     if (ctx->animator.settled()) {
         // Disabled, or settled — no pending set change, nothing held or
         // exiting, every spring at its own target (see TileAnimator::
@@ -1286,6 +1415,7 @@ static void tiles_source_render(void *data, gs_effect_t *)
         // matching entry in `animated`. The null fallback below is only for
         // a null feed pointer.
         rects.reserve(feeds.size());
+        moving.reserve(feeds.size());
         for (const TileFeedPtr &feed : feeds) {
             const uint32_t pid = feed ? feed->slot.participant_id() : 0;
             const AnimatedTile *live = nullptr;
@@ -1294,6 +1424,26 @@ static void tiles_source_render(void *data, gs_effect_t *)
             }
             rects.push_back(live ? snap_tile_independently(live->rect)
                                   : SnappedTileRect{});
+
+            // The same lookup decides whether this tile takes the sub-pixel
+            // path in the draw loop below. The test is this tile's own
+            // `at_rest`, deliberately NOT the whole-wall settled() gate above:
+            // the two answer different questions. settled() asks "does a fresh
+            // solve describe what the animator would draw", which is about
+            // which rects are safe to use; at_rest asks "is THIS tile moving",
+            // which is about whether resampling it through an intermediate
+            // texture buys anything. A newcomer seeded at its target sits
+            // perfectly still while its neighbours reflow around it — it takes
+            // the snapped blit and stays pixel-crisp, exactly as it would have
+            // before this feature existed.
+            MovingTile m;
+            if (live && !live->at_rest) {
+                m.moving = true;
+                m.x      = live->rect.x;
+                m.y      = live->rect.y;
+                m.alpha  = live->alpha;
+            }
+            moving.push_back(m);
         }
     }
 
@@ -1504,10 +1654,22 @@ static void tiles_source_render(void *data, gs_effect_t *)
     gs_technique_begin(tech);
 
     size_t drawn = 0;
-    for (size_t i = 0; i < rects.size() && i < feeds.size(); ++i) {
-        const SnappedTileRect &r = rects[i];
-        if (r.width < 2 || r.height < 2) continue;  // as the CPU path skips them
 
+    // One tile's draw — video or neutral placeholder — with its top-left at
+    // (ox, oy) in whatever render target is currently bound. This is the body
+    // the loop below used to have inline, unchanged except that the origin is
+    // a parameter instead of r.x/r.y and its three early exits are `return`
+    // instead of `continue`.
+    //
+    // It is a function because the sub-pixel path for a tile in motion has to
+    // run EXACTLY this — the same effect, the same technique, the same
+    // parity-verified BT.709 conversion, the same cover-crop and crop_uv, the
+    // same clamped border geometry — into an intermediate texture at (0, 0). A
+    // second copy specialised for that path is the one thing most likely to
+    // make a moving tile a different colour from a resting one, which is the
+    // acceptance gate for this whole feature. There is no second copy.
+    auto draw_tile = [&](size_t i, const SnappedTileRect &r, uint32_t ox,
+                         uint32_t oy) {
         // Bounded against this tile, not against the canvas: a width past half
         // the shorter side would leave no interior, and the shader's distance
         // field assumes a radius no larger than that. See zoom-tile-border.h.
@@ -1529,8 +1691,8 @@ static void tiles_source_render(void *data, gs_effect_t *)
         const TileFeedPtr &feed = feeds[i];
         if (!feed || !tile_take_snapshot(feed, ctx->render_scratches[i]) ||
             !tile_upload_frame(feed, ctx->render_scratches[i])) {
-            tiles_draw_neutral(tech, r.x, r.y, r.width, r.height, pass);
-            continue;
+            tiles_draw_neutral(tech, ox, oy, r.width, r.height, pass);
+            return;
         }
 
         // Narrow the usable source by this slot's crop, then sample the largest
@@ -1571,8 +1733,8 @@ static void tiles_source_render(void *data, gs_effect_t *)
         const uint32_t crop_w = static_cast<uint32_t>(crop.width);
         const uint32_t crop_h = static_cast<uint32_t>(crop.height);
         if (crop_w == 0 || crop_h == 0) {  // degenerate source: nothing to map
-            tiles_draw_neutral(tech, r.x, r.y, r.width, r.height, pass);
-            continue;
+            tiles_draw_neutral(tech, ox, oy, r.width, r.height, pass);
+            return;
         }
 
         // The same sub-rectangle, in normalized texture coords, so the shader
@@ -1597,9 +1759,9 @@ static void tiles_source_render(void *data, gs_effect_t *)
         pass.crop_cv = static_cast<float>(crop_h) / static_cast<float>(feed->tex_h);
 
         if (!tiles_begin_pass(tech, feed->tex_y, feed->tex_u, feed->tex_v, pass))
-            continue;
+            return;
         gs_matrix_push();
-        gs_matrix_translate3f(static_cast<float>(r.x), static_cast<float>(r.y),
+        gs_matrix_translate3f(static_cast<float>(ox), static_cast<float>(oy),
                               0.0f);
         gs_matrix_scale3f(static_cast<float>(r.width) / static_cast<float>(crop_w),
                           static_cast<float>(r.height) / static_cast<float>(crop_h),
@@ -1610,6 +1772,162 @@ static void tiles_source_render(void *data, gs_effect_t *)
         gs_matrix_pop();
         gs_technique_end_pass(tech);
         ++drawn;
+    };
+
+    for (size_t i = 0; i < rects.size() && i < feeds.size(); ++i) {
+        const SnappedTileRect &r = rects[i];
+        if (r.width < 2 || r.height < 2) continue;  // as the CPU path skips them
+
+        // Not moving. That is EVERY tile when the animation toggle is off
+        // (`moving` is empty, so this condition is true for every i), every
+        // tile on a settled wall, and any tile that happens to be sitting
+        // still while others reflow around it. It takes the blit this file has
+        // always done — straight to the canvas, at its snapped even-boundary
+        // rect, through the same call sequence as before this feature existed.
+        if (i >= moving.size() || !moving[i].moving) {
+            draw_tile(i, r, r.x, r.y);
+            continue;
+        }
+
+        // ── A tile in motion ─────────────────────────────────────────────────
+        //
+        // Composited into an intermediate texture of the tile's own
+        // even-rounded size, then drawn at the animator's true fractional
+        // position with linear filtering.
+        //
+        // The even-boundary rule exists because I420 chroma is subsampled 2x2:
+        // a blit edge on an odd pixel has no chroma sample to reconstruct from.
+        // Inside the intermediate the tile sits at (0, 0) with even dimensions,
+        // so that rule is satisfied in TILE space, and where the finished tile
+        // then lands on the canvas is free to be fractional. That is the whole
+        // trick — without it, motion is quantised to the 2px steps
+        // snap_tile_independently() imposes, which is plainly visible on a slow
+        // reflow and is exactly the case this feature exists to make look good.
+        //
+        // Resolved before anything is composited so that a missing default
+        // effect takes the fallback path below rather than rendering a tile
+        // into a texture nothing can then draw.
+        gs_effect_t *const def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+        gs_eparam_t *const def_image =
+            def ? gs_effect_get_param_by_name(def, "image") : nullptr;
+        gs_texrender_t *const tr = def_image ? ensure_motion_texrender(ctx)
+                                             : nullptr;
+
+        // The wall's technique is closed across this whole branch and reopened
+        // at the end. It has to be: gs_effect_loop() refuses to run — and logs
+        // a warning — while another effect is active (gs_effect_loop(),
+        // libobs/graphics/effect.c:69), and the blit below goes through
+        // libobs's default effect, not ours. The composite reopens the wall's
+        // technique for the tile's own pass inside the texrender.
+        // gs_technique_end() also discards the effect's parameter values, which
+        // costs nothing here: tiles_begin_pass() sets every one of them before
+        // every tile's pass anyway — that is already this file's rule, for the
+        // same upload-at-begin_pass reason.
+        gs_technique_end(tech);
+
+        bool composited = false;
+        if (tr) {
+            gs_texrender_reset(tr);
+            if (gs_texrender_begin(tr, r.width, r.height)) {
+                composited = true;
+                // gs_texrender_begin() sets the VIEWPORT but not the
+                // projection — it pushes the old one and leaves it in place
+                // (libobs/graphics/texture-render.c), so without this the
+                // tile would be drawn through the CANVAS's ortho into a
+                // tile-sized viewport and come out shrunk into a corner.
+                // Every caller in libobs sets its own; obs-scene.c:935 is the
+                // same call with the same -100..100 depth range. The projection
+                // is popped by gs_texrender_end().
+                //
+                // This particular ortho is also what makes the composite
+                // pixel-exact against the direct path: 0..width mapped across a
+                // width-wide viewport puts each destination pixel centre at the
+                // same tile-relative coordinate the canvas ortho gives it when
+                // the tile is drawn at an integer origin, so the shader is
+                // evaluated at identical UVs and produces identical bytes.
+                gs_ortho(0.0f, static_cast<float>(r.width), 0.0f,
+                         static_cast<float>(r.height), -100.0f, 100.0f);
+                // Blending OFF while compositing. The intermediate has to hold
+                // exactly what the shader produced, with STRAIGHT (not
+                // premultiplied) alpha, because the blit below composites it
+                // with the same SRCALPHA/INVSRCALPHA factors the direct path
+                // uses — the ones pushed above this loop, still in force.
+                // Leaving blending enabled here would fold alpha into the
+                // colour a first time against the cleared target and a second
+                // time at the blit, darkening every rounded corner.
+                gs_blend_state_push();
+                gs_enable_blending(false);
+                // The tile covers the whole intermediate, so this only matters
+                // when a pass fails to open: cleared, that tile draws nothing
+                // (which is what the direct path does on the same failure)
+                // rather than blitting whatever the texture last held.
+                struct vec4 transparent;
+                vec4_zero(&transparent);
+                gs_clear(GS_CLEAR_COLOR, &transparent, 0.0f, 0);
+
+                gs_technique_begin(tech);
+                draw_tile(i, r, 0, 0);
+                gs_technique_end(tech);
+
+                // Honour the animator's own alpha. Skipped at 1.0, which is
+                // every tile that reaches here today — see fade_tile_alpha().
+                if (moving[i].alpha < 1.0)
+                    fade_tile_alpha(r.width, r.height, moving[i].alpha);
+
+                gs_blend_state_pop();
+                gs_texrender_end(tr);
+
+                // Never null after a successful begin: gs_texrender_begin()
+                // returns false when its target could not be created
+                // (libobs/graphics/texture-render.c). Checked anyway, on this
+                // file's existing convention of not depending on that from the
+                // draw path.
+                gs_texture_t *const tile_tex = gs_texrender_get_texture(tr);
+                if (tile_tex) {
+                    // Sample the way the ambient framebuffer state writes, so
+                    // the round trip is an identity rather than a colour
+                    // change. With sRGB framebuffer writes off — which is the
+                    // state a source renders in (obs-video.c enables it only
+                    // around libobs's own blits) — both the intermediate and
+                    // the canvas store raw shader output, so a raw read is
+                    // exact. With them on, both stores are sRGB-encoded and the
+                    // read has to decode, or the value would be encoded twice
+                    // and the tile would visibly wash out. One line so this
+                    // holds either way instead of on one of them by luck.
+                    if (gs_framebuffer_srgb_enabled())
+                        gs_effect_set_texture_srgb(def_image, tile_tex);
+                    else
+                        gs_effect_set_texture(def_image, tile_tex);
+
+                    gs_matrix_push();
+                    // The fractional position, at last — the point of all of
+                    // the above. The default effect's sampler is Linear/Clamp
+                    // (libobs/data/default.effect), so the sub-pixel offset is
+                    // resolved by bilinear filtering inside the tile, where
+                    // chroma has already been reconstructed.
+                    gs_matrix_translate3f(static_cast<float>(moving[i].x),
+                                          static_cast<float>(moving[i].y), 0.0f);
+                    while (gs_effect_loop(def, "Draw"))
+                        gs_draw_sprite(tile_tex, 0, r.width, r.height);
+                    gs_matrix_pop();
+                }
+            } else if (!s_motion_render_failed_logged) {
+                s_motion_render_failed_logged = true;
+                blog(LOG_ERROR,
+                     "[obs-zoom-plugin] Tiles: could not create a %ux%u "
+                     "intermediate texture for a tile in motion; tiles will "
+                     "step on the 2px chroma grid instead of moving smoothly",
+                     r.width, r.height);
+            }
+        }
+
+        gs_technique_begin(tech);
+        // Whatever failed — no default effect, no texrender, or a render
+        // target that could not be created at this size — the tile still has
+        // to appear. Falling back to the snapped draw costs it sub-pixel
+        // smoothness for this frame and nothing else, which is why this is a
+        // fallback and not a skip.
+        if (!composited) draw_tile(i, r, r.x, r.y);
     }
 
     gs_technique_end(tech);
@@ -2342,6 +2660,27 @@ static void tiles_source_destroy(void *data)
         }
         execute_feed_plan(plan);
     }
+
+    // The intermediate render target for tiles in motion. Destroy does not run
+    // on the graphics thread, so the context has to be entered here — exactly
+    // as tile_feed_retire() does for a feed's plane textures, and for the same
+    // reason: leaking a tile-sized render target per Tiles source would
+    // accumulate GPU memory for the length of a show.
+    //
+    // Null unless a tile actually moved at least once, so a wall whose
+    // animation toggle was never on frees nothing because it allocated
+    // nothing. Guarded rather than calling gs_texrender_destroy(nullptr) —
+    // which is itself safe — so the common case does not enter the graphics
+    // context at all: that call blocks until the graphics thread is out of
+    // video_render, and paying for it on every source teardown is exactly the
+    // kind of cost this feature promises not to add when it is off.
+    if (ctx->motion_render) {
+        obs_enter_graphics();
+        gs_texrender_destroy(ctx->motion_render);
+        obs_leave_graphics();
+        ctx->motion_render = nullptr;
+    }
+
     delete ctx;
 }
 
@@ -2931,5 +3270,6 @@ void zoom_supersource_unload_gfx()
     s_bg_pass_failed_logged = false;
     s_glow_pass_failed_logged = false;
     s_glow_unavailable_logged = false;
+    s_motion_render_failed_logged = false;
     tiles_effect_destroy(s_tiles_effect);
 }

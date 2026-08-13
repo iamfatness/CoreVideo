@@ -79,6 +79,10 @@ in a single OBS source that relays itself as people come and go.
    group** to a scene or group, and add that scene or group to every scene so
    audio does not come and go as you cut. Leave it blank if you do not want the
    wall creating audio sources.
+6. Optionally turn on **Animate layout changes** so the wall eases when people
+   join and leave instead of jumping on one frame. It is off by default. Set it
+   before you go live rather than mid-show, and give it a look on program
+   first — a busy roster reflows more often than you might expect.
 
 Tiles are always filled, never letterboxed: a tile narrower than the camera
 feeding it crops the sides. If you run a second wall, leave its audio field

@@ -2,6 +2,7 @@
 #include "engine-ipc.h"
 #include "shm-resubscribe.h"
 #include "zoom-engine-client.h"
+#include "zoom-tile-animator.h"
 #include "zoom-tile-border.h"
 #include "zoom-tile-crop.h"
 #include "zoom-tile-fill.h"
@@ -22,6 +23,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <memory>
@@ -254,6 +256,11 @@ struct tiles_source {
     // percentage. 0 is the curve the glow shipped with, so this control is
     // inert until the operator moves it. See kMaxGlowSoftness.
     std::atomic<uint32_t> glow_softness{0};
+    // Layout animation: whether tile moves ease instead of snapping, and the
+    // duration in milliseconds. Same atomic-not-mutex reasoning as bg_color
+    // above. Off by default — see tiles_source_get_defaults.
+    std::atomic<bool>     animate{false};
+    std::atomic<uint32_t> animate_ms{350};
     // The wall's geometry: tile shape (width / height, already resolved from
     // the preset and the custom ratio) and the gutter and margin as
     // percentages of canvas height. Same atomic-not-mutex reasoning as
@@ -339,6 +346,47 @@ struct tiles_source {
     // allocating on the draw path.
     std::vector<TileScratch> render_scratches;
     uint64_t    rendered_frames = 0;
+    // Layout animation state, keyed by participant id across frames so a
+    // tile's motion survives its slot being repointed to someone else and
+    // back. Render-thread only, like the rest of this block — no lock:
+    // only tiles_source_render() ever touches it. See
+    // src/zoom-tile-animator.h.
+    TileAnimator animator;
+    // Participant ids this source has observed in a ZoomEngineClient roster
+    // snapshot. The evidence classify_departures() needs to tell a genuine
+    // departure from an operator repointing a slot away from someone who was
+    // never in the meeting at all — which Manual fill mode allows, and which
+    // would otherwise start an exit animation and break invariants 1 and 2.
+    // Render-thread only, like `animator`. Pruned every time it is written, so
+    // it stays the size of the meeting rather than growing with its length.
+    std::vector<uint32_t> roster_seen;
+    // Latched when an intermediate render target could not be opened for a
+    // tile in motion. The glow pass runs before the tile pass and has to know
+    // which rect each tile will be drawn at; a per-tile failure cannot be
+    // predicted from there, so once one happens this source stops promising
+    // the fractional rect and the two agree again. Render-thread only.
+    bool motion_composite_failed = false;
+    // The intermediate render target a tile IN MOTION is composited through
+    // before being drawn at a fractional position — see
+    // ensure_motion_texrender() and the draw loop in tiles_source_render().
+    //
+    // Null until the first frame a tile actually moves, so a source whose
+    // animation toggle has never been on holds no GPU memory for this at all —
+    // nothing on that path reaches the code that creates it.
+    //
+    // It is NOT freed when the toggle goes back off: once a tile has moved,
+    // this stays allocated (one tile-sized render target, well under a
+    // megabyte at 1080p) for the source's life. Freeing it on a settings
+    // change would mean calling obs_enter_graphics() from the update thread,
+    // which blocks on the graphics thread mid-frame — a worse trade than
+    // holding the memory. What the toggle guarantees is that the OUTPUT is
+    // byte-identical to before this feature existed, and that still holds:
+    // the disabled path never touches this texture, never draws through it,
+    // and never resizes it.
+    //
+    // Render-thread only, like the rest of this block; freed in
+    // tiles_source_destroy() with the graphics context entered.
+    gs_texrender_t *motion_render = nullptr;
 
     std::shared_ptr<TilesCallbackGate> gate =
         std::make_shared<TilesCallbackGate>();
@@ -847,6 +895,12 @@ static bool s_glow_pass_failed_logged = false;
 // operator actually notices (they moved the size off zero and saw nothing), so
 // it points back at that line rather than repeating it every frame.
 static bool s_glow_unavailable_logged = false;
+// The intermediate render target for tiles in motion could not be created, at
+// all or at a particular size. Once, not once per vsync, for the same reason
+// as the flags above — and essential at least once, because the visible
+// symptom (motion stepping on the 2px grid again) is subtle enough that
+// nobody would think to look for a graphics failure behind it.
+static bool s_motion_render_failed_logged = false;
 
 // Frees one feed's plane textures and forgets what they held. The caller must
 // already hold the graphics context.
@@ -1022,6 +1076,180 @@ static void tiles_draw_neutral(gs_technique_t *tech, uint32_t x, uint32_t y,
     gs_technique_end_pass(tech);
 }
 
+// Even-rounds one value onto a valid I420 chroma boundary — the same need
+// snap_tile_grid_even() (src/zoom-tile-grid.cpp) exists for, applied to one
+// tile in isolation rather than a whole grid. Mirrors that file's
+// even_floor/even_round split without reusing it (both are file-local
+// there): sizes are floored so an independently snapped tile never grows
+// past the animator's own rect, positions are rounded to the nearest even
+// value so they stay close to the animator's true position rather than
+// always shifting toward the origin. See snap_tile_independently() below for
+// why this exists instead of just calling snap_tile_grid_even().
+static uint32_t even_floor_px(double v)
+{
+    if (v <= 0.0) return 0;
+    // The 0.05 is TileAnimator's own kRestEpsilon, and it is load-bearing
+    // rather than defensive. A spring approaches its target asymptotically
+    // and from below, so a tile that has arrived at an even integer target
+    // sits at (target - 1e-8), not at target. A plain floor turns that into
+    // target - 1, and the &~1 then drops it a further pixel: a tile that has
+    // finished growing to 1064 draws 1062, two pixels short, for every frame
+    // between arriving and the wall as a whole becoming settled(). Measured
+    // across 2->1 through 12->11 reflows at 1920x1080, that hits five of the
+    // eleven counts. Widening the floor by exactly the band the animator
+    // itself calls "arrived" makes an arrived tile snap to the size the
+    // settled frame draws, and changes nothing for a tile that is genuinely
+    // still in flight — 0.05px from an even boundary is 1/40th of the 2px
+    // step this function quantises to. It can overshoot the animator's true
+    // rect, but by at most that same 0.05px, where flooring undershoots it
+    // by up to 1.95.
+    return static_cast<uint32_t>(v + 0.05) & ~1u;
+}
+
+static uint32_t even_round_px(double v)
+{
+    if (v <= 0.0) return 0;
+    return static_cast<uint32_t>(std::lround(v / 2.0)) * 2u;
+}
+
+// Snaps one tile's rect to even pixel boundaries independently of every
+// other tile on the wall. Used only while something is in motion — see the
+// mode-split comment in tiles_source_render() for why snap_tile_grid_even()
+// cannot be used there. This loses that function's guarantee of identical
+// gaps between neighbours (already meaningless mid-reflow, since tiles are
+// at different positions and sizes by definition while they move) and
+// quantises position and size to 2px steps.
+//
+// A tile that is actually MOVING no longer draws at the position this
+// returns: the sub-pixel path in tiles_source_render() takes only the even
+// SIZE from here — which is what the intermediate texture has to be, for the
+// same I420 chroma reason — and draws at the animator's true fractional
+// position instead. The position this computes still matters for the tiles
+// this file draws directly: everything on a wall that is not settled but is
+// itself at rest (a newcomer seeded at its target while its neighbours
+// reflow), and any tile whose composite could not be made.
+static SnappedTileRect snap_tile_independently(const TileRect &r)
+{
+    SnappedTileRect s;
+    s.x      = even_round_px(r.x);
+    s.y      = even_round_px(r.y);
+    s.width  = even_floor_px(r.width);
+    s.height = even_floor_px(r.height);
+    return s;
+}
+
+// Where a tile in motion actually is, as opposed to the even-boundary rect it
+// was snapped to. One entry per feed, index-aligned with the `rects` the draw
+// loop reads.
+//
+// The vector this fills is EMPTY whenever the wall is settled — which includes
+// every single frame the animation toggle is off, since the disabled bypass in
+// TileAnimator::advance() leaves settled() unconditionally true. That
+// emptiness is what keeps this whole feature out of the disabled path: the
+// draw loop's only reference to it is `i >= moving.size()`, which is true for
+// every tile, so no branch is taken, no intermediate texture is created, and
+// the draw calls are the ones this file has always made.
+struct MovingTile {
+    // False: draw at the snapped rect, exactly as before. True: this tile has
+    // to go through the intermediate texture, either because it is MOVING —
+    // and so needs a sub-pixel position the direct blit cannot give it — or
+    // because it is FADING, and the wall's I420 technique has no global-alpha
+    // parameter, so the only way to apply one is to composite the tile in
+    // isolation and scale that surface's alpha (see fade_tile_alpha()).
+    // Deliberately not called `moving`: an entering tile is perfectly still.
+    bool   needs_composite = false;
+    double x = 0.0;         // the animator's true, unsnapped canvas position
+    double y = 0.0;
+    // The animator's true, unsnapped SIZE. The intermediate texture is still
+    // the even-rounded size — that is what the I420 chroma rule requires of
+    // the surface the tile is composited into — but the finished tile is
+    // scaled onto these dimensions when it is blitted, so the trailing edge
+    // lands at exactly x + width rather than at x + even_floor(width).
+    // Without this the leading edge moves smoothly while the trailing edge
+    // steps 2px, which reads worse than the uniform stepping it replaced:
+    // two edges of the same rectangle on different quantisation grids.
+    double width = 0.0;
+    double height = 0.0;
+    double alpha = 1.0;     // the animator's own per-tile alpha
+};
+
+// The intermediate render target a tile in motion is composited through.
+// Created on the first frame a tile actually moves, reused for the rest of the
+// source's life, and destroyed in tiles_source_destroy(). Its texture is
+// (re)allocated by gs_texrender_begin() whenever the requested size changes,
+// which during a reflow is most frames — a tile's size is part of what is
+// being animated. That cost is bounded (one small texture per distinct tile
+// size per frame, and only while something is moving) and is why this is not
+// reached at all when nothing is.
+//
+// GS_RGBA, deliberately 8-bit rather than GS_RGBA16F: OBS's own SDR render
+// texture is 8-bit (GS_BGRA — obs_init_textures(), libobs/obs.c), so an 8-bit
+// intermediate quantises on exactly the same grid the direct path's write
+// does, and round-to-8-bit is idempotent — the round trip through this texture
+// reproduces the direct path's own bytes. A 16-bit float intermediate would
+// round onto a finer grid first and the 8-bit one second, which flips the last
+// bit on a small percentage of pixels: a smaller error per pixel, but a real
+// difference between two paths that currently have none. See task-7-report.md.
+//
+// The caller must already hold the graphics context; video_render does.
+static gs_texrender_t *ensure_motion_texrender(tiles_source *ctx)
+{
+    if (!ctx->motion_render) {
+        ctx->motion_render = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+        if (!ctx->motion_render && !s_motion_render_failed_logged) {
+            s_motion_render_failed_logged = true;
+            blog(LOG_ERROR,
+                 "[obs-zoom-plugin] Tiles: could not create the intermediate "
+                 "render target for layout animation; tiles in motion will "
+                 "step on the 2px chroma grid instead of moving smoothly");
+        }
+    }
+    return ctx->motion_render;
+}
+
+// Scales what has already been drawn into the bound render target by `alpha`:
+// the colour is left exactly as it is, and dst.a becomes alpha * dst.a.
+//
+// This is how the sub-pixel path honours AnimatedTile::alpha. It is a second
+// quad rather than a shader uniform because the I420 technique has no
+// global-alpha parameter, and adding one means changing
+// data/effects/corevideo-tiles.effect — which a stale effect file beside a new
+// DLL would then not have (see zoom-tiles-effect-policy.h). The blend factors
+// do the multiply instead: ZERO/ONE for colour leaves the destination
+// untouched, ZERO/SRCALPHA for alpha replaces dst.a with src.a * dst.a, and
+// the Solid technique supplies src.a from fill_color's alpha byte.
+//
+// The ENTRY FADE is this function's first real caller, and therefore its first
+// execution on a GPU at all — it was written speculatively, for exiting tiles
+// that are still not drawn. Treat a colour or blending regression in a tile
+// that is fading in as suspicion of this function before anything else. The
+// caller skips it entirely at alpha == 1.0, so a settled wall still never
+// reaches it.
+static void fade_tile_alpha(uint32_t w, uint32_t h, double alpha)
+{
+    const double clamped = alpha < 0.0 ? 0.0 : (alpha > 1.0 ? 1.0 : alpha);
+    const uint32_t a8 = static_cast<uint32_t>(std::lround(clamped * 255.0));
+    // gs_effect_set_color() takes 0xAARRGGBB and reads the alpha from the top
+    // byte (vec4_from_bgra, graphics/vec4.h); the colour bytes are zero here
+    // because the ZERO/ONE colour factors discard them anyway.
+    gs_effect_set_color(s_tiles_effect.param_color, a8 << 24);
+
+    gs_enable_blending(true);
+    gs_blend_function_separate(GS_BLEND_ZERO, GS_BLEND_ONE,
+                               GS_BLEND_ZERO, GS_BLEND_SRCALPHA);
+    gs_technique_t *const solid = s_tiles_effect.tech_solid;
+    gs_technique_begin(solid);
+    if (gs_technique_begin_pass(solid, 0)) {
+        gs_draw_sprite(nullptr, 0, w, h);
+        gs_technique_end_pass(solid);
+    }
+    gs_technique_end(solid);
+    // Back to how the composite left it. The caller's gs_blend_state_pop()
+    // restores the factors as well; this only keeps the enable flag honest for
+    // anything drawn between here and there.
+    gs_enable_blending(false);
+}
+
 // Draws the wall. Runs on the OBS graphics thread with the graphics context
 // already entered — do not nest obs_enter_graphics() in here.
 static void tiles_source_render(void *data, gs_effect_t *)
@@ -1074,8 +1302,339 @@ static void tiles_source_render(void *data, gs_effect_t *)
         ctx->gutter_pct.load(std::memory_order_acquire), canvas_h_d);
     params.margin        = resolve_spacing_px(
         ctx->margin_pct.load(std::memory_order_acquire), canvas_h_d);
-    const std::vector<SnappedTileRect> rects =
-        snap_tile_grid_even(solve_tile_grid(feeds.size(), params), params);
+    const std::vector<TileRect> solved = solve_tile_grid(feeds.size(), params);
+
+    // Snapped ONCE per frame, here, and used for two things: the animator's
+    // targets just below, and the settled frame further down. It used to be
+    // computed inside the settled branch alone; hoisting it changes nothing
+    // about that branch — same function, same arguments, same result — and
+    // makes the two uses the same numbers by construction rather than by two
+    // calls that have to be kept in agreement.
+    //
+    // Feeding the animator the SNAPPED rects, rather than the raw `solved`
+    // ones, is what makes motion converge on the geometry the resting frame
+    // actually draws. A moving tile is drawn at its exact fractional rect,
+    // but the settled frame draws snap_tile_grid_even(solved, params) — so
+    // with `solved` as the target, every reflow ended with a single-frame
+    // jump from where the spring arrived to where the snap puts it. Measured
+    // at 1920x1080 across 1..16 tiles, that trailing jump reaches |dx| 2.67,
+    // |dy| 2.67, |dw| 1.56 and |dh| 1.33 px (worst at 5..9 tiles, the common
+    // wall sizes) — larger than the 1.947 px trailing-edge step the sub-pixel
+    // path went to trouble to eliminate, and in the same place: the last
+    // frame of the transition, where the eye has just finished following the
+    // tile. Targeting the snapped rect removes it: the spring arrives on the
+    // exact integers the settled frame then draws.
+    //
+    // `snap_usable` is the all-or-nothing contract of snap_tile_grid_even():
+    // it returns either one rect per input or an empty vector (no rects, a
+    // tile that snaps below 2px, or a canvas smaller than one tile). In that
+    // degenerate case the animator keeps the unsnapped targets, exactly as
+    // before, and `rects` below ends up empty and nothing is drawn — also
+    // exactly as before.
+    const std::vector<SnappedTileRect> snapped =
+        snap_tile_grid_even(solved, params);
+    const bool snap_usable = snapped.size() == solved.size();
+
+    std::vector<DesiredTile> desired;
+    desired.reserve(feeds.size());
+    for (size_t i = 0; i < feeds.size() && i < solved.size(); ++i) {
+        // Defensive, not reachable today: plan_feeds_locked() only ever
+        // pushes make_shared<TileFeed>(), so feeds[i] is never null. Guarded
+        // anyway for consistency with the null checks further down in this
+        // function (the live-tile lookup in the motion branch, and the main
+        // draw loop), so the file has one answer to "can a feed be null
+        // here", not two that could quietly drift apart.
+        const uint32_t pid = feeds[i] ? feeds[i]->slot.participant_id() : 0;
+        TileRect target = solved[i];
+        if (snap_usable) {
+            target.x      = static_cast<double>(snapped[i].x);
+            target.y      = static_cast<double>(snapped[i].y);
+            target.width  = static_cast<double>(snapped[i].width);
+            target.height = static_cast<double>(snapped[i].height);
+        }
+        desired.push_back(DesiredTile{pid, target});
+    }
+
+    AnimationSettings anim;
+    anim.enabled = ctx->animate.load(std::memory_order_acquire);
+    anim.duration_seconds =
+        static_cast<double>(ctx->animate_ms.load(std::memory_order_acquire)) / 1000.0;
+
+    // `departed` is a STATE, not an event: which tracked participants are gone
+    // from the meeting roster right now, recomputed every frame. It is what
+    // separates a genuine departure (fade out) from an operator repointing a
+    // slot (instant cut, no fade) — the distinction the exit invariants in
+    // src/zoom-tile-slot.h rest on. Hardcoding it empty would make the exit
+    // path dead code on the wall.
+    // Computed in THIS pass, from the same frame the layout was solved in. If
+    // `departed` lags `desired` by even one frame, the exit exception silently
+    // never fires and the whole fade becomes dead code.
+    //
+    // Gated on `anim.enabled` AND on some tracked participant being MISSING
+    // from this frame's layout — either half missing and the render path must
+    // not take ZoomEngineClient's roster mutex when it has nothing to ask it.
+    // That mutex is hot: the engine reader thread takes it for every "frame"
+    // and "audio" message across every source in the plugin (see
+    // zoom-engine-client.h's own warning on stalling that dispatch), and
+    // roster() deep-copies the whole participant list, one std::string
+    // allocation per participant, while holding it. Before this feature
+    // existed the draw path took exactly one lock, for an O(1) pointer copy.
+    //
+    // The `anim.enabled` half is what keeps that true when the toggle is
+    // OFF. It is not implied by the other half: tracked_ids() reflects
+    // `m_tiles` as of the END of the PREVIOUS frame's advance() call, and
+    // only advance()'s own disabled branch clears it. So on the very first
+    // frame after the operator flips the toggle off while anything was
+    // mid-flight, `tracked` is still populated from last frame and a
+    // tracked-state test alone would pass, paying for a roster copy that
+    // `advance()`'s disabled branch is about to discard unread (it never
+    // looks at `departed`). Checking `anim.enabled` directly closes that
+    // one-frame gap.
+    //
+    // The second half is what keeps it true when the toggle is ON. It used
+    // to be `!tracked.empty()`, which is non-empty on EVERY frame once
+    // anything at all has committed — not just during transitions — so
+    // turning the animation on bought a locked, allocating roster copy on
+    // every one of 60 frames a second, for the entire life of the source. It
+    // is now "does some tracked id have no entry in `desired` this frame",
+    // which is exactly, and only, the question `departed` is ever consulted
+    // to answer: TileAnimator reads it in two places and both are already
+    // past a `present in desired` check (the lifecycle loop's retention test
+    // and the held-tile emission), so an id that IS in `desired` can never
+    // change any outcome by appearing in `departed`. Restricting the query
+    // to the ids that can matter is therefore behaviour-preserving, and it
+    // reduces the roster copy from every frame to the handful of frames
+    // where the layout and the animator's tracked set actually disagree —
+    // a departure, a repoint, or a blip.
+    //
+    // Do not weaken either half. Together they are the difference between
+    // "the animation costs something while the wall is changing" and "the
+    // animation costs a locked roster copy on every frame forever".
+    std::vector<uint32_t> departed;
+    const std::vector<uint32_t> tracked = ctx->animator.tracked_ids();
+    std::vector<uint32_t> layout_ids;
+    layout_ids.reserve(desired.size());
+    for (const auto &d : desired) layout_ids.push_back(d.participant_id);
+
+    if (anim.enabled && layout_disagrees_with_tracking(tracked, layout_ids)) {
+        const std::vector<ParticipantInfo> roster =
+            ZoomEngineClient::instance().roster();
+        std::vector<uint32_t> roster_ids;
+        roster_ids.reserve(roster.size());
+        for (const ParticipantInfo &p : roster) roster_ids.push_back(p.user_id);
+
+        // Everyone visible in this snapshot is now known to have been in the
+        // meeting. That record is what lets a later absence be told apart from
+        // a Manual-cast participant who was never here — see
+        // classify_departures(). Recorded on ARRIVAL frames as well as
+        // departure ones, which is why the gate above tests both directions.
+        for (const uint32_t id : roster_ids)
+            if (std::find(ctx->roster_seen.begin(), ctx->roster_seen.end(), id) ==
+                ctx->roster_seen.end())
+                ctx->roster_seen.push_back(id);
+
+        departed = classify_departures(tracked, layout_ids, roster_ids,
+                                       ctx->roster_seen);
+
+        // Bounded: a long meeting must not accumulate every id it ever saw.
+        // Anyone still in the meeting or still on the wall is kept; the rest
+        // can no longer depart from anything.
+        ctx->roster_seen.erase(
+            std::remove_if(ctx->roster_seen.begin(), ctx->roster_seen.end(),
+                           [&](uint32_t id) {
+                               return std::find(roster_ids.begin(), roster_ids.end(),
+                                                id) == roster_ids.end() &&
+                                      std::find(tracked.begin(), tracked.end(), id) ==
+                                          tracked.end();
+                           }),
+            ctx->roster_seen.end());
+    }
+
+    const std::vector<AnimatedTile> animated =
+        ctx->animator.advance(os_gettime_ns(), desired, anim, departed);
+
+    // ── Mode split: pixel-exact when settled, approximate only while moving ─
+    //
+    // snap_tile_grid_even() assumes a UNIFORM grid: one tile size, one gutter,
+    // every tile at a whole multiple of (size+gutter) from its row origin (see
+    // zoom-tile-grid.cpp — it derives the single tile_w/tile_h it uses for
+    // EVERY row from rects[0] alone). That holds for the solver's own output,
+    // but not for the animator's in general: a tile that has just joined is
+    // seeded at ITS target size while the others are still springing from the
+    // old one ("a newly seen tile starts at its target position" — see
+    // TileAnimator::advance()), so mid-reflow the tiles the animator returns
+    // can legitimately differ in size from each other. Feeding a mixed-size
+    // list to a function that derives ONE size from its first element
+    // silently mis-sizes every tile but the first for as long as the reflow
+    // lasts — confirmed against this exact code with a standalone repro
+    // before this split existed; see task-6-report.md.
+    //
+    // The gate is `ctx->animator.settled()`, deliberately NOT "every
+    // AnimatedTile this frame reports at_rest": that per-tile flag is also
+    // true in two situations where the WALL as a whole still disagrees with
+    // a fresh solve. An ENTERING tile sits perfectly still at its final slot
+    // and reports at_rest while it is only part-way through its fade, and the
+    // whole-grid branch draws through the snapped blit, which has no alpha —
+    // so an `all_of(at_rest)` gate would silently drop every entry fade. An
+    // EXITING tile is not in the layout the fresh solve describes at all, and
+    // its neighbours are mid-reflow around the space it left. settled() is
+    // false in both, which is exactly what routes them to the per-tile branch
+    // instead. The at_rest version of this gate was written first and the
+    // repro below caught it; see task-6-report.md.
+    //
+    // `rects`, below, ends up index-aligned with `feeds` — one rect per feed,
+    // in feed order — exactly the shape this file has always drawn from, so
+    // the glow loop, the tile loop and the log line after it are UNCHANGED
+    // from before this feature existed. Only how each entry is computed
+    // differs, by branch:
+    //
+    // `moving`, alongside it, records which of those tiles the animator says
+    // are actually in motion, and where they truly are before the snap. It
+    // stays EMPTY on the settled branch — so it is empty on every frame the
+    // toggle is off — and the draw loop treats an absent entry as "not
+    // moving", which is the pre-feature behaviour exactly.
+    std::vector<SnappedTileRect> rects;
+    std::vector<MovingTile> moving;
+    if (ctx->animator.settled()) {
+        // Disabled, or settled — no pending set change, nothing held or
+        // exiting, every spring at its own target (see TileAnimator::
+        // settled()): draw the whole-grid snap of `solved`/`params` — the
+        // exact call this file has always made, hoisted above only so the
+        // animator can target the same numbers — rather than routing the
+        // animator's rects through the snap. That makes this the SAME call
+        // as before this feature existed, so parity holds by construction
+        // rather than by the coincidence that the animator's numbers happen
+        // to match. It is also deliberately ONE branch for both "disabled"
+        // and "settled", not two that have to be kept in agreement: the
+        // disabled bypass in advance() clears every piece of state
+        // settled() reads (m_tiles — see its own header comment, which is
+        // all of it), so settled() is unconditionally true right after a
+        // disabled call, making disabled simply a case of this condition
+        // rather than a separate path. `solved` has exactly one entry per
+        // feed (or is empty — solve_tile_grid() is all-or-nothing), so this
+        // is index-aligned with `feeds` the same way the pre-animation code
+        // was, with no held/exiting entries to consider: `solved` never
+        // contains one, since a departed participant is already gone from
+        // `feeds` by the time it shrinks the count this is solved from.
+        rects = snapped;
+    } else {
+        // Not settled — something is entering, exiting, or still springing:
+        // snap_tile_grid_even()'s single-shared-size assumption does not hold
+        // (see the mode-split comment above), so each tile is snapped
+        // independently instead, one rect per feed.
+        //
+        // The rect for feed i is found by searching `animated` for the
+        // entry whose participant id matches feed i's — not by position —
+        // which is what makes skipping held and exiting tiles deliberate
+        // rather than an accident of array shape. Held and exiting tiles
+        // (see the ordering contract on TileAnimator::advance()) have no
+        // entry in `feeds` and no defined pixel source: a repointed slot's
+        // stored frame is exactly what src/zoom-tile-slot.h invalidates on
+        // purpose. What they should draw is still an open decision with the
+        // repo owner, so this task draws live tiles only; searching from
+        // `feeds` outward means a held or exiting entry in `animated` is
+        // simply never looked at here, rather than silently dropped through
+        // an index that happened not to line up. The reflow animation is
+        // fully functional without them; only exit fades are not drawn yet.
+        //
+        // Resolved from `desired` — the ids captured ONCE, above — never by
+        // re-reading each feed's live slot state here. `render_feeds` holds
+        // shared_ptrs to objects the writer still mutates, and this path
+        // dropped ctx->mutex before drawing, so plan_feeds_locked() can
+        // repoint a slot between the two reads. The lookup then either missed
+        // (that slot lost tile, border AND glow for a frame) or collided with
+        // another feed, painting a retired feed's grey placeholder over a live
+        // tile. See resolve_animated_for_desired(), which takes `desired` and
+        // nothing else so the second read cannot come back.
+        //
+        // `live` is non-null for every entry of `desired`: the animator
+        // withholds nothing, so every entry gets exactly one back. The empty
+        // SnappedTileRect below covers a feed with no `desired` entry at all
+        // (a null feed, or a solve shorter than the feed list). It has width
+        // 0, so the glow loop and the tile loop both skip that feed on the
+        // same `width < 2` rule they already apply.
+        const std::vector<const AnimatedTile *> resolved =
+            resolve_animated_for_desired(desired, animated);
+        rects.reserve(feeds.size());
+        moving.reserve(feeds.size());
+        for (size_t i = 0; i < feeds.size(); ++i) {
+            const AnimatedTile *live = i < resolved.size() ? resolved[i] : nullptr;
+            rects.push_back(live ? snap_tile_independently(live->rect)
+                                  : SnappedTileRect{});
+
+            // The same lookup decides whether this tile takes the
+            // intermediate-texture path in the draw loop below. Two
+            // independent reasons put it there, and `at_rest` alone answers
+            // only the first:
+            //
+            //   - MOVING (`!at_rest`). Deliberately not the whole-wall
+            //     settled() gate above: the two answer different questions.
+            //     settled() asks "does a fresh solve describe what the
+            //     animator would draw", which is about which rects are safe
+            //     to use; at_rest asks "is THIS tile moving", which is about
+            //     whether resampling it buys anything.
+            //
+            //   - FADING (`alpha < 1`). An ENTERING tile is seeded at its
+            //     final slot and is perfectly still, so it reports at_rest —
+            //     but it is part-way through its fade, and the direct blit
+            //     has no way to apply an alpha. The wall's I420 technique
+            //     carries no global-alpha parameter, and adding one would
+            //     mean changing data/effects/corevideo-tiles.effect, which a
+            //     stale effect file beside a new DLL would then not have (see
+            //     zoom-tiles-effect-policy.h) — a deployment hazard for a
+            //     cosmetic uniform. Compositing the tile in isolation and
+            //     scaling that surface's alpha needs no effect change at all,
+            //     which is why fade_tile_alpha() was written this way, and
+            //     the entry fade is its first real caller.
+            //
+            // Routing on the real question keeps `at_rest` honest rather than
+            // marking a stationary tile as moving to reach the path it needs.
+            // The composite is pixel-exact for an entering tile: its rect is
+            // its snapped integer target, so the tile-space ortho evaluates
+            // the shader at identical UVs and the blit lands at an integer
+            // origin at 1:1 scale (see the composite below).
+            MovingTile m;
+            if (live && (!live->at_rest || live->alpha < 1.0)) {
+                m.needs_composite = true;
+                m.x      = live->rect.x;
+                m.y      = live->rect.y;
+                m.width  = live->rect.width;
+                m.height = live->rect.height;
+                m.alpha  = live->alpha;
+            }
+            moving.push_back(m);
+        }
+    }
+
+    // ── Can a tile in motion actually be composited this frame? ──────────────
+    //
+    // Resolved ONCE, here, because two passes need the same answer and they
+    // run at different times: the halo is drawn under the tiles, so it has to
+    // know which rect each tile will end up at before the tile loop finds out.
+    // Deciding separately let the halo follow the fractional rect while the
+    // tile fell back to the snapped one, and they disagreed by up to ~2px on
+    // exactly the frames where something had already failed.
+    //
+    // Only asked when some tile actually needs it — `moving` is empty on every
+    // settled frame and on every frame the toggle is off — so a source whose
+    // tiles never move still never creates a render target and never enters
+    // this branch at all.
+    bool any_composite = false;
+    for (const MovingTile &m : moving)
+        if (m.needs_composite) { any_composite = true; break; }
+    gs_effect_t *const motion_def =
+        any_composite ? obs_get_base_effect(OBS_EFFECT_DEFAULT) : nullptr;
+    gs_eparam_t *const motion_def_image =
+        motion_def ? gs_effect_get_param_by_name(motion_def, "image") : nullptr;
+    gs_texrender_t *const motion_tr =
+        motion_def_image ? ensure_motion_texrender(ctx) : nullptr;
+    // A per-tile gs_texrender_begin() failure cannot be predicted from here,
+    // so it is latched: once a target has failed to open, this source stops
+    // promising the fractional rect to the halo. The failure is already logged
+    // and already costs the tile its sub-pixel motion, and a size that could
+    // not be created will not start working, so converging on "they agree" is
+    // worth more than optimism.
+    const bool can_composite = motion_tr != nullptr && !ctx->motion_composite_failed;
 
     // Background first, so tiles and their borders draw over it. This replaces
     // what used to be a fixed neutral fill drawn through the I420 technique
@@ -1205,13 +1764,43 @@ static void tiles_source_render(void *data, gs_effect_t *)
 
         gs_technique_t *glow = s_tiles_effect.tech_glow;
         gs_technique_begin(glow);
-        for (const SnappedTileRect &r : rects) {
+        for (size_t i = 0; i < rects.size(); ++i) {
+            const SnappedTileRect &r = rects[i];
             // Skipped on the same rule the tile loop below uses, so a rect too
             // small to be drawn does not get a halo drawn around nothing.
             if (r.width < 2 || r.height < 2) continue;
 
-            const GlowQuad q =
-                solve_glow_quad(r, glow_size_px, canvas_w, canvas_h);
+            // The halo fades with its tile. Without this a joining tile draws
+            // a full-intensity glow around a rect that is still transparent —
+            // a glowing empty rectangle for the whole entry fade, which is
+            // the one thing more obviously wrong than the pop the fade was
+            // added to prevent. Scaled through `intensity`, an existing float
+            // uniform, so this needs no change to the effect file (see
+            // fade_tile_alpha() for why that matters).
+            //
+            // `moving` is EMPTY whenever the wall is settled, which includes
+            // every frame the animation toggle is off, so this reads 1.0 and
+            // the pass is byte-for-byte the one it always was.
+            const double tile_alpha =
+                (i < moving.size() && moving[i].needs_composite) ? moving[i].alpha
+                                                                 : 1.0;
+            if (tile_alpha <= 0.0) continue;   // nothing to draw yet
+
+            // Solved from the SAME rect the tile is drawn at — its true
+            // fractional one if it will be composited, the 2px-quantised one
+            // in `rects` if it will not. Following the fractional rect is what
+            // stops the halo stepping on the 2px grid while its tile glides,
+            // which is the exact artefact the sub-pixel path exists to remove;
+            // deferring to `can_composite` is what stops it doing that when
+            // the tile is about to fall back to the snapped blit anyway.
+            const bool composited =
+                i < moving.size() && moving[i].needs_composite && can_composite;
+            const double mx = i < moving.size() ? moving[i].x : 0.0;
+            const double my = i < moving.size() ? moving[i].y : 0.0;
+            const double mw = i < moving.size() ? moving[i].width : 0.0;
+            const double mh = i < moving.size() ? moving[i].height : 0.0;
+            const GlowQuad q = solve_glow_quad_for_tile(
+                r, composited, mx, my, mw, mh, glow_size_px, canvas_w, canvas_h);
             if (!q.visible) continue;  // clamped away to nothing
 
             // The tile's own clamped radius, not the raw setting: the halo has
@@ -1232,7 +1821,7 @@ static void tiles_source_render(void *data, gs_effect_t *)
             gp.half_h        = static_cast<float>(q.half_height);
             gp.corner_radius = static_cast<float>(b.radius);
             gp.size          = static_cast<float>(glow_size_px);
-            gp.intensity     = glow_intensity;
+            gp.intensity     = static_cast<float>(glow_intensity * tile_alpha);
             gp.falloff       = glow_falloff;
 
             // break, not continue: every tile opens the same pass on the same
@@ -1284,10 +1873,22 @@ static void tiles_source_render(void *data, gs_effect_t *)
     gs_technique_begin(tech);
 
     size_t drawn = 0;
-    for (size_t i = 0; i < rects.size() && i < feeds.size(); ++i) {
-        const SnappedTileRect &r = rects[i];
-        if (r.width < 2 || r.height < 2) continue;  // as the CPU path skips them
 
+    // One tile's draw — video or neutral placeholder — with its top-left at
+    // (ox, oy) in whatever render target is currently bound. This is the body
+    // the loop below used to have inline, unchanged except that the origin is
+    // a parameter instead of r.x/r.y and its three early exits are `return`
+    // instead of `continue`.
+    //
+    // It is a function because the sub-pixel path for a tile in motion has to
+    // run EXACTLY this — the same effect, the same technique, the same
+    // parity-verified BT.709 conversion, the same cover-crop and crop_uv, the
+    // same clamped border geometry — into an intermediate texture at (0, 0). A
+    // second copy specialised for that path is the one thing most likely to
+    // make a moving tile a different colour from a resting one, which is the
+    // acceptance gate for this whole feature. There is no second copy.
+    auto draw_tile = [&](size_t i, const SnappedTileRect &r, uint32_t ox,
+                         uint32_t oy) {
         // Bounded against this tile, not against the canvas: a width past half
         // the shorter side would leave no interior, and the shader's distance
         // field assumes a radius no larger than that. See zoom-tile-border.h.
@@ -1309,8 +1910,8 @@ static void tiles_source_render(void *data, gs_effect_t *)
         const TileFeedPtr &feed = feeds[i];
         if (!feed || !tile_take_snapshot(feed, ctx->render_scratches[i]) ||
             !tile_upload_frame(feed, ctx->render_scratches[i])) {
-            tiles_draw_neutral(tech, r.x, r.y, r.width, r.height, pass);
-            continue;
+            tiles_draw_neutral(tech, ox, oy, r.width, r.height, pass);
+            return;
         }
 
         // Narrow the usable source by this slot's crop, then sample the largest
@@ -1351,8 +1952,8 @@ static void tiles_source_render(void *data, gs_effect_t *)
         const uint32_t crop_w = static_cast<uint32_t>(crop.width);
         const uint32_t crop_h = static_cast<uint32_t>(crop.height);
         if (crop_w == 0 || crop_h == 0) {  // degenerate source: nothing to map
-            tiles_draw_neutral(tech, r.x, r.y, r.width, r.height, pass);
-            continue;
+            tiles_draw_neutral(tech, ox, oy, r.width, r.height, pass);
+            return;
         }
 
         // The same sub-rectangle, in normalized texture coords, so the shader
@@ -1377,9 +1978,9 @@ static void tiles_source_render(void *data, gs_effect_t *)
         pass.crop_cv = static_cast<float>(crop_h) / static_cast<float>(feed->tex_h);
 
         if (!tiles_begin_pass(tech, feed->tex_y, feed->tex_u, feed->tex_v, pass))
-            continue;
+            return;
         gs_matrix_push();
-        gs_matrix_translate3f(static_cast<float>(r.x), static_cast<float>(r.y),
+        gs_matrix_translate3f(static_cast<float>(ox), static_cast<float>(oy),
                               0.0f);
         gs_matrix_scale3f(static_cast<float>(r.width) / static_cast<float>(crop_w),
                           static_cast<float>(r.height) / static_cast<float>(crop_h),
@@ -1390,6 +1991,197 @@ static void tiles_source_render(void *data, gs_effect_t *)
         gs_matrix_pop();
         gs_technique_end_pass(tech);
         ++drawn;
+    };
+
+    for (size_t i = 0; i < rects.size() && i < feeds.size(); ++i) {
+        const SnappedTileRect &r = rects[i];
+        if (r.width < 2 || r.height < 2) continue;  // as the CPU path skips them
+
+        // Neither moving nor fading. That is EVERY tile when the animation
+        // toggle is off (`moving` is empty, so this condition is true for
+        // every i), every tile on a settled wall, and any fully-opaque tile
+        // that happens to be sitting still while others reflow around it. It
+        // takes the blit this file has always done — straight to the canvas,
+        // at its snapped even-boundary rect, through the same call sequence
+        // as before this feature existed.
+        if (i >= moving.size() || !moving[i].needs_composite) {
+            draw_tile(i, r, r.x, r.y);
+            continue;
+        }
+
+        // ── A tile in motion, or fading in ───────────────────────────────────
+        //
+        // Composited into an intermediate texture of the tile's own
+        // even-rounded size, then drawn at the animator's true fractional
+        // position with linear filtering.
+        //
+        // The even-boundary rule exists because I420 chroma is subsampled 2x2:
+        // a blit edge on an odd pixel has no chroma sample to reconstruct from.
+        // Inside the intermediate the tile sits at (0, 0) with even dimensions,
+        // so that rule is satisfied in TILE space, and where the finished tile
+        // then lands on the canvas is free to be fractional. That is the whole
+        // trick — without it, motion is quantised to the 2px steps
+        // snap_tile_independently() imposes, which is plainly visible on a slow
+        // reflow and is exactly the case this feature exists to make look good.
+        //
+        // Resolved once for the whole frame, above, so that a missing default
+        // effect takes the fallback path below rather than rendering a tile
+        // into a texture nothing can then draw — and so that the glow pass,
+        // which has already run, made its geometry decision from the same
+        // answer this loop acts on. `can_composite` also carries the latched
+        // per-tile failure; honouring it here keeps the two in step on the
+        // frames after one.
+        gs_eparam_t *const def_image = motion_def_image;
+        gs_texrender_t *const tr = can_composite ? motion_tr : nullptr;
+
+        // The wall's technique is closed across this whole branch and reopened
+        // at the end. It has to be: gs_effect_loop() refuses to run — and logs
+        // a warning — while another effect is active (gs_effect_loop(),
+        // libobs/graphics/effect.c:69), and the blit below goes through
+        // libobs's default effect, not ours. The composite reopens the wall's
+        // technique for the tile's own pass inside the texrender.
+        // gs_technique_end() also discards the effect's parameter values, which
+        // costs nothing here: tiles_begin_pass() sets every one of them before
+        // every tile's pass anyway — that is already this file's rule, for the
+        // same upload-at-begin_pass reason.
+        gs_technique_end(tech);
+
+        bool composited = false;
+        if (tr) {
+            gs_texrender_reset(tr);
+            if (gs_texrender_begin(tr, r.width, r.height)) {
+                composited = true;
+                // gs_texrender_begin() sets the VIEWPORT but not the
+                // projection — it pushes the old one and leaves it in place
+                // (libobs/graphics/texture-render.c), so without this the
+                // tile would be drawn through the CANVAS's ortho into a
+                // tile-sized viewport and come out shrunk into a corner.
+                // Every caller in libobs sets its own; obs-scene.c:935 is the
+                // same call with the same -100..100 depth range. The projection
+                // is popped by gs_texrender_end().
+                //
+                // This particular ortho is also what makes the composite
+                // pixel-exact against the direct path: 0..width mapped across a
+                // width-wide viewport puts each destination pixel centre at the
+                // same tile-relative coordinate the canvas ortho gives it when
+                // the tile is drawn at an integer origin, so the shader is
+                // evaluated at identical UVs and produces identical bytes.
+                gs_ortho(0.0f, static_cast<float>(r.width), 0.0f,
+                         static_cast<float>(r.height), -100.0f, 100.0f);
+                // Blending OFF while compositing. The intermediate has to hold
+                // exactly what the shader produced, with STRAIGHT (not
+                // premultiplied) alpha, because the blit below composites it
+                // with the same SRCALPHA/INVSRCALPHA factors the direct path
+                // uses — the ones pushed above this loop, still in force.
+                // Leaving blending enabled here would fold alpha into the
+                // colour a first time against the cleared target and a second
+                // time at the blit, darkening every rounded corner.
+                gs_blend_state_push();
+                gs_enable_blending(false);
+                // The tile covers the whole intermediate, so this only matters
+                // when a pass fails to open: cleared, that tile draws nothing
+                // (which is what the direct path does on the same failure)
+                // rather than blitting whatever the texture last held.
+                struct vec4 transparent;
+                vec4_zero(&transparent);
+                gs_clear(GS_CLEAR_COLOR, &transparent, 0.0f, 0);
+
+                gs_technique_begin(tech);
+                draw_tile(i, r, 0, 0);
+                gs_technique_end(tech);
+
+                // Honour the animator's own alpha. Skipped at 1.0, which is
+                // every tile that reaches here today — see fade_tile_alpha().
+                if (moving[i].alpha < 1.0)
+                    fade_tile_alpha(r.width, r.height, moving[i].alpha);
+
+                gs_blend_state_pop();
+                gs_texrender_end(tr);
+
+                // Never null after a successful begin: gs_texrender_begin()
+                // returns false when its target could not be created
+                // (libobs/graphics/texture-render.c). Checked anyway, on this
+                // file's existing convention of not depending on that from the
+                // draw path.
+                gs_texture_t *const tile_tex = gs_texrender_get_texture(tr);
+                if (tile_tex) {
+                    // Sample the way the ambient framebuffer state writes, so
+                    // the round trip is an identity rather than a colour
+                    // change. With sRGB framebuffer writes off — which is the
+                    // state a source renders in (obs-video.c enables it only
+                    // around libobs's own blits) — both the intermediate and
+                    // the canvas store raw shader output, so a raw read is
+                    // exact. With them on, both stores are sRGB-encoded and the
+                    // read has to decode, or the value would be encoded twice
+                    // and the tile would visibly wash out. One line so this
+                    // holds either way instead of on one of them by luck.
+                    if (gs_framebuffer_srgb_enabled())
+                        gs_effect_set_texture_srgb(def_image, tile_tex);
+                    else
+                        gs_effect_set_texture(def_image, tile_tex);
+
+                    gs_matrix_push();
+                    // The fractional position, at last — the point of all of
+                    // the above. The default effect's sampler is Linear/Clamp
+                    // (libobs/data/default.effect), so the sub-pixel offset is
+                    // resolved by bilinear filtering inside the tile, where
+                    // chroma has already been reconstructed.
+                    gs_matrix_translate3f(static_cast<float>(moving[i].x),
+                                          static_cast<float>(moving[i].y), 0.0f);
+                    // ...and the fractional SIZE. The intermediate had to be
+                    // even-dimensioned, but the quad it is blitted onto does
+                    // not: scaling the sprite from the even size onto the
+                    // animator's true size puts the trailing edge at exactly
+                    // x + width instead of x + even_floor(width). Without it
+                    // the leading edge of a moving tile travels smoothly while
+                    // the trailing edge steps 2px — the same artifact class
+                    // this task exists to remove, now on one edge only, which
+                    // reads worse than the uniform stepping it replaced.
+                    //
+                    // The factor is within ~0.2% of 1.0 (the even-rounding
+                    // discards under 2px of a tile hundreds of pixels wide), so
+                    // the resampling it adds is far below the fractional-offset
+                    // filtering already happening on the same draw. Anchored at
+                    // the tile's top-left, which the translate above has
+                    // already put at the animator's exact position, so growth
+                    // happens away from a corner that is already correct.
+                    //
+                    // r.width/r.height are at least 2 here — the loop skips
+                    // anything smaller before this branch — so neither divisor
+                    // can be zero.
+                    gs_matrix_scale3f(
+                        static_cast<float>(moving[i].width) /
+                            static_cast<float>(r.width),
+                        static_cast<float>(moving[i].height) /
+                            static_cast<float>(r.height),
+                        1.0f);
+                    while (gs_effect_loop(motion_def, "Draw"))
+                        gs_draw_sprite(tile_tex, 0, r.width, r.height);
+                    gs_matrix_pop();
+                }
+            } else {
+                // Latched so the glow pass, which decides its geometry before
+                // this loop runs, stops promising the fractional rect from the
+                // next frame on. See can_composite.
+                ctx->motion_composite_failed = true;
+                if (!s_motion_render_failed_logged) {
+                    s_motion_render_failed_logged = true;
+                    blog(LOG_ERROR,
+                         "[obs-zoom-plugin] Tiles: could not create a %ux%u "
+                         "intermediate texture for a tile in motion; tiles will "
+                         "step on the 2px chroma grid instead of moving smoothly",
+                         r.width, r.height);
+                }
+            }
+        }
+
+        gs_technique_begin(tech);
+        // Whatever failed — no default effect, no texrender, or a render
+        // target that could not be created at this size — the tile still has
+        // to appear. Falling back to the snapped draw costs it sub-pixel
+        // smoothness for this frame and nothing else, which is why this is a
+        // fallback and not a skip.
+        if (!composited) draw_tile(i, r, r.x, r.y);
     }
 
     gs_technique_end(tech);
@@ -1432,6 +2224,11 @@ static constexpr const char *PROP_GLOW_SIZE      = "glow_size";
 static constexpr const char *PROP_GLOW_COLOR     = "glow_color";
 static constexpr const char *PROP_GLOW_INTENSITY = "glow_intensity";
 static constexpr const char *PROP_GLOW_SOFTNESS  = "glow_softness";
+// Layout animation: whether tile moves/joins/departures ease instead of
+// snapping, and how long that eases over. See PROP_ANIMATE default below —
+// off is a complete bypass, not a fast setting.
+static constexpr const char *PROP_ANIMATE    = "animate_layout";
+static constexpr const char *PROP_ANIMATE_MS = "animate_duration_ms";
 // Tile shape: a preset, plus the ratio the Custom entry reveals. Two keys
 // rather than one so switching to a preset and back keeps the ratio the
 // operator typed, exactly as the corner radius survives a switch to Square.
@@ -1919,6 +2716,17 @@ static void tiles_source_update(void *data, obs_data_t *settings)
             std::max<int64_t>(raw_glow_soft, 0), kMaxGlowSoftness)),
         std::memory_order_release);
 
+    ctx->animate.store(obs_data_get_bool(settings, PROP_ANIMATE),
+                       std::memory_order_release);
+    // Clamped on the same threat model as every other setting here: scene
+    // files are hand-editable and obs_data_get_int returns an int64. A
+    // negative value wrapped to 4294967295 ms, which parks every tile at
+    // alpha ~0 forever — the wall renders as background only and settled()
+    // never becomes true, so it stays on the composite path indefinitely.
+    ctx->animate_ms.store(
+        clamp_animate_duration_ms(obs_data_get_int(settings, PROP_ANIMATE_MS)),
+        std::memory_order_release);
+
     // Tile shape and spacing. resolve_tile_aspect() already refuses a ratio of
     // zero or less (and a NaN) and falls back to 16:9; the clamp here is the
     // same bound the slider carries, applied to scene data too because
@@ -2111,6 +2919,27 @@ static void tiles_source_destroy(void *data)
         }
         execute_feed_plan(plan);
     }
+
+    // The intermediate render target for tiles in motion. Destroy does not run
+    // on the graphics thread, so the context has to be entered here — exactly
+    // as tile_feed_retire() does for a feed's plane textures, and for the same
+    // reason: leaking a tile-sized render target per Tiles source would
+    // accumulate GPU memory for the length of a show.
+    //
+    // Null unless a tile actually moved at least once, so a wall whose
+    // animation toggle was never on frees nothing because it allocated
+    // nothing. Guarded rather than calling gs_texrender_destroy(nullptr) —
+    // which is itself safe — so the common case does not enter the graphics
+    // context at all: that call blocks until the graphics thread is out of
+    // video_render, and paying for it on every source teardown is exactly the
+    // kind of cost this feature promises not to add when it is off.
+    if (ctx->motion_render) {
+        obs_enter_graphics();
+        gs_texrender_destroy(ctx->motion_render);
+        obs_leave_graphics();
+        ctx->motion_render = nullptr;
+    }
+
     delete ctx;
 }
 
@@ -2261,6 +3090,13 @@ static void tiles_source_get_defaults(obs_data_t *settings)
     // guarantee the size default carries, and the reason the default is 0
     // rather than whatever eventually matches the reference best.
     obs_data_set_default_int(settings, PROP_GLOW_SOFTNESS, 0);
+    // Off by default: the animator's "off" is a complete bypass (it clears
+    // its state and emits the solver's rects verbatim), so a scene saved
+    // before this control existed renders through exactly the path it
+    // renders through today. The duration default is only what the operator
+    // sees when they first switch animation on.
+    obs_data_set_default_bool(settings, PROP_ANIMATE, false);
+    obs_data_set_default_int(settings, PROP_ANIMATE_MS, 350);
     // 16:9 tiles and a canvas_height/135 gutter and margin: exactly what the
     // wall was hard-coded to before these controls existed, so a scene saved
     // before them renders byte-for-byte as it did. The spacing default is a
@@ -2499,6 +3335,17 @@ static obs_properties_t *tiles_source_get_properties(void *data)
         obs_module_text("CoreVideoTiles.GlowSoftness"),
         0, static_cast<int>(kMaxGlowSoftness), 1);
 
+    // Off by default: upgrading must not change how any existing scene
+    // looks. The animator's "off" is a complete bypass — it clears its state
+    // and emits the solver's rects verbatim — so a scene saved before this
+    // control existed renders through exactly the path it renders through
+    // today.
+    obs_properties_add_bool(props, PROP_ANIMATE,
+                            obs_module_text("CoreVideoTiles.Animate"));
+    obs_properties_add_int_slider(props, PROP_ANIMATE_MS,
+                                  obs_module_text("CoreVideoTiles.AnimateMs"),
+                                  100, 1000, 10);
+
     // Per-slot left/right crop, for reframing a badly-framed guest without
     // touching the grid. Eighteen sliders inline would swamp a dialog that
     // already carries thirteen choosers, so they go in a collapsible group —
@@ -2682,5 +3529,6 @@ void zoom_supersource_unload_gfx()
     s_bg_pass_failed_logged = false;
     s_glow_pass_failed_logged = false;
     s_glow_unavailable_logged = false;
+    s_motion_render_failed_logged = false;
     tiles_effect_destroy(s_tiles_effect);
 }

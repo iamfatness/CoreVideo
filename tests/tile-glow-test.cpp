@@ -323,6 +323,127 @@ int main()
         }
     }
 
+    // Final review, Minor 7: the halo must follow a MOVING tile's true
+    // fractional rect, not the 2px-quantised one the direct blit uses. The
+    // renderer was solving the quad from `rects[i]` while drawing the tile at
+    // `moving[i]`, so while a tile glided its halo stepped on the 2px grid —
+    // the exact artefact the sub-pixel path exists to remove from the tile's
+    // own trailing edge.
+    //
+    // The quad stays whole-pixel, because it is drawn as a sprite and rounds
+    // outward to avoid clipping the falloff. What has to move continuously is
+    // the centre and half-size the shader measures distance from.
+    {
+        constexpr double g = 24.0;
+        double last_center = -1.0;
+        int distinct = 0;
+        for (int step = 0; step <= 8; ++step) {
+            const double x = 500.0 + step * 0.25;     // sub-2px motion
+            const GlowQuad q = solve_glow_quad(x, 300.0, 628.0, 354.0, g, 1920, 1080);
+            if (!q.visible) {
+                std::cerr << "a moving tile's glow quad was not visible\n";
+                return 1;
+            }
+            // Absolute centre on the canvas, reconstructed from the quad.
+            const double abs_center = static_cast<double>(q.x) + q.center_x;
+            if (!near(abs_center, x + 314.0)) {
+                std::cerr << "the glow centre did not follow the tile's fractional "
+                             "position: wanted " << (x + 314.0) << " got "
+                          << abs_center << "\n";
+                return 1;
+            }
+            if (last_center < 0.0 || !near(abs_center, last_center)) ++distinct;
+            last_center = abs_center;
+        }
+        // Nine quarter-pixel steps must give nine distinct centres. Quantised
+        // to the 2px grid they would collapse to two.
+        if (distinct != 9) {
+            std::cerr << "the glow centre is quantised, not continuous: "
+                      << distinct << " distinct positions across 9 quarter-pixel "
+                         "steps\n";
+            return 1;
+        }
+
+        // A fractional SIZE is carried through too — even_floor_px() would
+        // have lost up to 1.95px of it.
+        const GlowQuad qf = solve_glow_quad(100.0, 100.0, 628.75, 354.5, g, 1920, 1080);
+        if (!near(qf.half_width, 628.75 * 0.5) ||
+            !near(qf.half_height, 354.5 * 0.5)) {
+            std::cerr << "the glow quad rounded the tile's fractional size away\n";
+            return 1;
+        }
+
+        // The whole-pixel overload must agree with the fractional one, or the
+        // settled and moving paths would draw different halos.
+        SnappedTileRect s;
+        s.x = 500; s.y = 300; s.width = 628; s.height = 354;
+        const GlowQuad a = solve_glow_quad(s, g, 1920, 1080);
+        const GlowQuad b = solve_glow_quad(500.0, 300.0, 628.0, 354.0, g, 1920, 1080);
+        if (a.visible != b.visible || a.x != b.x || a.y != b.y ||
+            a.width != b.width || a.height != b.height ||
+            !near(a.center_x, b.center_x) || !near(a.center_y, b.center_y) ||
+            !near(a.half_width, b.half_width) || !near(a.half_height, b.half_height)) {
+            std::cerr << "the whole-pixel and fractional overloads disagree\n";
+            return 1;
+        }
+
+        // A degenerate fractional size draws nothing, as the integer one does.
+        if (solve_glow_quad(10.0, 10.0, 0.0, 100.0, g, 1920, 1080).visible ||
+            solve_glow_quad(10.0, 10.0, 100.0, 0.0, g, 1920, 1080).visible) {
+            std::cerr << "a zero-sized fractional tile still produced a halo\n";
+            return 1;
+        }
+    }
+
+    // Re-review N2: on the composite-failure fallback the halo must follow the
+    // rect the tile ACTUALLY drew at, not the one it was going to draw at.
+    //
+    // The glow pass runs before the tile pass, so it has to be told whether
+    // the composite will succeed. When it does not — no default effect, no
+    // render target, or one that could not be created at this size — the tile
+    // falls back to the snapped blit, and a halo solved from the fractional
+    // rect sits up to 1px out in position and ~1.95px in size against it.
+    {
+        constexpr double g = 24.0;
+        SnappedTileRect snapped;
+        snapped.x = 500; snapped.y = 300; snapped.width = 628; snapped.height = 354;
+        // The fractional rect the tile would have used, deliberately well off
+        // the snapped one so a mix-up cannot hide inside rounding.
+        const double fx = 501.75, fy = 301.25, fw = 629.5, fh = 355.5;
+
+        const GlowQuad fell_back =
+            solve_glow_quad_for_tile(snapped, false, fx, fy, fw, fh, g, 1920, 1080);
+        const GlowQuad want_snapped = solve_glow_quad(snapped, g, 1920, 1080);
+        if (fell_back.x != want_snapped.x || fell_back.y != want_snapped.y ||
+            fell_back.width != want_snapped.width ||
+            fell_back.height != want_snapped.height ||
+            !near(fell_back.center_x, want_snapped.center_x) ||
+            !near(fell_back.center_y, want_snapped.center_y) ||
+            !near(fell_back.half_width, want_snapped.half_width) ||
+            !near(fell_back.half_height, want_snapped.half_height)) {
+            std::cerr << "the halo followed the fractional rect on a tile that "
+                         "fell back to the snapped blit\n";
+            return 1;
+        }
+
+        const GlowQuad composited =
+            solve_glow_quad_for_tile(snapped, true, fx, fy, fw, fh, g, 1920, 1080);
+        const GlowQuad want_fractional =
+            solve_glow_quad(fx, fy, fw, fh, g, 1920, 1080);
+        if (!near(composited.center_x, want_fractional.center_x) ||
+            !near(composited.half_width, want_fractional.half_width)) {
+            std::cerr << "the halo did not follow the fractional rect on a tile "
+                         "that was composited\n";
+            return 1;
+        }
+        // And the two answers must genuinely differ, or this proves nothing.
+        if (near(composited.half_width, fell_back.half_width) &&
+            near(composited.center_x, fell_back.center_x)) {
+            std::cerr << "test setup: the two rects produce the same halo\n";
+            return 1;
+        }
+    }
+
     std::cout << "tile-glow: all tests passed\n";
     return 0;
 }

@@ -58,7 +58,18 @@ struct GlowQuad {
 // and obviously wrong large, and clamping would silently contradict the number
 // the operator typed. The clipping below is a consequence of the canvas being
 // finite, not a bound on the setting.
-inline GlowQuad solve_glow_quad(const SnappedTileRect &tile, double glow_size,
+// Fractional overload. A tile in motion is drawn at its true, unsnapped rect,
+// not at the 2px-quantised one the direct blit uses, so its halo has to be
+// solved from the same numbers or it steps on the 2px grid while the tile
+// glides — up to 1px out in position and ~1.95px in size, which is exactly the
+// stepping the sub-pixel path went to trouble to remove from the tile's own
+// trailing edge. The quad itself stays whole-pixel: it is drawn as a sprite,
+// and rounding OUTWARD keeps the falloff from being clipped. What follows the
+// tile continuously is `center` and `half_size`, which is what the shader
+// measures distance from.
+inline GlowQuad solve_glow_quad(double tile_left, double tile_top,
+                                double tile_width, double tile_height,
+                                double glow_size,
                                 uint32_t canvas_width, uint32_t canvas_height)
 {
     GlowQuad q;
@@ -68,13 +79,11 @@ inline GlowQuad solve_glow_quad(const SnappedTileRect &tile, double glow_size,
     // without comment. Zero is the default and the no-regression guarantee:
     // nothing is drawn, so the output is byte-identical to a wall with no glow.
     if (!(glow_size > 0.0)) return q;
-    if (tile.width == 0 || tile.height == 0) return q;
+    if (!(tile_width > 0.0) || !(tile_height > 0.0)) return q;
     if (canvas_width == 0 || canvas_height == 0) return q;
 
-    const double tile_left   = static_cast<double>(tile.x);
-    const double tile_top    = static_cast<double>(tile.y);
-    const double tile_right  = tile_left + static_cast<double>(tile.width);
-    const double tile_bottom = tile_top + static_cast<double>(tile.height);
+    const double tile_right  = tile_left + tile_width;
+    const double tile_bottom = tile_top + tile_height;
 
     // Expand, rounding OUTWARD. The quad is drawn in whole pixels, so rounding
     // inward would clip the last row of the falloff and leave a faint hard edge
@@ -104,11 +113,48 @@ inline GlowQuad solve_glow_quad(const SnappedTileRect &tile, double glow_size,
     q.width  = static_cast<uint32_t>(right - left);
     q.height = static_cast<uint32_t>(bottom - top);
 
-    q.half_width  = static_cast<double>(tile.width) * 0.5;
-    q.half_height = static_cast<double>(tile.height) * 0.5;
+    q.half_width  = tile_width * 0.5;
+    q.half_height = tile_height * 0.5;
     // Measured from the quad's origin, which is why the clamp above has to have
     // happened first: this is the term that absorbs whatever the canvas clipped.
     q.center_x = (tile_left + q.half_width) - left;
     q.center_y = (tile_top + q.half_height) - top;
     return q;
+}
+
+// Whole-pixel overload, for a tile drawn through the direct snapped blit.
+// Delegates, so the two can never disagree about the geometry.
+inline GlowQuad solve_glow_quad(const SnappedTileRect &tile, double glow_size,
+                                uint32_t canvas_width, uint32_t canvas_height)
+{
+    return solve_glow_quad(static_cast<double>(tile.x),
+                           static_cast<double>(tile.y),
+                           static_cast<double>(tile.width),
+                           static_cast<double>(tile.height),
+                           glow_size, canvas_width, canvas_height);
+}
+
+// One tile's halo, solved from the SAME rect the tile itself will be drawn at.
+//
+// `composited` is the deciding input and it is not the same question as "is
+// this tile moving". A moving tile is drawn at its true fractional rect only
+// if the intermediate-texture composite actually succeeds; when it cannot —
+// no default effect, no render target, or one that could not be created at
+// this size — the draw path falls back to the snapped blit. The halo is drawn
+// in an earlier pass, under the tiles, so it has to be told which of those two
+// the tile will end up taking rather than assuming the fractional one. Getting
+// that wrong leaves the halo up to 1px out in position and ~1.95px in size
+// against the tile it belongs to, on exactly the frames where something has
+// already gone wrong.
+inline GlowQuad solve_glow_quad_for_tile(const SnappedTileRect &snapped,
+                                         bool composited,
+                                         double moving_x, double moving_y,
+                                         double moving_width, double moving_height,
+                                         double glow_size,
+                                         uint32_t canvas_width, uint32_t canvas_height)
+{
+    if (!composited)
+        return solve_glow_quad(snapped, glow_size, canvas_width, canvas_height);
+    return solve_glow_quad(moving_x, moving_y, moving_width, moving_height,
+                           glow_size, canvas_width, canvas_height);
 }

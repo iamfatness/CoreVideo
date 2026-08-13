@@ -218,21 +218,30 @@ inline void spring_advance(Spring1D &s, double target, double settle_seconds,
         return;
     }
 
-    // Critically damped spring, integrated implicitly so it is stable at any
-    // dt — an explicit integrator diverges when a frame is long. omega is
-    // chosen so the spring is within ~1% of the target after settle_seconds.
-    constexpr double kSettleFactor = 4.6;  // -ln(0.01)
+    // Exact solution of the critically damped spring, not a numerical
+    // integrator. An approximate integrator overshoots — measurably, and by an
+    // amount that does not vanish as dt shrinks — and overshoot on a tile means
+    // it sails past its slot and comes back, which is precisely the cheap look
+    // this feature exists to avoid. The closed form also makes the result
+    // identical at any frame rate by construction rather than by tolerance.
+    //
+    // kSettleFactor is the critically damped 1%-remaining constant, the root of
+    // (1 + k)e^-k = 0.01. It is NOT 4.6: that is the first-order constant, and
+    // a second-order critically damped system decays as (1 + wt)e^-wt, which at
+    // 4.6 is still 5.6% short of its target.
+    constexpr double kSettleFactor = 6.6384;
     const double omega = kSettleFactor / settle_seconds;
 
-    const double denom = 1.0 + omega * dt_seconds +
-                         0.5 * omega * omega * dt_seconds * dt_seconds;
     const double delta = s.position - target;
-    const double next_velocity =
-        (s.velocity - omega * omega * dt_seconds * delta) / denom;
-    s.position = target + (delta + dt_seconds * next_velocity) / denom;
-    s.velocity = next_velocity;
+    const double decay = std::exp(-omega * dt_seconds);
+    const double c     = s.velocity + omega * delta;
+
+    s.position = target + (delta + c * dt_seconds) * decay;
+    s.velocity = (s.velocity - omega * c * dt_seconds) * decay;
 }
 ```
+
+`src/tile-motion.h` needs `#include <cmath>` for `std::exp`.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
@@ -455,6 +464,7 @@ public:
         if (!settings.enabled) {
             m_tiles.clear();
             m_last_ns = 0;
+            m_has_last = false;
             std::vector<AnimatedTile> out;
             out.reserve(desired.size());
             for (const auto &d : desired)
@@ -462,10 +472,16 @@ public:
             return out;
         }
 
-        const double dt = m_last_ns == 0 || now_ns <= m_last_ns
+        // An explicit "have we been called before" flag, not a sentinel value
+        // of m_last_ns. Zero is a legitimate timestamp — the tests advance from
+        // 0 — and overloading it means m_last_ns stays 0 after a first call at
+        // 0, so dt is forced to zero on two consecutive calls and the wall
+        // silently loses a frame of motion.
+        const double dt = (!m_has_last || now_ns <= m_last_ns)
             ? 0.0
             : static_cast<double>(now_ns - m_last_ns) / 1e9;
         m_last_ns = now_ns;
+        m_has_last = true;
 
         std::vector<AnimatedTile> out;
         out.reserve(desired.size());
@@ -517,7 +533,8 @@ public:
 private:
     struct Motion { Spring1D x, y, w, h; };
     std::map<uint32_t, Motion> m_tiles;
-    uint64_t m_last_ns = 0;
+    uint64_t m_last_ns  = 0;
+    bool     m_has_last = false;
 };
 ```
 
@@ -614,6 +631,12 @@ In `src/zoom-tile-animator.h`, add to the private section:
     std::vector<uint32_t> m_committed_ids;   // the set the wall is laid out for
     std::vector<uint32_t> m_pending_ids;     // a candidate set, not yet settled
     uint64_t m_pending_since_ns = 0;
+    // Explicit, not `m_committed_ids.empty()`: an empty committed set is also
+    // what a legitimately vacated wall looks like, and conflating the two lets a
+    // vacate-and-return blip skip the hold entirely.
+    bool m_has_committed = false;
+    // Distinguishes "an empty roster is proposed" from "nothing is proposed".
+    bool m_has_pending = false;
 ```
 
 Add this helper to the private section:
@@ -638,18 +661,29 @@ In `advance()`, immediately after `m_last_ns = now_ns;`, insert the settle gate:
         // only adopted once it has held for kSettleNs; a reversal inside that
         // window is forgotten and nothing moves.
         const std::vector<uint32_t> incoming = ids_of(desired);
-        if (m_committed_ids.empty() && m_pending_ids.empty()) {
+        if (!m_has_committed) {
             m_committed_ids = incoming;          // first frame: adopt at once
+            m_has_committed = true;
         } else if (incoming != m_committed_ids) {
-            if (incoming != m_pending_ids) {
+            // m_has_pending, not "m_pending_ids is non-empty": an empty roster
+            // is a legitimate proposal — everyone dropping out at once is the
+            // flicker case this gate exists for — and it is indistinguishable
+            // from the default-empty vector. Without the flag, an empty
+            // proposal falls through to the elapsed-time branch and is measured
+            // against a stale m_pending_since_ns, so it is adopted with no hold
+            // at all.
+            if (!m_has_pending || incoming != m_pending_ids) {
                 m_pending_ids = incoming;
                 m_pending_since_ns = now_ns;
+                m_has_pending = true;
             } else if (now_ns - m_pending_since_ns >= kSettleNs) {
                 m_committed_ids = incoming;      // held long enough: adopt
                 m_pending_ids.clear();
+                m_has_pending = false;
             }
         } else {
             m_pending_ids.clear();               // reverted: forget the change
+            m_has_pending = false;
         }
 ```
 
@@ -678,7 +712,39 @@ Then filter what is animated to the committed set. Replace the `for (const auto 
             }
 ```
 
-and target the springs at the rect the *committed* layout implies — which, while a change is pending, is the tile's existing target. Keep the rest of the loop body unchanged.
+**The target a tile springs toward is remembered, not taken from `desired` every frame.** This is the part the settle window actually turns on. `desired` is solved for whatever participant set the caller currently sees, so the moment a blip starts, the incoming rects describe a layout the wall has *not* agreed to. Springing toward them is the very reflow the settle window exists to suppress.
+
+Give `Motion` a remembered target and only adopt a new one when no change is pending:
+
+```cpp
+    struct Motion { Spring1D x, y, w, h; TileRect target; };
+```
+
+Seed it when a tile is first seen (`m.target = d.rect;` beside the spring seeding), and in the loop body replace the direct use of `d.rect` as the spring target with:
+
+```cpp
+            // Adopt a new target only when the layout in hand was solved for
+            // the set the wall has committed to. While a change is pending, the
+            // incoming rects belong to a layout that may never happen — a blip
+            // that reverts must leave every tile exactly where it was.
+            if (!change_pending && committed)
+                m.target = d.rect;
+
+            spring_advance(m.x, m.target.x,      settings.duration_seconds, dt);
+            spring_advance(m.y, m.target.y,      settings.duration_seconds, dt);
+            spring_advance(m.w, m.target.width,  settings.duration_seconds, dt);
+            spring_advance(m.h, m.target.height, settings.duration_seconds, dt);
+```
+
+where `change_pending` is computed once, immediately after the settle gate:
+
+```cpp
+        // Same reason as above: an empty proposal is still a pending change, so
+        // this must read the flag, not the vector's emptiness.
+        const bool change_pending = m_has_pending;
+```
+
+**`at_rest` must be measured against `m.target`, not `d.rect`.** A tile held through a pending change sits exactly on its remembered target while `d.rect` says otherwise; comparing against `d.rect` would report it in motion forever and push it onto the sub-pixel render path for no reason.
 
 Finally, in the cleanup loop at the end, only erase participants absent from `m_committed_ids` (not merely absent from `desired`), so a blipped participant keeps its motion state:
 
@@ -991,8 +1057,27 @@ with:
     anim.duration_seconds =
         static_cast<double>(ctx->animate_ms.load(std::memory_order_acquire)) / 1000.0;
 
+    // `departed` is a STATE, not an event: which tracked participants are gone
+    // from the meeting roster right now, recomputed every frame. It is what
+    // separates a genuine departure (fade out) from an operator repointing a
+    // slot (instant cut, no fade) — the distinction the exit invariants in
+    // src/zoom-tile-slot.h rest on. Hardcoding it empty would make the exit
+    // path dead code on the wall.
+    // Computed in THIS pass, from the same frame the layout was solved in. If
+    // `departed` lags `desired` by even one frame, the exit exception silently
+    // never fires and the whole fade becomes dead code.
+    const std::vector<ParticipantInfo> roster = ZoomEngineClient::instance().roster();
+    std::vector<uint32_t> departed;
+    for (const uint32_t id : ctx->animator.tracked_ids()) {
+        const bool in_roster = std::any_of(
+            roster.begin(), roster.end(),
+            [id](const ParticipantInfo &p) { return p.user_id == id; });
+        if (!in_roster)
+            departed.push_back(id);
+    }
+
     const std::vector<AnimatedTile> animated =
-        ctx->animator.advance(os_gettime_ns(), desired, anim, /*departed=*/{});
+        ctx->animator.advance(os_gettime_ns(), desired, anim, departed);
 
     // Snap what the animator produced. A tile at rest snaps to exactly the
     // geometry the solver produced, so with animation off this is identical to

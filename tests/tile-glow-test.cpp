@@ -395,6 +395,55 @@ int main()
         }
     }
 
+    // Re-review N2: on the composite-failure fallback the halo must follow the
+    // rect the tile ACTUALLY drew at, not the one it was going to draw at.
+    //
+    // The glow pass runs before the tile pass, so it has to be told whether
+    // the composite will succeed. When it does not — no default effect, no
+    // render target, or one that could not be created at this size — the tile
+    // falls back to the snapped blit, and a halo solved from the fractional
+    // rect sits up to 1px out in position and ~1.95px in size against it.
+    {
+        constexpr double g = 24.0;
+        SnappedTileRect snapped;
+        snapped.x = 500; snapped.y = 300; snapped.width = 628; snapped.height = 354;
+        // The fractional rect the tile would have used, deliberately well off
+        // the snapped one so a mix-up cannot hide inside rounding.
+        const double fx = 501.75, fy = 301.25, fw = 629.5, fh = 355.5;
+
+        const GlowQuad fell_back =
+            solve_glow_quad_for_tile(snapped, false, fx, fy, fw, fh, g, 1920, 1080);
+        const GlowQuad want_snapped = solve_glow_quad(snapped, g, 1920, 1080);
+        if (fell_back.x != want_snapped.x || fell_back.y != want_snapped.y ||
+            fell_back.width != want_snapped.width ||
+            fell_back.height != want_snapped.height ||
+            !near(fell_back.center_x, want_snapped.center_x) ||
+            !near(fell_back.center_y, want_snapped.center_y) ||
+            !near(fell_back.half_width, want_snapped.half_width) ||
+            !near(fell_back.half_height, want_snapped.half_height)) {
+            std::cerr << "the halo followed the fractional rect on a tile that "
+                         "fell back to the snapped blit\n";
+            return 1;
+        }
+
+        const GlowQuad composited =
+            solve_glow_quad_for_tile(snapped, true, fx, fy, fw, fh, g, 1920, 1080);
+        const GlowQuad want_fractional =
+            solve_glow_quad(fx, fy, fw, fh, g, 1920, 1080);
+        if (!near(composited.center_x, want_fractional.center_x) ||
+            !near(composited.half_width, want_fractional.half_width)) {
+            std::cerr << "the halo did not follow the fractional rect on a tile "
+                         "that was composited\n";
+            return 1;
+        }
+        // And the two answers must genuinely differ, or this proves nothing.
+        if (near(composited.half_width, fell_back.half_width) &&
+            near(composited.center_x, fell_back.center_x)) {
+            std::cerr << "test setup: the two rects produce the same halo\n";
+            return 1;
+        }
+    }
+
     std::cout << "tile-glow: all tests passed\n";
     return 0;
 }

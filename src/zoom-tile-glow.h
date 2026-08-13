@@ -133,3 +133,28 @@ inline GlowQuad solve_glow_quad(const SnappedTileRect &tile, double glow_size,
                            static_cast<double>(tile.height),
                            glow_size, canvas_width, canvas_height);
 }
+
+// One tile's halo, solved from the SAME rect the tile itself will be drawn at.
+//
+// `composited` is the deciding input and it is not the same question as "is
+// this tile moving". A moving tile is drawn at its true fractional rect only
+// if the intermediate-texture composite actually succeeds; when it cannot —
+// no default effect, no render target, or one that could not be created at
+// this size — the draw path falls back to the snapped blit. The halo is drawn
+// in an earlier pass, under the tiles, so it has to be told which of those two
+// the tile will end up taking rather than assuming the fractional one. Getting
+// that wrong leaves the halo up to 1px out in position and ~1.95px in size
+// against the tile it belongs to, on exactly the frames where something has
+// already gone wrong.
+inline GlowQuad solve_glow_quad_for_tile(const SnappedTileRect &snapped,
+                                         bool composited,
+                                         double moving_x, double moving_y,
+                                         double moving_width, double moving_height,
+                                         double glow_size,
+                                         uint32_t canvas_width, uint32_t canvas_height)
+{
+    if (!composited)
+        return solve_glow_quad(snapped, glow_size, canvas_width, canvas_height);
+    return solve_glow_quad(moving_x, moving_y, moving_width, moving_height,
+                           glow_size, canvas_width, canvas_height);
+}

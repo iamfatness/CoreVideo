@@ -360,6 +360,12 @@ struct tiles_source {
     // Render-thread only, like `animator`. Pruned every time it is written, so
     // it stays the size of the meeting rather than growing with its length.
     std::vector<uint32_t> roster_seen;
+    // Latched when an intermediate render target could not be opened for a
+    // tile in motion. The glow pass runs before the tile pass and has to know
+    // which rect each tile will be drawn at; a per-tile failure cannot be
+    // predicted from there, so once one happens this source stops promising
+    // the fractional rect and the two agree again. Render-thread only.
+    bool motion_composite_failed = false;
     // The intermediate render target a tile IN MOTION is composited through
     // before being drawn at a fractional position — see
     // ensure_motion_texrender() and the draw loop in tiles_source_render().
@@ -1600,6 +1606,36 @@ static void tiles_source_render(void *data, gs_effect_t *)
         }
     }
 
+    // ── Can a tile in motion actually be composited this frame? ──────────────
+    //
+    // Resolved ONCE, here, because two passes need the same answer and they
+    // run at different times: the halo is drawn under the tiles, so it has to
+    // know which rect each tile will end up at before the tile loop finds out.
+    // Deciding separately let the halo follow the fractional rect while the
+    // tile fell back to the snapped one, and they disagreed by up to ~2px on
+    // exactly the frames where something had already failed.
+    //
+    // Only asked when some tile actually needs it — `moving` is empty on every
+    // settled frame and on every frame the toggle is off — so a source whose
+    // tiles never move still never creates a render target and never enters
+    // this branch at all.
+    bool any_composite = false;
+    for (const MovingTile &m : moving)
+        if (m.needs_composite) { any_composite = true; break; }
+    gs_effect_t *const motion_def =
+        any_composite ? obs_get_base_effect(OBS_EFFECT_DEFAULT) : nullptr;
+    gs_eparam_t *const motion_def_image =
+        motion_def ? gs_effect_get_param_by_name(motion_def, "image") : nullptr;
+    gs_texrender_t *const motion_tr =
+        motion_def_image ? ensure_motion_texrender(ctx) : nullptr;
+    // A per-tile gs_texrender_begin() failure cannot be predicted from here,
+    // so it is latched: once a target has failed to open, this source stops
+    // promising the fractional rect to the halo. The failure is already logged
+    // and already costs the tile its sub-pixel motion, and a size that could
+    // not be created will not start working, so converging on "they agree" is
+    // worth more than optimism.
+    const bool can_composite = motion_tr != nullptr && !ctx->motion_composite_failed;
+
     // Background first, so tiles and their borders draw over it. This replaces
     // what used to be a fixed neutral fill drawn through the I420 technique
     // purely for CPU-path parity; the per-tile placeholder below
@@ -1750,17 +1786,21 @@ static void tiles_source_render(void *data, gs_effect_t *)
                                                                  : 1.0;
             if (tile_alpha <= 0.0) continue;   // nothing to draw yet
 
-            // Solved from the SAME rect the tile is drawn at. For a composited
-            // tile that is its true fractional rect, not the 2px-quantised one
-            // in `rects` — otherwise the halo steps on the 2px grid while the
-            // tile glides smoothly, which is the exact artefact the sub-pixel
-            // path exists to remove.
-            const bool composited = i < moving.size() && moving[i].needs_composite;
-            const GlowQuad q =
-                composited ? solve_glow_quad(moving[i].x, moving[i].y,
-                                             moving[i].width, moving[i].height,
-                                             glow_size_px, canvas_w, canvas_h)
-                           : solve_glow_quad(r, glow_size_px, canvas_w, canvas_h);
+            // Solved from the SAME rect the tile is drawn at — its true
+            // fractional one if it will be composited, the 2px-quantised one
+            // in `rects` if it will not. Following the fractional rect is what
+            // stops the halo stepping on the 2px grid while its tile glides,
+            // which is the exact artefact the sub-pixel path exists to remove;
+            // deferring to `can_composite` is what stops it doing that when
+            // the tile is about to fall back to the snapped blit anyway.
+            const bool composited =
+                i < moving.size() && moving[i].needs_composite && can_composite;
+            const double mx = i < moving.size() ? moving[i].x : 0.0;
+            const double my = i < moving.size() ? moving[i].y : 0.0;
+            const double mw = i < moving.size() ? moving[i].width : 0.0;
+            const double mh = i < moving.size() ? moving[i].height : 0.0;
+            const GlowQuad q = solve_glow_quad_for_tile(
+                r, composited, mx, my, mw, mh, glow_size_px, canvas_w, canvas_h);
             if (!q.visible) continue;  // clamped away to nothing
 
             // The tile's own clamped radius, not the raw setting: the halo has
@@ -1984,14 +2024,15 @@ static void tiles_source_render(void *data, gs_effect_t *)
         // snap_tile_independently() imposes, which is plainly visible on a slow
         // reflow and is exactly the case this feature exists to make look good.
         //
-        // Resolved before anything is composited so that a missing default
+        // Resolved once for the whole frame, above, so that a missing default
         // effect takes the fallback path below rather than rendering a tile
-        // into a texture nothing can then draw.
-        gs_effect_t *const def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
-        gs_eparam_t *const def_image =
-            def ? gs_effect_get_param_by_name(def, "image") : nullptr;
-        gs_texrender_t *const tr = def_image ? ensure_motion_texrender(ctx)
-                                             : nullptr;
+        // into a texture nothing can then draw — and so that the glow pass,
+        // which has already run, made its geometry decision from the same
+        // answer this loop acts on. `can_composite` also carries the latched
+        // per-tile failure; honouring it here keeps the two in step on the
+        // frames after one.
+        gs_eparam_t *const def_image = motion_def_image;
+        gs_texrender_t *const tr = can_composite ? motion_tr : nullptr;
 
         // The wall's technique is closed across this whole branch and reopened
         // at the end. It has to be: gs_effect_loop() refuses to run — and logs
@@ -2114,17 +2155,23 @@ static void tiles_source_render(void *data, gs_effect_t *)
                         static_cast<float>(moving[i].height) /
                             static_cast<float>(r.height),
                         1.0f);
-                    while (gs_effect_loop(def, "Draw"))
+                    while (gs_effect_loop(motion_def, "Draw"))
                         gs_draw_sprite(tile_tex, 0, r.width, r.height);
                     gs_matrix_pop();
                 }
-            } else if (!s_motion_render_failed_logged) {
-                s_motion_render_failed_logged = true;
-                blog(LOG_ERROR,
-                     "[obs-zoom-plugin] Tiles: could not create a %ux%u "
-                     "intermediate texture for a tile in motion; tiles will "
-                     "step on the 2px chroma grid instead of moving smoothly",
-                     r.width, r.height);
+            } else {
+                // Latched so the glow pass, which decides its geometry before
+                // this loop runs, stops promising the fractional rect from the
+                // next frame on. See can_composite.
+                ctx->motion_composite_failed = true;
+                if (!s_motion_render_failed_logged) {
+                    s_motion_render_failed_logged = true;
+                    blog(LOG_ERROR,
+                         "[obs-zoom-plugin] Tiles: could not create a %ux%u "
+                         "intermediate texture for a tile in motion; tiles will "
+                         "step on the 2px chroma grid instead of moving smoothly",
+                         r.width, r.height);
+                }
             }
         }
 

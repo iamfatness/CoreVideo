@@ -1128,6 +1128,44 @@ int main()
         check(a.settled(), "the animator was not settled after being disabled");
     }
 
+    // Re-review N1: the very FIRST tile the animator ever sees must fade in.
+    //
+    // Adoption is "this animator has not run yet", not "the map is empty".
+    // Latching the adoption flag only once tiles existed meant an animator
+    // left running on an empty wall — OBS open before the meeting starts,
+    // which is the ordinary case — still counted as un-run when the first
+    // participant arrived, and popped them on at full opacity. The two
+    // behaviours are one line apart, so this block asserts BOTH directions:
+    // the first-ever participant fades, and the toggle test above asserts an
+    // existing wall does not.
+    {
+        TileAnimator a;
+        // Running with Animate on, nobody on camera yet.
+        for (int i = 0; i < 5; ++i)
+            a.advance(i * 16 * kMs, {}, on, {});
+        check(a.settled(), "test setup: an empty wall should be settled");
+        check(a.tracked_ids().empty(), "test setup: an empty wall tracks nothing");
+
+        // The first participant ever to appear. This is an ARRIVAL — there was
+        // no wall to adopt — so it fades in.
+        const auto first = a.advance(100 * kMs, {{1, three_a}}, on, {});
+        check(find(first, 1) != nullptr,
+              "the first participant was not drawn at all");
+        check(find(first, 1) != nullptr && find(first, 1)->alpha < 0.001,
+              "the first participant to ever appear popped on at full opacity "
+              "instead of fading in — an empty wall is not a wall to adopt");
+        check(find(first, 1) != nullptr &&
+                  std::fabs(find(first, 1)->rect.x - three_a.x) < 0.001,
+              "the first participant did not appear at its own slot");
+
+        // And the one after it, so a fix cannot be "the first frame is special
+        // forever".
+        const auto second =
+            a.advance(116 * kMs, {{1, three_a}, {2, three_b}}, on, {});
+        check(find(second, 2) != nullptr && find(second, 2)->alpha < 0.001,
+              "a later join stopped fading in");
+    }
+
     // Important 6 / finding 4: motion must be ELAPSED-TIME based, at the
     // animator level and not only in the spring. The same elapsed time
     // advanced in 16ms steps and in 32ms steps has to reach the same geometry.

@@ -55,9 +55,10 @@ public:
             m_tiles.clear();
             m_last_ns = 0;
             m_has_last = false;
-            // Cleared with everything else, so the NEXT enabled frame adopts
-            // the wall it finds at rest instead of fading it up from nothing.
-            m_seeded = false;
+            // Cleared with everything else, so the NEXT enabled frame is an
+            // adoption again: the wall the operator sees when they tick the
+            // checkbox is the wall that stays on screen.
+            m_has_run_enabled_frame = false;
             std::vector<AnimatedTile> out;
             out.reserve(desired.size());
             for (const auto &d : desired)
@@ -75,6 +76,29 @@ public:
             : static_cast<double>(now_ns - m_last_ns) / 1e9;
         m_last_ns = now_ns;
         m_has_last = true;
+
+        // ADOPTION vs ARRIVAL. These are two different events and the animator
+        // has to tell them apart, because only one of them should fade:
+        //
+        //   - Adoption: this animator's FIRST enabled frame. Whatever the
+        //     layout holds is a wall that already exists — a scene load, or an
+        //     operator ticking the Animate checkbox mid-show (the disabled
+        //     bypass discards all state, so the next enabled frame starts from
+        //     nothing). Fading here would blank a live show for the whole
+        //     duration over a checkbox.
+        //   - Arrival: a participant appearing on any LATER frame. That is a
+        //     join, and it fades, because it is drawn at its slot in the new
+        //     grid while every incumbent is still at its old one.
+        //
+        // Latched unconditionally, and deliberately NOT derived from `m_tiles`
+        // being empty. That test conflates "the animator has not run yet" with
+        // "the wall happens to have nobody on it", so an animator left running
+        // on an empty wall — OBS open before the meeting starts — treated the
+        // first participant to ever appear as an adoption and popped them on
+        // at full opacity. An empty container standing in for a state is the
+        // recurring bug on this feature; the state is its own flag.
+        const bool adopting_existing_wall = !m_has_run_enabled_frame;
+        m_has_run_enabled_frame = true;
 
         const std::vector<uint32_t> incoming = ids_of(desired);
 
@@ -205,17 +229,6 @@ public:
             // grid generation the rest of the wall has left.
         }
 
-        // A participant appearing on the animator's FIRST populated frame is
-        // not a join — it is the wall that was already there. Adopting it at
-        // rest is what stops the Animate toggle from blanking a live show:
-        // the disabled bypass clears m_tiles on every disabled call, so the
-        // first enabled frame sees an empty map and would otherwise treat
-        // every tile as first sight and fade the entire wall up from nothing,
-        // with no roster change at all. Same on a scene load. Only a tile
-        // that appears while the animator already had state is a genuine
-        // join.
-        const bool adopt_at_rest = !m_seeded;
-
         std::vector<uint32_t> emitted;
         emitted.reserve(desired.size());
 
@@ -246,7 +259,7 @@ public:
                 m.w = {d.rect.width, 0.0};
                 m.h = {d.rect.height, 0.0};
                 m.target = d.rect;
-                m.entering = !adopt_at_rest;
+                m.entering = !adopting_existing_wall;
                 m.entered_ns = now_ns;
                 it = m_tiles.emplace(d.participant_id, m).first;
             }
@@ -279,8 +292,6 @@ public:
             out.push_back(AnimatedTile{d.participant_id, r, entry_alpha(m, now_ns, settings),
                                        at_rest});
         }
-
-        if (!m_tiles.empty()) m_seeded = true;
 
         return out;
     }
@@ -390,9 +401,11 @@ private:
     std::map<uint32_t, Motion> m_tiles;
     uint64_t m_last_ns  = 0;
     bool     m_has_last = false;
-    // Has this animator ever carried tiles? Distinguishes "the wall was
-    // already there" from "somebody joined" — see adopt_at_rest in advance().
-    bool     m_seeded   = false;
+    // Has this animator processed an enabled frame yet in this enabled run?
+    // Latched unconditionally in advance(), reset by the disabled bypass. See
+    // adopting_existing_wall there for why this is its own flag and not a test
+    // on m_tiles being empty.
+    bool     m_has_run_enabled_frame = false;
 };
 
 // ── Caller-side helpers ──────────────────────────────────────────────────────
@@ -461,9 +474,26 @@ inline bool layout_disagrees_with_tracking(const std::vector<uint32_t> &tracked,
 // while that participant's camera is off"), so an operator can cast someone
 // who never joined the meeting at all. Repointing that slot away satisfies
 // both conditions, and the animator would start an exit for a participant who
-// never departed — invariants 1 and 2 broken by one operator action. The same
-// hole opens whenever the roster is momentarily empty or stale, such as
-// between an engine restart and the first roster tick.
+// never departed — invariants 1 and 2 broken by one operator action.
+//
+// What this does NOT close, and must not be read as closing: a roster snapshot
+// that is momentarily EMPTY. Every participant on the wall is in
+// `ever_in_roster` by definition, so if `roster_ids` reads empty while they are
+// off the layout, every one of them classifies as departed. Forced in a probe,
+// that window produced 15,832 exits for participants still in the meeting.
+//
+// It is unreachable only because of an invariant OUTSIDE this file:
+// ZoomEngineClient::m_roster is cleared exactly twice — on "left", which is a
+// genuine departure of everyone, and at the top of a "participants" rebuild
+// that repopulates it before releasing m_mtx, so it is never observably empty
+// mid-rebuild (src/zoom-engine-client.cpp:978 and :1094). A disconnect leaves
+// it STALE rather than empty, and stale fails safe: still in the roster means
+// not departed, which cuts instantly and puts nothing on air.
+//
+// If that ever changes — if m_roster is cleared on a disconnect, a
+// meeting-end, or an engine restart path — this classifier will call the whole
+// wall departed and every tile will begin an exit. Either keep that invariant
+// or make this function require a non-empty snapshot.
 //
 // `ever_in_roster` is the evidence: ids observed in some earlier roster
 // snapshot. An id that has never been seen in one cannot have departed from

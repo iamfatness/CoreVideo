@@ -64,16 +64,100 @@ int main()
     }
 
     // Identity, not index: the surviving tile keeps its own position when the
-    // tile before it disappears from the desired layout.
+    // tile before it disappears from the desired layout. Participant 1
+    // leaving is itself a set change, so — as of the settle window — it is
+    // gated too: at 16ms nothing has moved yet for participant 7 either
+    // (the whole layout might revert), but once the departure has genuinely
+    // settled, participant 7 reflows from its own prior position, not from
+    // participant 1's slot.
     {
         TileAnimator a;
         a.advance(0, {{1, rect(0, 0, 100, 100)}, {7, rect(100, 0, 100, 100)}}, on);
         const auto out = a.advance(16 * kMs, {{7, rect(0, 0, 200, 200)}}, on);
         const AnimatedTile *t = find(out, 7);
         check(t != nullptr, "participant 7 was lost when participant 1 left");
-        check(t->rect.x > 0.0 && t->rect.x < 100.0,
+        check(std::fabs(t->rect.x - 100.0) < 0.001,
+              "participant 7 moved before participant 1's departure had settled");
+        check(t->at_rest,
+              "participant 7 reported motion before the departure had settled");
+
+        const auto settled = a.advance(300 * kMs, {{7, rect(0, 0, 200, 200)}}, on);
+        const AnimatedTile *t2 = find(settled, 7);
+        check(t2 != nullptr, "participant 7 was lost once the departure settled");
+        check(t2->rect.x > 0.0 && t2->rect.x < 100.0,
               "participant 7 did not continue animating from its own prior position toward its new target");
-        check(!t->at_rest, "participant 7 reported at rest despite being retargeted");
+        check(!t2->at_rest, "participant 7 reported at rest despite being retargeted");
+    }
+
+    // A blip never moves the wall: a participant who vanishes and returns
+    // inside the settle window produces no motion at all.
+    {
+        TileAnimator a;
+        const std::vector<DesiredTile> two{{1, rect(0, 0, 100, 100)},
+                                           {2, rect(100, 0, 100, 100)}};
+        const std::vector<DesiredTile> one{{1, rect(0, 0, 200, 200)}};
+        a.advance(0, two, on);
+        a.advance(100 * kMs, one, on);          // 2 disappears
+        const auto back = a.advance(150 * kMs, two, on);  // and returns
+        const AnimatedTile *t = find(back, 1);
+        check(t != nullptr, "participant 1 lost during a blip");
+        check(std::fabs(t->rect.width - 100.0) < 0.001,
+              "the wall reflowed for a blip that never settled");
+        check(find(back, 2) != nullptr, "the returning participant was dropped");
+    }
+
+    // A change that holds past the settle window is acted on.
+    {
+        TileAnimator a;
+        a.advance(0, {{1, rect(0, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on);
+        a.advance(100 * kMs, {{1, rect(0, 0, 200, 200)}}, on);
+        const auto out = a.advance(400 * kMs, {{1, rect(0, 0, 200, 200)}}, on);
+        const AnimatedTile *t = find(out, 1);
+        check(t != nullptr && t->rect.width > 100.0,
+              "a settled departure did not start the reflow");
+    }
+
+    // A wall that vacates entirely and returns inside the settle window must
+    // not have moved either: the whole roster leaving at once is a blip like
+    // any other, and motion state for every participant survives it exactly
+    // as a single participant's does.
+    {
+        TileAnimator a;
+        const std::vector<DesiredTile> two{{1, rect(0, 0, 100, 100)},
+                                           {2, rect(100, 0, 100, 100)}};
+        a.advance(0, two, on);
+        a.advance(100 * kMs, {}, on);              // everyone leaves
+        const auto back = a.advance(150 * kMs, two, on);  // and returns
+        const AnimatedTile *t1 = find(back, 1);
+        const AnimatedTile *t2 = find(back, 2);
+        check(t1 != nullptr && t2 != nullptr,
+              "a participant was lost during a full-vacate blip");
+        check(std::fabs(t1->rect.width - 100.0) < 0.001 &&
+              std::fabs(t2->rect.width - 100.0) < 0.001,
+              "the wall reflowed for a full-vacate blip that never settled");
+    }
+
+    // A legitimately empty wall is not a first frame: once the roster has
+    // genuinely settled on zero participants (a full 250ms, not just a
+    // blip), a return must hold for its own 250ms before the wall commits to
+    // it, the same as any other set change would. Proven by proposing a
+    // layout change for the returning participant only 10ms after it
+    // reappears: while that return is still pending, the change must sit
+    // exactly at the proposed target, untouched (at_rest) — not partially
+    // interpolated the way it would be if the wall had mistaken the return
+    // for a fresh start and already committed to it.
+    {
+        TileAnimator a;
+        a.advance(0, {{1, rect(0, 0, 100, 100)}}, on);
+        a.advance(300 * kMs, {}, on);                          // genuinely settles on zero
+        a.advance(310 * kMs, {{1, rect(0, 0, 100, 100)}}, on);  // returns, 10ms later
+        const auto out = a.advance(320 * kMs, {{1, rect(0, 0, 300, 300)}}, on);
+        const AnimatedTile *t = find(out, 1);
+        check(t != nullptr, "the returning participant was dropped");
+        check(t->at_rest,
+              "a still-pending return was already animating a layout change");
+        check(std::fabs(t->rect.width - 300.0) < 0.001,
+              "a still-pending return partially reflowed instead of holding at the proposed target");
     }
 
     if (failures == 0) std::cout << "zoom-tile-animator tests passed\n";

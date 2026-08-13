@@ -4,6 +4,7 @@
 #include "tile-motion.h"
 #include "zoom-tile-grid.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <iterator>
@@ -40,6 +41,10 @@ public:
             m_tiles.clear();
             m_last_ns = 0;
             m_has_last = false;
+            m_committed_ids.clear();
+            m_pending_ids.clear();
+            m_pending_since_ns = 0;
+            m_has_committed = false;
             std::vector<AnimatedTile> out;
             out.reserve(desired.size());
             for (const auto &d : desired)
@@ -58,9 +63,54 @@ public:
         m_last_ns = now_ns;
         m_has_last = true;
 
+        // Decide which participant set the wall is laid out for. A change is
+        // only adopted once it has held for kSettleNs; a reversal inside that
+        // window is forgotten and nothing moves.
+        const std::vector<uint32_t> incoming = ids_of(desired);
+        if (!m_has_committed) {
+            // An explicit flag, not m_committed_ids.empty(): a wall that has
+            // legitimately settled on zero participants looks identical to a
+            // freshly constructed animator if all we check is emptiness, and
+            // a return from a genuine vacate must not skip the settle gate
+            // the way a true first frame is allowed to.
+            m_committed_ids = incoming;
+            m_has_committed = true;
+        } else if (incoming != m_committed_ids) {
+            if (incoming != m_pending_ids) {
+                m_pending_ids = incoming;
+                m_pending_since_ns = now_ns;
+            } else if (now_ns - m_pending_since_ns >= kSettleNs) {
+                m_committed_ids = incoming;      // held long enough: adopt
+                m_pending_ids.clear();
+            }
+        } else {
+            m_pending_ids.clear();               // reverted: forget the change
+        }
+        const bool change_pending = !m_pending_ids.empty();
+
         std::vector<AnimatedTile> out;
         out.reserve(desired.size());
         for (const auto &d : desired) {
+            const bool committed =
+                std::find(m_committed_ids.begin(), m_committed_ids.end(),
+                          d.participant_id) != m_committed_ids.end();
+            if (!committed) {
+                // Present but not yet adopted: hold it wherever it already is,
+                // or emit it at its target if it is new, without disturbing the
+                // rest of the wall.
+                auto held = m_tiles.find(d.participant_id);
+                if (held == m_tiles.end()) {
+                    out.push_back(AnimatedTile{d.participant_id, d.rect, 1.0, true});
+                } else {
+                    TileRect r;
+                    r.x = held->second.x.position; r.y = held->second.y.position;
+                    r.width = held->second.w.position;
+                    r.height = held->second.h.position;
+                    out.push_back(AnimatedTile{d.participant_id, r, 1.0, true});
+                }
+                continue;
+            }
+
             auto it = m_tiles.find(d.participant_id);
             if (it == m_tiles.end()) {
                 // First sight of this participant: start at the target rather
@@ -70,14 +120,23 @@ public:
                 m.y = {d.rect.y, 0.0};
                 m.w = {d.rect.width, 0.0};
                 m.h = {d.rect.height, 0.0};
+                m.target = d.rect;
                 it = m_tiles.emplace(d.participant_id, m).first;
             }
 
             Motion &m = it->second;
-            spring_advance(m.x, d.rect.x,      settings.duration_seconds, dt);
-            spring_advance(m.y, d.rect.y,      settings.duration_seconds, dt);
-            spring_advance(m.w, d.rect.width,  settings.duration_seconds, dt);
-            spring_advance(m.h, d.rect.height, settings.duration_seconds, dt);
+
+            // Adopt a new target only when the layout in hand was solved for
+            // the set the wall has committed to. While a change is pending, the
+            // incoming rects belong to a layout that may never happen — a blip
+            // that reverts must leave every tile exactly where it was.
+            if (!change_pending && committed)
+                m.target = d.rect;
+
+            spring_advance(m.x, m.target.x,      settings.duration_seconds, dt);
+            spring_advance(m.y, m.target.y,      settings.duration_seconds, dt);
+            spring_advance(m.w, m.target.width,  settings.duration_seconds, dt);
+            spring_advance(m.h, m.target.height, settings.duration_seconds, dt);
 
             TileRect r;
             r.x = m.x.position; r.y = m.y.position;
@@ -85,29 +144,54 @@ public:
 
             constexpr double kRestEpsilon = 0.05;  // sub-tenth-pixel
             const bool at_rest =
-                std::fabs(r.x - d.rect.x) < kRestEpsilon &&
-                std::fabs(r.y - d.rect.y) < kRestEpsilon &&
-                std::fabs(r.width - d.rect.width) < kRestEpsilon &&
-                std::fabs(r.height - d.rect.height) < kRestEpsilon;
+                std::fabs(r.x - m.target.x) < kRestEpsilon &&
+                std::fabs(r.y - m.target.y) < kRestEpsilon &&
+                std::fabs(r.width - m.target.width) < kRestEpsilon &&
+                std::fabs(r.height - m.target.height) < kRestEpsilon;
 
             out.push_back(AnimatedTile{d.participant_id, r, 1.0, at_rest});
         }
 
-        // Forget participants no longer desired. Task 4 replaces this with the
-        // exit lifecycle.
+        // Forget participants no longer committed. Task 4 replaces this with
+        // the exit lifecycle. Absence from `desired` alone does not erase a
+        // tile's motion state: a blipped participant keeps it until the
+        // settle window either adopts or forgets the change.
         for (auto it = m_tiles.begin(); it != m_tiles.end();) {
-            bool still_wanted = false;
-            for (const auto &d : desired)
-                if (d.participant_id == it->first) { still_wanted = true; break; }
-            it = still_wanted ? std::next(it) : m_tiles.erase(it);
+            const bool keep =
+                std::find(m_committed_ids.begin(), m_committed_ids.end(),
+                          it->first) != m_committed_ids.end();
+            it = keep ? std::next(it) : m_tiles.erase(it);
         }
 
         return out;
     }
 
 private:
-    struct Motion { Spring1D x, y, w, h; };
+    struct Motion { Spring1D x, y, w, h; TileRect target; };
+
+    static std::vector<uint32_t> ids_of(const std::vector<DesiredTile> &d)
+    {
+        std::vector<uint32_t> ids;
+        ids.reserve(d.size());
+        for (const auto &t : d) ids.push_back(t.participant_id);
+        std::sort(ids.begin(), ids.end());
+        return ids;
+    }
+
+    // A roster change must hold this long before the wall reacts. The roster is
+    // known to flicker — SpeakerDirector carries a 60s absence grace for the
+    // same reason — and without this a 120ms dropout would produce a full exit
+    // animation followed by a full entry, which is more visible on air than the
+    // single-frame pop it replaces. Fixed, not a setting: zero would reintroduce
+    // exactly the behaviour this exists to prevent.
+    static constexpr uint64_t kSettleNs = 250000000ULL;
+
     std::map<uint32_t, Motion> m_tiles;
     uint64_t m_last_ns  = 0;
     bool     m_has_last = false;
+
+    std::vector<uint32_t> m_committed_ids;   // the set the wall is laid out for
+    std::vector<uint32_t> m_pending_ids;     // a candidate set, not yet settled
+    uint64_t m_pending_since_ns = 0;
+    bool     m_has_committed = false;
 };

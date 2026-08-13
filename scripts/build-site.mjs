@@ -11,11 +11,49 @@ const outDir = path.join(root, "public");
 // the same content as an alias. Canonical tags point search engines at the
 // primary host so the two domains are not treated as duplicate content.
 const PRIMARY_ORIGIN = "https://corevideo.io";
+const SITE_NAME = "CoreVideo";
+const OG_IMAGE = `${PRIMARY_ORIGIN}/assets/corevideo-share.jpg`;
+const OG_IMAGE_ALT =
+  "CoreVideo - Zoom participant video and audio as native OBS Studio sources";
+
+// Every canonical URL is, by definition, a page we want indexed: aliases and
+// redirect targets never call canonicalUrl(), so this set is exactly the
+// sitemap. Pages that build their own <head> (the documentation page) register
+// themselves explicitly.
+const indexableUrls = new Set();
 
 function canonicalUrl(output) {
   const pathPart = ("/" + output).replace(/index\.html$/, "");
-  return PRIMARY_ORIGIN + (pathPart || "/");
+  const url = PRIMARY_ORIGIN + (pathPart || "/");
+  indexableUrls.add(url);
+  return url;
 }
+
+// The project() version in CMakeLists.txt is a documented development
+// placeholder - the real version comes from the release tag, and CHANGELOG.md
+// is the one in-repo file that tracks it. Release builds can override.
+function latestReleaseVersion() {
+  const override = process.env.COREVIDEO_RELEASE_VERSION?.trim().replace(/^v/, "");
+  if (override) return override;
+  const changelogPath = path.join(root, "CHANGELOG.md");
+  if (fs.existsSync(changelogPath)) {
+    const match = fs
+      .readFileSync(changelogPath, "utf8")
+      .match(/^## \[(\d+\.\d+\.\d+)\]/m);
+    if (match) return match[1];
+  }
+  // Never print a guessed version. The download page drops its version-stamped
+  // links and offers only the always-current release link instead.
+  console.warn(
+    "Warning: no release version found (CHANGELOG.md heading or " +
+      "COREVIDEO_RELEASE_VERSION); the download page will link to " +
+      "releases/latest only.",
+  );
+  return null;
+}
+
+const RELEASE_VERSION = latestReleaseVersion();
+const RELEASES_LATEST = "https://github.com/iamfatness/CoreVideo/releases/latest";
 
 // The CoreVideo "Multiview" brand mark (mirrors Controls/MultiviewMark.xaml in
 // the app): a 16:9 monitor frame split 2x2 with the top-right tile live-green.
@@ -30,27 +68,32 @@ const pages = [
   {
     source: "Home.md",
     title: "CoreVideo",
-    description: "CoreVideo: the OBS plugin for live Zoom video, and CoreVideo Pro, a standalone app for producing online conversations.",
+    seoTitle: "CoreVideo - Zoom Video & Audio as Native OBS Sources",
+    description:
+      "Free open-source OBS Studio plugin: Zoom participant video, audio, and screen share as native OBS sources. No NDI, virtual camera, or screen capture.",
     output: "index.html",
   },
   {
     source: "Terms-of-Use.md",
     title: "Terms of Use",
-    description: "Terms of Use for the CoreVideo OBS Studio plugin.",
+    description:
+      "Terms of Use for the CoreVideo OBS Studio plugin and CoreVideo Pro, covering licensing, acceptable use, and Zoom Marketplace requirements.",
     output: "terms/index.html",
     aliases: ["terms-of-use/index.html", "Terms-of-Use/index.html"],
   },
   {
     source: "Privacy-Policy.md",
     title: "Privacy Policy",
-    description: "Privacy Policy for the CoreVideo OBS Studio plugin.",
+    description:
+      "Privacy Policy for CoreVideo: what the OBS plugin processes locally on your machine, what is never uploaded, and which third-party services are involved.",
     output: "privacy/index.html",
     aliases: ["privacy-policy/index.html", "Privacy-Policy/index.html"],
   },
   {
     source: "Support.md",
     title: "Support",
-    description: "Support resources for the CoreVideo OBS Studio plugin.",
+    description:
+      "Get help with CoreVideo: troubleshooting steps, log collection, known issues, and how to report a bug against the OBS Studio plugin.",
     output: "support/index.html",
     aliases: ["Support/index.html"],
   },
@@ -60,7 +103,9 @@ const markdownPages = [
   {
     source: path.join(docsDir, "CORE_PLUGIN_FUNCTIONALITY.md"),
     title: "CoreVideo (OBS Plugin)",
-    description: "CoreVideo OBS plugin workflows, control examples, and ISO recording.",
+    seoTitle: "CoreVideo OBS Plugin Guide - Zoom ISO Recording & Routing",
+    description:
+      "How to route Zoom participants to OBS sources: per-participant video and audio, active-speaker follow, spotlight slots, screen share, and ISO recording.",
     output: "core-plugin/index.html",
   },
 ];
@@ -141,24 +186,34 @@ function homeContent() {
   return `<section class="hero">
   <figure class="hero-media">
     <div class="console">
-      <div class="console-bar"><span class="tally tally-live">Live</span><span>Multiview 01</span><span class="tc">1080p60 &middot; 00:00:00:00</span></div>
-      <div class="console-screen center"><div class="brand-lockup">${MULTIVIEW_MARK}<div class="wordmark">CoreVideo</div><div class="brand-sub">Live production studio</div></div></div>
+      <div class="console-bar"><span class="tally tally-live">Live</span><span>Program</span><span class="tc">1080p60 &middot; 6 Zoom sources</span></div>
+      <div class="console-screen"><img src="/assets/dynamic-gallery.webp" alt="A six-participant gallery composed in OBS from individual CoreVideo sources, each guest in their own rounded, bordered tile on a branded background"></div>
     </div>
   </figure>
   <div class="hero-copy">
-    <p class="eyebrow">Live Zoom production &mdash; from free plugin to full studio</p>
-    <h1>Produce broadcast-grade Zoom shows in one studio app.</h1>
-    <p class="lede">CoreVideo Pro is the complete standalone production studio for live Zoom conversations &mdash; scenes, participants, AI direction, recording, and streaming in a single premium app. Already working in OBS? The free CoreVideo plugin brings the same clean participant capture to your existing rig.</p>
+    <p class="eyebrow">Free, open-source OBS Studio plugin</p>
+    <h1>Bring Zoom participants into OBS as native sources.</h1>
+    <p class="lede">CoreVideo joins the meeting through the Zoom Meeting SDK and hands OBS each participant's own video and audio as a real source &mdash; no NDI, no virtual camera, no screen capture, and no second machine. Follow the active speaker, pin spotlight slots, take the screen share, and record every guest to an isolated file.</p>
     <div class="hero-actions">
-      <a class="button primary" href="/pro/">Explore CoreVideo Pro</a>
-      <a class="button" href="/core-plugin/">Free OBS plugin</a>
-      <a class="button" href="/documentation/">Plugin Docs</a>
+      <a class="button primary" href="/download/">Download${RELEASE_VERSION ? ` v${RELEASE_VERSION}` : ""} for Windows</a>
+      <a class="button" href="/core-plugin/">How it works</a>
+      <a class="button" href="https://github.com/iamfatness/CoreVideo">View source</a>
     </div>
   </div>
 </section>
+<section class="link-grid" aria-label="What the plugin does">
+  <div><strong>One source per participant</strong><span>Each Zoom participant becomes a separate OBS source at up to 1080p, with their audio on its own track &mdash; not a crop out of a gallery screenshot.</span></div>
+  <div><strong>Active speaker &amp; spotlight</strong><span>Point a source at whoever is talking, at Zoom spotlight slot 1&hellip;N, or at a fixed guest with an automatic failover if they drop.</span></div>
+  <div><strong>Screen share &amp; interpretation</strong><span>Subscribe to the live screen share, and pull existing Zoom interpretation audio channels in as dedicated sources.</span></div>
+  <div><strong>ISO recording</strong><span>Record every assigned participant to their own muxed MP4 with matching PCM audio, alongside the main program recording.</span></div>
+</section>
+<figure class="doc-image">
+  <img src="/assets/obs-multiview.webp" alt="OBS Studio multiview: preview and program above four scenes built from individual Zoom participant sources - the host alone, the host with a reader, the host with the active speaker, and the active speaker full frame" loading="lazy">
+  <figcaption>Every guest arrives as their own OBS source, so scenes, transitions, and the multiview all work the way they already do &mdash; this is stock OBS, cutting between Zoom participants.</figcaption>
+</figure>
 <section class="link-grid products" aria-label="CoreVideo products">
-  <a class="featured" href="/pro/"><span class="tier tier-premium">Premium &middot; Standalone app</span><strong>CoreVideo Pro</strong><span>The complete production studio for live Zoom conversations: multi-scene production, participant management, AI auto-direct, recording, and multi-destination streaming in one polished app.</span></a>
-  <a href="/core-plugin/"><span class="tier">Free &middot; OBS plugin</span><strong>CoreVideo (OBS Plugin)</strong><span>The free building block: clean Zoom participant video, audio, screen share, and ISO recording as native sources inside OBS Studio.</span></a>
+  <a href="/download/"><span class="tier">Free &middot; OBS plugin</span><strong>CoreVideo for OBS</strong><span>The plugin on this page: Zoom participant video, audio, screen share, interpretation, and ISO recording as native sources in the OBS you already run. MIT licensed.</span></a>
+  <a class="featured" href="/pro/"><span class="tier tier-premium">Premium &middot; Standalone app</span><strong>CoreVideo Pro</strong><span>Want the whole console instead of a plugin? Pro is a standalone studio: multi-scene production, participant management, AI auto-direct, recording, and multi-destination streaming.</span></a>
 </section>
 <section class="link-grid" aria-label="CoreVideo resources">
   <a href="/documentation/"><strong>Plugin Docs</strong><span>Architecture, setup, control APIs, and operating notes.</span></a>
@@ -474,6 +529,159 @@ function markdownToHtml(markdown) {
   return html.join("\n");
 }
 
+// Open Graph and Twitter cards. Without these, every link posted to Reddit,
+// LinkedIn, Slack, or Discord renders as a bare grey URL with no title, blurb,
+// or image - which is most of how anyone first sees the project.
+function socialTags({ title, description, url, image }) {
+  const tags = [
+    ["og:type", "website"],
+    ["og:site_name", SITE_NAME],
+    ["og:title", title],
+    ["og:description", description],
+    ["og:image", image],
+    ["og:image:alt", OG_IMAGE_ALT],
+    ["og:image:width", "1200"],
+    ["og:image:height", "630"],
+    ["og:locale", "en_US"],
+  ];
+  if (url) tags.push(["og:url", url]);
+
+  const twitter = [
+    ["twitter:card", "summary_large_image"],
+    ["twitter:title", title],
+    ["twitter:description", description],
+    ["twitter:image", image],
+    ["twitter:image:alt", OG_IMAGE_ALT],
+  ];
+
+  return [
+    ...tags.map(
+      ([p, c]) => `  <meta property="${p}" content="${escapeHtml(c)}">`,
+    ),
+    ...twitter.map(
+      ([n, c]) => `  <meta name="${n}" content="${escapeHtml(c)}">`,
+    ),
+  ].join("\n");
+}
+
+// JSON-LD is a data block, not executable script, so the production CSP does
+// not apply to it - but the inline-<script> build guard below still has to know
+// the difference. Escaping "<" keeps any string in the payload from closing the
+// element early.
+function jsonLdBlock(data) {
+  const json = JSON.stringify(data, null, 2).replaceAll("<", "\\u003c");
+  return `  <script type="application/ld+json">\n${json}\n  </script>\n`;
+}
+
+function downloadPageContent() {
+  const v = RELEASE_VERSION;
+  const tagBase = v
+    ? `https://github.com/iamfatness/CoreVideo/releases/download/v${v}`
+    : null;
+  const asset = (name) => `${tagBase}/${name}`;
+
+  // Without a resolved version there are no version-stamped asset URLs to
+  // build, so the page degrades to the always-current release listing rather
+  // than printing links that 404.
+  const primaryHref = v ? asset(`CoreVideo-Setup-v${v}.exe`) : RELEASES_LATEST;
+  const primaryLabel = v
+    ? `Download for Windows &mdash; v${v}`
+    : "Download for Windows";
+
+  const versionNote = v
+    ? `<p class="lede">Latest release <strong>v${v}</strong> &mdash; signed Windows installer for OBS Studio 30 and newer. Free and open source under the MIT license.</p>`
+    : `<p class="lede">Signed Windows installer for OBS Studio 30 and newer. Free and open source under the MIT license.</p>`;
+
+  const fileRows = v
+    ? `<section class="link-grid" aria-label="Release files">
+  <a href="${asset(`CoreVideo-Setup-v${v}.exe`)}"><strong>Windows installer (.exe)</strong><span>Recommended. Installs the plugin into your existing OBS Studio installation.</span></a>
+  <a href="${asset(`CoreVideo-Windows-x64-v${v}.zip`)}"><strong>Portable ZIP (x64)</strong><span>Unpack into the OBS plugin directory yourself &mdash; for locked-down or portable OBS setups.</span></a>
+  <a href="${asset(`CoreVideo-Setup-v${v}.exe.sha256`)}"><strong>Installer checksum</strong><span>SHA-256 for the installer, to verify the download before running it.</span></a>
+  <a href="${asset(`CoreVideo-Windows-x64-v${v}.zip.sha256`)}"><strong>ZIP checksum</strong><span>SHA-256 for the portable archive.</span></a>
+</section>`
+    : "";
+
+  return `<section class="hero">
+  <figure class="hero-media">
+    <div class="console">
+      <div class="console-bar"><span class="tally tally-live">Live</span><span>CoreVideo</span><span class="tc">${v ? `v${v}` : "latest"} &middot; x64</span></div>
+      <div class="console-screen center"><div class="brand-lockup">${MULTIVIEW_MARK}<div class="wordmark">CoreVideo</div><div class="brand-sub">Free OBS Studio plugin</div></div></div>
+    </div>
+  </figure>
+  <div class="hero-copy">
+    <p class="eyebrow">Download</p>
+    <h1>Install CoreVideo for OBS Studio.</h1>
+    ${versionNote}
+    <div class="hero-actions">
+      <a class="button primary" href="${primaryHref}">${primaryLabel}</a>
+      <a class="button" href="${RELEASES_LATEST}">All releases &amp; release notes</a>
+    </div>
+  </div>
+</section>
+${fileRows}
+<h2>Requirements</h2>
+<ul>
+<li><strong>OBS Studio 30 or newer</strong>, 64-bit.</li>
+<li><strong>Windows 10 or Windows 11</strong> (x64). An Apple Silicon macOS build is in beta &mdash; see the <a href="/documentation/#mac-beta">macOS beta notes</a>.</li>
+<li><strong>A Zoom account you can sign in with.</strong> CoreVideo joins meetings through the Zoom Meeting SDK, so the video quality and number of simultaneous feeds you get follow your Zoom account entitlements.</li>
+<li><strong>Downstream bandwidth</strong> for the feeds you subscribe to &mdash; roughly 4-6 Mbps per 1080p participant. Standard accounts are typically capped around 30 Mbps incoming; Enhanced Media / HBM raises that to roughly 100 Mbps.</li>
+</ul>
+<h2>Install</h2>
+<ol>
+<li>Close OBS Studio.</li>
+<li>Run the installer and point it at your OBS installation directory if it is not detected automatically.</li>
+<li>Start OBS and open <strong>Docks -&gt; CoreVideo</strong> to sign in and join a meeting.</li>
+<li>Add a <strong>CoreVideo</strong> source to any scene, then assign it to a participant, the active speaker, a spotlight slot, or the screen share.</li>
+</ol>
+<p>The <a href="/core-plugin/">Core Plugin Guide</a> walks through participant routing, isolated audio, and ISO recording in detail.</p>
+<h2>Verify your download</h2>
+<p>Each release ships a SHA-256 file alongside the binary. On Windows, compare the hashes with PowerShell:</p>
+<pre><code class="language-powershell">Get-FileHash .\\CoreVideo-Setup-${v ? `v${v}` : "vX.Y.Z"}.exe -Algorithm SHA256</code></pre>
+<h2>Building from source</h2>
+<p>CoreVideo is MIT-licensed and builds from source on Windows, macOS, and Linux. See the <a href="https://github.com/iamfatness/CoreVideo">repository</a> for the toolchain requirements and CMake options, including hardware-accelerated colour conversion.</p>`;
+}
+
+// Structured data for the free plugin. SoftwareApplication is what earns the
+// download-style rich result; the price-0 offer is what marks it free.
+function pluginJsonLd() {
+  const app = {
+    "@type": "SoftwareApplication",
+    name: "CoreVideo",
+    alternateName: "CoreVideo OBS Plugin",
+    applicationCategory: "MultimediaApplication",
+    applicationSubCategory: "OBS Studio plugin",
+    operatingSystem: "Windows 10, Windows 11, macOS (Apple Silicon beta)",
+    description:
+      "OBS Studio plugin that captures Zoom meeting participants as native OBS sources - per-participant video and audio, screen share, interpretation audio, and ISO recording - using the Zoom Meeting SDK rather than NDI, a virtual camera, or screen capture.",
+    url: `${PRIMARY_ORIGIN}/`,
+    downloadUrl: `${PRIMARY_ORIGIN}/download/`,
+    installUrl: `${PRIMARY_ORIGIN}/download/`,
+    softwareHelp: `${PRIMARY_ORIGIN}/documentation/`,
+    license: "https://opensource.org/licenses/MIT",
+    isAccessibleForFree: true,
+    image: OG_IMAGE,
+    offers: {
+      "@type": "Offer",
+      price: "0",
+      priceCurrency: "USD",
+      availability: "https://schema.org/InStock",
+    },
+  };
+  if (RELEASE_VERSION) app.softwareVersion = RELEASE_VERSION;
+
+  return {
+    "@context": "https://schema.org",
+    "@graph": [
+      app,
+      {
+        "@type": "WebSite",
+        name: SITE_NAME,
+        url: `${PRIMARY_ORIGIN}/`,
+      },
+    ],
+  };
+}
+
 function layout(page, content, options = {}) {
   const nav = [
     ["Home", "/"],
@@ -481,7 +689,7 @@ function layout(page, content, options = {}) {
     ["Pro Docs", "/pro/documentation/"],
     ["Plugin Docs", "/documentation/"],
     ["Core Plugin", "/core-plugin/"],
-    ["Download", "/download"],
+    ["Download", "/download/"],
     ["Terms", "/terms/"],
     ["Privacy", "/privacy/"],
     ["Support", "/support/"],
@@ -492,19 +700,26 @@ function layout(page, content, options = {}) {
 
   const here = options.canonical ? options.canonical.replace(PRIMARY_ORIGIN, "") : null;
 
+  // Search results and social cards show the title verbatim, so a page that
+  // sets seoTitle owns the whole string; everything else keeps the
+  // "<page> | CoreVideo" suffix convention.
+  const fullTitle = page.seoTitle ?? `${page.title} | ${SITE_NAME}`;
+  const ogImage = page.ogImage ?? OG_IMAGE;
+
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${escapeHtml(page.title)} | CoreVideo</title>
+  <title>${escapeHtml(fullTitle)}</title>
   <meta name="description" content="${escapeHtml(page.description)}">
   <meta name="theme-color" content="#0a0b0c">
   <link rel="icon" href="/favicon.svg">
   <link rel="preload" href="/assets/fonts/SpaceGrotesk-var.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/assets/fonts/IBMPlexMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
-${options.canonical ? `  <link rel="canonical" href="${escapeHtml(options.canonical)}">\n` : ""}  <link rel="stylesheet" href="/assets/site.css">
-</head>
+${options.canonical ? `  <link rel="canonical" href="${escapeHtml(options.canonical)}">\n` : ""}${socialTags({ title: fullTitle, description: page.description, url: options.canonical, image: ogImage })}
+  <link rel="stylesheet" href="/assets/site.css">
+${options.jsonLd ? jsonLdBlock(options.jsonLd) : ""}</head>
 <body class="${options.home ? "home-page" : "document-page"}">
   <header class="site-header">
     <a class="brand" href="/">${MULTIVIEW_MARK}<span>CoreVideo</span></a>
@@ -548,6 +763,7 @@ for (const page of pages) {
   const html = layout(page, isHome ? homeContent() : markdownToHtml(markdown), {
     home: isHome,
     canonical: canonicalUrl(page.output),
+    jsonLd: isHome ? pluginJsonLd() : undefined,
   });
   writeText(page.output, html);
   for (const alias of page.aliases ?? []) {
@@ -563,6 +779,27 @@ for (const page of markdownPages) {
   writeText(page.output, html);
 }
 
+// Download page. This used to be a bare 302 from the worker straight to the
+// GitHub releases list, which meant the highest-intent page on the site was not
+// a page at all - nothing to rank, and nothing to read before installing.
+writeText(
+  "download/index.html",
+  layout(
+    {
+      title: "Download",
+      seoTitle: "Download CoreVideo - Free Zoom Plugin for OBS Studio",
+      description: RELEASE_VERSION
+        ? `Download CoreVideo v${RELEASE_VERSION}, the free open-source OBS Studio plugin for Zoom. Signed Windows installer, checksums, requirements, and install steps.`
+        : "Download CoreVideo, the free open-source OBS Studio plugin for Zoom. Signed Windows installer, checksums, requirements, and install steps.",
+    },
+    downloadPageContent(),
+    {
+      canonical: canonicalUrl("download/index.html"),
+      jsonLd: pluginJsonLd(),
+    },
+  ),
+);
+
 // CoreVideo Pro landing page
 writeText(
   "pro/index.html",
@@ -570,7 +807,7 @@ writeText(
     {
       title: "CoreVideo Pro",
       description:
-        "CoreVideo Pro: a cross-platform (macOS and Windows) standalone app for producing high-quality online conversations with multi-scene production, participant management, streaming, recording, and AI auto-direct.",
+        "CoreVideo Pro: a standalone macOS and Windows studio for live Zoom production - scenes, participant management, recording, streaming, and AI auto-direct.",
     },
     proPageContent(),
     {
@@ -589,7 +826,7 @@ writeText(
     {
       title: "CoreVideo Pro Architecture",
       description:
-        "CoreVideo Pro architecture: native media core, typed IPC renderer, isolated Zoom capture, local Blackmagic/AJA capture, GPU compositing, AI direction, and recording/ISO/streaming outputs.",
+        "CoreVideo Pro architecture: native media core, typed IPC, isolated Zoom capture, Blackmagic/AJA input, GPU compositing, AI direction, and ISO/streaming outputs.",
     },
     proDocsContent(),
     {
@@ -706,6 +943,24 @@ writeText(
 </svg>`,
 );
 
+// Shared site imagery: the Open Graph card plus the two product screenshots the
+// plugin pages lead with. Missing files are skipped rather than failing the
+// build, matching how the logo and Pro screenshot are handled below.
+for (const name of [
+  "corevideo-share.jpg",
+  "obs-multiview.webp",
+  "dynamic-gallery.webp",
+]) {
+  const source = path.join(siteAssetsDir, name);
+  if (fs.existsSync(source)) {
+    const target = path.join(outDir, "assets", name);
+    ensureDir(target);
+    fs.copyFileSync(source, target);
+  } else {
+    console.warn(`Warning: ${name} missing from site-assets; skipping.`);
+  }
+}
+
 const logoSource = path.join(siteAssetsDir, "corevideo-logo.jpg");
 if (fs.existsSync(logoSource)) {
   const logoTarget = path.join(outDir, "assets", "corevideo-logo.jpg");
@@ -735,6 +990,12 @@ if (fs.existsSync(pluginDocShots)) {
   });
 }
 
+// Mirrors the <title> already inside docs/index.html.
+const DOCS_TITLE = "CoreVideo - OBS Plugin for Live Zoom Video";
+const DOCS_DESCRIPTION =
+  "How the CoreVideo OBS plugin works: the Zoom Meeting SDK engine process, IPC and shared-memory frame transport, source types, active-speaker direction, and setup.";
+const DOCS_CANONICAL = canonicalUrl("documentation/index.html");
+
 const docsHtml = fs.readFileSync(path.join(docsDir, "index.html"), "utf8")
   .replaceAll("iamfatness.github.io/CoreVideo", publicDocumentationUrl
     ? new URL("/documentation", publicDocumentationUrl).host + "/documentation"
@@ -743,10 +1004,27 @@ const docsHtml = fs.readFileSync(path.join(docsDir, "index.html"), "utf8")
   .replaceAll('href="ZOOM_MARKETPLACE_OAUTH.md"', 'href="https://github.com/iamfatness/CoreVideo/blob/main/docs/ZOOM_MARKETPLACE_OAUTH.md"')
   .replaceAll('href="ROADMAP.md"', 'href="https://github.com/iamfatness/CoreVideo/blob/main/docs/ROADMAP.md"')
   .replaceAll("<pre>", '<pre tabindex="0">')
+  // The documentation page ships its own hand-written <head>, so it misses the
+  // shared layout(). Inject the same canonical, description, and social cards
+  // here rather than leaving the most-linked page on the site without them.
   .replace(
     "</head>",
-    `  <link rel="canonical" href="${canonicalUrl("documentation/index.html")}">\n</head>`,
+    `  <link rel="canonical" href="${DOCS_CANONICAL}">\n` +
+      `  <meta name="description" content="${escapeHtml(DOCS_DESCRIPTION)}">\n` +
+      socialTags({
+        title: DOCS_TITLE,
+        description: DOCS_DESCRIPTION,
+        url: DOCS_CANONICAL,
+        image: OG_IMAGE,
+      }) +
+      "\n</head>",
   );
+if (!docsHtml.includes('rel="canonical"')) {
+  throw new Error(
+    "docs/index.html has no </head> to inject SEO tags into; the documentation " +
+      "page would ship without a canonical, description, or social card.",
+  );
+}
 writeText("documentation/index.html", docsHtml);
 writeText("docs/index.html", docsHtml);
 
@@ -789,6 +1067,30 @@ writeText("_redirects", `/terms-of-use /terms/ 301
 `);
 writeText("CNAME", "corevideo.io\n");
 
+// Sitemap: every canonical URL registered during the build, so a new page is
+// listed the moment it is generated rather than when someone remembers to
+// update a hand-maintained list.
+const sitemapUrls = [...indexableUrls].sort();
+writeText(
+  "sitemap.xml",
+  `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${sitemapUrls.map((url) => `  <url><loc>${escapeHtml(url)}</loc></url>`).join("\n")}
+</urlset>
+`,
+);
+
+// Cloudflare serves a managed robots.txt when the origin has none, and that one
+// carries no Sitemap: line. Shipping our own means the sitemap is advertised.
+writeText(
+  "robots.txt",
+  `User-agent: *
+Allow: /
+
+Sitemap: ${PRIMARY_ORIGIN}/sitemap.xml
+`,
+);
+
 // Guard: the production CSP blocks inline scripts, so any inline <script> in
 // built HTML is a page that will silently misbehave in production only.
 // Fail the build loudly instead.
@@ -798,8 +1100,12 @@ function findHtmlFiles(dir) {
     return e.isDirectory() ? findHtmlFiles(p) : e.name.endsWith(".html") ? [p] : [];
   });
 }
+// application/ld+json is structured-data markup that browsers never execute, so
+// script-src does not apply to it and it is exempt from this guard.
 const inlineOffenders = findHtmlFiles(outDir).filter((f) =>
-  /<script(?![^>]*src=)[^>]*>/i.test(fs.readFileSync(f, "utf8")),
+  /<script(?![^>]*\bsrc=)(?![^>]*type="application\/ld\+json")[^>]*>/i.test(
+    fs.readFileSync(f, "utf8"),
+  ),
 );
 if (inlineOffenders.length) {
   const list = inlineOffenders.map((f) => path.relative(outDir, f)).join(", ");

@@ -1057,8 +1057,24 @@ with:
     anim.duration_seconds =
         static_cast<double>(ctx->animate_ms.load(std::memory_order_acquire)) / 1000.0;
 
+    // `departed` is a STATE, not an event: which tracked participants are gone
+    // from the meeting roster right now, recomputed every frame. It is what
+    // separates a genuine departure (fade out) from an operator repointing a
+    // slot (instant cut, no fade) — the distinction the exit invariants in
+    // src/zoom-tile-slot.h rest on. Hardcoding it empty would make the exit
+    // path dead code on the wall.
+    const std::vector<ParticipantInfo> roster = ZoomEngineClient::instance().roster();
+    std::vector<uint32_t> departed;
+    for (const auto &d : desired_ids_previously_tracked) {
+        const bool in_roster = std::any_of(
+            roster.begin(), roster.end(),
+            [&](const ParticipantInfo &p) { return p.user_id == d; });
+        if (!in_roster)
+            departed.push_back(d);
+    }
+
     const std::vector<AnimatedTile> animated =
-        ctx->animator.advance(os_gettime_ns(), desired, anim, /*departed=*/{});
+        ctx->animator.advance(os_gettime_ns(), desired, anim, departed);
 
     // Snap what the animator produced. A tile at rest snaps to exactly the
     // geometry the solver produced, so with animation off this is identical to

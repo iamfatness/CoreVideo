@@ -21,6 +21,14 @@ static const AnimatedTile *find(const std::vector<AnimatedTile> &tiles, uint32_t
     return nullptr;
 }
 
+// -1 if absent. Used to check relative draw order, not just presence.
+static int index_of(const std::vector<AnimatedTile> &tiles, uint32_t id)
+{
+    for (size_t i = 0; i < tiles.size(); ++i)
+        if (tiles[i].participant_id == id) return static_cast<int>(i);
+    return -1;
+}
+
 static constexpr uint64_t kMs = 1000000ULL;
 
 int main()
@@ -335,6 +343,78 @@ int main()
         const bool no_lingering_fade = settled != nullptr && settled->alpha == 1.0;
         check(no_lingering_fade,
               "invariant 3: the repointed participant was still fading after its own settle window committed");
+    }
+
+    // Fix round 2, NEW Important 1: the hold must have its own ceiling,
+    // independent of the whole-set settle timer. The settle timer resets
+    // whenever the incoming set changes from what was last proposed, so a
+    // single unrelated participant flapping in and out of `desired` keeps
+    // resetting it forever — before this fix, a genuinely departed
+    // participant held via that timer would then never be released.
+    // Mirrors the review's own flapping probe: participant 1 stays,
+    // participant 9 flaps in and out every 200ms, participant 2 left the
+    // roster at t=300ms and must be gone well before the run ends 60
+    // seconds later. The continuous-time ceiling is kSettleNs (250ms) +
+    // duration (350ms) = 600ms after departure; this samples on a 200ms
+    // grid (like the probe), which can add up to roughly two call
+    // intervals of detection latency, so the assertion leaves generous
+    // margin (1500ms) while still being nowhere near "indefinite" — the
+    // review measured the unfixed code still holding the tile 59800ms
+    // after departure, and it would have continued forever.
+    {
+        TileAnimator a;
+        a.advance(0, {{1, rect(0, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});
+
+        constexpr uint64_t kDepartedAtMs = 300;
+        constexpr uint64_t kGenerousCeilingMs = 1500;
+        uint64_t last_seen_ms = 0;
+
+        uint64_t t = kDepartedAtMs * kMs;
+        for (int i = 0; i < 300; ++i) {  // 300 * 200ms = 60s of roster churn
+            std::vector<DesiredTile> d{{1, rect(0, 0, 100, 100)}};
+            if (i % 2) d.push_back({9, rect(100, 0, 100, 100)});  // 9 flaps in and out
+            const auto out = a.advance(t, d, on, {2});
+            if (find(out, 2) != nullptr) last_seen_ms = t / kMs;
+            t += 200 * kMs;
+        }
+
+        check(last_seen_ms <= kDepartedAtMs + kGenerousCeilingMs,
+              "invariant 1/4: an unrelated flapping participant held a departed tile on screen "
+              "far past its kSettleNs + duration ceiling — the hold is not time-boxed");
+    }
+
+    // Fix round 2, NEW Important 2: held and exiting tiles must be emitted
+    // before live tiles, so a live tile painted after them draws on top
+    // rather than being hidden under a departed participant's frozen or
+    // fading frame. Reproduces the review's scenario: a departure and a
+    // join in the same set change hand the joiner the departing
+    // participant's old rect. Checked in both the held phase (before the
+    // roster change commits) and the exiting phase (after it commits and
+    // the fade begins) — the ordering contract must hold in both states.
+    {
+        TileAnimator a;
+        const TileRect slotA = rect(0, 0, 100, 100);
+        const TileRect slotB = rect(100, 0, 100, 100);
+        a.advance(0, {{1, slotA}, {2, slotB}}, on, {});
+
+        // 2 departs, 3 joins into slotB — 2's old rect. Still pending: 2 is
+        // held.
+        const auto pending = a.advance(300 * kMs, {{1, slotA}, {3, slotB}}, on, {2});
+        const bool held_behind_live =
+            index_of(pending, 2) >= 0 && index_of(pending, 3) >= 0 &&
+            index_of(pending, 2) < index_of(pending, 3);
+        check(held_behind_live,
+              "ordering contract: a held departing tile was emitted after the live tile "
+              "occupying its rect, instead of before it");
+
+        // Commits at 560ms (260ms >= 250ms): exit begins, 2 is now fading.
+        const auto exiting_phase = a.advance(560 * kMs, {{1, slotA}, {3, slotB}}, on, {2});
+        const bool exiting_behind_live =
+            index_of(exiting_phase, 2) >= 0 && index_of(exiting_phase, 3) >= 0 &&
+            index_of(exiting_phase, 2) < index_of(exiting_phase, 3);
+        check(exiting_behind_live,
+              "ordering contract: an exiting tile was emitted after the live tile "
+              "occupying its rect, instead of before it");
     }
 
     if (failures == 0) std::cout << "zoom-tile-animator tests passed\n";

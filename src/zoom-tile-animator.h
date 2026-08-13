@@ -29,6 +29,14 @@ struct AnimatedTile {
 
 class TileAnimator {
 public:
+    // Ordering contract: the returned vector lists held and exiting tiles
+    // first, live tiles from `desired` last. A single set change can hand a
+    // departing participant's rect to a joiner (a departure and a join at
+    // once; the layout solved for the new set reuses the vacated slot), so
+    // a consumer MUST draw this vector in the order returned — that is what
+    // makes the live tile paint over a held or fading ghost at the same
+    // rect rather than being hidden under it. Do not reorder the two loops
+    // below without preserving this.
     std::vector<AnimatedTile> advance(uint64_t now_ns,
                                       const std::vector<DesiredTile> &desired,
                                       const AnimationSettings &settings,
@@ -109,40 +117,74 @@ public:
         //   3. any repoint cancels a running exit immediately
         //   4. an exit can never outlive its duration
         //
-        // "wanted" is presence in the *layout* — this frame's `desired`, or
-        // the settled set the wall is committed to — not committed-set
-        // membership alone. `departed` is roster-absence state, not a
-        // one-shot event, so a participant can be in both `desired` and
-        // `departed` at once: repointed back into a slot while still absent
-        // from the meeting roster. A correct caller cannot drop them from
-        // `departed` just because a slot shows them again, so committed-set
-        // membership by itself cannot be trusted to mean "still exiting" —
-        // presence in `desired` must cancel a running exit immediately,
-        // regardless of what the settle window has or hasn't committed to
-        // yet. (Invariant 2 is unaffected: a reassigned participant is by
-        // definition never back in `desired`, so this addition never applies
-        // to it.)
+        // Presence in the *layout* — this frame's `desired` — cancels a
+        // hold or a running exit immediately (3). `departed` is
+        // roster-absence state, not a one-shot event, so a participant can
+        // be in both `desired` and `departed` at once: repointed back into
+        // a slot while still absent from the meeting roster. A correct
+        // caller cannot drop them from `departed` just because a slot shows
+        // them again, so committed-set membership by itself cannot be
+        // trusted to mean "still exiting" — presence in `desired` must
+        // cancel a running exit regardless of what the settle window has or
+        // hasn't committed to yet. (Invariant 2 is unaffected: a reassigned
+        // participant is by definition never back in `desired`.)
+        //
+        // The hold — absent from `desired`, genuinely departed, but not yet
+        // exiting because the whole-set settle window hasn't committed the
+        // removal — has its own clock, independent of that settle timer.
+        // The timer resets whenever the proposed set changes from the last
+        // one seen, so a single unrelated participant flapping in and out
+        // of `desired` resets it on every call and would otherwise hold a
+        // departed participant on screen indefinitely — the same fault
+        // class `zoom-tile-slot.h` exists to prevent, just delayed rather
+        // than avoided. `held_since_ns` is stamped the first time a tile is
+        // observed absent from `desired`; once `kSettleNs` has elapsed by
+        // that clock, the exit begins regardless of whether the settle
+        // window has committed, bounding total on-air time for a departed
+        // participant at kSettleNs + duration_seconds by construction,
+        // independent of what the rest of the roster does.
         for (auto it = m_tiles.begin(); it != m_tiles.end();) {
-            const bool wanted =
-                std::find(incoming.begin(), incoming.end(), it->first) != incoming.end() ||
-                std::find(m_committed_ids.begin(), m_committed_ids.end(),
-                          it->first) != m_committed_ids.end();
-            if (wanted) {
+            const bool in_desired =
+                std::find(incoming.begin(), incoming.end(), it->first) != incoming.end();
+            if (in_desired) {
                 it->second.exiting = false;      // (3) back in the layout
                 it->second.alpha = 1.0;
+                it->second.held = false;         // a future departure gets its own fresh clock
                 ++it;
                 continue;
             }
+
+            // Absent from `desired`. Stamp when that was first observed, so
+            // it cannot be pushed out by unrelated roster churn later.
+            if (!it->second.held && !it->second.exiting) {
+                it->second.held = true;
+                it->second.held_since_ns = now_ns;
+            }
+
             const bool left_roster =
                 std::find(departed.begin(), departed.end(), it->first) != departed.end();
             if (!left_roster) {
-                it = m_tiles.erase(it);          // (2) reassignment: instant
+                it = m_tiles.erase(it);          // (2) reassignment: instant, hold or not
                 continue;
             }
-            if (!it->second.exiting) {           // (1) departure: begin fading
+
+            if (!it->second.exiting) {
+                const bool committed =
+                    std::find(m_committed_ids.begin(), m_committed_ids.end(),
+                              it->first) != m_committed_ids.end();
+                const bool hold_expired =
+                    (now_ns - it->second.held_since_ns) >= kSettleNs;
+                if (committed && !hold_expired) {
+                    ++it;   // still within bounds: hold, unfaded (emitted below)
+                    continue;
+                }
+                // Either the whole-set settle window committed the
+                // removal, or this tile's own hold clock ran out
+                // regardless: begin the exit either way (1).
                 it->second.exiting = true;
                 it->second.exit_started_ns = now_ns;
             }
+
             const double elapsed =
                 static_cast<double>(now_ns - it->second.exit_started_ns) / 1e9;
             if (elapsed >= settings.duration_seconds) {
@@ -157,6 +199,52 @@ public:
         // Upper bound: every desired tile, plus every tracked tile the loop
         // below might append (exiting, or held mid-departure).
         out.reserve(desired.size() + m_tiles.size());
+
+        // Held and exiting tiles are emitted before live tiles from
+        // `desired` — see the ordering contract on advance(). A set change
+        // can hand a departing participant's rect to a joiner in the same
+        // frame (a departure and a join in one change; the layout solved
+        // for the new set reuses the vacated slot), so the departing tile
+        // must be earlier in `out` than the live one for a draw-in-order
+        // consumer to paint the live tile on top rather than under a
+        // frozen or fading ghost at the same rect.
+        for (const auto &entry : m_tiles) {
+            if (entry.second.exiting) {
+                // Fading. Deliberately not gated on presence in `desired`:
+                // that invariant — a tile the loop below places back in
+                // `desired` always has `exiting == false` by construction,
+                // because the branch above already forced it false — is
+                // exactly what must hold for this to never double-emit a
+                // repointed participant. Gating this check on `desired`
+                // membership would paper over a broken reset instead of
+                // relying on it, and silently hide the exact bug
+                // invariant 3 exists to catch.
+                TileRect r;
+                r.x = entry.second.x.position; r.y = entry.second.y.position;
+                r.width = entry.second.w.position; r.height = entry.second.h.position;
+                out.push_back(AnimatedTile{entry.first, r, entry.second.alpha, false});
+                continue;
+            }
+
+            // Not exiting. Anything present in `desired` this frame was
+            // already promoted out of the hold above (or was never held);
+            // it is emitted by the loop below instead.
+            const bool in_desired =
+                std::find(incoming.begin(), incoming.end(), entry.first) != incoming.end();
+            if (in_desired) continue;
+
+            // Reachable only for a tile still inside its own hold window
+            // (see the lifecycle loop above): by construction anything not
+            // genuinely departed was already erased there, and anything
+            // whose hold expired was already promoted to exiting there. No
+            // need to re-check `departed` here — this loop cannot reach a
+            // reassigned participant.
+            TileRect r;
+            r.x = entry.second.x.position; r.y = entry.second.y.position;
+            r.width = entry.second.w.position; r.height = entry.second.h.position;
+            out.push_back(AnimatedTile{entry.first, r, 1.0, true});
+        }
+
         for (const auto &d : desired) {
             const bool committed =
                 std::find(m_committed_ids.begin(), m_committed_ids.end(),
@@ -219,51 +307,6 @@ public:
             out.push_back(AnimatedTile{d.participant_id, r, 1.0, at_rest});
         }
 
-        for (const auto &entry : m_tiles) {
-            if (entry.second.exiting) {
-                // Fading. Deliberately not gated on presence in `desired`:
-                // that invariant — a tile the loop above just placed back in
-                // `desired` always has `exiting == false` by construction,
-                // because "wanted" already forced it false — is exactly what
-                // must hold for this to never double-emit a repointed
-                // participant. Gating this check on `desired` membership
-                // would paper over a broken reset above instead of relying
-                // on it, and silently hide the exact bug invariant 3 exists
-                // to catch.
-                TileRect r;
-                r.x = entry.second.x.position; r.y = entry.second.y.position;
-                r.width = entry.second.w.position; r.height = entry.second.h.position;
-                out.push_back(AnimatedTile{entry.first, r, entry.second.alpha, false});
-                continue;
-            }
-
-            // Not exiting. Anything present in `desired` this frame was
-            // already emitted by the loop above; only tracked tiles absent
-            // from `desired` are relevant below.
-            const bool in_desired =
-                std::find(incoming.begin(), incoming.end(), entry.first) != incoming.end();
-            if (in_desired) continue;
-
-            // Still "wanted" (see above) but missing from this frame's
-            // `desired` — reachable only while a roster-set change is
-            // pending, i.e. inside the 250ms settle window. `departed` is
-            // what tells a genuine departure mid-settle apart from a
-            // reassignment mid-settle: only the former holds its last frame
-            // here, unfaded, until the removal commits and the exit above
-            // begins. A reassignment is never in `departed`, so it stays cut
-            // for the whole window — exactly as it already was — rather than
-            // being held for up to 250ms, which would itself be an
-            // invariant-2 violation (the wrong face held on air).
-            const bool left_roster =
-                std::find(departed.begin(), departed.end(), entry.first) != departed.end();
-            if (!left_roster) continue;
-
-            TileRect r;
-            r.x = entry.second.x.position; r.y = entry.second.y.position;
-            r.width = entry.second.w.position; r.height = entry.second.h.position;
-            out.push_back(AnimatedTile{entry.first, r, 1.0, true});
-        }
-
         return out;
     }
 
@@ -271,9 +314,15 @@ private:
     struct Motion {
         Spring1D x, y, w, h;
         TileRect target;
-        double   alpha         = 1.0;
-        bool     exiting       = false;
+        double   alpha           = 1.0;
+        bool     exiting         = false;
         uint64_t exit_started_ns = 0;
+        // The hold (absent from `desired`, not yet exiting) has its own
+        // clock, stamped the first time the absence is observed. See the
+        // lifecycle loop in advance() for why it cannot rely on the
+        // whole-set settle timer instead.
+        bool     held            = false;
+        uint64_t held_since_ns   = 0;
     };
 
     static std::vector<uint32_t> ids_of(const std::vector<DesiredTile> &d)

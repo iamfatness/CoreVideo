@@ -325,7 +325,6 @@ public:
             r.x = m.x.position; r.y = m.y.position;
             r.width = m.w.position; r.height = m.h.position;
 
-            constexpr double kRestEpsilon = 0.05;  // sub-tenth-pixel
             const bool at_rest =
                 std::fabs(r.x - m.target.x) < kRestEpsilon &&
                 std::fabs(r.y - m.target.y) < kRestEpsilon &&
@@ -351,6 +350,49 @@ public:
         ids.reserve(m_tiles.size());
         for (const auto &entry : m_tiles) ids.push_back(entry.first);
         return ids;
+    }
+
+    // True when the wall is showing the layout it has committed to and
+    // nothing is moving: no pending set change, no held or exiting tile, and
+    // every spring already at its own target. This is a STRICTER condition
+    // than "every AnimatedTile advance() just returned reports at_rest" —
+    // that per-tile flag is true in two situations where the wall as a whole
+    // still disagrees with a fresh solve_tile_grid()/snap_tile_grid_even()
+    // call:
+    //
+    //   - During a departure's settle hold, the held tile reports at_rest
+    //     (it is frozen, not moving) while the survivors also report
+    //     at_rest — sitting on their OLD remembered targets, since a pending
+    //     change must not retarget them yet (see the "blip never moves the
+    //     wall" contract above). A fresh solve, meanwhile, already describes
+    //     the NEW, smaller grid, because feed-list resizing is not gated on
+    //     this animator's settle window at all. Drawing the fresh solve
+    //     during this window shows the wrong size.
+    //   - During a join's settle hold, symmetrically: a not-yet-committed
+    //     newcomer is held at its own target (see "a newly seen tile starts
+    //     at its target") while the already-committed tiles hold THEIR old
+    //     targets — again everything reports at_rest, and this time
+    //     `animated.size() == desired.size()`, so a count check would not
+    //     catch it either.
+    //
+    // Only when nothing is pending AND every tracked tile is a plain, fully
+    // arrived, non-held, non-exiting entry does the fresh solve match what
+    // this animator would draw — that is what makes the caller's whole-grid
+    // snap safe to use instead of the animator's own (slower, per-tile)
+    // rects. See the caller in src/zoom-supersource.cpp for the render-side
+    // half of this contract.
+    bool settled() const
+    {
+        if (m_has_pending) return false;
+        for (const auto &entry : m_tiles) {
+            const Motion &m = entry.second;
+            if (m.held || m.exiting) return false;
+            if (std::fabs(m.x.position - m.target.x) >= kRestEpsilon) return false;
+            if (std::fabs(m.y.position - m.target.y) >= kRestEpsilon) return false;
+            if (std::fabs(m.w.position - m.target.width) >= kRestEpsilon) return false;
+            if (std::fabs(m.h.position - m.target.height) >= kRestEpsilon) return false;
+        }
+        return true;
     }
 
 private:
@@ -384,6 +426,13 @@ private:
     // single-frame pop it replaces. Fixed, not a setting: zero would reintroduce
     // exactly the behaviour this exists to prevent.
     static constexpr uint64_t kSettleNs = 250000000ULL;
+
+    // Shared by advance()'s own at_rest field and settled() above, so the
+    // two can never disagree about what "arrived" means for the same spring
+    // state. Sub-tenth-pixel: tight enough that a caller treating "at rest"
+    // as pixel-exact never observes a rounding difference against the
+    // spring's true target.
+    static constexpr double kRestEpsilon = 0.05;
 
     std::map<uint32_t, Motion> m_tiles;
     uint64_t m_last_ns  = 0;

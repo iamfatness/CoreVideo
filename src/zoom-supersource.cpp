@@ -1160,7 +1160,7 @@ static void tiles_source_render(void *data, gs_effect_t *)
     const std::vector<AnimatedTile> animated =
         ctx->animator.advance(os_gettime_ns(), desired, anim, departed);
 
-    // ── Mode split: pixel-exact at rest, approximate only while moving ──────
+    // ── Mode split: pixel-exact when settled, approximate only while moving ─
     //
     // snap_tile_grid_even() assumes a UNIFORM grid: one tile size, one gutter,
     // every tile at a whole multiple of (size+gutter) from its row origin (see
@@ -1176,41 +1176,56 @@ static void tiles_source_render(void *data, gs_effect_t *)
     // lasts — confirmed against this exact code with a standalone repro
     // before this split existed; see task-6-report.md.
     //
-    // The fix mirrors the design's own principle: pixel-exact at rest,
-    // approximate only while moving.
-    const bool all_at_rest = std::all_of(
-        animated.begin(), animated.end(),
-        [](const AnimatedTile &t) { return t.at_rest; });
-
+    // The gate is `ctx->animator.settled()`, deliberately NOT "every
+    // AnimatedTile this frame reports at_rest": that per-tile flag is also
+    // true in two situations where the WALL as a whole still disagrees with
+    // a fresh solve — a departure's settle hold (the held tile is frozen,
+    // at_rest, while the survivors sit on their OLD targets, also at_rest,
+    // while a fresh solve already reflects the new smaller grid — feed-list
+    // resizing is not gated on this animator's own settle window at all),
+    // and symmetrically a join's settle hold (a not-yet-committed newcomer
+    // is held at its own target while the already-committed tiles hold
+    // THEIR old ones — everything at_rest, and `animated.size() ==
+    // desired.size()`, so a count check would not catch this case either).
+    // Both were caught by re-running the repro below after implementing the
+    // naive `all_of(at_rest)` version first; see task-6-report.md. settled()
+    // is false in both cases (pending set change, or a held/exiting tile
+    // present), which is exactly what routes them to the per-tile branch
+    // instead.
+    //
     // `rects`, below, ends up index-aligned with `feeds` — one rect per feed,
     // in feed order — exactly the shape this file has always drawn from, so
     // the glow loop, the tile loop and the log line after it are UNCHANGED
     // from before this feature existed. Only how each entry is computed
     // differs, by branch:
     std::vector<SnappedTileRect> rects;
-    if (all_at_rest) {
-        // Disabled, or every tile the animator returned is at rest: solve
-        // and snap FRESH from `solved`/`params` — the exact call this file
-        // has always made — rather than routing the animator's rects
-        // through the snap. That makes this the SAME call as before this
-        // feature existed, so parity holds by construction rather than by
-        // the coincidence that the animator's numbers happen to match. It
-        // is also deliberately ONE branch for both "disabled" and
-        // "settled", not two that have to be kept in agreement: the
-        // disabled bypass in advance() always reports every tile at_rest
-        // (see its own header comment), so disabled is simply a case of
-        // this condition rather than a separate path. `solved` has exactly
-        // one entry per feed (or is empty — solve_tile_grid() is all-or-
-        // nothing), so this is index-aligned with `feeds` the same way the
-        // pre-animation code was, with no held/exiting entries to consider:
-        // `solved` never contains one, since a departed participant is
-        // already gone from `feeds` by the time it shrinks the count this
-        // is solved from (see the mode-split comment above).
+    if (ctx->animator.settled()) {
+        // Disabled, or settled — no pending set change, nothing held or
+        // exiting, every spring at its own target (see TileAnimator::
+        // settled()): solve and snap FRESH from `solved`/`params` — the
+        // exact call this file has always made — rather than routing the
+        // animator's rects through the snap. That makes this the SAME call
+        // as before this feature existed, so parity holds by construction
+        // rather than by the coincidence that the animator's numbers happen
+        // to match. It is also deliberately ONE branch for both "disabled"
+        // and "settled", not two that have to be kept in agreement: the
+        // disabled bypass in advance() clears every piece of state
+        // settled() reads (m_tiles, m_has_pending — see its own header
+        // comment), so settled() is unconditionally true right after a
+        // disabled call, making disabled simply a case of this condition
+        // rather than a separate path. `solved` has exactly one entry per
+        // feed (or is empty — solve_tile_grid() is all-or-nothing), so this
+        // is index-aligned with `feeds` the same way the pre-animation code
+        // was, with no held/exiting entries to consider: `solved` never
+        // contains one, since a departed participant is already gone from
+        // `feeds` by the time it shrinks the count this is solved from.
         rects = snap_tile_grid_even(solved, params);
     } else {
-        // Something is in motion: snap_tile_grid_even()'s single-shared-size
-        // assumption does not hold (see the mode-split comment above), so
-        // each tile is snapped independently instead, one rect per feed.
+        // Not settled — a set change is pending, or something is held,
+        // exiting, or still springing: snap_tile_grid_even()'s single-
+        // shared-size assumption does not hold (see the mode-split comment
+        // above), so each tile is snapped independently instead, one rect
+        // per feed.
         //
         // The rect for feed i is found by searching `animated` for the
         // entry whose participant id matches feed i's — not by position —

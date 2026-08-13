@@ -1,5 +1,6 @@
 #include "zoom-tile-animator.h"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 
@@ -503,6 +504,117 @@ int main()
         check(fresh_clock,
               "invariant 1: a second departure reused a stale hold clock from an earlier "
               "departure-then-return cycle instead of starting its own");
+    }
+
+    // TileAnimator::settled(): false while a set change is pending or
+    // anything is held, exiting, or still springing; true once everything
+    // has committed and fully arrived. Exercises the exact bug settled()
+    // was added to fix (see task-6-report.md): a render path that gated its
+    // fast path on "every AnimatedTile this frame reports at_rest" instead
+    // of settled() mis-sized every live tile during a departure's settle
+    // hold, because the held tile and the blip-protected survivors are ALL
+    // at_rest individually while the wall as a whole still disagrees with a
+    // fresh solve. Stepped in small (20ms) increments throughout, the way a
+    // real render loop calls advance() every frame — a single huge-dt call
+    // spanning the whole hold would let the spring below nearly finish in
+    // one step and defeat the "still not settled right after commit" check.
+    {
+        TileAnimator a;
+        a.advance(0, {{1, rect(0, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});
+        check(a.settled(), "a freshly-joined, unmoving wall was not reported settled");
+
+        uint64_t t = 0;
+        auto step = [&](const std::vector<DesiredTile> &d, const std::vector<uint32_t> &dep) {
+            t += 20 * kMs;
+            return a.advance(t, d, on, dep);
+        };
+
+        // Participant 2 departs; participant 1's target grows to fill the
+        // freed space. Still pending for the first 250ms.
+        bool saw_all_at_rest_during_hold = false;
+        for (int i = 0; i < 12; ++i) {  // 12 * 20ms = 240ms: inside the 250ms hold
+            const auto out = step({{1, rect(0, 0, 200, 200)}}, {2});
+            if (std::all_of(out.begin(), out.end(),
+                             [](const AnimatedTile &x) { return x.at_rest; }))
+                saw_all_at_rest_during_hold = true;
+            check(!a.settled(),
+                  "settled() was true during a departure's settle hold, where a "
+                  "fresh solve would already disagree with the wall's held layout");
+        }
+        check(saw_all_at_rest_during_hold,
+              "test setup: every AnimatedTile should report at_rest at some point "
+              "during the hold — exactly what settled() must NOT rely on");
+
+        // Cross the 250ms hold: commits, participant 1 starts springing to
+        // its new target, participant 2 starts exiting.
+        for (int i = 0; i < 3; ++i) step({{1, rect(0, 0, 200, 200)}}, {2});
+        check(!a.settled(),
+              "settled() was true immediately after commit, with an exit in "
+              "flight and a spring not yet at its target");
+
+        // Run well past the 350ms fade duration and let the spring fully
+        // arrive.
+        for (int i = 0; i < 40; ++i) step({{1, rect(0, 0, 200, 200)}}, {2});
+        check(a.settled(),
+              "settled() was still false long after the exit finished and the "
+              "spring arrived");
+    }
+
+    // settled() during a pending JOIN, not just a departure: a not-yet-
+    // committed newcomer is held at its own target ("a newly seen tile
+    // starts at its target") while an already-committed tile holds its own
+    // unchanged target — both at_rest, and animated.size() == desired.size()
+    // (no extra held/exiting entry to catch this by count), so only the
+    // pending-set-change check catches it.
+    {
+        TileAnimator a;
+        a.advance(0, {{1, rect(0, 0, 200, 200)}}, on, {});
+        check(a.settled(), "a single settled participant was not reported settled");
+
+        uint64_t t = 0;
+        auto step = [&](const std::vector<DesiredTile> &d) {
+            t += 20 * kMs;
+            return a.advance(t, d, on, {});
+        };
+
+        bool saw_all_at_rest_during_hold = false;
+        for (int i = 0; i < 12; ++i) {  // 240ms: inside the 250ms hold
+            const auto out =
+                step({{1, rect(0, 0, 200, 200)}, {2, rect(200, 0, 100, 100)}});
+            if (std::all_of(out.begin(), out.end(),
+                             [](const AnimatedTile &x) { return x.at_rest; }))
+                saw_all_at_rest_during_hold = true;
+            check(!a.settled(),
+                  "settled() was true while a join was still pending, where a "
+                  "fresh solve for the new count would already disagree with "
+                  "the wall");
+        }
+        check(saw_all_at_rest_during_hold,
+              "test setup: the newcomer should be held at its own target, "
+              "still at_rest, throughout the hold — exactly what settled() "
+              "must NOT rely on");
+
+        for (int i = 0; i < 5; ++i)  // cross the 250ms hold: join commits
+            step({{1, rect(0, 0, 200, 200)}, {2, rect(200, 0, 100, 100)}});
+        check(a.settled(),
+              "settled() was false once a join committed with nothing left to "
+              "move (participant 1's target never changed, and the newcomer "
+              "starts at its own target by construction)");
+    }
+
+    // settled() reflects the disabled bypass unconditionally: advance()
+    // clears m_tiles and m_has_pending on every disabled call (see its own
+    // header comment), so settled() must be true right after, regardless of
+    // how much in-flight state existed the moment before disabling.
+    {
+        TileAnimator a;
+        a.advance(0, {{1, rect(0, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});
+        a.advance(20 * kMs, {{1, rect(0, 0, 400, 400)}}, on, {2});  // now mid-flight, unsettled
+        check(!a.settled(), "test setup: the animator should be unsettled before disabling");
+        a.advance(40 * kMs, {{1, rect(0, 0, 400, 400)}}, off, {2});
+        check(a.settled(),
+              "settled() was false immediately after the disabled bypass, which "
+              "clears every piece of state settled() reads");
     }
 
     if (failures == 0) std::cout << "zoom-tile-animator tests passed\n";

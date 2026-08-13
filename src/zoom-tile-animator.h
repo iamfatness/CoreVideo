@@ -60,6 +60,7 @@ public:
             m_pending_since_ns = 0;
             m_has_committed = false;
             m_has_pending = false;
+            m_withheld_since.clear();
             std::vector<AnimatedTile> out;
             out.reserve(desired.size());
             for (const auto &d : desired)
@@ -232,6 +233,24 @@ public:
             ++it;
         }
 
+        // The withheld-newcomer clocks (see the withholding branch below)
+        // live only for as long as a tile is both proposed and unreleased.
+        // This sweep is their single owner, so no other site has to remember
+        // to clean up: an id that has left the layout is no longer being
+        // withheld, and one that now has motion state has been released —
+        // either by its own clock, or by the settle window committing it. A
+        // proposal that comes back later is a fresh withholding and gets a
+        // fresh clock, exactly as `held` is reset for a tile that returns to
+        // `desired` on the departure side.
+        for (auto it = m_withheld_since.begin(); it != m_withheld_since.end();) {
+            const bool in_layout =
+                std::find(incoming.begin(), incoming.end(), it->first) != incoming.end();
+            if (!in_layout || m_tiles.find(it->first) != m_tiles.end())
+                it = m_withheld_since.erase(it);
+            else
+                ++it;
+        }
+
         std::vector<AnimatedTile> out;
         // Upper bound: every desired tile, plus every tracked tile the loop
         // below might append (exiting, or held mid-departure).
@@ -290,6 +309,47 @@ public:
             out.push_back(AnimatedTile{entry.first, r, 1.0, true});
         }
 
+        // Every rect that will be drawn as a LIVE participant this frame. A
+        // never-before-seen tile is checked against these, and only these,
+        // before it is allowed on screen (see the withholding branch below).
+        //
+        // Held and exiting tiles are deliberately NOT in here. The ordering
+        // contract at the top of this function exists precisely so a live
+        // tile may paint over a held or fading ghost at the same rect — that
+        // is the intended look when a departure hands its slot to a joiner —
+        // and the render path does not draw them at all today. Including them
+        // would also defeat the whole point of this test: an operator
+        // repointing a slot leaves the OUTGOING participant retained here,
+        // invisible, at exactly the rect the incoming one wants, so every
+        // repoint would look like an overlap and be delayed.
+        //
+        // Read before the springs below advance, so a tile is measured where
+        // it was at the end of the previous frame rather than one step into
+        // this one. The difference cannot matter for the cases this decides:
+        // a never-seen tile only exists while a set change is pending, and a
+        // pending change is exactly when committed tiles are NOT retargeted.
+        std::vector<TileRect> live_rects;
+        live_rects.reserve(desired.size());
+        for (const auto &d : desired) {
+            auto it = m_tiles.find(d.participant_id);
+            if (it != m_tiles.end()) {
+                TileRect r;
+                r.x = it->second.x.position; r.y = it->second.y.position;
+                r.width = it->second.w.position; r.height = it->second.h.position;
+                live_rects.push_back(r);
+                continue;
+            }
+            // No motion state. A committed one is created at its target
+            // further down and drawn there this frame; an uncommitted one is
+            // a newcomer, and two newcomers are slots in the same grid, so
+            // they are disjoint from each other by construction and need not
+            // be considered here.
+            const bool committed =
+                std::find(m_committed_ids.begin(), m_committed_ids.end(),
+                          d.participant_id) != m_committed_ids.end();
+            if (committed) live_rects.push_back(d.rect);
+        }
+
         for (const auto &d : desired) {
             const bool committed =
                 std::find(m_committed_ids.begin(), m_committed_ids.end(),
@@ -300,44 +360,92 @@ public:
                 // exactly where it is, without disturbing the rest of the
                 // wall — that is the blip case, and it must not move.
                 //
-                // A tile with NO motion state has never been on the wall, and
-                // it is WITHHELD rather than emitted at its target. Emitting
-                // it would put one tile in the layout solved for the NEW set
-                // while every committed tile is deliberately still sitting on
-                // its OLD target (see the retarget gate below) — two
-                // different grids on screen at once. Because the grids are
-                // solved for different counts, the newcomer's slot lands on
-                // top of a participant who is still legitimately drawn in the
-                // old one, and the renderer draws in feed order with
-                // newcomers appended last, so the newcomer paints OVER that
-                // participant's face for the whole settle window. Measured
-                // against the real solve_tile_grid() at 1920x1080, every join
-                // from 1->2 through 8->9 overlaps an existing tile by 25% to
-                // 100% of the newcomer's area (1->2: 502203 px^2, 99%).
-                // Departures do not have this problem — nothing new appears —
-                // which is why this is a join-only defect.
+                // A tile with NO motion state has never been on the wall.
+                // Emitting it unconditionally at its target would put one
+                // tile in the layout solved for the NEW set while every
+                // committed tile is deliberately still sitting on its OLD
+                // target (see the retarget gate below) — two different grids
+                // on screen at once. When the grids are solved for different
+                // counts the newcomer's slot lands on top of a participant
+                // who is still legitimately drawn in the old one, and the
+                // renderer draws in feed order with newcomers appended last,
+                // so it paints OVER that participant's face. Measured against
+                // the real solve_tile_grid() at 1920x1080, every count-
+                // changing join from 1->2 through 15->16 overlaps an existing
+                // tile (1->2: 502203 px^2, 99% of the newcomer's own area).
+                // Departures do not have this problem — nothing new appears.
                 //
-                // The cost of withholding is the one the settle window
-                // already declares in the design: "the wall reacts one settle
-                // window later". A joining participant is drawn 250ms after
-                // the layout first proposes them, in the same frame the rest
-                // of the wall starts reflowing to make room. The one case
-                // that gets visibly slower rather than merely later is an
-                // operator repointing a slot from one participant to another:
-                // the outgoing participant is cut instantly (invariant 2) and
-                // the incoming one is withheld, so that slot shows the
-                // background for the settle window instead of cutting
-                // straight over. That is the same delay every other roster
-                // change already pays, and it is preferable to covering a
-                // face that is still on air.
+                // So the tile is withheld, but only for as long as it would
+                // actually cover someone, and never indefinitely. TWO
+                // independent releases, either of which is enough:
                 //
-                // The render side needs nothing for this: a feed with no
-                // matching entry in the animator's output gets an empty
-                // SnappedTileRect and is skipped by the width < 2 guard that
-                // both the glow loop and the tile loop already apply.
+                //   - DISJOINT. The overlap above is a property of the
+                //     geometry, not of the settle window, so it is tested
+                //     directly rather than assumed. A newcomer whose target
+                //     touches nothing being drawn cannot cover a face and
+                //     goes on screen immediately. That is what makes an
+                //     operator repointing one slot cut instantly, as it did
+                //     before this feature existed: the grid is identical on
+                //     both sides of a same-count repoint, so the incoming
+                //     participant's slot is disjoint from every other slot —
+                //     measured true at all 15 counts from 2 to 16 — and
+                //     waiting would buy nothing, since nothing moves at
+                //     commit either. Withholding there is pure dead time, and
+                //     worse than it looks: a withheld feed gets an empty
+                //     SnappedTileRect, so the width < 2 guard skips it in the
+                //     glow loop as well as the tile loop and the slot loses
+                //     its tile, border AND glow, where before this feature it
+                //     drew a neutral placeholder immediately.
+                //
+                //   - ITS OWN CLOCK. Stamped the first frame it is withheld,
+                //     and independent of the whole-set settle timer, for the
+                //     same reason held_since_ns is on the departure side (see
+                //     the lifecycle loop above): that timer re-stamps whenever
+                //     the proposed set differs from the last one seen, so a
+                //     single unrelated participant flapping in and out resets
+                //     it on every call and nothing ever commits. Measured
+                //     before this clock existed: a newcomer continuously
+                //     present in `desired`, with one unrelated participant
+                //     flapping every 100ms, was emitted 0 times in 30
+                //     seconds — a participant who joined and never appeared,
+                //     which is a far worse failure than a brief overlap.
+                //     Without churn the same join took 256ms.
+                //
+                // The clock is kept beside m_tiles rather than by creating
+                // the Motion early and flagging it: a Motion seeded on first
+                // sight would carry the rect from that first frame, and the
+                // proposal can change while the tile is withheld, so a
+                // clock-released tile would appear at a stale rect. Created
+                // on release instead, it is always seeded at the target the
+                // layout is proposing right now.
                 auto held = m_tiles.find(d.participant_id);
-                if (held == m_tiles.end())
+                if (held == m_tiles.end()) {
+                    auto since = m_withheld_since.find(d.participant_id);
+                    if (since == m_withheld_since.end())
+                        since = m_withheld_since
+                                    .emplace(d.participant_id, now_ns).first;
+
+                    const bool clock_expired =
+                        (now_ns - since->second) >= kSettleNs;
+                    bool covers_someone = false;
+                    for (const TileRect &r : live_rects) {
+                        if (rects_overlap(d.rect, r)) { covers_someone = true; break; }
+                    }
+                    if (covers_someone && !clock_expired)
+                        continue;
+
+                    // Released. Seeded at its target: it has nowhere to
+                    // travel from, exactly like the first-sight case below.
+                    Motion m;
+                    m.x = {d.rect.x, 0.0};
+                    m.y = {d.rect.y, 0.0};
+                    m.w = {d.rect.width, 0.0};
+                    m.h = {d.rect.height, 0.0};
+                    m.target = d.rect;
+                    m_tiles.emplace(d.participant_id, m);
+                    out.push_back(AnimatedTile{d.participant_id, d.rect, 1.0, true});
                     continue;
+                }
                 TileRect r;
                 r.x = held->second.x.position; r.y = held->second.y.position;
                 r.width = held->second.w.position;
@@ -463,6 +571,25 @@ private:
         uint64_t held_since_ns   = 0;
     };
 
+    // Do the two rects share more than a sliver? Used to decide whether a
+    // never-before-seen tile would cover a participant already on screen.
+    //
+    // The half-pixel tolerance is not floating-point hygiene, it is the
+    // difference between a test and a hair trigger. Tiles that are adjacent
+    // with the gutter set to zero share an edge exactly, and a spring that
+    // has arrived sits a hair either side of its target, so an exact test
+    // would call two touching tiles an overlap and delay a join for a
+    // sub-pixel sliver that cannot hide any part of a face.
+    static bool rects_overlap(const TileRect &a, const TileRect &b)
+    {
+        constexpr double kSliver = 0.5;
+        const double left   = std::fmax(a.x, b.x);
+        const double top    = std::fmax(a.y, b.y);
+        const double right  = std::fmin(a.x + a.width,  b.x + b.width);
+        const double bottom = std::fmin(a.y + a.height, b.y + b.height);
+        return (right - left) > kSliver && (bottom - top) > kSliver;
+    }
+
     static std::vector<uint32_t> ids_of(const std::vector<DesiredTile> &d)
     {
         std::vector<uint32_t> ids;
@@ -498,4 +625,9 @@ private:
 
     // Distinguishes "an empty roster is proposed" from "nothing is proposed".
     bool m_has_pending = false;
+
+    // When each never-before-seen tile was first withheld. Its own clock, not
+    // the whole-set settle timer, which unrelated churn can re-stamp forever.
+    // Swept in advance(); see the sweep for what owns each entry's lifetime.
+    std::map<uint32_t, uint64_t> m_withheld_since;
 };

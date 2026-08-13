@@ -356,13 +356,22 @@ struct tiles_source {
     // before being drawn at a fractional position — see
     // ensure_motion_texrender() and the draw loop in tiles_source_render().
     //
-    // Null until the first frame a tile actually moves, and therefore null for
-    // the whole life of a source whose animation toggle is off: nothing on
-    // that path reaches the code that creates it. That is deliberate and is
-    // part of this feature's no-regression guarantee — off costs no GPU
-    // memory, not even an unused texture. Render-thread only, like the rest of
-    // this block; freed in tiles_source_destroy() with the graphics context
-    // entered.
+    // Null until the first frame a tile actually moves, so a source whose
+    // animation toggle has never been on holds no GPU memory for this at all —
+    // nothing on that path reaches the code that creates it.
+    //
+    // It is NOT freed when the toggle goes back off: once a tile has moved,
+    // this stays allocated (one tile-sized render target, well under a
+    // megabyte at 1080p) for the source's life. Freeing it on a settings
+    // change would mean calling obs_enter_graphics() from the update thread,
+    // which blocks on the graphics thread mid-frame — a worse trade than
+    // holding the memory. What the toggle guarantees is that the OUTPUT is
+    // byte-identical to before this feature existed, and that still holds:
+    // the disabled path never touches this texture, never draws through it,
+    // and never resizes it.
+    //
+    // Render-thread only, like the rest of this block; freed in
+    // tiles_source_destroy() with the graphics context entered.
     gs_texrender_t *motion_render = nullptr;
 
     std::shared_ptr<TilesCallbackGate> gate =
@@ -1115,6 +1124,16 @@ struct MovingTile {
     bool   moving = false;  // false: draw at the snapped rect, exactly as before
     double x = 0.0;         // the animator's true, unsnapped canvas position
     double y = 0.0;
+    // The animator's true, unsnapped SIZE. The intermediate texture is still
+    // the even-rounded size — that is what the I420 chroma rule requires of
+    // the surface the tile is composited into — but the finished tile is
+    // scaled onto these dimensions when it is blitted, so the trailing edge
+    // lands at exactly x + width rather than at x + even_floor(width).
+    // Without this the leading edge moves smoothly while the trailing edge
+    // steps 2px, which reads worse than the uniform stepping it replaced:
+    // two edges of the same rectangle on different quantisation grids.
+    double width = 0.0;
+    double height = 0.0;
     double alpha = 1.0;     // the animator's own per-tile alpha
 };
 
@@ -1441,6 +1460,8 @@ static void tiles_source_render(void *data, gs_effect_t *)
                 m.moving = true;
                 m.x      = live->rect.x;
                 m.y      = live->rect.y;
+                m.width  = live->rect.width;
+                m.height = live->rect.height;
                 m.alpha  = live->alpha;
             }
             moving.push_back(m);
@@ -1907,6 +1928,33 @@ static void tiles_source_render(void *data, gs_effect_t *)
                     // chroma has already been reconstructed.
                     gs_matrix_translate3f(static_cast<float>(moving[i].x),
                                           static_cast<float>(moving[i].y), 0.0f);
+                    // ...and the fractional SIZE. The intermediate had to be
+                    // even-dimensioned, but the quad it is blitted onto does
+                    // not: scaling the sprite from the even size onto the
+                    // animator's true size puts the trailing edge at exactly
+                    // x + width instead of x + even_floor(width). Without it
+                    // the leading edge of a moving tile travels smoothly while
+                    // the trailing edge steps 2px — the same artifact class
+                    // this task exists to remove, now on one edge only, which
+                    // reads worse than the uniform stepping it replaced.
+                    //
+                    // The factor is within ~0.2% of 1.0 (the even-rounding
+                    // discards under 2px of a tile hundreds of pixels wide), so
+                    // the resampling it adds is far below the fractional-offset
+                    // filtering already happening on the same draw. Anchored at
+                    // the tile's top-left, which the translate above has
+                    // already put at the animator's exact position, so growth
+                    // happens away from a corner that is already correct.
+                    //
+                    // r.width/r.height are at least 2 here — the loop skips
+                    // anything smaller before this branch — so neither divisor
+                    // can be zero.
+                    gs_matrix_scale3f(
+                        static_cast<float>(moving[i].width) /
+                            static_cast<float>(r.width),
+                        static_cast<float>(moving[i].height) /
+                            static_cast<float>(r.height),
+                        1.0f);
                     while (gs_effect_loop(def, "Draw"))
                         gs_draw_sprite(tile_tex, 0, r.width, r.height);
                     gs_matrix_pop();

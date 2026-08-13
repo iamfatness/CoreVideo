@@ -1136,7 +1136,14 @@ static SnappedTileRect snap_tile_independently(const TileRect &r)
 // every tile, so no branch is taken, no intermediate texture is created, and
 // the draw calls are the ones this file has always made.
 struct MovingTile {
-    bool   moving = false;  // false: draw at the snapped rect, exactly as before
+    // False: draw at the snapped rect, exactly as before. True: this tile has
+    // to go through the intermediate texture, either because it is MOVING —
+    // and so needs a sub-pixel position the direct blit cannot give it — or
+    // because it is FADING, and the wall's I420 technique has no global-alpha
+    // parameter, so the only way to apply one is to composite the tile in
+    // isolation and scale that surface's alpha (see fade_tile_alpha()).
+    // Deliberately not called `moving`: an entering tile is perfectly still.
+    bool   needs_composite = false;
     double x = 0.0;         // the animator's true, unsnapped canvas position
     double y = 0.0;
     // The animator's true, unsnapped SIZE. The intermediate texture is still
@@ -1198,14 +1205,12 @@ static gs_texrender_t *ensure_motion_texrender(tiles_source *ctx)
 // untouched, ZERO/SRCALPHA for alpha replaces dst.a with src.a * dst.a, and
 // the Solid technique supplies src.a from fill_color's alpha byte.
 //
-// Not reachable today, and deliberately so rather than by oversight: every
-// tile this path draws is a LIVE tile, and TileAnimator::advance() hardcodes
-// 1.0 for every live tile it emits. The only tiles that fade are exiting ones,
-// which this task does not draw at all — their pixel source is an open
-// decision with the repo owner. This exists so the alpha the animator computes
-// is honoured rather than silently dropped the day those tiles do get drawn,
-// and the caller skips it entirely at alpha == 1.0, so the live path pays
-// nothing for it.
+// The ENTRY FADE is this function's first real caller, and therefore its first
+// execution on a GPU at all — it was written speculatively, for exiting tiles
+// that are still not drawn. Treat a colour or blending regression in a tile
+// that is fading in as suspicion of this function before anything else. The
+// caller skips it entirely at alpha == 1.0, so a settled wall still never
+// reaches it.
 static void fade_tile_alpha(uint32_t w, uint32_t h, double alpha)
 {
     const double clamped = alpha < 0.0 ? 0.0 : (alpha > 1.0 ? 1.0 : alpha);
@@ -1534,20 +1539,40 @@ static void tiles_source_render(void *data, gs_effect_t *)
             rects.push_back(live ? snap_tile_independently(live->rect)
                                   : SnappedTileRect{});
 
-            // The same lookup decides whether this tile takes the sub-pixel
-            // path in the draw loop below. The test is this tile's own
-            // `at_rest`, deliberately NOT the whole-wall settled() gate above:
-            // the two answer different questions. settled() asks "does a fresh
-            // solve describe what the animator would draw", which is about
-            // which rects are safe to use; at_rest asks "is THIS tile moving",
-            // which is about whether resampling it through an intermediate
-            // texture buys anything. A newcomer seeded at its target sits
-            // perfectly still while its neighbours reflow around it — it takes
-            // the snapped blit and stays pixel-crisp, exactly as it would have
-            // before this feature existed.
+            // The same lookup decides whether this tile takes the
+            // intermediate-texture path in the draw loop below. Two
+            // independent reasons put it there, and `at_rest` alone answers
+            // only the first:
+            //
+            //   - MOVING (`!at_rest`). Deliberately not the whole-wall
+            //     settled() gate above: the two answer different questions.
+            //     settled() asks "does a fresh solve describe what the
+            //     animator would draw", which is about which rects are safe
+            //     to use; at_rest asks "is THIS tile moving", which is about
+            //     whether resampling it buys anything.
+            //
+            //   - FADING (`alpha < 1`). An ENTERING tile is seeded at its
+            //     final slot and is perfectly still, so it reports at_rest —
+            //     but it is part-way through its fade, and the direct blit
+            //     has no way to apply an alpha. The wall's I420 technique
+            //     carries no global-alpha parameter, and adding one would
+            //     mean changing data/effects/corevideo-tiles.effect, which a
+            //     stale effect file beside a new DLL would then not have (see
+            //     zoom-tiles-effect-policy.h) — a deployment hazard for a
+            //     cosmetic uniform. Compositing the tile in isolation and
+            //     scaling that surface's alpha needs no effect change at all,
+            //     which is why fade_tile_alpha() was written this way, and
+            //     the entry fade is its first real caller.
+            //
+            // Routing on the real question keeps `at_rest` honest rather than
+            // marking a stationary tile as moving to reach the path it needs.
+            // The composite is pixel-exact for an entering tile: its rect is
+            // its snapped integer target, so the tile-space ortho evaluates
+            // the shader at identical UVs and the blit lands at an integer
+            // origin at 1:1 scale (see the composite below).
             MovingTile m;
-            if (live && !live->at_rest) {
-                m.moving = true;
+            if (live && (!live->at_rest || live->alpha < 1.0)) {
+                m.needs_composite = true;
                 m.x      = live->rect.x;
                 m.y      = live->rect.y;
                 m.width  = live->rect.width;
@@ -1889,18 +1914,19 @@ static void tiles_source_render(void *data, gs_effect_t *)
         const SnappedTileRect &r = rects[i];
         if (r.width < 2 || r.height < 2) continue;  // as the CPU path skips them
 
-        // Not moving. That is EVERY tile when the animation toggle is off
-        // (`moving` is empty, so this condition is true for every i), every
-        // tile on a settled wall, and any tile that happens to be sitting
-        // still while others reflow around it. It takes the blit this file has
-        // always done — straight to the canvas, at its snapped even-boundary
-        // rect, through the same call sequence as before this feature existed.
-        if (i >= moving.size() || !moving[i].moving) {
+        // Neither moving nor fading. That is EVERY tile when the animation
+        // toggle is off (`moving` is empty, so this condition is true for
+        // every i), every tile on a settled wall, and any fully-opaque tile
+        // that happens to be sitting still while others reflow around it. It
+        // takes the blit this file has always done — straight to the canvas,
+        // at its snapped even-boundary rect, through the same call sequence
+        // as before this feature existed.
+        if (i >= moving.size() || !moving[i].needs_composite) {
             draw_tile(i, r, r.x, r.y);
             continue;
         }
 
-        // ── A tile in motion ─────────────────────────────────────────────────
+        // ── A tile in motion, or fading in ───────────────────────────────────
         //
         // Composited into an intermediate texture of the tile's own
         // even-rounded size, then drawn at the animator's true fractional

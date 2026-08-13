@@ -44,6 +44,47 @@ static int index_of(const std::vector<AnimatedTile> &tiles, uint32_t id)
 
 static constexpr uint64_t kMs = 1000000ULL;
 
+// Worst overlap between any two emitted tiles this frame.
+static double worst_overlap(const std::vector<AnimatedTile> &out)
+{
+    double w = 0.0;
+    for (size_t i = 0; i < out.size(); ++i)
+        for (size_t j = i + 1; j < out.size(); ++j)
+            w = std::fmax(w, overlap_area(out[i].rect, out[j].rect));
+    return w;
+}
+
+// Worst overlap between two tiles that are BOTH at rest. This is the invariant
+// the design can actually hold: an immediate join necessarily draws the
+// newcomer at its slot in the new grid while the incumbents are still at their
+// old ones and only starting to move, so tiles DO overlap transiently during a
+// reflow — that is what the entry fade exists to make invisible. What must
+// never happen is two STATIONARY tiles stacked, which is what every defect in
+// this file's history actually was.
+static double worst_at_rest_overlap(const std::vector<AnimatedTile> &out)
+{
+    double w = 0.0;
+    for (size_t i = 0; i < out.size(); ++i)
+        for (size_t j = i + 1; j < out.size(); ++j)
+            if (out[i].at_rest && out[j].at_rest)
+                w = std::fmax(w, overlap_area(out[i].rect, out[j].rect));
+    return w;
+}
+
+// Advance until the wall is fully settled — every spring arrived and every
+// entry fade finished — so a test about a later transition does not start
+// mid-fade. Returns the timestamp reached, in ms.
+static uint64_t settle_in(TileAnimator &a, const std::vector<DesiredTile> &d,
+                          const AnimationSettings &on, uint64_t from_ms)
+{
+    uint64_t ms = from_ms;
+    for (int i = 0; i < 60 && !a.settled(); ++i) {
+        ms += 16;
+        a.advance(ms * kMs, d, on, {});
+    }
+    return ms;
+}
+
 int main()
 {
     AnimationSettings on;  on.enabled = true;  on.duration_seconds = 0.35;
@@ -63,13 +104,44 @@ int main()
               "disabled animator reported motion");
     }
 
-    // First frame with animation on: tiles appear at their target, not from 0,0.
+    // First frame with animation on: tiles appear at their target, not from
+    // 0,0 — and they ENTER, fading from transparent to opaque in place rather
+    // than popping on at full brightness. The fade is what makes an immediate
+    // join safe: the newcomer is at its slot in the new grid while every other
+    // tile is still at its old one, so it is drawn over them on that first
+    // frame, and alpha ~0 is what makes that invisible.
     {
         TileAnimator a;
         const std::vector<DesiredTile> desired{{1, rect(50, 60, 100, 100)}};
         const auto out = a.advance(0, desired, on, {});
         check(out.size() == 1 && find(out, 1)->rect.x == 50.0,
               "a newly seen tile did not start at its target position");
+        check(find(out, 1)->alpha < 0.001,
+              "a newly seen tile appeared at full opacity instead of fading in");
+
+        // Reaches full opacity by duration_seconds, and stays there.
+        const auto mid = a.advance(175 * kMs, desired, on, {});
+        check(find(mid, 1)->alpha > 0.4 && find(mid, 1)->alpha < 0.6,
+              "the entry fade is not linear in time across its duration");
+        const auto done = a.advance(350 * kMs, desired, on, {});
+        check(find(done, 1)->alpha == 1.0,
+              "the entry fade did not reach full opacity by duration_seconds");
+        const auto after = a.advance(400 * kMs, desired, on, {});
+        check(find(after, 1)->alpha == 1.0,
+              "a tile that finished entering did not stay opaque");
+        check(a.settled(),
+              "the wall was not settled once every entry fade had finished");
+    }
+
+    // A zero duration has no fade to run, exactly as it has no travel to do:
+    // the tile arrives opaque on its first frame rather than dividing by zero.
+    {
+        TileAnimator a;
+        const AnimationSettings instant{true, 0.0};
+        const auto out = a.advance(0, {{1, rect(50, 60, 100, 100)}}, instant, {});
+        check(find(out, 1) != nullptr && find(out, 1)->alpha == 1.0,
+              "a zero duration still produced a fade");
+        check(a.settled(), "a zero-duration wall was not immediately settled");
     }
 
     // A tile that moves is reported not-at-rest and travels toward the target.
@@ -84,81 +156,87 @@ int main()
               "tile did not travel toward its new target");
     }
 
-    // Identity, not index: the surviving tile keeps its own position when the
-    // tile before it disappears from the desired layout. Participant 1
-    // leaving is itself a set change, so — as of the settle window — it is
-    // gated too: at 16ms nothing has moved yet for participant 7 either
-    // (the whole layout might revert), but once the departure has genuinely
-    // settled, participant 7 reflows from its own prior position, not from
-    // participant 1's slot.
+    // Identity, not index: the surviving tile reflows from ITS OWN prior
+    // position when the tile before it disappears, not from the departing
+    // tile's slot. Participant 1 here is REASSIGNED, not departed — absent
+    // from the layout but still in the meeting — so the wall commits at once
+    // and participant 7 starts moving on the same frame.
     {
         TileAnimator a;
         a.advance(0, {{1, rect(0, 0, 100, 100)}, {7, rect(100, 0, 100, 100)}}, on, {});
-        const auto out = a.advance(16 * kMs, {{7, rect(0, 0, 200, 200)}}, on, {});
-        const AnimatedTile *t = find(out, 7);
-        check(t != nullptr, "participant 7 was lost when participant 1 left");
-        check(std::fabs(t->rect.x - 100.0) < 0.001,
-              "participant 7 moved before participant 1's departure had settled");
-        check(t->at_rest,
-              "participant 7 reported motion before the departure had settled");
+        const uint64_t t0 = settle_in(
+            a, {{1, rect(0, 0, 100, 100)}, {7, rect(100, 0, 100, 100)}}, on, 0);
 
-        const auto settled = a.advance(300 * kMs, {{7, rect(0, 0, 200, 200)}}, on, {});
-        const AnimatedTile *t2 = find(settled, 7);
-        check(t2 != nullptr, "participant 7 was lost once the departure settled");
-        check(t2->rect.x > 0.0 && t2->rect.x < 100.0,
-              "participant 7 did not continue animating from its own prior position toward its new target");
-        check(!t2->at_rest, "participant 7 reported at rest despite being retargeted");
+        const auto out =
+            a.advance((t0 + 16) * kMs, {{7, rect(0, 0, 200, 200)}}, on, {});
+        const AnimatedTile *t = find(out, 7);
+        check(t != nullptr, "participant 7 was lost when participant 1 was reassigned away");
+        check(!t->at_rest,
+              "participant 7 did not start moving on the frame a reassignment "
+              "freed the slot — a reassignment is not a departure and must not hold");
+        check(t->rect.x < 100.0 && t->rect.x > 0.0,
+              "participant 7 did not travel from its own prior position toward "
+              "its new target");
     }
 
-    // A blip never moves the wall: a participant who vanishes and returns
-    // inside the settle window produces no motion at all. Sampled mid-window
-    // as well as at the endpoints, so "zero motion" is observed directly
-    // rather than inferred from the before/after rects merely matching.
+    // A roster blip never moves the wall: a participant who vanishes from the
+    // ROSTER and returns inside the settle window produces no motion at all.
+    // `departed` names them while they are gone, which is what makes this a
+    // departure rather than a reassignment. Sampled mid-window as well as at
+    // the endpoints, so "zero motion" is observed directly rather than
+    // inferred from the before/after rects merely matching.
     {
         TileAnimator a;
         const std::vector<DesiredTile> two{{1, rect(0, 0, 100, 100)},
                                            {2, rect(100, 0, 100, 100)}};
         const std::vector<DesiredTile> one{{1, rect(0, 0, 200, 200)}};
         a.advance(0, two, on, {});
-        a.advance(100 * kMs, one, on, {});          // 2 disappears
-        const auto mid = a.advance(125 * kMs, one, on, {});    // still gone, mid-window
+        settle_in(a, two, on, 0);
+
+        a.advance(600 * kMs, one, on, {2});          // 2 drops off the roster
+        const auto mid = a.advance(625 * kMs, one, on, {2});   // still gone, mid-window
         const AnimatedTile *tm = find(mid, 1);
         check(tm != nullptr, "participant 1 lost mid-window during a blip");
         check(std::fabs(tm->rect.width - 100.0) < 0.001,
-              "participant 1 drifted mid-window while the blip was still pending");
-        const auto back = a.advance(150 * kMs, two, on, {});  // and returns
+              "participant 1 drifted mid-window while the departure was still pending");
+        const auto back = a.advance(650 * kMs, two, on, {});   // and returns
         const AnimatedTile *t = find(back, 1);
         check(t != nullptr, "participant 1 lost during a blip");
         check(std::fabs(t->rect.width - 100.0) < 0.001,
-              "the wall reflowed for a blip that never settled");
+              "the wall reflowed for a roster blip that never settled");
         check(find(back, 2) != nullptr, "the returning participant was dropped");
+        check(worst_overlap(back) == 0.0,
+              "tiles overlapped during a departure hold, where nothing is on "
+              "the new grid at all");
     }
 
-    // A change that holds past the settle window is acted on.
+    // A departure that holds past the settle window is acted on.
     {
         TileAnimator a;
         a.advance(0, {{1, rect(0, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});
-        a.advance(100 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {});
-        const auto out = a.advance(400 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {});
+        settle_in(a, {{1, rect(0, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, 0);
+        a.advance(600 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {2});
+        const auto out = a.advance(900 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {2});
         const AnimatedTile *t = find(out, 1);
         check(t != nullptr && t->rect.width > 100.0,
               "a settled departure did not start the reflow");
     }
 
     // A wall that vacates entirely and returns inside the settle window must
-    // not have moved either: the whole roster leaving at once is a blip like
-    // any other, and motion state for every participant survives it exactly
-    // as a single participant's does. Sampled mid-window too (querying the
-    // full roster again before the "official" return) so zero motion is
-    // observed directly at an interior point of the window, not just at the
-    // one endpoint chosen for the final check.
+    // not have moved either: the whole roster leaving at once is a departure
+    // blip like any other, and motion state for every participant survives it
+    // exactly as a single participant's does. Sampled mid-window too (querying
+    // the full roster again before the "official" return) so zero motion is
+    // observed directly at an interior point of the window.
     {
         TileAnimator a;
         const std::vector<DesiredTile> two{{1, rect(0, 0, 100, 100)},
                                            {2, rect(100, 0, 100, 100)}};
         a.advance(0, two, on, {});
-        a.advance(100 * kMs, {}, on, {});              // everyone leaves
-        const auto mid = a.advance(125 * kMs, two, on, {});    // queried mid-window
+        settle_in(a, two, on, 0);
+
+        a.advance(600 * kMs, {}, on, {1, 2});                   // everyone drops off the roster
+        const auto mid = a.advance(625 * kMs, two, on, {});     // queried mid-window
         const AnimatedTile *m1 = find(mid, 1);
         const AnimatedTile *m2 = find(mid, 2);
         check(m1 != nullptr && m2 != nullptr,
@@ -166,7 +244,7 @@ int main()
         check(std::fabs(m1->rect.width - 100.0) < 0.001 &&
               std::fabs(m2->rect.width - 100.0) < 0.001,
               "the wall had already reflowed mid-window for a full-vacate blip");
-        const auto back = a.advance(150 * kMs, two, on, {});  // and returns
+        const auto back = a.advance(650 * kMs, two, on, {});    // and returns
         const AnimatedTile *t1 = find(back, 1);
         const AnimatedTile *t2 = find(back, 2);
         check(t1 != nullptr && t2 != nullptr,
@@ -176,81 +254,32 @@ int main()
               "the wall reflowed for a full-vacate blip that never settled");
     }
 
-    // A legitimately empty wall is not a first frame: once the roster has
-    // genuinely settled on zero participants — proposed at 300ms, then held
-    // and reconfirmed at 560ms, 260ms later, past the 250ms hold — a return
-    // must hold for its own 250ms before the wall commits to it, the same as
-    // any other set change would. (A single call proposing empty is not
-    // enough to "genuinely settle" on it; that would just be the proposal,
-    // still pending until it is held and reconfirmed.) Proven by proposing a
-    // layout change for the returning participant only 10ms after it
-    // reappears: while that return is still pending, the participant must sit
-    // exactly where it came back, untouched (at_rest), and must NOT have
-    // adopted the newer proposal — which is what it would have done had the
-    // wall mistaken the return for a fresh start and committed to it. Only
-    // once the return commits does it reflow to the newer rect.
-    //
-    // The returning participant is drawn from the frame it reappears: the
-    // vacate erased its motion state, so it is a never-before-seen tile, but
-    // the wall it is joining is EMPTY — its slot covers nobody, so there is
-    // nothing to withhold it for (see CRITICAL 1 below). Withholding here
-    // would blank an already-blank wall for a further 250ms.
+    // A wall that genuinely empties, then a participant returns. The vacate is
+    // a departure, so it holds for kSettleNs and then resolves; the return is
+    // a JOIN, so it commits at once and the participant is drawn on the frame
+    // it reappears, entering from transparent. Nothing waits on anything.
     {
         TileAnimator a;
         a.advance(0, {{1, rect(0, 0, 100, 100)}}, on, {});
-        a.advance(300 * kMs, {}, on, {});                          // empty proposed
-        a.advance(560 * kMs, {}, on, {});                          // held 260ms: now genuinely settled on zero
-        const auto returned =
-            a.advance(570 * kMs, {{1, rect(0, 0, 100, 100)}}, on, {});  // returns, 10ms later
+        settle_in(a, {{1, rect(0, 0, 100, 100)}}, on, 0);
+
+        a.advance(600 * kMs, {}, on, {1});      // 1 leaves the meeting
+        a.advance(900 * kMs, {}, on, {1});      // hold expired at 850: the exit begins
+        a.advance(1300 * kMs, {}, on, {1});     // past the 350ms fade: gone
+        check(a.tracked_ids().empty(),
+              "the vacated wall still carried motion state long after the exit "
+              "should have finished");
+
+        const auto returned = a.advance(1400 * kMs, {{1, rect(0, 0, 300, 300)}}, on, {});
         const AnimatedTile *back = find(returned, 1);
         check(back != nullptr,
-              "the returning participant was withheld from an empty wall, where "
-              "its slot could not have covered anyone");
-
-        const auto pending = a.advance(580 * kMs, {{1, rect(0, 0, 300, 300)}}, on, {});
-        const AnimatedTile *p = find(pending, 1);
-        check(p != nullptr, "the returning participant was dropped while pending");
-        check(p != nullptr && p->at_rest,
-              "a still-pending return was already animating a layout change");
-        check(p != nullptr && std::fabs(p->rect.width - 100.0) < 0.001,
-              "a still-pending return adopted the newer proposal instead of "
-              "holding where it came back — the return was treated as a fresh "
-              "start instead of holding its own settle window");
-
-        // 570ms + 250ms = 820ms: this is the frame the return commits on, and
-        // only now may it move to the rect proposed at 580ms.
-        const auto out = a.advance(830 * kMs, {{1, rect(0, 0, 300, 300)}}, on, {});
-        const AnimatedTile *t = find(out, 1);
-        check(t != nullptr, "the returning participant was dropped");
-        check(t != nullptr && !t->at_rest,
-              "a committed return did not start reflowing to the rect it was "
-              "proposed at while pending");
-        check(t != nullptr && t->rect.width > 100.0 && t->rect.width < 300.0,
-              "a committed return jumped to its new rect instead of springing to it");
-    }
-
-    // The "sharp" case found in review: an empty roster proposed after the
-    // animator has already been running past the settle window must still be
-    // held for its own 250ms, not adopted the instant it is proposed just
-    // because elapsed real time already exceeds kSettleNs. m_pending_ids
-    // defaults to (and is reset back to) an empty vector, so without
-    // m_has_pending an empty proposal is indistinguishable from "nothing is
-    // pending" — it falls through to the elapsed-time branch and is measured
-    // against a stale m_pending_since_ns, adopting instantly any time the
-    // animator has already been running for 250ms, which in a real session
-    // is virtually always.
-    {
-        TileAnimator a;
-        a.advance(0, {{1, rect(0, 0, 100, 100)}}, on, {});
-        a.advance(260 * kMs, {}, on, {});                           // empty proposed well past 250ms of uptime
-        a.advance(270 * kMs, {{1, rect(0, 0, 100, 100)}}, on, {});  // returns, 10ms later
-        const auto out = a.advance(280 * kMs, {{1, rect(0, 0, 300, 300)}}, on, {}); // rect changes, 10ms later
-        const AnimatedTile *t = find(out, 1);
-        check(t != nullptr, "the returning participant was dropped");
-        check(!t->at_rest,
-              "the sharp empty-roster proposal was adopted instantly, teleporting the returning tile");
-        check(t->rect.width > 100.0 && t->rect.width < 300.0,
-              "the sharp empty-roster proposal skipped the settle hold instead of staying in flight");
+              "a participant returning to an empty wall was not drawn on the "
+              "frame it reappeared — a join has no departure to wait for");
+        check(back != nullptr && std::fabs(back->rect.width - 300.0) < 0.001,
+              "the returning participant did not appear at its own target");
+        check(back != nullptr && back->alpha < 0.001,
+              "the returning participant popped in at full opacity instead of "
+              "fading in");
     }
 
     // Invariant 1 + 4: a genuine departure holds its last frame — unfaded,
@@ -263,10 +292,9 @@ int main()
     // passing it once and letting it lapse.
     //
     // The 300/549ms checks guard against the "hold has a hole" defect found
-    // in review: `desired` drops the tile immediately, but `wanted` (still
-    // keyed off the pre-commit `m_committed_ids`) does not go false until
-    // commit, so without an explicit held-emission for this window the tile
-    // is in neither emission set — cut, then popped back at 100% opacity
+    // in review: `desired` drops the tile immediately, so without an explicit
+    // held-emission for the window between that and the exit starting, the
+    // tile is in neither emission set — cut, then popped back at 100% opacity
     // when the fade starts, which is worse than the single-frame cut this
     // whole feature exists to avoid.
     {
@@ -533,24 +561,22 @@ int main()
         const TileRect slotB = rect(100, 0, 100, 100);
         a.advance(0, {{1, slotA}, {2, slotB}}, on, {});
 
-        // 2 departs, 3 joins into slotB — 2's old rect. Still pending: 2 is
-        // held, and 3 is emitted straight away. 3 is never-before-seen, so it
-        // is checked for overlap first (CRITICAL 1), but that check is
-        // against the tiles drawn as LIVE participants — here just 1, at
-        // slotA, which slotB only touches. A held or fading ghost is
-        // deliberately not protected from a joiner: resolving that exact
-        // collision by draw order is what THIS contract is for, and a
-        // departed participant's frozen last frame is not a face that must be
-        // kept on air ahead of the live participant now occupying the slot.
+        // 2 departs, 3 joins into slotB — 2's old rect. While the departure
+        // holds, 3 is not drawn at all: a departure pending means the wall is
+        // still showing the layout 2 belongs to, and nothing from the new grid
+        // is put into it. That is what makes a hold overlap-free by
+        // construction rather than by a geometric test.
         const auto pending = a.advance(300 * kMs, {{1, slotA}, {3, slotB}}, on, {2});
-        const bool held_behind_live =
-            index_of(pending, 2) >= 0 && index_of(pending, 3) >= 0 &&
-            index_of(pending, 2) < index_of(pending, 3);
-        check(held_behind_live,
-              "ordering contract: a held departing tile was emitted after the live tile "
-              "occupying its rect, instead of before it");
+        check(index_of(pending, 2) >= 0,
+              "a departing tile was not held through its settle window");
+        check(index_of(pending, 3) < 0,
+              "a joiner was drawn into the departing tile's rect while the "
+              "departure was still holding");
+        check(worst_overlap(pending) == 0.0,
+              "tiles overlapped during a departure hold");
 
-        // Commits at 560ms (260ms >= 250ms): exit begins, 2 is now fading.
+        // The hold expires at 550ms: the exit begins and 3 joins. Now the two
+        // can coincide, and the ordering contract is what resolves it.
         const auto exiting_phase = a.advance(560 * kMs, {{1, slotA}, {3, slotB}}, on, {2});
         const bool exiting_behind_live =
             index_of(exiting_phase, 2) >= 0 && index_of(exiting_phase, 3) >= 0 &&
@@ -646,10 +672,15 @@ int main()
     // one step and defeat the "still not settled right after commit" check.
     {
         TileAnimator a;
-        a.advance(0, {{1, rect(0, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});
-        check(a.settled(), "a freshly-joined, unmoving wall was not reported settled");
+        const std::vector<DesiredTile> start{{1, rect(0, 0, 100, 100)},
+                                             {2, rect(100, 0, 100, 100)}};
+        a.advance(0, start, on, {});
+        check(!a.settled(),
+              "a wall whose tiles are still fading in was reported settled — the "
+              "whole-grid snap has no alpha, so that would drop every entry fade");
+        uint64_t t = settle_in(a, start, on, 0) * kMs;
+        check(a.settled(), "a joined, arrived, fully-faded-in wall was not reported settled");
 
-        uint64_t t = 0;
         auto step = [&](const std::vector<DesiredTile> &d, const std::vector<uint32_t> &dep) {
             t += 20 * kMs;
             return a.advance(t, d, on, dep);
@@ -686,479 +717,281 @@ int main()
               "spring arrived");
     }
 
-    // Final review, CRITICAL 1: a never-before-seen tile whose target would
-    // cover a participant already on screen must be WITHHELD, not emitted at
-    // its target in the meantime.
+    // Fix round 4, part 1: a PURE JOIN reflows the wall immediately. No
+    // departure is pending, so nothing is held: the newcomer is drawn on the
+    // frame it appears and every other tile starts moving on that same frame.
     //
-    // While a change is pending, every committed tile deliberately stays on
-    // its OLD target (see the "a blip never moves the wall" contract). A
-    // newcomer has no old target, so emitting it at its new one puts one
-    // tile in the NEW grid while the whole rest of the wall is still in the
-    // OLD one — and the two grids are solved for different counts, so the
-    // newcomer's slot lands squarely on top of a participant who is still
-    // legitimately on air there. The renderer draws in feed order with
-    // newcomers appended last, so the newcomer paints OVER that participant
-    // for the whole 250ms window.
-    //
-    // The rects below are the real 1920x1080 geometry, not convenient
-    // synthetic ones: solve_tile_grid() at the shipped defaults (16:9,
-    // gutter and margin = canvas_height/135 = 8) for one tile and for two.
-    // Measured against those exact numbers, the 1->2 newcomer covers
-    // 502203 px^2 of participant 1 — 99% of the newcomer's own area. Every
-    // count from 1 to 8 overlaps by 25-100%; departures overlap by 0.
-    // The earlier version of this test used {1:(0,0,200,200)} and
-    // {2:(200,0,100,100)}, which happen not to overlap at all, and so
-    // asserted the defect was correct behaviour.
-    //
-    // Withholding is what the spec already buys: "the wall reacts one
-    // settle window later" is the stated cost of the settle window, and a
-    // join is exactly that. The render side needs nothing: a feed with no
-    // matching animated entry gets SnappedTileRect{} and is skipped by the
-    // width < 2 guard in tiles_source_render().
-    //
-    // A withheld tile has TWO releases — its set change committing, or its
-    // own clock reaching kSettleNs — and here they fall on the same frame,
-    // which is what makes this the pure overlap case. The two are separated
-    // in the churn test below, where nothing ever commits.
-    {
-        const TileRect one_of_one   = rect(14.2222, 8.0, 1891.5556, 1064.0);
-        const TileRect two_of_two_a = rect(8.0, 273.375, 948.0, 533.25);
-        const TileRect two_of_two_b = rect(964.0, 273.375, 948.0, 533.25);
-
-        TileAnimator a;
-        a.advance(0, {{1, one_of_one}}, on, {});
-        check(a.settled(), "a single settled participant was not reported settled");
-
-        uint64_t t = 0;
-        auto step = [&](const std::vector<DesiredTile> &d) {
-            t += 20 * kMs;
-            return a.advance(t, d, on, {});
-        };
-
-        // Steps land on t = 20, 40, ... 260ms. The join is first proposed on
-        // the t=20ms step, so the last of these is 240ms into the 250ms hold.
-        for (int i = 0; i < 13; ++i) {
-            const auto out =
-                step({{1, two_of_two_a}, {2, two_of_two_b}});
-
-            const AnimatedTile *newcomer = find(out, 2);
-            check(newcomer == nullptr,
-                  "a never-before-seen tile was emitted during the settle "
-                  "window, stamping the new grid's slot over a participant "
-                  "still drawn in the old one");
-
-            // The incumbent is still exactly where it was, in the OLD grid —
-            // which is the whole reason the newcomer cannot be drawn yet.
-            const AnimatedTile *incumbent = find(out, 1);
-            check(incumbent != nullptr, "the incumbent was lost during a pending join");
-            check(incumbent != nullptr &&
-                      std::fabs(incumbent->rect.x - one_of_one.x) < 0.001 &&
-                      std::fabs(incumbent->rect.width - one_of_one.width) < 0.001,
-                  "the incumbent moved before the join had settled");
-
-            check(!a.settled(),
-                  "settled() was true while a join was still pending, where a "
-                  "fresh solve for the new count would already disagree with "
-                  "the wall");
-        }
-
-        // t is 260ms here; the change was proposed at 20ms, so the next step
-        // (280ms, 260ms later) is the frame it commits on. The newcomer must
-        // appear on exactly that frame — withheld, not dropped — and at its
-        // own target, since it has nowhere to travel from.
-        const auto committed = step({{1, two_of_two_a}, {2, two_of_two_b}});
-        const AnimatedTile *arrived = find(committed, 2);
-        check(arrived != nullptr,
-              "the newcomer did not appear on the frame its join committed");
-        check(arrived != nullptr &&
-                  std::fabs(arrived->rect.x - two_of_two_b.x) < 0.001 &&
-                  std::fabs(arrived->rect.y - two_of_two_b.y) < 0.001,
-              "the newcomer did not appear at its own target once the join committed");
-
-        // The incumbent reflows into the two-up grid from where it was. Run
-        // well past the 350ms settle time and the wall is settled again.
-        for (int i = 0; i < 40; ++i)
-            step({{1, two_of_two_a}, {2, two_of_two_b}});
-        check(a.settled(),
-              "settled() was still false long after the join committed and the "
-              "incumbent's spring had arrived");
-    }
-
-    // The real 3-up grid at 1920x1080, snapped: three slots, two on the top
-    // row and one centred below. Used by the repoint tests that follow.
-    const TileRect three_a = rect(18.0, 8.0, 938.0, 528.0);
-    const TileRect three_b = rect(964.0, 8.0, 938.0, 528.0);
-    const TileRect three_c = rect(490.0, 544.0, 938.0, 528.0);
-
-    // Fix wave re-review, part 2: a SAME-COUNT single-slot repoint must cut
-    // instantly, on the same frame, with no gap.
-    //
-    // Withholding every newcomer until its change commits was too broad. A
-    // repoint does not change the tile count, so both sides of it solve to
-    // the identical grid: the incoming participant's slot is disjoint from
-    // every other slot — measured true at all 15 counts from 2 to 16 — so it
-    // cannot cover anyone, and waiting buys nothing, because nothing moves at
-    // commit either. It is pure dead time, and it costs more than a delayed
-    // tile: a withheld feed gets an empty SnappedTileRect, so the width < 2
-    // guard skips it in the glow loop as well as the tile loop and the slot
-    // loses tile, border AND glow, where before this feature it drew a
-    // neutral placeholder immediately.
-    //
-    // So the release is the geometry itself: a newcomer that touches nothing
-    // being drawn goes on screen at once.
-    {
-        TileAnimator a;
-        a.advance(0, {{1, three_a}, {2, three_b}, {3, three_c}}, on, {});
-        check(a.settled(), "test setup: the three-up wall should start settled");
-
-        // The operator repoints the third slot from participant 3 to
-        // participant 4. Same count, same grid, `departed` empty — 3 has not
-        // left the meeting, it is just no longer shown.
-        const auto out =
-            a.advance(100 * kMs, {{1, three_a}, {2, three_b}, {4, three_c}}, on, {});
-
-        const AnimatedTile *incoming = find(out, 4);
-        check(incoming != nullptr,
-              "a same-count repoint left the slot empty: the incoming "
-              "participant was withheld even though its slot covers nobody");
-        check(incoming != nullptr &&
-                  std::fabs(incoming->rect.x - three_c.x) < 0.001 &&
-                  std::fabs(incoming->rect.y - three_c.y) < 0.001 &&
-                  std::fabs(incoming->rect.width - three_c.width) < 0.001,
-              "the repointed-in participant did not appear at the slot's own rect");
-        check(incoming != nullptr && incoming->at_rest,
-              "the repointed-in participant was interpolating instead of "
-              "cutting straight in");
-
-        // Invariant 2 is untouched: the outgoing participant is cut, not
-        // held and not faded.
-        check(find(out, 3) == nullptr,
-              "invariant 2: the repointed-away participant was still on screen");
-
-        // And it stays: the slot must not blink out again on the next frame,
-        // nor duplicate when the repointed set commits at 350ms.
-        const auto next =
-            a.advance(116 * kMs, {{1, three_a}, {2, three_b}, {4, three_c}}, on, {});
-        check(find(next, 4) != nullptr,
-              "the repointed-in participant vanished again the frame after it "
-              "appeared");
-        const auto after_commit =
-            a.advance(400 * kMs, {{1, three_a}, {2, three_b}, {4, three_c}}, on, {});
-        int count4 = 0;
-        for (const auto &t : after_commit) if (t.participant_id == 4) ++count4;
-        check(count4 == 1,
-              "the repointed-in participant was emitted twice once its own set "
-              "change committed");
-    }
-
-    // The same test's mirror image, and the case that makes the disjointness
-    // test a test rather than a blanket permission: a same-count change that
-    // also REORDERS. resolve_tile_assignments() produces {1,2,3} -> {1,3,4}
-    // both when participant 2's camera goes off and when 2 leaves as 4 joins.
-    // Participant 3 moves from the third slot to the second, but a pending
-    // change means it has not moved yet — it is still drawn in the third
-    // slot, which is exactly where newcomer 4 is bound. The counts match, so
-    // a "same count means safe" shortcut would let 4 straight through at 100%
-    // overlap on 3's face. Only the geometry catches this.
-    {
-        TileAnimator a;
-        a.advance(0, {{1, three_a}, {2, three_b}, {3, three_c}}, on, {});
-
-        const auto out =
-            a.advance(100 * kMs, {{1, three_a}, {3, three_b}, {4, three_c}}, on, {});
-
-        const AnimatedTile *held_incumbent = find(out, 3);
-        check(held_incumbent != nullptr &&
-                  std::fabs(held_incumbent->rect.x - three_c.x) < 0.001,
-              "test setup: participant 3 should still be drawn in the third "
-              "slot while the change is pending");
-        check(find(out, 4) == nullptr,
-              "a newcomer was let onto the wall at 100% overlap on a participant "
-              "who had not moved out of that slot yet, because the tile count "
-              "happened not to change");
-    }
-
-    // Fix round 2, CRITICAL: two LIVE participants must never be emitted at
-    // overlapping rects during a settle hold.
-    //
-    // Two camera toggles inside 250ms are all it takes. Four people, 1/2/3 on
-    // camera and 4 off, steady 3-up wall. Participant 3's camera goes off and
-    // 4's comes on in one roster update: same count, so 4's slot is disjoint
-    // from every other and it is released instantly into the slot 3 just
-    // vacated. One frame later 3's camera comes back. 3 is committed, so it
-    // is redrawn — frozen at its old target, because a pending change must
-    // not retarget it — which is the very slot 4 was released into. 4's
-    // release decision was made a frame earlier, when 3 was retained but
-    // invisible and so in neither the live set nor the emitted one.
-    //
-    // Both are live, both are in `feeds`, both are drawn, at the identical
-    // rect: 495264 px^2, 100% overlap, for the whole window. Feed order
-    // decides whose face survives, and the incoming grid's fourth slot sits
-    // blank meanwhile. Measured at each commit on this exact sequence: 49%
-    // before any withholding existed, 0% with the unconditional withhold,
-    // 100% once the disjointness release was added — worse than either.
-    //
-    // The fix is that an early release makes a tile a GUEST rather than a
-    // resident: it is re-tested every frame against where it would actually
-    // be drawn, and yields the moment the committed layout wants that space
-    // back. Letting it track the current proposal instead was rejected on
-    // measurement — that converges to a SUSTAINED 50% overlap (246048 px^2),
-    // because it puts the guest in the new grid while every committed tile is
-    // still in the old one, which is the defect class this all started with.
-    {
-        const TileRect four_a = rect(18.0, 8.0, 938.0, 528.0);
-        const TileRect four_b = rect(964.0, 8.0, 938.0, 528.0);
-        const TileRect four_c = rect(18.0, 544.0, 938.0, 528.0);
-        const TileRect four_d = rect(964.0, 544.0, 938.0, 528.0);
-
-        TileAnimator a;
-        a.advance(0, {{1, three_a}, {2, three_b}, {3, three_c}}, on, {});
-        check(a.settled(), "test setup: the three-up wall should start settled");
-
-        // 3's camera off and 4's on, in one update: layout [1,2,4].
-        a.advance(1016 * kMs, {{1, three_a}, {2, three_b}, {4, three_c}}, on, {});
-
-        // 3's camera back on, 16ms later: layout [1,2,4,3]. Everything below
-        // proposes the 4-up grid, which stays pending for 250ms.
-        const std::vector<DesiredTile> four_up{
-            {1, four_a}, {2, four_b}, {4, four_c}, {3, four_d}};
-
-        // The window below runs from the frame 3 returns to the frame the
-        // 4-up layout commits, which is also the frame the guest's own clock
-        // expires. Both clocks were started by the same event here, so they
-        // fire together and the guest goes straight from yielding to
-        // committed. That is NOT guaranteed in general — see the KNOWN GAP
-        // block that follows, which drives the two apart deliberately.
-        double worst_overlap = 0.0;
-        bool saw_three = false;
-        for (uint64_t ms = 1032; ms < 1288; ms += 16) {
-            const auto out = a.advance(ms * kMs, four_up, on, {});
-            if (find(out, 3) != nullptr) saw_three = true;
-            for (size_t i = 0; i < out.size(); ++i)
-                for (size_t j = i + 1; j < out.size(); ++j)
-                    worst_overlap =
-                        std::fmax(worst_overlap, overlap_area(out[i].rect, out[j].rect));
-        }
-
-        check(saw_three,
-              "test setup: participant 3 should be back on the wall throughout "
-              "the hold, otherwise there is nothing for a guest to cover");
-        check(worst_overlap == 0.0,
-              "two live tiles were emitted at overlapping rects while the guest "
-              "was still yielding — a returning participant's face and a "
-              "newcomer's stacked in one slot");
-
-        // And the guest is not simply lost: once the 4-up layout commits it
-        // takes its place, and the wall reflows to four disjoint slots.
-        const auto committed = a.advance(1288 * kMs, four_up, on, {});
-        check(find(committed, 4) != nullptr,
-              "the guest never arrived once the layout that includes it committed");
-
-        for (uint64_t ms = 1304; ms <= 2200; ms += 16)
-            a.advance(ms * kMs, four_up, on, {});
-        const auto settled_out = a.advance(2216 * kMs, four_up, on, {});
-        check(settled_out.size() == 4,
-              "the settled four-up wall did not carry all four participants");
-        double settled_overlap = 0.0;
-        for (size_t i = 0; i < settled_out.size(); ++i)
-            for (size_t j = i + 1; j < settled_out.size(); ++j)
-                settled_overlap = std::fmax(
-                    settled_overlap, overlap_area(settled_out[i].rect, settled_out[j].rect));
-        check(settled_overlap == 0.0,
-              "the settled four-up wall still had overlapping tiles");
-    }
-
-    // Fix round 3, CRITICAL: a guest must yield to another GUEST, not only to
-    // a committed tile.
-    //
-    // The first version of the yield test dropped every provisional tile from
-    // the set a guest is measured against, reasoning that "two guests are
-    // slots in the same grid and are disjoint by construction". False: guests
-    // released at different moments are seeded against different PROPOSALS,
-    // so different grids, so nothing makes them disjoint.
-    //
-    // The two people who turn their cameras on first, within one settle
-    // window of each other, are enough — no churn, no repoint, no departure.
-    // The wall is empty; participant 1 arrives and is released into the 1-up
-    // layout, because an empty wall has nothing to cover. A frame later
-    // participant 2 arrives, and the layout now proposed is the 2-up one, so
-    // 2's slot is measured against a grid 1 is not in. Drawn, it sits
-    // entirely inside participant 1: 500080 px^2, 99% of its own area, and
-    // neither tile is moving, so it stays exactly like that for the window.
-    // Zero on every earlier commit including the pre-branch baseline.
+    // The rects are the real 1920x1080 geometry — solve_tile_grid() at the
+    // shipped defaults (16:9, gutter and margin = canvas_height/135 = 8),
+    // snapped — for one tile and for two, so the overlap this measures is the
+    // one a real wall produces.
     {
         const TileRect one_of_one   = rect(14.0, 8.0, 1890.0, 1064.0);
         const TileRect two_of_two_a = rect(8.0, 274.0, 948.0, 532.0);
         const TileRect two_of_two_b = rect(964.0, 274.0, 948.0, 532.0);
 
         TileAnimator a;
-        // The wall genuinely settles on zero first — nobody has video on yet.
-        // This is what makes participant 1 a GUEST when it arrives rather
-        // than a committed tile: a first-ever frame is adopted outright, and
-        // then the defect cannot appear, because the tile the second camera
-        // must not cover is committed and was never dropped from the set a
-        // guest is measured against.
-        a.advance(0, {}, on, {});
+        a.advance(0, {{1, one_of_one}}, on, {});
+        const uint64_t t0 = settle_in(a, {{1, one_of_one}}, on, 0);
+        check(a.settled(), "a single arrived participant was not reported settled");
 
-        a.advance(1280 * kMs, {{1, one_of_one}}, on, {});   // first camera on
+        const auto joined = a.advance((t0 + 16) * kMs,
+                                      {{1, two_of_two_a}, {2, two_of_two_b}}, on, {});
 
-        double worst_overlap = 0.0;
-        bool saw_one = false;
-        for (uint64_t ms = 1296; ms < 1536; ms += 16) {     // second camera on
+        const AnimatedTile *newcomer = find(joined, 2);
+        check(newcomer != nullptr,
+              "the newcomer was not drawn on the frame it appeared — a join has "
+              "no departure to wait for");
+        check(newcomer != nullptr &&
+                  std::fabs(newcomer->rect.x - two_of_two_b.x) < 0.001,
+              "the newcomer did not appear at its own target");
+        check(newcomer != nullptr && newcomer->alpha < 0.001,
+              "the newcomer appeared at full opacity — the entry fade is what "
+              "makes the reflow transient invisible");
+
+        const AnimatedTile *incumbent = find(joined, 1);
+        check(incumbent != nullptr && !incumbent->at_rest,
+              "the incumbent did not start moving on the frame the newcomer "
+              "appeared");
+        check(incumbent != nullptr && incumbent->rect.width < one_of_one.width &&
+                  incumbent->rect.width > two_of_two_a.width,
+              "the incumbent did not begin shrinking toward the two-up grid");
+
+        // This is the transient the entry fade exists for: the newcomer is at
+        // its slot in the NEW grid while the incumbent is still very nearly
+        // filling the canvas, so it is drawn entirely inside it. Both are
+        // "live"; what makes it invisible is that the newcomer's alpha is ~0
+        // exactly here. Pinned so a regression in the fade cannot pass unseen.
+        const double peak = worst_overlap(joined);
+        check(peak > 400000.0,
+              "test setup: the join should produce a large first-frame overlap, "
+              "otherwise this proves nothing about the fade");
+        check(newcomer != nullptr && newcomer->alpha < 0.001,
+              "the wall stacked two live tiles at a large overlap with the "
+              "newcomer already visible");
+
+        // It decays as the incumbent reflows, and the two never sit stacked
+        // while both are at rest.
+        double worst_at_rest = 0.0;
+        uint64_t ms = t0 + 16;
+        for (int i = 0; i < 60; ++i) {
+            ms += 16;
             const auto out =
                 a.advance(ms * kMs, {{1, two_of_two_a}, {2, two_of_two_b}}, on, {});
-            if (find(out, 1) != nullptr) saw_one = true;
-            for (size_t i = 0; i < out.size(); ++i)
-                for (size_t j = i + 1; j < out.size(); ++j)
-                    worst_overlap =
-                        std::fmax(worst_overlap, overlap_area(out[i].rect, out[j].rect));
+            worst_at_rest = std::fmax(worst_at_rest, worst_at_rest_overlap(out));
         }
-
-        check(saw_one,
-              "test setup: participant 1 should stay on the wall throughout, "
-              "otherwise there is nothing for participant 2 to cover");
-        check(worst_overlap == 0.0,
-              "the second camera to come on was drawn inside the first: a guest "
-              "was measured against a set that excluded tiles already on the "
-              "wall");
+        check(worst_at_rest == 0.0,
+              "two tiles that were both at rest overlapped after a join");
+        check(a.settled(),
+              "the wall was not settled once the join had reflowed and faded in");
     }
 
-    // KNOWN GAP, recorded rather than fixed — the repo owner is deciding on
-    // it. The yield above is NOT a guarantee that two live tiles never
-    // overlap during a hold. Promotion-on-clock-expiry re-creates the overlap
-    // whenever a guest's own clock and the whole-set settle clock do not
-    // expire on the same frame, because only the latter is re-stamped by
-    // roster churn. One unrelated blip is enough to drive them apart.
+    // The real 3-up and 4-up grids at 1920x1080, snapped. Used by the repro
+    // tests below, so what they measure is what a real wall produces.
+    const TileRect three_a = rect(18.0, 8.0, 938.0, 528.0);
+    const TileRect three_b = rect(964.0, 8.0, 938.0, 528.0);
+    const TileRect three_c = rect(490.0, 544.0, 938.0, 528.0);
+    const TileRect four_a  = rect(18.0, 8.0, 938.0, 528.0);
+    const TileRect four_b  = rect(964.0, 8.0, 938.0, 528.0);
+    const TileRect four_c  = rect(18.0, 544.0, 938.0, 528.0);
+    const TileRect four_d  = rect(964.0, 544.0, 938.0, 528.0);
+
+    // Fix round 4, rule 3: a REPOINT is instant. The outgoing participant is
+    // absent from the layout but still in the meeting, so it is not a
+    // departure and holds nothing — the incoming participant is drawn on the
+    // frame the operator repoints the slot, exactly as it was before this
+    // feature existed.
     //
-    // This is inherited from the round-1 bound ("a brief overlap is a far
-    // better failure than a participant who joined and never appeared"), not
-    // introduced by the guest rule: the promotion is exactly what stops a
-    // yielding guest from being suppressed forever. But the two requirements
-    // genuinely conflict, and the honest statement of the property is "a
-    // guest yields while it would cover, until its clock runs out", not "two
-    // live tiles never overlap".
-    //
-    // Measured under sustained churn: 284 consecutive frames — 4.5 seconds —
-    // at 495264 px^2. This test pins the shape so nobody reads the block
-    // above as a stronger guarantee than it is.
+    // This is the amendment that matters most in practice. Settling every set
+    // change, rather than only departures, blanked the repointed slot for
+    // kSettleNs: the withheld feed got an empty SnappedTileRect and the
+    // width < 2 guard skipped it in the glow loop as well as the tile loop, so
+    // the slot lost its tile, its border AND its glow for a quarter second,
+    // where before it drew a neutral placeholder immediately.
     {
-        const TileRect four_a = rect(18.0, 8.0, 938.0, 528.0);
-        const TileRect four_b = rect(964.0, 8.0, 938.0, 528.0);
-        const TileRect four_c = rect(18.0, 544.0, 938.0, 528.0);
-        const TileRect four_d = rect(964.0, 544.0, 938.0, 528.0);
+        TileAnimator a;
+        const std::vector<DesiredTile> before{{1, three_a}, {2, three_b}, {3, three_c}};
+        a.advance(0, before, on, {});
+        const uint64_t t0 = settle_in(a, before, on, 0);
+        check(a.settled(), "test setup: the three-up wall should be settled");
+
+        // Slot three is repointed from participant 3 to participant 4.
+        // `departed` is empty — 3 has not left the meeting.
+        const auto out = a.advance((t0 + 16) * kMs,
+                                   {{1, three_a}, {2, three_b}, {4, three_c}}, on, {});
+
+        const AnimatedTile *incoming = find(out, 4);
+        check(incoming != nullptr,
+              "a repoint left the slot empty: the incoming participant was held "
+              "as though a reassignment were a departure");
+        check(incoming != nullptr && std::fabs(incoming->rect.x - three_c.x) < 0.001 &&
+                  std::fabs(incoming->rect.width - three_c.width) < 0.001,
+              "the repointed-in participant did not appear at the slot's own rect");
+        check(incoming != nullptr && incoming->at_rest,
+              "the repointed-in participant was interpolating instead of cutting in");
+        check(find(out, 3) == nullptr,
+              "invariant 2: the repointed-away participant was still on screen");
+        check(worst_overlap(out) == 0.0,
+              "a repoint produced overlapping tiles, where the grid is identical "
+              "on both sides of the change");
+
+        // The neighbours do not move: same count, same grid.
+        check(find(out, 1) != nullptr && find(out, 1)->at_rest &&
+                  find(out, 2) != nullptr && find(out, 2)->at_rest,
+              "a repoint moved the tiles that did not change");
+    }
+
+    // Fix round 4: a departure hold is BOUNDED under sustained unrelated
+    // churn. This is the scenario that broke the first attempt at bounding —
+    // a whole-set settle timer re-stamped on every set change, so one
+    // participant flapping in and out stalled a genuine departure forever.
+    // The timer is per tile and stamped once, at that tile's own
+    // disappearance, so nothing else can extend it; and the hold condition is
+    // evaluated from the tiles absent on THIS frame, so on every frame the
+    // flapper is present it contributes nothing at all.
+    {
+        TileAnimator a;
+        const std::vector<DesiredTile> start{{1, three_a}, {2, three_b}, {3, three_c}};
+        a.advance(0, start, on, {});
+        const uint64_t t0 = settle_in(a, start, on, 0);
+
+        constexpr uint64_t kSettleMs = 250;
+        constexpr uint64_t kFrameMs  = 16;
+        const uint64_t departed_at = t0 + kFrameMs;
+
+        uint64_t first_reflow_ms = 0;
+        uint64_t last_seen_2_ms  = 0;
+        double   worst_at_rest   = 0.0;
+        double   worst_in_hold   = 0.0;
+
+        for (uint64_t ms = departed_at; ms <= departed_at + 3000; ms += kFrameMs) {
+            // Participant 2 has left the meeting. Participant 9 flaps in and
+            // out on every frame — present in the layout, never in `departed`,
+            // so it is churn and not a departure.
+            std::vector<DesiredTile> d{{1, three_a}, {3, three_b}};
+            if ((ms / kFrameMs) % 2) d.push_back({9, three_c});
+
+            const auto out = a.advance(ms * kMs, d, on, {2});
+            const AnimatedTile *t3 = find(out, 3);
+            if (first_reflow_ms == 0 && t3 != nullptr && !t3->at_rest)
+                first_reflow_ms = ms;
+            if (find(out, 2) != nullptr) last_seen_2_ms = ms;
+            worst_at_rest = std::fmax(worst_at_rest, worst_at_rest_overlap(out));
+            if (first_reflow_ms == 0)
+                worst_in_hold = std::fmax(worst_in_hold, worst_overlap(out));
+        }
+
+        check(first_reflow_ms != 0,
+              "the wall never reflowed after a genuine departure — unrelated "
+              "churn stalled the hold indefinitely");
+        check(first_reflow_ms != 0 &&
+                  first_reflow_ms <= departed_at + kSettleMs + 2 * kFrameMs,
+              "the departure hold ran well past kSettleNs under unrelated churn "
+              "— its timer is being re-stamped by something other than the "
+              "departure itself");
+        check(last_seen_2_ms != 0 &&
+                  last_seen_2_ms <= departed_at + kSettleMs + 350 + 2 * kFrameMs,
+              "the departed participant was still on air past kSettleNs plus its "
+              "fade duration");
+        check(worst_in_hold == 0.0,
+              "tiles overlapped during the departure hold, where every emitted "
+              "tile comes from the one old layout");
+        check(worst_at_rest == 0.0,
+              "two tiles that were both at rest overlapped during a departure "
+              "and the reflow that followed");
+    }
+
+    // Fix round 4: the two-camera-toggle repro that produced 100% frozen
+    // overlap under the settle-everything design. Participant 3's camera goes
+    // off and 4's comes on, then 3's comes back one frame later. Neither is a
+    // departure — nobody left the meeting — so both changes commit at once and
+    // the wall simply reflows. The overlap that remains is a REFLOW transient:
+    // 3 and 4 momentarily share a slot while both are moving out of it, and
+    // 4 is still nearly transparent, which is what the entry fade is for.
+    {
+        TileAnimator a;
+        const std::vector<DesiredTile> start{{1, three_a}, {2, three_b}, {3, three_c}};
+        a.advance(0, start, on, {});
+        const uint64_t t0 = settle_in(a, start, on, 0);
+
+        // 3's camera off, 4's on.
+        a.advance((t0 + 16) * kMs, {{1, three_a}, {2, three_b}, {4, three_c}}, on, {});
+        // 3's camera back on: now four tiles.
         const std::vector<DesiredTile> four_up{
             {1, four_a}, {2, four_b}, {4, four_c}, {3, four_d}};
 
-        TileAnimator a;
-        a.advance(0, {{1, three_a}, {2, three_b}, {3, three_c}}, on, {});
-        a.advance(1016 * kMs, {{1, three_a}, {2, three_b}, {4, three_c}}, on, {});
-
-        double overlap_after_promotion = 0.0;
-        int frames_overlapping = 0;
-        for (uint64_t ms = 1032; ms <= 1500; ms += 16) {
-            // One unrelated blip at 1128: participant 2 drops for a frame.
-            // That re-stamps the whole-set settle clock, pushing commit out,
-            // but leaves the guest's own clock — started at 1032, when it
-            // first yielded — untouched. The guest is therefore promoted
-            // before the layout that would have made room for it commits.
-            std::vector<DesiredTile> d = four_up;
-            if (ms == 1128) d.erase(d.begin() + 1);
-
-            const auto out = a.advance(ms * kMs, d, on, {});
-            double frame_worst = 0.0;
-            for (size_t i = 0; i < out.size(); ++i)
-                for (size_t j = i + 1; j < out.size(); ++j)
-                    frame_worst =
-                        std::fmax(frame_worst, overlap_area(out[i].rect, out[j].rect));
-            if (frame_worst > 0.0) ++frames_overlapping;
-            overlap_after_promotion = std::fmax(overlap_after_promotion, frame_worst);
-        }
-
-        check(overlap_after_promotion > 0.0 && frames_overlapping > 0,
-              "test setup: this block exists to document that promotion "
-              "re-creates the overlap — if it no longer does, the gap has been "
-              "closed and this block should become a real assertion");
-        // It does terminate: the layout commits and reflows the guest away.
-        check(frames_overlapping < 20,
-              "the post-promotion overlap did not end — the commit is supposed "
-              "to reflow the guest out of the space it took");
-    }
-
-    // Fix wave re-review, part 1: a withheld newcomer's suppression must be
-    // BOUNDED.
-    //
-    // Withholding until the set change commits assumed the change eventually
-    // commits. The whole-set settle timer re-stamps whenever the proposed set
-    // differs from the last one seen, so one unrelated participant flapping
-    // in and out resets it on every call and nothing ever commits — the same
-    // fault class held_since_ns exists for on the departure side, where the
-    // lifecycle loop's comment says a flapping participant "would otherwise
-    // hold a departed participant on screen indefinitely". Measured before
-    // the newcomer had a clock of its own: continuously present in `desired`,
-    // with one participant flapping every 100ms, emitted 0 times in 30
-    // seconds of frames. A participant who joined and never appeared.
-    //
-    // Participant 4's target overlaps the incumbent's held rect by 99% here,
-    // so the disjointness release cannot fire and only the clock can end it.
-    {
-        const TileRect one_of_one   = rect(14.2222, 8.0, 1891.5556, 1064.0);
-        const TileRect two_of_two_a = rect(8.0, 273.375, 948.0, 533.25);
-        const TileRect two_of_two_b = rect(964.0, 273.375, 948.0, 533.25);
-
-        TileAnimator a;
-        a.advance(0, {{1, one_of_one}}, on, {});
-
-        constexpr uint64_t kJoinedAtMs = 100;
-        constexpr uint64_t kFrameMs    = 16;
-        constexpr uint64_t kSettleMs   = 250;   // kSettleNs, in ms
-
-        uint64_t first_seen_ms = 0;
-        uint64_t frames_after_first_seen = 0;
-        uint64_t frames_missing_after_first_seen = 0;
-        for (uint64_t ms = kJoinedAtMs; ms <= 30000; ms += kFrameMs) {
-            // 4 is continuously proposed. 9 flaps in and out, so the proposed
-            // set differs from the last one on every single call and the
-            // whole-set settle timer never expires.
-            std::vector<DesiredTile> d{{1, two_of_two_a}, {4, two_of_two_b}};
-            if ((ms / kFrameMs) % 2) d.push_back({9, rect(1500, 900, 100, 100)});
-
-            const auto out = a.advance(ms * kMs, d, on, {});
-            const bool seen = find(out, 4) != nullptr;
-            if (first_seen_ms == 0 && seen) first_seen_ms = ms;
-            else if (first_seen_ms != 0) {
-                ++frames_after_first_seen;
-                if (!seen) ++frames_missing_after_first_seen;
+        double peak = 0.0;
+        double alpha_at_peak = 1.0;
+        double worst_at_rest = 0.0;
+        uint64_t ms = t0 + 16;
+        for (int i = 0; i < 60; ++i) {
+            ms += 16;
+            const auto out = a.advance(ms * kMs, four_up, on, {});
+            const double w = worst_overlap(out);
+            if (w > peak) {
+                peak = w;
+                const AnimatedTile *n = find(out, 4);
+                alpha_at_peak = n != nullptr ? n->alpha : 1.0;
             }
+            worst_at_rest = std::fmax(worst_at_rest, worst_at_rest_overlap(out));
         }
-
-        check(first_seen_ms != 0,
-              "a participant who joined was never drawn at all in 30 seconds of "
-              "roster churn — the withholding has no ceiling of its own");
-        check(first_seen_ms != 0 &&
-                  first_seen_ms <= kJoinedAtMs + kSettleMs + kFrameMs,
-              "a withheld newcomer was released well past kSettleNs under "
-              "unrelated churn — its clock is being re-stamped by the "
-              "whole-set settle timer instead of running on its own");
-
-        // Once its clock has released it, the tile stops being a guest for
-        // good and never yields again. Without that promotion the overlap
-        // test would withhold it on the very next frame — 4's rect covers
-        // participant 1's held rect by 99% here, which is why the clock had
-        // to release it in the first place — and it would strobe one frame
-        // visible for every kSettleNs invisible, for as long as the churn
-        // lasted. That is a worse artefact than the overlap the release
-        // deliberately accepts.
-        check(frames_after_first_seen > 1000,
-              "test setup: the run should continue well past the first sighting");
-        check(frames_missing_after_first_seen == 0,
-              "a newcomer released by its own clock was withheld again "
-              "afterwards — it strobes on and off instead of staying on the wall");
+        check(worst_at_rest == 0.0,
+              "two tiles that were both at rest overlapped in the two-camera-"
+              "toggle sequence");
+        check(alpha_at_peak < 0.1,
+              "the newcomer was substantially visible at the moment of peak "
+              "overlap — the entry fade is what makes this transient invisible");
+        check(a.settled(),
+              "the wall never settled after the two-camera-toggle sequence");
     }
 
-    // settled() reflects the disabled bypass unconditionally: advance()
-    // clears m_tiles and m_has_pending on every disabled call (see its own
-    // header comment), so settled() must be true right after, regardless of
-    // how much in-flight state existed the moment before disabling.
+    // Fix round 4: the empty-wall two-camera repro — the first two people to
+    // turn their cameras on, one frame apart. Both are joins, so both commit
+    // at once. Participant 2 lands inside participant 1's one-up rect while 1
+    // is only starting to shrink, which is the largest transient this design
+    // produces; 2's alpha is ~0 exactly there.
+    {
+        const TileRect one_of_one   = rect(14.0, 8.0, 1890.0, 1064.0);
+        const TileRect two_of_two_a = rect(8.0, 274.0, 948.0, 532.0);
+        const TileRect two_of_two_b = rect(964.0, 274.0, 948.0, 532.0);
+
+        TileAnimator a;
+        a.advance(0, {}, on, {});
+        a.advance(1280 * kMs, {{1, one_of_one}}, on, {});   // first camera on
+
+        double peak = 0.0;
+        double alpha_at_peak = 1.0;
+        double worst_at_rest = 0.0;
+        for (uint64_t ms = 1296; ms <= 1296 + 960; ms += 16) {
+            const auto out =
+                a.advance(ms * kMs, {{1, two_of_two_a}, {2, two_of_two_b}}, on, {});
+            const double w = worst_overlap(out);
+            if (w > peak) {
+                peak = w;
+                const AnimatedTile *n = find(out, 2);
+                alpha_at_peak = n != nullptr ? n->alpha : 1.0;
+            }
+            worst_at_rest = std::fmax(worst_at_rest, worst_at_rest_overlap(out));
+        }
+        check(peak > 400000.0,
+              "test setup: the second camera should land inside the first's "
+              "one-up rect, otherwise this proves nothing about the fade");
+        check(alpha_at_peak < 0.1,
+              "the second camera was substantially visible at the moment it was "
+              "drawn inside the first");
+        check(worst_at_rest == 0.0,
+              "two tiles that were both at rest overlapped on the empty-wall "
+              "two-camera sequence");
+        check(a.settled(), "the wall never settled after both cameras came on");
+    }
+
+    // settled() reflects the disabled bypass unconditionally: advance() clears
+    // m_tiles on every disabled call (see its own header comment), so
+    // settled() must be true right after — no held tile, no exit, no entry
+    // fade — regardless of how much in-flight state existed the moment before
+    // disabling. This is what makes "disabled" simply a case of "settled" for
+    // the render path, and so what keeps the toggle-off output byte-identical
+    // to the pre-animation one.
     {
         TileAnimator a;
         a.advance(0, {{1, rect(0, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});

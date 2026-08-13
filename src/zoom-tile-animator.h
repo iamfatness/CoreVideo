@@ -129,6 +129,19 @@ public:
         // hasn't committed to yet. (Invariant 2 is unaffected: a reassigned
         // participant is by definition never back in `desired`.)
         //
+        // Absence from `desired` alone must NOT erase a tile. A one-frame
+        // blip and the pending phase of a genuine departure or
+        // reassignment are indistinguishable at the moment they start —
+        // all three are retained identically, motion untouched, until the
+        // wall's committed set actually drops the participant or this
+        // tile's own hold clock (below) runs out. Gating erasure on
+        // `desired` presence alone, rather than `m_committed_ids`, was a
+        // regression caught in review: it erased and rebuilt the Motion
+        // from scratch on every single dropped frame, snapping a mid-flight
+        // tile to its target the instant `desired` next included it again —
+        // the exact pop the settle window exists to prevent, even though it
+        // never puts a wrong face on air.
+        //
         // The hold — absent from `desired`, genuinely departed, but not yet
         // exiting because the whole-set settle window hasn't committed the
         // removal — has its own clock, independent of that settle timer.
@@ -139,9 +152,10 @@ public:
         // class `zoom-tile-slot.h` exists to prevent, just delayed rather
         // than avoided. `held_since_ns` is stamped the first time a tile is
         // observed absent from `desired`; once `kSettleNs` has elapsed by
-        // that clock, the exit begins regardless of whether the settle
-        // window has committed, bounding total on-air time for a departed
-        // participant at kSettleNs + duration_seconds by construction,
+        // that clock, the tile stops being retained regardless of whether
+        // the settle window has committed: a genuine departure begins its
+        // exit, and a reassignment stalled by unrelated churn is cut. Both
+        // bound total time spent absent-but-unresolved at kSettleNs,
         // independent of what the rest of the roster does.
         for (auto it = m_tiles.begin(); it != m_tiles.end();) {
             const bool in_desired =
@@ -161,13 +175,6 @@ public:
                 it->second.held_since_ns = now_ns;
             }
 
-            const bool left_roster =
-                std::find(departed.begin(), departed.end(), it->first) != departed.end();
-            if (!left_roster) {
-                it = m_tiles.erase(it);          // (2) reassignment: instant, hold or not
-                continue;
-            }
-
             if (!it->second.exiting) {
                 const bool committed =
                     std::find(m_committed_ids.begin(), m_committed_ids.end(),
@@ -175,7 +182,20 @@ public:
                 const bool hold_expired =
                     (now_ns - it->second.held_since_ns) >= kSettleNs;
                 if (committed && !hold_expired) {
-                    ++it;   // still within bounds: hold, unfaded (emitted below)
+                    // Indistinguishable, at this point, from a one-frame
+                    // blip that is about to return: retain untouched.
+                    // Whether this turns out to be a blip, a pending
+                    // departure, or a pending reassignment is resolved
+                    // below, once the wall's committed set actually drops
+                    // the participant or this tile's own hold clock runs
+                    // out — never merely from being absent for one frame.
+                    ++it;
+                    continue;
+                }
+                const bool left_roster =
+                    std::find(departed.begin(), departed.end(), it->first) != departed.end();
+                if (!left_roster) {
+                    it = m_tiles.erase(it);      // (2) reassignment: instant, now that it is genuinely resolved
                     continue;
                 }
                 // Either the whole-set settle window committed the
@@ -233,12 +253,20 @@ public:
                 std::find(incoming.begin(), incoming.end(), entry.first) != incoming.end();
             if (in_desired) continue;
 
-            // Reachable only for a tile still inside its own hold window
-            // (see the lifecycle loop above): by construction anything not
-            // genuinely departed was already erased there, and anything
-            // whose hold expired was already promoted to exiting there. No
-            // need to re-check `departed` here — this loop cannot reach a
-            // reassigned participant.
+            // Retained here (see the lifecycle loop above) but not yet
+            // exiting: could be a one-frame blip, a pending reassignment,
+            // or a pending departure — all three are retained identically
+            // for motion-continuity purposes, and only `departed` tells
+            // them apart for display. A blip or a pending reassignment
+            // must stay invisible for the whole window — showing a
+            // reassignment on screen, even briefly, is itself an
+            // invariant-2 violation, just delayed rather than avoided; only
+            // a genuine, still-pending departure is shown here, frozen,
+            // until its exit begins.
+            const bool left_roster =
+                std::find(departed.begin(), departed.end(), entry.first) != departed.end();
+            if (!left_roster) continue;
+
             TileRect r;
             r.x = entry.second.x.position; r.y = entry.second.y.position;
             r.width = entry.second.w.position; r.height = entry.second.h.position;

@@ -345,28 +345,37 @@ int main()
               "invariant 3: the repointed participant was still fading after its own settle window committed");
     }
 
-    // Fix round 2, NEW Important 1: the hold must have its own ceiling,
-    // independent of the whole-set settle timer. The settle timer resets
-    // whenever the incoming set changes from what was last proposed, so a
-    // single unrelated participant flapping in and out of `desired` keeps
-    // resetting it forever — before this fix, a genuinely departed
-    // participant held via that timer would then never be released.
-    // Mirrors the review's own flapping probe: participant 1 stays,
-    // participant 9 flaps in and out every 200ms, participant 2 left the
-    // roster at t=300ms and must be gone well before the run ends 60
-    // seconds later. The continuous-time ceiling is kSettleNs (250ms) +
-    // duration (350ms) = 600ms after departure; this samples on a 200ms
-    // grid (like the probe), which can add up to roughly two call
-    // intervals of detection latency, so the assertion leaves generous
-    // margin (1500ms) while still being nowhere near "indefinite" — the
-    // review measured the unfixed code still holding the tile 59800ms
-    // after departure, and it would have continued forever.
+    // Fix round 2, NEW Important 1 (tightened in round 3, Minor 1): the
+    // hold must have its own ceiling, independent of the whole-set settle
+    // timer. The settle timer resets whenever the incoming set changes
+    // from what was last proposed, so a single unrelated participant
+    // flapping in and out of `desired` keeps resetting it forever — before
+    // this fix, a genuinely departed participant held via that timer would
+    // then never be released. Mirrors the review's own flapping probe:
+    // participant 1 stays, participant 9 flaps in and out every 200ms,
+    // participant 2 left the roster at t=300ms and must be gone well
+    // before the run ends 60 seconds later.
+    //
+    // Round 2's version of this test only asserted "not indefinite" (a
+    // 1500ms allowance against a 600ms continuous-time ceiling), which a
+    // ceiling up to 4x too large — kSettleNs*4 instead of kSettleNs — still
+    // passed: a departed participant held at full opacity for a full
+    // second is a real regression, not noise. Tightened to two separate,
+    // narrow bounds: the last frame seen at *full opacity* must be within
+    // kSettleNs of departure (proving the hold itself is bounded, not just
+    // the eventual disappearance), and the last frame seen *at all* must be
+    // within kSettleNs + duration. Both add one grid interval (200ms, this
+    // test's own sampling period) of slack for detection latency on a
+    // discrete-call schedule, not to hide a looser ceiling.
     {
         TileAnimator a;
         a.advance(0, {{1, rect(0, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});
 
         constexpr uint64_t kDepartedAtMs = 300;
-        constexpr uint64_t kGenerousCeilingMs = 1500;
+        constexpr uint64_t kGridMs        = 200;  // this test's sampling interval
+        constexpr uint64_t kSettleMs      = 250;  // kSettleNs, in ms
+        constexpr uint64_t kDurationMs    = 350;  // on.duration_seconds, in ms
+        uint64_t last_full_opacity_ms = 0;
         uint64_t last_seen_ms = 0;
 
         uint64_t t = kDepartedAtMs * kMs;
@@ -374,13 +383,20 @@ int main()
             std::vector<DesiredTile> d{{1, rect(0, 0, 100, 100)}};
             if (i % 2) d.push_back({9, rect(100, 0, 100, 100)});  // 9 flaps in and out
             const auto out = a.advance(t, d, on, {2});
-            if (find(out, 2) != nullptr) last_seen_ms = t / kMs;
-            t += 200 * kMs;
+            const AnimatedTile *tile2 = find(out, 2);
+            if (tile2 != nullptr) {
+                last_seen_ms = t / kMs;
+                if (tile2->alpha == 1.0) last_full_opacity_ms = t / kMs;
+            }
+            t += kGridMs * kMs;
         }
 
-        check(last_seen_ms <= kDepartedAtMs + kGenerousCeilingMs,
-              "invariant 1/4: an unrelated flapping participant held a departed tile on screen "
-              "far past its kSettleNs + duration ceiling — the hold is not time-boxed");
+        check(last_full_opacity_ms <= kDepartedAtMs + kSettleMs + kGridMs,
+              "invariant 1: a departed tile was held at full opacity well past kSettleNs "
+              "under unrelated roster churn — the hold ceiling is too loose");
+        check(last_seen_ms <= kDepartedAtMs + kSettleMs + kDurationMs + kGridMs,
+              "invariant 1/4: a departed tile was emitted well past kSettleNs + duration "
+              "under unrelated roster churn — the hold-plus-fade ceiling is too loose");
     }
 
     // Fix round 2, NEW Important 2: held and exiting tiles must be emitted
@@ -415,6 +431,78 @@ int main()
         check(exiting_behind_live,
               "ordering contract: an exiting tile was emitted after the live tile "
               "occupying its rect, instead of before it");
+    }
+
+    // Fix round 3, Important: a one-frame blip during an in-flight reflow
+    // must not teleport the tile to its target. Round 2 narrowed the
+    // lifecycle loop's retention test to `in_desired` alone, so a tile
+    // merely absent from `desired` for a single frame — never in
+    // `departed` — fell into the reassignment-erase branch and was
+    // recreated from scratch (at rest, at the target) the moment it
+    // returned: a visible pop in exactly the motion-continuity feature
+    // this file exists to deliver, even though no wrong face was ever put
+    // on air. Proven by an A/B: a control run that never blips, versus an
+    // otherwise-identical run where the same tile is dropped from
+    // `desired` for exactly one call.
+    {
+        TileAnimator control;
+        control.advance(0, {{1, rect(0, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});
+        control.advance(16 * kMs, {{1, rect(400, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});
+        control.advance(32 * kMs, {{1, rect(400, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});
+        const auto control_out =
+            control.advance(48 * kMs, {{1, rect(400, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});
+        const AnimatedTile *control_tile = find(control_out, 1);
+        check(control_tile != nullptr && !control_tile->at_rest,
+              "test setup: the control run should still be in flight at t=48ms");
+
+        TileAnimator blipped;
+        blipped.advance(0, {{1, rect(0, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});
+        blipped.advance(16 * kMs, {{1, rect(400, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});
+        // 1 drops out of `desired` for exactly one call. Never in
+        // `departed` — this is not a departure, and it is not a
+        // reassignment either: it is the single-frame flicker the settle
+        // window exists to absorb.
+        blipped.advance(32 * kMs, {{2, rect(100, 0, 100, 100)}}, on, {});
+        const auto blipped_out =
+            blipped.advance(48 * kMs, {{1, rect(400, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});
+        const AnimatedTile *blipped_tile = find(blipped_out, 1);
+
+        check(blipped_tile != nullptr, "a blipped tile was lost on return");
+        const bool still_in_flight = blipped_tile != nullptr && !blipped_tile->at_rest;
+        check(still_in_flight,
+              "a one-frame blip teleported a mid-flight tile to its target (at_rest) "
+              "instead of leaving it in flight");
+        const bool did_not_snap_to_target =
+            blipped_tile != nullptr && std::fabs(blipped_tile->rect.x - 400.0) > 1.0;
+        check(did_not_snap_to_target,
+              "a one-frame blip snapped a mid-flight tile to its exact target rect");
+    }
+
+    // Fix round 3, Minor 2: a second departure must start its own fresh
+    // hold clock, not reuse a stale timestamp from an earlier
+    // departure-then-return cycle (mutant H: dropping `held = false` from
+    // the in-desired branch). First departure, then a repoint that brings
+    // the participant back and lets the roster re-commit to including
+    // them, then a second, later departure — checked shortly after it
+    // begins, well inside a fresh 250ms hold window. A stale clock (still
+    // ticking from the first departure) would already have expired by
+    // then and be mid-fade instead of held.
+    {
+        TileAnimator a;
+        a.advance(0, {{1, rect(0, 0, 100, 100)}, {2, rect(100, 0, 100, 100)}}, on, {});
+        a.advance(300 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {2});   // departs
+        a.advance(560 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {2});   // commits, exit begins
+        a.advance(600 * kMs, {{1, rect(0, 0, 200, 200)}, {2, rect(100, 0, 100, 100)}}, on, {});  // repointed back
+        a.advance(900 * kMs, {{1, rect(0, 0, 200, 200)}, {2, rect(100, 0, 100, 100)}}, on, {});  // held steady 300ms: roster re-commits to {1,2}
+        a.advance(2000 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {2});  // departs again
+        const auto shortly_after =
+            a.advance(2100 * kMs, {{1, rect(0, 0, 200, 200)}}, on, {2});  // 100ms later: well inside a fresh hold window
+        const AnimatedTile *t2 = find(shortly_after, 2);
+        check(t2 != nullptr, "a second departure was not shown at all 100ms in");
+        const bool fresh_clock = t2 != nullptr && t2->alpha == 1.0;
+        check(fresh_clock,
+              "invariant 1: a second departure reused a stale hold clock from an earlier "
+              "departure-then-return cycle instead of starting its own");
     }
 
     if (failures == 0) std::cout << "zoom-tile-animator tests passed\n";

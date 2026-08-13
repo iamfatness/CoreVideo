@@ -1442,21 +1442,15 @@ static void tiles_source_render(void *data, gs_effect_t *)
     // The gate is `ctx->animator.settled()`, deliberately NOT "every
     // AnimatedTile this frame reports at_rest": that per-tile flag is also
     // true in two situations where the WALL as a whole still disagrees with
-    // a fresh solve — a departure's settle hold (the held tile is frozen,
-    // at_rest, while the survivors sit on their OLD targets, also at_rest,
-    // while a fresh solve already reflects the new smaller grid — feed-list
-    // resizing is not gated on this animator's own settle window at all),
-    // and symmetrically a join's settle hold (the already-committed tiles
-    // hold THEIR old targets, all at_rest, while a fresh solve already
-    // describes the larger grid — and the newcomer is either withheld, or
-    // released early and sitting still in a slot the OLD grid left free, so
-    // either way nothing in the emitted tiles marks this frame as different
-    // from a settled one).
-    // Both were caught by re-running the repro below after implementing the
-    // naive `all_of(at_rest)` version first; see task-6-report.md. settled()
-    // is false in both cases (pending set change, or a held/exiting tile
-    // present), which is exactly what routes them to the per-tile branch
-    // instead.
+    // a fresh solve. An ENTERING tile sits perfectly still at its final slot
+    // and reports at_rest while it is only part-way through its fade, and the
+    // whole-grid branch draws through the snapped blit, which has no alpha —
+    // so an `all_of(at_rest)` gate would silently drop every entry fade. An
+    // EXITING tile is not in the layout the fresh solve describes at all, and
+    // its neighbours are mid-reflow around the space it left. settled() is
+    // false in both, which is exactly what routes them to the per-tile branch
+    // instead. The at_rest version of this gate was written first and the
+    // repro below caught it; see task-6-report.md.
     //
     // `rects`, below, ends up index-aligned with `feeds` — one rect per feed,
     // in feed order — exactly the shape this file has always drawn from, so
@@ -1483,8 +1477,8 @@ static void tiles_source_render(void *data, gs_effect_t *)
         // to match. It is also deliberately ONE branch for both "disabled"
         // and "settled", not two that have to be kept in agreement: the
         // disabled bypass in advance() clears every piece of state
-        // settled() reads (m_tiles, m_has_pending — see its own header
-        // comment), so settled() is unconditionally true right after a
+        // settled() reads (m_tiles — see its own header comment, which is
+        // all of it), so settled() is unconditionally true right after a
         // disabled call, making disabled simply a case of this condition
         // rather than a separate path. `solved` has exactly one entry per
         // feed (or is empty — solve_tile_grid() is all-or-nothing), so this
@@ -1494,11 +1488,10 @@ static void tiles_source_render(void *data, gs_effect_t *)
         // `feeds` by the time it shrinks the count this is solved from.
         rects = snapped;
     } else {
-        // Not settled — a set change is pending, or something is held,
-        // exiting, or still springing: snap_tile_grid_even()'s single-
-        // shared-size assumption does not hold (see the mode-split comment
-        // above), so each tile is snapped independently instead, one rect
-        // per feed.
+        // Not settled — something is entering, exiting, or still springing:
+        // snap_tile_grid_even()'s single-shared-size assumption does not hold
+        // (see the mode-split comment above), so each tile is snapped
+        // independently instead, one rect per feed.
         //
         // The rect for feed i is found by searching `animated` for the
         // entry whose participant id matches feed i's — not by position —
@@ -1514,20 +1507,12 @@ static void tiles_source_render(void *data, gs_effect_t *)
         // an index that happened not to line up. The reflow animation is
         // fully functional without them; only exit fades are not drawn yet.
         //
-        // `live` can legitimately be null even for a non-null feed, and the
-        // empty SnappedTileRect below is the correct answer when it is. The
-        // animator WITHHOLDS a participant whose slot would be painted over
-        // one still drawn in the layout the wall has committed to — a
-        // joiner before the wall has made room, or a tile released early
-        // whose slot the committed layout has since wanted back (see the
-        // not-committed branch of TileAnimator::advance()). It is not
-        // withheld for a fixed period: it appears as soon as its slot is
-        // clear, or at the latest one settle window later, whichever comes
-        // first, so a joiner whose slot was already free is drawn on the
-        // frame it arrives. An empty rect has width 0, so the glow loop and
-        // the tile loop both skip that feed on the same `width < 2` rule they
-        // already apply, and the slot shows the background until then. The
-        // same fallback covers a null feed pointer.
+        // `live` is non-null for every non-null feed: the animator withholds
+        // nothing, so every entry of `desired` — which is built one-for-one
+        // from `feeds` above — gets exactly one live entry back. The empty
+        // SnappedTileRect below is the null-feed fallback only. It has width
+        // 0, so the glow loop and the tile loop both skip that feed on the
+        // same `width < 2` rule they already apply.
         rects.reserve(feeds.size());
         moving.reserve(feeds.size());
         for (const TileFeedPtr &feed : feeds) {
@@ -1711,10 +1696,27 @@ static void tiles_source_render(void *data, gs_effect_t *)
 
         gs_technique_t *glow = s_tiles_effect.tech_glow;
         gs_technique_begin(glow);
-        for (const SnappedTileRect &r : rects) {
+        for (size_t i = 0; i < rects.size(); ++i) {
+            const SnappedTileRect &r = rects[i];
             // Skipped on the same rule the tile loop below uses, so a rect too
             // small to be drawn does not get a halo drawn around nothing.
             if (r.width < 2 || r.height < 2) continue;
+
+            // The halo fades with its tile. Without this a joining tile draws
+            // a full-intensity glow around a rect that is still transparent —
+            // a glowing empty rectangle for the whole entry fade, which is
+            // the one thing more obviously wrong than the pop the fade was
+            // added to prevent. Scaled through `intensity`, an existing float
+            // uniform, so this needs no change to the effect file (see
+            // fade_tile_alpha() for why that matters).
+            //
+            // `moving` is EMPTY whenever the wall is settled, which includes
+            // every frame the animation toggle is off, so this reads 1.0 and
+            // the pass is byte-for-byte the one it always was.
+            const double tile_alpha =
+                (i < moving.size() && moving[i].needs_composite) ? moving[i].alpha
+                                                                 : 1.0;
+            if (tile_alpha <= 0.0) continue;   // nothing to draw yet
 
             const GlowQuad q =
                 solve_glow_quad(r, glow_size_px, canvas_w, canvas_h);
@@ -1738,7 +1740,7 @@ static void tiles_source_render(void *data, gs_effect_t *)
             gp.half_h        = static_cast<float>(q.half_height);
             gp.corner_radius = static_cast<float>(b.radius);
             gp.size          = static_cast<float>(glow_size_px);
-            gp.intensity     = glow_intensity;
+            gp.intensity     = static_cast<float>(glow_intensity * tile_alpha);
             gp.falloff       = glow_falloff;
 
             // break, not continue: every tile opens the same pass on the same

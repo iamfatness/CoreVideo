@@ -75,45 +75,39 @@ public:
 
         const std::vector<uint32_t> incoming = ids_of(desired);
 
-        // ── The settle window applies to DEPARTURES ONLY ─────────────────────
+        // ── There is no settle window ────────────────────────────────────────
         //
-        // It used to gate every set change: the whole roster had to hold for
-        // kSettleNs before the wall adopted it. That is what produced this
-        // file's entire defect history, because it kept committed tiles on
-        // their OLD targets while a joiner wanted the NEW layout, so two
-        // grids were alive at once and something had to give — the joiner was
-        // invisible, or it was drawn over a face, or it was drawn and then
-        // blanked again. Each round moved the damage rather than removing it.
+        // Every set change commits immediately: on every frame, every tile in
+        // `desired` targets that frame's rect. This is the whole reason the
+        // defect class that dominated this file's history is now
+        // unrepresentable rather than merely tested for.
         //
-        // The window only ever existed to stop a roster BLIP producing a full
-        // exit animation followed by a full entry. A join has no exit to
-        // suppress, so gating it bought nothing and cost the mixed state. So:
+        // That class was always the same shape — two tiles on DIFFERENT grid
+        // generations at the same time — and a settle window is what created
+        // it, by holding some tiles on targets from an older solve while the
+        // rest moved on. Five variants were found and individually fixed
+        // (a withheld joiner, a frozen joiner over a live face, a yielding
+        // joiner that blanked, a joiner released against a stale set, and
+        // finally a tile that was absent when the wall committed and so kept
+        // a target from an older generation entirely). Each fix moved the
+        // damage. With targets refreshed unconditionally there is no second
+        // generation for anything to be on: any two tiles at rest are at
+        // their slots in the same solve, which are disjoint by construction.
         //
-        //   1. No departure pending -> any set change commits immediately,
-        //      and a join reflows the wall at once.
-        //   2. A departure pending -> hold everything. Nothing adopts a new
-        //      target, and a joiner is not drawn until it resolves. Safe
-        //      precisely because NOTHING is on the new grid: every emitted
-        //      tile comes from the one old layout, so no two can overlap.
-        //   3. A departure is an absence from `desired` by a participant who
-        //      is also in `departed` — genuinely gone from the roster. A
-        //      reassignment (absent from the layout, still in the meeting) is
-        //      NOT a departure and does not hold anything, which is what
-        //      keeps an operator repointing a slot instant.
-        //   4. A departure that reverts inside its window cancels: the tile
-        //      comes back to `desired`, its hold is cleared, and nothing
-        //      moved.
+        // The window existed for one reason — to stop a roster blip producing
+        // a full exit animation followed by a full entry — and the render
+        // path does not draw exits at all (see tiles_source_render(): held
+        // and exiting tiles have no entry in `feeds` and no defined pixel
+        // source). It was protecting against something that cannot happen.
         //
-        // The timer is per tile — `held_since_ns`, stamped the first frame
-        // that tile is observed absent — and NOT a whole-set timer. That
-        // distinction is load-bearing: a whole-set timer re-stamps on every
-        // set change, so one unrelated participant flapping in and out stalls
-        // it forever, and a departure hold that never ends is the failure
-        // this animator exists to prevent, just delayed rather than avoided.
-        // A flapper cannot extend anything here, because the condition below
-        // is evaluated from the tiles absent on THIS frame: on every frame a
-        // flapper is present it contributes nothing, so the wall commits and
-        // reflows normally.
+        // KNOWN CONSEQUENCE, accepted deliberately: a roster blip now reflows
+        // the wall out and back rather than absorbing it. Because the springs
+        // carry velocity through a retarget, the wall turns around from
+        // wherever it had got to instead of stopping and restarting, so a
+        // short blip reads as a wobble rather than a pop. A blipped
+        // participant is erased and re-created, and so fades back in over
+        // duration_seconds rather than snapping back — the entry fade covers
+        // the discontinuity that the old per-tile retention used to cover.
         //
         // ── Exit lifecycle ───────────────────────────────────────────────────
         //
@@ -134,49 +128,22 @@ public:
         // unaffected: a reassigned participant is by definition never back
         // in `desired`.)
         //
-        // Absence from `desired` alone must NOT erase a tile. A one-frame
-        // blip, a pending departure and a pending reassignment are
-        // indistinguishable at the moment they start — all three are
-        // retained identically, motion untouched, until this tile's own hold
-        // clock runs out. Erasing on absence alone was a regression caught in
-        // review: it rebuilt the Motion from scratch on every dropped frame,
-        // snapping a mid-flight tile to its target the instant `desired` next
-        // included it again.
-        bool departure_pending = false;
+        // A tile absent from `desired` resolves on the frame it goes absent —
+        // there is nothing left to wait for, so the two cases separate at
+        // once on `departed` alone.
         for (auto it = m_tiles.begin(); it != m_tiles.end();) {
             const bool in_desired =
                 std::find(incoming.begin(), incoming.end(), it->first) != incoming.end();
             if (in_desired) {
                 it->second.exiting = false;      // (3) back in the layout
                 it->second.alpha = 1.0;
-                it->second.held = false;         // a future departure gets its own fresh clock
                 ++it;
                 continue;
-            }
-
-            // Absent from `desired`. Stamp when that was first observed, so
-            // it cannot be pushed out by unrelated roster churn later.
-            if (!it->second.held && !it->second.exiting) {
-                it->second.held = true;
-                it->second.held_since_ns = now_ns;
             }
 
             if (!it->second.exiting) {
                 const bool left_roster =
                     std::find(departed.begin(), departed.end(), it->first) != departed.end();
-                const bool hold_expired =
-                    (now_ns - it->second.held_since_ns) >= kSettleNs;
-                if (!hold_expired) {
-                    // Indistinguishable, at this point, from a one-frame blip
-                    // that is about to return: retained untouched either way.
-                    // Only a tile that has genuinely left the ROSTER holds the
-                    // wall still while we wait (rule 3) — a reassignment is
-                    // retained for motion continuity but the wall reflows
-                    // around it at once.
-                    if (left_roster) departure_pending = true;
-                    ++it;
-                    continue;
-                }
                 if (!left_roster) {
                     // ERASED, not merely withheld from the output. A tile kept
                     // here would be invisible — nothing emits a reassigned
@@ -185,13 +152,11 @@ public:
                     // names it and it begins a full-opacity exit from a frame
                     // recorded before the repoint: the wrong face on air,
                     // which is exactly what src/zoom-tile-slot.h exists to
-                    // prevent. Every other test in the suite passes with the
-                    // tile retained instead; one test pins this shape.
+                    // prevent. One test pins this shape.
                     it = m_tiles.erase(it);      // (2) reassignment: instant
                     continue;
                 }
-                // The hold ran out and the participant really is gone: begin
-                // the exit (1).
+                // Genuinely gone from the roster: begin the exit (1).
                 it->second.exiting = true;
                 it->second.exit_started_ns = now_ns;
             }
@@ -228,40 +193,23 @@ public:
                 continue;
             }
 
-            const bool in_desired =
-                std::find(incoming.begin(), incoming.end(), entry.first) != incoming.end();
-            if (in_desired) continue;
-
-            // Retained but not yet exiting: a one-frame blip, a pending
-            // reassignment, or a pending departure. Only a genuine, still
-            // pending departure is SHOWN here, frozen, until its exit begins.
-            // Showing a reassignment on screen even briefly is itself an
-            // invariant-2 violation, just delayed rather than avoided.
-            const bool left_roster =
-                std::find(departed.begin(), departed.end(), entry.first) != departed.end();
-            if (!left_roster) continue;
-
-            TileRect r;
-            r.x = entry.second.x.position; r.y = entry.second.y.position;
-            r.width = entry.second.w.position; r.height = entry.second.h.position;
-            out.push_back(AnimatedTile{entry.first, r, 1.0, true});
+            // Nothing else can be here. The lifecycle loop above resolves
+            // every tile absent from `desired` on the frame it goes absent:
+            // a reassignment is erased and a departure starts exiting, so a
+            // tracked tile is either in `desired` (emitted by the loop below)
+            // or exiting (emitted above). There is no third, held state, and
+            // that is what makes it impossible for a tile to be drawn from a
+            // grid generation the rest of the wall has left.
         }
 
         for (const auto &d : desired) {
             auto it = m_tiles.find(d.participant_id);
             if (it == m_tiles.end()) {
-                // A participant the wall has never carried. While a departure
-                // is pending it is not drawn at all (rule 2) — the wall is
-                // still showing the layout the departing tile belongs to, and
-                // putting a tile from the new grid into it is the mixed state
-                // this design exists to remove. It appears when the departure
-                // resolves, which is bounded at kSettleNs from that
-                // departure, never from its own arrival.
-                if (departure_pending) continue;
-
                 // First sight: start at the target rather than flying in
                 // from the origin, and ENTER — alpha 0 to 1 over the same
-                // duration, in place. See Motion::entering.
+                // duration, in place. See Motion::entering. Nothing is ever
+                // withheld: a tile in `desired` is drawn on the frame it
+                // appears, at its slot in the layout being solved right now.
                 Motion m;
                 m.x = {d.rect.x, 0.0};
                 m.y = {d.rect.y, 0.0};
@@ -275,12 +223,13 @@ public:
 
             Motion &m = it->second;
 
-            // Adopt a new target unless a departure is pending. While one is,
-            // the incoming rects describe a layout the wall has not adopted;
-            // every tile must stay exactly where it is so a departure that
-            // reverts inside the window produces no motion at all (rule 4).
-            if (!departure_pending)
-                m.target = d.rect;
+            // Unconditional, every frame. This one line is what makes the
+            // grid-generation defect class unrepresentable: no tile can ever
+            // hold a target from an older solve, so no two tiles can be on
+            // different grids at once. Do not reintroduce a condition here
+            // without re-reading the header comment above — five separate
+            // defects came from exactly that.
+            m.target = d.rect;
 
             spring_advance(m.x, m.target.x,      settings.duration_seconds, dt);
             spring_advance(m.y, m.target.y,      settings.duration_seconds, dt);
@@ -325,13 +274,10 @@ public:
     // per-tile rects. It is a STRICTER condition than "every AnimatedTile
     // advance() just returned reports at_rest":
     //
-    //   - A held tile is frozen, so it reports at_rest, while the survivors
-    //     also report at_rest sitting on their OLD targets — and a fresh
-    //     solve already describes the new, smaller grid, because feed-list
-    //     resizing is not gated on this animator at all. Drawing the fresh
-    //     solve during that window shows the wrong size.
+    //   - An EXITING tile is not in the layout at all, so a fresh solve
+    //     describes a wall it is not part of.
     //   - An ENTERING tile is at its final slot and perfectly still, so it
-    //     reports at_rest too, but it is part-way through its fade. The
+    //     reports at_rest, but it is part-way through its fade. The
     //     whole-grid branch draws through the snapped blit, which has no
     //     alpha, so reporting settled() here would silently drop every entry
     //     fade — the tile would pop in at full opacity. This is the only
@@ -341,7 +287,7 @@ public:
     {
         for (const auto &entry : m_tiles) {
             const Motion &m = entry.second;
-            if (m.held || m.exiting || m.entering) return false;
+            if (m.exiting || m.entering) return false;
             if (std::fabs(m.x.position - m.target.x) >= kRestEpsilon) return false;
             if (std::fabs(m.y.position - m.target.y) >= kRestEpsilon) return false;
             if (std::fabs(m.w.position - m.target.width) >= kRestEpsilon) return false;
@@ -357,10 +303,6 @@ private:
         double   alpha           = 1.0;   // the EXIT fade only
         bool     exiting         = false;
         uint64_t exit_started_ns = 0;
-        // The hold (absent from `desired`, not yet exiting) has its own
-        // clock, stamped the first time the absence is observed.
-        bool     held            = false;
-        uint64_t held_since_ns   = 0;
         // Entering: alpha 0 -> 1 over duration_seconds, at the tile's final
         // slot, per the design's Lifecycle section ("Entering tiles fade in
         // at their final position rather than flying in, so tiles never cross
@@ -405,14 +347,6 @@ private:
         std::sort(ids.begin(), ids.end());
         return ids;
     }
-
-    // A departure must hold this long before the wall reacts. The roster is
-    // known to flicker — SpeakerDirector carries a 60s absence grace for the
-    // same reason — and without this a 120ms dropout would produce a full exit
-    // animation followed by a full entry, which is more visible on air than the
-    // single-frame pop it replaces. Fixed, not a setting: zero would reintroduce
-    // exactly the behaviour this exists to prevent.
-    static constexpr uint64_t kSettleNs = 250000000ULL;
 
     // Shared by advance()'s own at_rest field and settled() above, so the
     // two can never disagree about what "arrived" means for the same spring

@@ -464,6 +464,7 @@ public:
         if (!settings.enabled) {
             m_tiles.clear();
             m_last_ns = 0;
+            m_has_last = false;
             std::vector<AnimatedTile> out;
             out.reserve(desired.size());
             for (const auto &d : desired)
@@ -471,10 +472,16 @@ public:
             return out;
         }
 
-        const double dt = m_last_ns == 0 || now_ns <= m_last_ns
+        // An explicit "have we been called before" flag, not a sentinel value
+        // of m_last_ns. Zero is a legitimate timestamp — the tests advance from
+        // 0 — and overloading it means m_last_ns stays 0 after a first call at
+        // 0, so dt is forced to zero on two consecutive calls and the wall
+        // silently loses a frame of motion.
+        const double dt = (!m_has_last || now_ns <= m_last_ns)
             ? 0.0
             : static_cast<double>(now_ns - m_last_ns) / 1e9;
         m_last_ns = now_ns;
+        m_has_last = true;
 
         std::vector<AnimatedTile> out;
         out.reserve(desired.size());
@@ -526,7 +533,8 @@ public:
 private:
     struct Motion { Spring1D x, y, w, h; };
     std::map<uint32_t, Motion> m_tiles;
-    uint64_t m_last_ns = 0;
+    uint64_t m_last_ns  = 0;
+    bool     m_has_last = false;
 };
 ```
 

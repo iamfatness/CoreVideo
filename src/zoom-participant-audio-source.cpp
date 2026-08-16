@@ -224,7 +224,24 @@ static void maybe_resubscribe_for_roster(CoreVideoAudioSource *ctx)
     const uint32_t target = ctx->kind == CoreVideoAudioKind::Audience
         ? 0 : target_participant_id(ctx);
 
-    switch (audio_resubscribe_action(ctx->kind, active, state, target)) {
+    // Whether the participant this source currently holds is still in the
+    // meeting. Only meaningful when we hold one; a source that holds nothing
+    // reports `true` so the departure rule cannot fire on it. Without this the
+    // subscription — and the shared-memory region behind it, one of
+    // kMaxShmSources — is held for the rest of the session after its person
+    // leaves, and a long show with roster churn exhausts the budget.
+    bool held_participant_present = true;
+    if (state.subscribed && state.participant_id != 0) {
+        const auto roster = ZoomEngineClient::instance().roster();
+        held_participant_present = std::any_of(
+            roster.begin(), roster.end(),
+            [&](const ParticipantInfo &p) {
+                return p.user_id == state.participant_id;
+            });
+    }
+
+    switch (audio_resubscribe_action(ctx->kind, active, state, target,
+                                     held_participant_present)) {
     case AudioResubscribeAction::None:
         return;
     case AudioResubscribeAction::UnsubscribeThenSubscribe:
@@ -233,6 +250,13 @@ static void maybe_resubscribe_for_roster(CoreVideoAudioSource *ctx)
         return;
     case AudioResubscribeAction::Subscribe:
         subscribe_audio(ctx);
+        return;
+    case AudioResubscribeAction::Unsubscribe:
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] Releasing CoreVideo audio subscription for a departed participant: source=%s uuid=%s participant_id=%u",
+             obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
+             state.participant_id);
+        unsubscribe_audio(ctx);
         return;
     }
 }

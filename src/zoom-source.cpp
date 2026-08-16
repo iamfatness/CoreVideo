@@ -1592,32 +1592,78 @@ void ZoomSource::on_engine_audio(uint32_t event_byte_len,
                                  uint32_t event_shm_gen)
 {
     std::lock_guard<std::mutex> lk(m_mtx);
-    const std::string audio_base = IPC_SHM_PREFIX + source_uuid + "_audio";
+    output_audio_from_shared_memory(source_uuid, m_audio_shm, m_audio_shm_gen,
+                                    event_byte_len, resolved_participant_id,
+                                    event_shm_gen);
+}
+
+// Publishes audio for the director preview slot, and ONLY while a cut is
+// handing over.
+//
+// Before a cut this must stay silent: the preview follows the NEXT speaker, and
+// putting them on air early is the whole reason this callback used to be a
+// no-op. After the cut commits it is the opposite — the main subscription's
+// audio region has just been released and the engine needs 735-1277 ms to
+// rebuild it, so the preview is the only place this participant's audio exists.
+// That window is exactly what m_director_handover_pending marks, which is why
+// the video handover shipped first: this rides on the same flag.
+//
+// Without this the operator heard a 1-2 second dropout on every speaker change
+// (measured 2026-08-16), and the video handover made it MORE obvious by keeping
+// the picture clean through a gap the sound still had.
+void ZoomSource::on_director_preview_audio(uint32_t event_byte_len,
+                                           uint32_t resolved_participant_id,
+                                           uint32_t event_shm_gen)
+{
+    if (!m_director_handover_pending.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::mutex> lk(m_mtx);
+    // Re-checked under the lock: a handover completing between the check above
+    // and here would mean the main region is live again, and publishing both
+    // would double this participant's audio.
+    if (!m_director_handover_pending.load(std::memory_order_acquire)) return;
+    output_audio_from_shared_memory(m_director_preview_uuid,
+                                    m_director_preview_audio_shm,
+                                    m_director_preview_audio_shm_gen,
+                                    event_byte_len, resolved_participant_id,
+                                    event_shm_gen);
+}
+
+// Caller must hold m_mtx. Split out of on_engine_audio() so the director
+// preview slot can publish through the same path, the way
+// output_video_from_shared_memory() already serves both video slots.
+void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
+                                                 ShmRegion &audio_shm,
+                                                 uint32_t &audio_shm_gen,
+                                                 uint32_t event_byte_len,
+                                                 uint32_t resolved_participant_id,
+                                                 uint32_t event_shm_gen)
+{
+    const std::string audio_base = IPC_SHM_PREFIX + uuid + "_audio";
     const std::string shm_name = shm_region_name(audio_base, event_shm_gen);
     if (event_byte_len == 0) return;
     const size_t audio_bytes = sizeof(ShmAudioHeader) + event_byte_len;
     const bool gen_changed = event_shm_gen != 0 &&
-                             event_shm_gen != m_audio_shm_gen;
-    if (m_audio_shm.ptr && gen_changed)
-        shm_region_destroy(m_audio_shm);
-    if (!m_audio_shm.ptr || m_audio_shm.size < audio_bytes) {
-        if (!shm_region_open_read(m_audio_shm, shm_name, audio_bytes) &&
+                             event_shm_gen != audio_shm_gen;
+    if (audio_shm.ptr && gen_changed)
+        shm_region_destroy(audio_shm);
+    if (!audio_shm.ptr || audio_shm.size < audio_bytes) {
+        if (!shm_region_open_read(audio_shm, shm_name, audio_bytes) &&
             // Engines predating suffixed names recreate the legacy name for
             // every generation — fall back to it.
             (event_shm_gen <= 1 ||
-             !shm_region_open_read(m_audio_shm, audio_base, audio_bytes))) {
+             !shm_region_open_read(audio_shm, audio_base, audio_bytes))) {
             if (m_audio_frame_count == 0) {
                 blog(LOG_WARNING,
                      "[obs-zoom-plugin] Failed to open audio shared memory: source=%s uuid=%s bytes=%zu gen=%u",
-                     output_name().c_str(), source_uuid.c_str(), audio_bytes,
+                     output_name().c_str(), uuid.c_str(), audio_bytes,
                      event_shm_gen);
             }
             return;
         }
-        m_audio_shm_gen = event_shm_gen;
+        audio_shm_gen = event_shm_gen;
     }
 
-    auto *hdr = static_cast<const ShmAudioHeader *>(m_audio_shm.ptr);
+    auto *hdr = static_cast<const ShmAudioHeader *>(audio_shm.ptr);
     uint32_t byte_len = 0;
     uint32_t sample_rate = 0;
     uint16_t channels = 0;
@@ -1630,8 +1676,8 @@ void ZoomSource::on_engine_audio(uint32_t event_byte_len,
         sample_rate = hdr->sample_rate;
         channels = hdr->channels;
         if (!source || byte_len == 0) return;
-        if (sizeof(ShmAudioHeader) + byte_len > m_audio_shm.size) return;
-        const auto *pcm_src = static_cast<const uint8_t *>(m_audio_shm.ptr) +
+        if (sizeof(ShmAudioHeader) + byte_len > audio_shm.size) return;
+        const auto *pcm_src = static_cast<const uint8_t *>(audio_shm.ptr) +
             sizeof(ShmAudioHeader);
         if (m_audio_buf.size() < byte_len)
             m_audio_buf.resize(byte_len);
@@ -1683,7 +1729,7 @@ void ZoomSource::on_engine_audio(uint32_t event_byte_len,
             peak = std::max<int>(peak, std::abs(static_cast<int>(pcm[i])));
         blog(LOG_INFO,
              "[obs-zoom-plugin] Output Zoom audio frame: source=%s uuid=%s count=%llu frames=%u sample_rate=%u channels=%u byte_len=%u peak=%d",
-             output_name().c_str(), source_uuid.c_str(),
+             output_name().c_str(), uuid.c_str(),
              static_cast<unsigned long long>(m_audio_frame_count),
              audio.frames, sample_rate, channels, byte_len, peak);
     }
@@ -1800,14 +1846,17 @@ void ZoomSource::release_shared_memory()
     std::lock_guard<std::mutex> lk(m_mtx);
     shm_release_for_resubscribe(m_video_shm, m_video_shm_gen);
     shm_release_for_resubscribe(m_director_preview_shm, m_director_preview_shm_gen);
+    shm_release_for_resubscribe(m_director_preview_audio_shm,
+                                m_director_preview_audio_shm_gen);
     shm_release_for_resubscribe(m_audio_shm, m_audio_shm_gen);
 }
 
 // A new ZoomObsEngine process is about to serve this source, and its SHM
-// generation table is empty: its first create for any of our three regions asks
+// generation table is empty: its first create for any of our four regions asks
 // for generation 1, the legacy unsuffixed name, whatever the dead engine had
 // climbed to. Every mapping we hold is standing on a name it is about to ask
-// for, so all three go — video, director preview and audio alike. Audio matters
+// for, so all four go — video, director preview video, director preview audio
+// and audio alike. Audio matters
 // most: no subscribe path releases it, and a blocked audio create publishes no
 // event, so nothing would ever prompt us to reopen and the source would stay
 // silent for the rest of the session. See ZoomEngineClient::SourceCallbacks.
@@ -1876,6 +1925,12 @@ void ZoomSource::release_audio_shm_locked()
 
 void ZoomSource::release_director_preview_shm_locked()
 {
+    // The preview's audio region goes with its video one. Both are destroyed
+    // and rebuilt by the engine when this uuid is unsubscribed, and a mapping
+    // we still hold blocks the recreate at a larger size — the same hazard
+    // release_audio_shm_locked() exists for on the main slot.
+    shm_release_for_resubscribe(m_director_preview_audio_shm,
+                                m_director_preview_audio_shm_gen);
     const uint32_t dropped_gen = m_director_preview_shm_gen;
     if (!shm_release_for_resubscribe(m_director_preview_shm,
                                      m_director_preview_shm_gen))
@@ -1962,11 +2017,20 @@ static void *zoom_source_create_common(obs_data_t *settings, obs_source_t *sourc
                 if (!gate->alive) return;
                 ctx->on_director_preview_frame(w, h, participant_id, shm_gen);
             },
-            [gate = ctx->m_callback_gate](uint32_t, uint32_t, uint32_t) {
+            [ctx, gate = ctx->m_callback_gate](uint32_t byte_len,
+                                               uint32_t participant_id,
+                                               uint32_t shm_gen) {
                 std::lock_guard<std::mutex> callback_lock(gate->mtx);
                 if (!gate->alive) return;
-                // Audio cuts follow the committed current slot. The preview
-                // slot is video-only so it can warm a frame before the cut.
+                // Audio cuts follow the committed current slot, so before a cut
+                // this publishes nothing — putting the NEXT speaker on air early
+                // is why this used to be a no-op outright. After the cut commits
+                // it is the only place the new speaker's audio exists, because
+                // the main slot's region has just been released and takes
+                // 735-1277 ms to rebuild. on_director_preview_audio() enforces
+                // that window.
+                ctx->on_director_preview_audio(byte_len, participant_id,
+                                               shm_gen);
             },
             // Deliberately the same wholesale release as the main uuid above,
             // not a preview-only one. It is idempotent — the second call finds

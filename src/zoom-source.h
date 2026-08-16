@@ -88,6 +88,9 @@ struct ZoomSource {
     void on_director_preview_frame(uint32_t width, uint32_t height,
                                    uint32_t resolved_participant_id,
                                    uint32_t shm_generation);
+    void on_director_preview_audio(uint32_t byte_len,
+                                   uint32_t participant_id,
+                                   uint32_t shm_gen);
     void on_engine_audio(uint32_t byte_len,
                          uint32_t resolved_participant_id,
                          uint32_t shm_generation);
@@ -101,8 +104,8 @@ struct ZoomSource {
     bool wants_subscription() const;
     void set_preview_cb(ZoomPreviewCallback cb);
     void clear_preview_cb();
-    // Both drop all three of this source's SHM read mappings (video, director
-    // preview, audio). They differ only in logging, and for a reason that is
+    // Both drop all four of this source's SHM read mappings (video, director
+    // preview video, director preview audio, audio). They differ only in logging, and for a reason that is
     // about where each one runs — see the definitions.
     void release_shared_memory();               // teardown; silent
     void release_shared_memory_for_new_engine(); // engine restart; logged
@@ -133,6 +136,14 @@ private:
     void release_audio_shm_locked();
     void release_director_preview_shm();
     void release_director_preview_shm_locked();
+    // Caller must hold m_mtx. Serves both the main slot and the director
+    // preview slot, mirroring output_video_from_shared_memory().
+    void output_audio_from_shared_memory(const std::string &uuid,
+                                         ShmRegion &audio_shm,
+                                         uint32_t &audio_shm_gen,
+                                         uint32_t event_byte_len,
+                                         uint32_t resolved_participant_id,
+                                         uint32_t event_shm_gen);
     bool output_video_from_shared_memory(const std::string &uuid,
                                          ShmRegion &video_shm,
                                          uint32_t &video_shm_gen,
@@ -154,6 +165,10 @@ private:
     // frozen frame forever. 0 = opened without a generation (older engine).
     uint32_t m_video_shm_gen = 0;
     uint32_t m_director_preview_shm_gen = 0;
+    // The preview slot's audio region. Only read while a cut is handing
+    // over -- see on_director_preview_audio().
+    ShmRegion m_director_preview_audio_shm;
+    uint32_t m_director_preview_audio_shm_gen = 0;
     std::vector<uint8_t> m_placeholder_buf;
     std::vector<uint8_t> m_video_buf;
     std::vector<uint8_t> m_scaled_video_buf;

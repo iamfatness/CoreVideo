@@ -8,6 +8,7 @@ class QTableWidget;
 class QLineEdit;
 class QComboBox;
 class QLabel;
+class QCheckBox;
 
 class ZoomOutputDialog : public QWidget {
 public:
@@ -30,6 +31,7 @@ private:
     QTableWidget *m_table            = nullptr;
     QTableWidget *m_participant_table = nullptr;
     QLineEdit    *m_filter            = nullptr;
+    QCheckBox    *m_hide_non_video    = nullptr;
     QComboBox    *m_profile_combo     = nullptr;
     QLabel       *m_output_summary    = nullptr;
     bool          m_deferred_refresh_queued = false;

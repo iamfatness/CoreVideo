@@ -7,6 +7,7 @@
 #include "zoom-settings.h"
 #include <QAbstractItemView>
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QHBoxLayout>
@@ -568,6 +569,20 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     connect(m_filter, &QLineEdit::textChanged, this,
             [this]() { refresh_participants(); });
 
+    m_hide_non_video = new QCheckBox("Hide participants without video", this);
+    m_hide_non_video->setToolTip(
+        "Hide camera-off participants from video assignment lists. Audio "
+        "source pickers always show everyone.");
+    m_hide_non_video->setChecked(
+        ZoomPluginSettings::load().hide_participants_without_video);
+    connect(m_hide_non_video, &QCheckBox::toggled, this, [this](bool on) {
+        ZoomPluginSettings s = ZoomPluginSettings::load();
+        s.hide_participants_without_video = on;
+        s.save();
+        refresh_participants();
+        refresh();
+    });
+
     m_output_summary = new QLabel(this);
     m_output_summary->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_output_summary->setWordWrap(true);
@@ -658,6 +673,7 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     layout->addLayout(profile_row);
     layout->addWidget(new QLabel("Participants", this));
     layout->addWidget(m_filter);
+    layout->addWidget(m_hide_non_video);
     layout->addWidget(m_participant_table);
     layout->addWidget(new QLabel("Outputs", this));
     layout->addWidget(m_output_summary);
@@ -995,9 +1011,14 @@ void ZoomOutputDialog::refresh_participants()
     const QString filter = m_filter ? m_filter->text().trimmed() : QString{};
     const std::vector<ParticipantInfo> roster = ZoomEngineClient::instance().roster();
 
+    // keep_user_id is 0 here: this table is a roster view, not a picker bound to
+    // a participant, so there is no selection that hiding somebody could break.
+    const auto visible = visible_for_video_assignment(
+        roster, ZoomPluginSettings::load().hide_participants_without_video, 0);
+
     int row = 0;
     m_participant_table->setRowCount(0);
-    for (const auto &p : roster) {
+    for (const auto &p : visible) {
         const QString name = p.display_name.empty()
             ? QString("ID %1").arg(p.user_id)
             : QString::fromStdString(p.display_name);

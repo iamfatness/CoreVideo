@@ -83,6 +83,14 @@ struct ShmFrameHeader {
     uint32_t width;
     uint32_t height;
     uint32_t y_len;
+    // The engine's tile_clock_now_ns() when the Zoom SDK handed this frame
+    // over. Same clock, same cross-process equivalence caveat (Windows-only)
+    // as ShmAudioSlot::capture_ns below -- see the comment there rather than
+    // repeating it here. Paired with ShmAudioSlot::capture_ns this is what
+    // makes the A/V offset a measured number instead of an assertion -- on
+    // 2026-08-16 the product could not answer "what is our render latency"
+    // because nothing carried a timestamp across the boundary.
+    uint64_t capture_ns;
 };
 // Audio is a RING, not a mailbox.
 //
@@ -342,7 +350,9 @@ enum class ShmFrameRead {
 // reuses one buffer stops allocating after the first frame. out_w/out_h/
 // out_y_len are filled from the header whenever it was readable (including the
 // TooSmall case, so callers can report the shortfall); dst is only meaningful
-// on Ok.
+// on Ok. out_capture_ns is optional (default nullptr, so existing callers are
+// unaffected) and, when Ok, receives the engine's capture_ns for latency
+// measurement -- see ShmFrameHeader::capture_ns.
 inline ShmFrameRead shm_read_i420_frame(ShmRegion &region,
                                         const std::string &base_name,
                                         uint32_t event_width,
@@ -352,7 +362,8 @@ inline ShmFrameRead shm_read_i420_frame(ShmRegion &region,
                                         std::vector<uint8_t> &dst,
                                         uint32_t &out_w,
                                         uint32_t &out_h,
-                                        uint32_t &out_y_len)
+                                        uint32_t &out_y_len,
+                                        uint64_t *out_capture_ns = nullptr)
 {
     out_w = 0;
     out_h = 0;
@@ -389,6 +400,7 @@ inline ShmFrameRead shm_read_i420_frame(ShmRegion &region,
         const uint32_t w = hdr->width;
         const uint32_t h = hdr->height;
         const uint32_t y_len = hdr->y_len;
+        const uint64_t capture_ns = hdr->capture_ns;
         out_w = w;
         out_h = h;
         out_y_len = y_len;
@@ -408,7 +420,10 @@ inline ShmFrameRead shm_read_i420_frame(ShmRegion &region,
                     payload);
         std::atomic_thread_fence(std::memory_order_acquire);
         const uint32_t seq2 = hdr->sequence;
-        if (seq1 == seq2 && (seq2 & 1u) == 0) return ShmFrameRead::Ok;
+        if (seq1 == seq2 && (seq2 & 1u) == 0) {
+            if (out_capture_ns) *out_capture_ns = capture_ns;
+            return ShmFrameRead::Ok;
+        }
     }
     return ShmFrameRead::Invalid;
 }

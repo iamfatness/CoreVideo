@@ -646,6 +646,8 @@ ZoomOutputInfo ZoomSource::output_info() const
     info.assignment = mode;
     info.spotlight_slot = spotlight_slot.load(std::memory_order_acquire);
     info.failover_participant_id = failover_participant_id.load(std::memory_order_acquire);
+    info.audio_latency_us = m_audio_latency_us.load(std::memory_order_relaxed);
+    info.video_latency_us = m_video_latency_us.load(std::memory_order_relaxed);
     return info;
 }
 
@@ -1354,10 +1356,11 @@ bool ZoomSource::output_video_from_shared_memory(
     uint32_t w = 0;
     uint32_t h = 0;
     uint32_t y_len = 0;
+    uint64_t hdr_capture_ns = 0;
     const ShmFrameRead read_status =
         shm_read_i420_frame(video_shm, IPC_SHM_PREFIX + uuid, event_width,
                             event_height, event_shm_gen, video_shm_gen,
-                            video_buf, w, h, y_len);
+                            video_buf, w, h, y_len, &hdr_capture_ns);
     if (read_status != ShmFrameRead::Ok) {
         if (m_frame_count == 0) {
             switch (read_status) {
@@ -1444,6 +1447,13 @@ bool ZoomSource::output_video_from_shared_memory(
         obs_stride_uv = canvas_w / 2;
     }
     const uint64_t ts = os_gettime_ns();
+
+    // Both processes share a QPC-based monotonic clock (see
+    // ShmAudioSlot::capture_ns in engine-ipc.h), so this subtraction is
+    // meaningful across the boundary.
+    if (hdr_capture_ns != 0 && ts > hdr_capture_ns)
+        m_video_latency_us.store((ts - hdr_capture_ns) / 1000,
+                                 std::memory_order_relaxed);
 
     // Try hardware-accelerated I420→NV12 conversion; fall back to CPU I420 path.
     obs_source_frame frame = {};
@@ -1710,6 +1720,7 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
     uint32_t byte_len = 0;
     uint32_t sample_rate = 0;
     uint16_t channels = 0;
+    uint64_t capture_ns = 0;
     bool copied = false;
     for (int attempt = 0; attempt < 3; ++attempt) {
         const uint32_t seq1 = slot->sequence;
@@ -1718,6 +1729,7 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
         byte_len = slot->byte_len;
         sample_rate = ring->sample_rate;
         channels = ring->channels;
+        capture_ns = slot->capture_ns;
         if (!source || byte_len == 0) return;
         if (byte_len > ring->slot_bytes) return;
         const auto *pcm_src = reinterpret_cast<const uint8_t *>(slot) +
@@ -1735,6 +1747,12 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
     if (!copied) return;
     const auto *pcm = reinterpret_cast<const int16_t *>(m_audio_buf.data());
     const uint64_t ts = os_gettime_ns();
+
+    // Same cross-process clock as the video path above -- see
+    // ShmAudioSlot::capture_ns in engine-ipc.h.
+    if (capture_ns != 0 && ts > capture_ns)
+        m_audio_latency_us.store((ts - capture_ns) / 1000,
+                                 std::memory_order_relaxed);
 
     obs_source_audio audio = {};
     audio.samples_per_sec = sample_rate;

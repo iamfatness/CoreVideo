@@ -80,6 +80,11 @@ struct CoreVideoAudioSource {
     // Slots the writer lapped before we drained them -- audio that was lost.
     // Counted so loss is visible; the old mailbox lost audio invisibly.
     uint64_t overrun_slots = 0;
+    // Engine capture to OBS publish, microseconds. 0 = not yet measured. Set
+    // in output_audio_frame() against ShmAudioSlot::capture_ns. Not currently
+    // wired into ZoomOutputInfo -- this source type is not a ZoomSource and
+    // is not registered with ZoomOutputManager; see task-5-report.md.
+    std::atomic<uint64_t> audio_latency_us{0};
 };
 
 static uint32_t target_participant_id(const CoreVideoAudioSource *ctx)
@@ -517,6 +522,15 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
 
         const uint32_t sample_rate = ring->sample_rate;
         const uint16_t channels    = ring->channels;
+        const uint64_t now_ns = os_gettime_ns();
+
+        // Both processes share a QPC-based monotonic clock, so this
+        // subtraction is meaningful across the boundary -- see
+        // ShmAudioSlot::capture_ns in engine-ipc.h.
+        if (capture_ns != 0 && now_ns > capture_ns) {
+            ctx->audio_latency_us.store((now_ns - capture_ns) / 1000,
+                                        std::memory_order_relaxed);
+        }
 
         const auto *pcm = reinterpret_cast<const int16_t *>(ctx->audio_buf.data());
         obs_source_audio audio = {};
@@ -527,7 +541,7 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
         const uint32_t timeline_frames =
             byte_len / (kZoomBytesPerSample * std::max<uint16_t>(channels, 1));
         audio.timestamp = audio_timeline_stamp(ctx->timeline, sample_rate,
-                                               timeline_frames, os_gettime_ns());
+                                               timeline_frames, now_ns);
 
         if (ctx->audio_mode.load(std::memory_order_acquire) == AudioChannelMode::Stereo &&
             channels == 1) {

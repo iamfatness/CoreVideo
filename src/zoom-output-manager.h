@@ -58,6 +58,9 @@ struct ZoomOutputInfo {
     AssignmentMode   assignment = AssignmentMode::Participant;
     uint32_t         spotlight_slot = 1;     // used when assignment == SpotlightIndex
     uint32_t         failover_participant_id = 0; // 0 = none
+    // Engine capture to OBS publish, microseconds. 0 = not yet measured.
+    uint64_t audio_latency_us = 0;
+    uint64_t video_latency_us = 0;
 };
 
 inline const char *output_health_reason_id(ZoomOutputHealthReason reason)

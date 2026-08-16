@@ -276,6 +276,10 @@ void ParticipantSubscription::onRawDataFrameReceived(YUVRawDataI420 *data)
         hdr->width = w;
         hdr->height = h;
         hdr->y_len = static_cast<uint32_t>(y_len);
+        // See ShmAudioSlot::capture_ns in engine-ipc.h for why tile_clock_now_ns()
+        // (not os_gettime_ns(), which this standalone process cannot call) is
+        // the right clock here and what it lets the plugin measure.
+        hdr->capture_ns = tile_clock_now_ns();
 
         std::memcpy(pixels,                   data->GetYBuffer(), y_len);
         std::memcpy(pixels + y_len,           data->GetUBuffer(), y_len / 4);

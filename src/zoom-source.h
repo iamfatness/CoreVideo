@@ -202,4 +202,10 @@ private:
     std::atomic<bool>     m_director_handover_pending{false};
     std::atomic<uint32_t> m_director_handover_target{0};
     std::atomic<uint64_t> m_director_handover_started_ns{0};
+    // Engine capture to OBS publish, microseconds. 0 = not yet measured. Set
+    // from output_video_from_shared_memory() / output_audio_from_shared_memory()
+    // against ShmFrameHeader::capture_ns / ShmAudioSlot::capture_ns; read by
+    // output_info() into ZoomOutputInfo. See engine-ipc.h for the clock notes.
+    std::atomic<uint64_t> m_video_latency_us{0};
+    std::atomic<uint64_t> m_audio_latency_us{0};
 };

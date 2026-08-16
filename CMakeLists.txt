@@ -870,6 +870,18 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoDirectorHandover
              COMMAND CoreVideoDirectorHandoverTest)
 
+    # Which participants a video-assignment picker offers. The rule that the
+    # picker's own current selection is never hidden is the load-bearing one:
+    # dropping it would unbind the source when somebody's camera goes off.
+    add_executable(CoreVideoParticipantFilterTest
+        tests/participant-filter-test.cpp
+    )
+    target_include_directories(CoreVideoParticipantFilterTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoParticipantFilter
+             COMMAND CoreVideoParticipantFilterTest)
+
     # Measures the luma range actually delivered by the SDK, so the full-range
     # vs limited-range question is settled by measurement, not assumption.
     add_executable(CoreVideoLumaRangeProbeTest

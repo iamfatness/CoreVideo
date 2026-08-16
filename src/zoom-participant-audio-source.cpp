@@ -420,14 +420,27 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
     // is now visible, not that it can never happen.
     if (pending > slot_count) {
         const uint32_t lost = pending - slot_count;
+        const uint64_t overrun_before = ctx->overrun_slots;
         ctx->overrun_slots += lost;
         audio_timeline_skip(ctx->timeline, lost * nominal_frames);
         ctx->read_index = write_index - slot_count;
         pending = slot_count;
-        blog(LOG_WARNING,
-             "[obs-zoom-plugin] CoreVideo audio ring overrun: source=%s uuid=%s lost_slots=%llu",
-             obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
-             static_cast<unsigned long long>(ctx->overrun_slots));
+        // Rate-limited the same way every other high-frequency log in this
+        // file is: first occurrence loud, then periodically (see the
+        // frame_count == 1 || frame_count % 250 == 0 pattern below). Without
+        // this, a sustained overrun at Zoom's ~100 callbacks/sec would put up
+        // to 900 blog() calls/sec -- each taking libobs' log lock and writing
+        // to disk, under ctx->mtx -- on the exact path that is already
+        // CPU-starved, amplifying the stall being reported. overrun_slots is
+        // already maintained cumulatively for Task 7 to surface; this only
+        // decides when a change in it also goes to the log.
+        if (overrun_before == 0 ||
+            overrun_before / 250 != ctx->overrun_slots / 250) {
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] CoreVideo audio ring overrun: source=%s uuid=%s lost_slots=%llu",
+                 obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
+                 static_cast<unsigned long long>(ctx->overrun_slots));
+        }
     }
 
     for (uint32_t n = 0; n < pending; ++n) {
@@ -469,11 +482,25 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
         // slot's timeline position.
         if (copied && ring->write_index - slot_index > slot_count) {
             copied = false;
+            const uint64_t overrun_before = ctx->overrun_slots;
             ++ctx->overrun_slots;
-            blog(LOG_WARNING,
-                 "[obs-zoom-plugin] CoreVideo audio slot overwritten mid-read: source=%s uuid=%s lost_slots=%llu",
-                 obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
-                 static_cast<unsigned long long>(ctx->overrun_slots));
+            // Same rate-limit, and the same reason, as the overrun-skip log
+            // above -- this one sits INSIDE the per-slot loop and could
+            // otherwise fire up to slot_count times per callback. Sharing the
+            // gate on the one overrun_slots counter (rather than a second
+            // one) keeps "first occurrence, then periodically" meaningful
+            // regardless of which of the two loss paths produced it. This
+            // check can also false-positive if the reader is preempted
+            // between the seqlock's seq2 read and this write_index re-read --
+            // a still-valid buffer gets discarded and counted -- which is a
+            // second reason not to treat every occurrence as log-worthy.
+            if (overrun_before == 0 ||
+                overrun_before / 250 != ctx->overrun_slots / 250) {
+                blog(LOG_WARNING,
+                     "[obs-zoom-plugin] CoreVideo audio slot overwritten mid-read: source=%s uuid=%s lost_slots=%llu",
+                     obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
+                     static_cast<unsigned long long>(ctx->overrun_slots));
+            }
         }
 
         ctx->read_index = slot_index + 1;

@@ -90,6 +90,21 @@ struct ShmFrameHeader {
     // makes the A/V offset a measured number instead of an assertion -- on
     // 2026-08-16 the product could not answer "what is our render latency"
     // because nothing carried a timestamp across the boundary.
+    //
+    // Deliberately UNLIKE ShmAudioSlot below, this header carries no version
+    // guard. A new-engine/old-plugin skew (old plugin requests the smaller,
+    // pre-capture_ns frame_bytes; that request succeeds as a partial view
+    // into the larger region; width/height/y_len read fine from their
+    // unchanged offsets; the pixel memcpy then reads from the wrong offset)
+    // is SILENT -- no failed map, no rejected read, just a subtly wrong
+    // frame. That is the one direction shm_mapping_stale()'s size check does
+    // not catch (old-engine/new-plugin is the reverse skew and IS caught: the
+    // larger request fails MapViewOfFile outright). Accepted anyway: unlike
+    // the audio ring, no field here is available to repurpose as a guard the
+    // way slot_count was, so a guard would mean adding a new field solely to
+    // detect a skew that release-local.ps1 already prevents by packaging
+    // plugin + engine + SDK as one matched build. Revisit if engine and
+    // plugin are ever updated independently of each other.
     uint64_t capture_ns;
 };
 // Audio is a RING, not a mailbox.

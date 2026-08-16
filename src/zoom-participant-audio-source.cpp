@@ -29,6 +29,26 @@
 
 static constexpr uint32_t kZoomBytesPerSample = sizeof(int16_t);
 
+static constexpr uint32_t kMaxAudioDelayMs = 500;
+
+// The operator's global delay trim for the DEDICATED audio path, in ms.
+//
+// File-scope and read straight out of the publish expression in
+// output_audio_frame(), NOT cached per source. That is the whole mechanism: a
+// change takes effect on the very next buffer, on every live source, with no
+// restart, no per-source push and no broadcast machinery -- and there is no
+// broadcast machinery anywhere in this plugin to build it on. The previous
+// per-source copy was only refreshed from apply_audio_settings(), i.e. when
+// that ONE source's own properties dialog was OK'd, so a global settings
+// change reached nothing that was already running.
+//
+// Seeded from ZoomPluginSettings::audio_delay_ms by apply_audio_settings()
+// (create + update) and written by corevideo_set_global_audio_delay_ms() from
+// the settings dialog. Always clamped to 0-kMaxAudioDelayMs at every write
+// site: ZoomPluginSettings::save() does not clamp, so config_get_int() can
+// hand back anything that is on disk.
+static std::atomic<uint32_t> g_global_audio_delay_ms{0};
+
 // CoreVideoAudioKind, AudioSubscriptionState and the two decisions they drive
 // live in src/audio-subscription-state.h so they can be tested without OBS.
 
@@ -50,13 +70,6 @@ struct CoreVideoAudioSource {
     CoreVideoAudioKind kind = CoreVideoAudioKind::Participant;
     std::atomic<uint32_t> participant_id{0};
     std::atomic<AudioChannelMode> audio_mode{AudioChannelMode::Mono};
-    // Milliseconds to delay this source's audio, so it lands on the master
-    // clock later than sample-derived timing alone would put it -- aligning
-    // it with the slower video path (see the delay comment in
-    // output_audio_frame()). Loaded from ZoomPluginSettings::audio_delay_ms
-    // in apply_audio_settings(), which runs on create and on every
-    // audio_update(), so a change takes effect without an OBS restart.
-    std::atomic<uint32_t> audio_delay_ms{0};
     // The two fields of AudioSubscriptionState, held as atomics because they
     // are touched from the OBS UI thread (activate/deactivate/update), the
     // engine reader thread (roster callbacks) and whichever thread called
@@ -87,12 +100,88 @@ struct CoreVideoAudioSource {
     // Slots the writer lapped before we drained them -- audio that was lost.
     // Counted so loss is visible; the old mailbox lost audio invisibly.
     uint64_t overrun_slots = 0;
+    // How many times output_audio_frame() had to reopen the mapping because
+    // the ring header described a region larger than our view. Rate-limits
+    // that log; nonzero is diagnostic, not fatal.
+    uint64_t remap_count = 0;
     // Engine capture to OBS publish, microseconds. 0 = not yet measured. Set
-    // in output_audio_frame() against ShmAudioSlot::capture_ns. Not currently
-    // wired into ZoomOutputInfo -- this source type is not a ZoomSource and
-    // is not registered with ZoomOutputManager; see task-5-report.md.
+    // in output_audio_frame() against ShmAudioSlot::capture_ns. Deliberately
+    // NOT in ZoomOutputInfo -- this source type is not a ZoomSource and is not
+    // registered with ZoomOutputManager, so it can never appear in
+    // list_outputs. It is surfaced through the registry below and the control
+    // API's list_audio_sources instead.
     std::atomic<uint64_t> audio_latency_us{0};
 };
+
+// Live-instance registry.
+//
+// Mirrors ZoomOutputManager's register_source()/unregister_source() pattern for
+// ZoomSource -- a mutex plus a vector of raw pointers, with registration in
+// create and removal in destroy -- because nothing equivalent existed for these
+// sources. Without it, overrun_slots and audio_latency_us were private fields
+// reaching nothing but a rate-limited blog(), and the spec's requirement to
+// surface loss and latency in the control API could not be met (nor its
+// acceptance test run).
+//
+// LOCK ORDER: g_sources_mtx before any ctx->mtx, never the reverse. The only
+// place both are taken is corevideo_audio_source_infos(); the audio reader
+// thread takes ctx->mtx and never touches g_sources_mtx. audio_destroy()
+// unregisters BEFORE `delete ctx`, so a pointer held under g_sources_mtx is
+// always live.
+static std::mutex g_sources_mtx;
+static std::vector<CoreVideoAudioSource *> g_sources;
+
+static const char *audio_kind_id(CoreVideoAudioKind kind)
+{
+    switch (kind) {
+    case CoreVideoAudioKind::ActiveSpeaker: return "active_speaker";
+    case CoreVideoAudioKind::Audience:      return "audience";
+    case CoreVideoAudioKind::Participant:
+    default:                                return "participant";
+    }
+}
+
+uint32_t corevideo_set_global_audio_delay_ms(uint32_t delay_ms)
+{
+    const uint32_t clamped = std::min(delay_ms, kMaxAudioDelayMs);
+    g_global_audio_delay_ms.store(clamped, std::memory_order_relaxed);
+    return clamped;
+}
+
+std::vector<CoreVideoAudioSourceInfo> corevideo_audio_source_infos()
+{
+    const uint32_t delay_ms =
+        g_global_audio_delay_ms.load(std::memory_order_relaxed);
+    std::vector<CoreVideoAudioSourceInfo> out;
+    std::lock_guard<std::mutex> lk(g_sources_mtx);
+    out.reserve(g_sources.size());
+    for (CoreVideoAudioSource *ctx : g_sources) {
+        if (!ctx) continue;
+        CoreVideoAudioSourceInfo info;
+        const char *name = ctx->source ? obs_source_get_name(ctx->source)
+                                       : nullptr;
+        info.source_name = name ? name : std::string();
+        info.source_uuid = ctx->source_uuid;
+        info.kind = audio_kind_id(ctx->kind);
+        info.participant_id =
+            ctx->current_participant_id.load(std::memory_order_acquire);
+        info.subscribed = ctx->subscribed.load(std::memory_order_acquire);
+        info.audio_delay_ms = delay_ms;
+        info.audio_latency_us =
+            ctx->audio_latency_us.load(std::memory_order_relaxed);
+        {
+            // overrun_slots and frame_count are plain members owned by the
+            // engine reader thread under ctx->mtx -- the same lock
+            // output_audio_frame() holds for the whole drain. Read them the way
+            // that path writes them.
+            std::lock_guard<std::mutex> ctx_lk(ctx->mtx);
+            info.overrun_slots = ctx->overrun_slots;
+            info.frame_count   = ctx->frame_count;
+        }
+        out.push_back(std::move(info));
+    }
+    return out;
+}
 
 static uint32_t target_participant_id(const CoreVideoAudioSource *ctx)
 {
@@ -383,25 +472,65 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
         }
         return;
     }
-    const uint32_t slot_count = ring->slot_count;
 
     // ensure_shm() only ever grows slot_bytes. The mapping this call opened
     // may have been sized against a SMALLER event_byte_len than the region
-    // now actually holds (e.g. attaching fresh right after a bigger buffer
-    // already grew it elsewhere). Trusting ring->slot_bytes to derive a slot
-    // offset without checking this reads past our own mapped VIEW, even when
-    // the underlying region is large enough -- an access violation, not a
-    // logic error.
+    // now actually holds (e.g. a target whose audio role flipped Mix (stereo,
+    // 1920 B) to Isolated (mono, 960 B) without an unsubscribe: the region
+    // keeps slot_bytes=1920 while a fresh mapping asks for only 7892 bytes of
+    // a 15572-byte ring). Trusting ring->slot_bytes to derive a slot offset
+    // without checking this reads past our own mapped VIEW, even when the
+    // underlying region is large enough -- an access violation, not a logic
+    // error.
+    //
+    // Simply returning here MUTED THE SOURCE FOREVER: the mapping is only
+    // reopened when audio_shm.size < shm_audio_region_bytes(event_byte_len),
+    // and event_byte_len is the CURRENT buffer size, which in this scenario is
+    // the SMALL one -- so the condition that got us here could never untrip,
+    // and after frame_count > 0 it stopped logging too. The header is inside
+    // the view we already hold, so the correct size is known: reopen at it
+    // now, in this same call.
     if (shm_audio_region_bytes(ring->slot_bytes) > ctx->audio_shm.size) {
-        if (ctx->frame_count == 0) {
-            blog(LOG_WARNING,
-                 "[obs-zoom-plugin] CoreVideo audio mapping too small for the ring it describes: source=%s uuid=%s mapped_bytes=%zu needed_bytes=%zu slot_bytes=%u",
-                 obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
-                 ctx->audio_shm.size, shm_audio_region_bytes(ring->slot_bytes),
-                 ring->slot_bytes);
+        const size_t mapped_bytes = ctx->audio_shm.size;
+        const uint32_t described_slot_bytes = ring->slot_bytes;
+        const size_t needed_bytes = shm_audio_region_bytes(described_slot_bytes);
+        ring = nullptr; // the view backing it is about to be unmapped
+        shm_region_destroy(ctx->audio_shm);
+        if (!shm_region_open_read(ctx->audio_shm, shm_name, needed_bytes) &&
+            (event_shm_gen <= 1 ||
+             !shm_region_open_read(ctx->audio_shm, audio_base, needed_bytes))) {
+            ctx->read_started = false;
+            ++ctx->remap_count;
+            if (ctx->remap_count == 1 || ctx->remap_count % 250 == 0) {
+                blog(LOG_WARNING,
+                     "[obs-zoom-plugin] CoreVideo audio remap at the ring's own size FAILED: source=%s uuid=%s needed_bytes=%zu gen=%u",
+                     obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
+                     needed_bytes, event_shm_gen);
+            }
+            return;
         }
-        return;
+        ctx->audio_shm_gen = event_shm_gen;
+        // Same named region, same writer, same free-running write_index -- the
+        // view got bigger, nothing restarted -- so read_index stays valid and
+        // read_started stays as it was.
+        ring = static_cast<const ShmAudioHeader *>(ctx->audio_shm.ptr);
+        ++ctx->remap_count;
+        if (ctx->remap_count == 1 || ctx->remap_count % 250 == 0) {
+            blog(LOG_INFO,
+                 "[obs-zoom-plugin] CoreVideo audio mapping reopened at the ring's own size: source=%s uuid=%s was_bytes=%zu now_bytes=%zu slot_bytes=%u count=%llu",
+                 obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
+                 mapped_bytes, ctx->audio_shm.size, described_slot_bytes,
+                 static_cast<unsigned long long>(ctx->remap_count));
+        }
+        // Re-validate against the NEW view: the writer may have moved on again
+        // between the unmap and the remap, and the version guard above ran on
+        // a header we no longer hold.
+        if (ring->slot_count != kAudioRingSlots ||
+            shm_audio_region_bytes(ring->slot_bytes) > ctx->audio_shm.size) {
+            return;
+        }
     }
+    const uint32_t slot_count = ring->slot_count;
 
     // First event after a (re)subscribe: start level with the writer rather
     // than replaying whatever stale audio the region still holds.
@@ -551,9 +680,13 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
         // holds timestamped audio until its time comes. Only ever pushes audio
         // LATER -- ITU-R BT.1359-1 detects audio leading at +45 ms but
         // tolerates lagging to -125 ms, so late is the safe direction to err.
+        //
+        // Read from the file-scope global here rather than a per-source cached
+        // copy: that is what makes a change in Zoom Plugin Settings take effect
+        // on the next buffer, on every live source, with no restart.
         audio.timestamp = audio_timeline_stamp(ctx->timeline, sample_rate,
                                                timeline_frames, now_ns) +
-                          static_cast<uint64_t>(ctx->audio_delay_ms.load(
+                          static_cast<uint64_t>(g_global_audio_delay_ms.load(
                               std::memory_order_relaxed)) * 1'000'000ULL;
 
         if (ctx->audio_mode.load(std::memory_order_acquire) == AudioChannelMode::Stereo &&
@@ -606,15 +739,16 @@ static void apply_audio_settings(CoreVideoAudioSource *ctx, obs_data_t *settings
     ctx->participant_id.store(new_participant, std::memory_order_release);
     ctx->audio_mode.store(new_mode, std::memory_order_release);
 
-    // The operator delay trim is a global setting (Task 7 will add a
-    // per-source override); re-read it here, the same site the other
-    // settings-driven state on this source is refreshed from, so a change in
-    // the plugin's settings dialog takes effect on the next roster/update tick
-    // without requiring an OBS restart. Clamp on every read, not just on
-    // load() -- config_get_int() returns whatever is on disk, trusted or not.
-    uint32_t new_delay_ms = ZoomPluginSettings::load().audio_delay_ms;
-    if (new_delay_ms > 500) new_delay_ms = 500;
-    ctx->audio_delay_ms.store(new_delay_ms, std::memory_order_relaxed);
+    // The operator delay trim is deliberately GLOBAL to this source type, not
+    // per source: it corrects the pipeline's audio-ahead-of-video bias, which
+    // is a property of the pipeline, not of one participant. Re-seeding the
+    // file-scope atomic here keeps a hand-edited global.ini working; the Zoom
+    // Plugin Settings dialog writes the atomic directly, which is what makes
+    // the change land on already-running sources. Clamp at every write site,
+    // not just in load() -- ZoomPluginSettings::save() does not clamp and
+    // config_get_int() returns whatever is on disk.
+    corevideo_set_global_audio_delay_ms(
+        ZoomPluginSettings::load().audio_delay_ms);
 
     if (old_participant != new_participant || old_mode != new_mode)
         maybe_resubscribe_for_roster(ctx);
@@ -657,6 +791,10 @@ static void *audio_create_common(obs_data_t *settings, obs_source_t *source,
             maybe_resubscribe_for_roster(ctx);
         });
 
+    {
+        std::lock_guard<std::mutex> lk(g_sources_mtx);
+        g_sources.push_back(ctx);
+    }
     return ctx;
 }
 
@@ -678,6 +816,13 @@ static void *audience_audio_create(obs_data_t *settings, obs_source_t *source)
 static void audio_destroy(void *data)
 {
     auto *ctx = static_cast<CoreVideoAudioSource *>(data);
+    {
+        // Before anything else, and well before `delete ctx`: a reader holding
+        // g_sources_mtx must never be handed a pointer that is about to die.
+        std::lock_guard<std::mutex> lk(g_sources_mtx);
+        g_sources.erase(std::remove(g_sources.begin(), g_sources.end(), ctx),
+                        g_sources.end());
+    }
     {
         std::lock_guard<std::mutex> callback_lock(ctx->callback_gate->mtx);
         ctx->callback_gate->alive = false;

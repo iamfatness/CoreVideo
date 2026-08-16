@@ -409,6 +409,10 @@ bool obs_module_load(void)
     blog(LOG_INFO, "[obs-zoom-plugin] Registered CoreVideo source kinds");
 
     ZoomPluginSettings s = ZoomPluginSettings::load();
+    // Seed the dedicated audio path's global delay trim once, here, so the
+    // operator's saved value is in force from the first buffer rather than
+    // only from whenever some source next re-applies its own settings.
+    corevideo_set_global_audio_delay_ms(s.audio_delay_ms);
     ZoomReconnectManager::instance().set_policy(s.reconnect_policy);
     ZoomControlServer::instance().set_token(s.control_token);
     if (!ZoomControlServer::instance().start(s.control_server_port))

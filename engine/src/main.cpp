@@ -822,6 +822,18 @@ public:
 #endif
         if (m_video_engine) {
             m_video_engine->set_raw_media_active(false);
+            // suspend_all() KEEPS the desired-state map so a later
+            // resubscribe_all() can rebuild every source. That is right for
+            // the operator stopping and restarting raw recording INSIDE one
+            // meeting -- forgetting the intent there made sources come back
+            // empty and be re-picked by hand, on air.
+            //
+            // It is WRONG at a meeting boundary, which is why
+            // clear_media_intent() below exists and why DISCONNECTING/ENDED
+            // calls it. Zoom user IDs are meeting-scoped 32-bit values, so
+            // intent carried from meeting A into meeting B can resubscribe a
+            // colliding ID and put the WRONG PARTICIPANT on an output. Do not
+            // re-unify these two paths.
             m_video_engine->suspend_all();
         }
         if (m_share_engine)
@@ -832,6 +844,20 @@ public:
         EngineIpc::write(
             R"({"cmd":"debug","stage":"raw_media_stopped","reason":")" +
             std::string(reason ? reason : "manual_stop") + "\"}");
+    }
+
+    // Meeting-boundary teardown, on top of stop_raw_media(). Leaving meeting A
+    // and joining meeting B in the same engine process must NOT carry meeting
+    // A's participant IDs into B's subscribes -- see the suspend_all() comment
+    // above. Only the DISCONNECTING/ENDED path calls this; the operator's
+    // stop/start of raw recording deliberately does not.
+    void clear_media_intent(const char *reason)
+    {
+        if (m_video_engine)
+            m_video_engine->unsubscribe_all();
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"media_intent_cleared","reason":")" +
+            std::string(reason ? reason : "meeting_left") + "\"}");
     }
 
 #if defined(COREVIDEO_HAS_LIVE_STREAM_CTRL)
@@ -957,6 +983,9 @@ public:
         case ZOOMSDK::MEETING_STATUS_DISCONNECTING:
         case ZOOMSDK::MEETING_STATUS_ENDED:
             stop_raw_media("meeting_left");
+            // A meeting boundary genuinely ends the intent: the next join is a
+            // different meeting with its own, unrelated 32-bit user IDs.
+            clear_media_intent("meeting_left");
 #if defined(COREVIDEO_HAS_LIVE_STREAM_CTRL)
             if (m_meeting_svc && *m_meeting_svc) {
                 auto *stream = (*m_meeting_svc)->GetMeetingLiveStreamController();

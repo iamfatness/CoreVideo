@@ -206,6 +206,10 @@ private:
     uint64_t m_fps_window_start_ns = 0;
     uint32_t m_fps_window_frames = 0;
     uint64_t m_audio_frame_count = 0;
+    // How many times output_audio_from_shared_memory() had to reopen an audio
+    // mapping because the ring header described a region larger than our view.
+    // Rate-limits that log; guarded by m_mtx like the rest of the audio read.
+    uint64_t m_audio_remap_count = 0;
     std::atomic<bool> m_subscribed{false};
     std::atomic<bool> m_active{false};
     std::atomic<uint32_t> m_current_subscription_id{0};

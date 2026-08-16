@@ -6,6 +6,7 @@
 #include "zoom-iso-recorder.h"
 #include "zoom-oauth.h"
 #include "zoom-output-manager.h"
+#include "zoom-participant-audio-source.h"
 #include "zoom-reconnect.h"
 #include "zoom-settings.h"
 #include <QHostAddress>
@@ -285,9 +286,20 @@ static QJsonObject output_to_json(const ZoomOutputInfo &o)
     obj["video_latency_us"] = static_cast<double>(o.video_latency_us);
     // The EBU R37 number: positive means audio is EARLY relative to video, so
     // that much delay (in ms) is what to dial into audio_delay_ms to close it.
-    obj["av_offset_us"] =
-        static_cast<double>(static_cast<int64_t>(o.video_latency_us) -
-                            static_cast<int64_t>(o.audio_latency_us));
+    //
+    // NULL, not 0, when either latency has not been measured yet. A latency of
+    // 0 means "no frame/buffer has been through this path", and emitting an
+    // av_offset_us of 0 for it told automation the rig was PERFECTLY IN SYNC --
+    // the most confident possible reading of no data at all. The dock has
+    // always drawn "-" in exactly this case (av_offset_text()); the API now
+    // agrees with it.
+    if (o.audio_latency_us == 0 || o.video_latency_us == 0) {
+        obj["av_offset_us"] = QJsonValue(QJsonValue::Null);
+    } else {
+        obj["av_offset_us"] =
+            static_cast<double>(static_cast<int64_t>(o.video_latency_us) -
+                                static_cast<int64_t>(o.audio_latency_us));
+    }
     // audio_delay_ms/audio_latency_us/video_latency_us/av_offset_us all
     // describe THIS output's own embedded audio path (this ZoomSource's
     // obs_source_output_audio() call) -- NOT the separate, disjoint
@@ -525,6 +537,37 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
         for (const auto &o : ZoomOutputManager::instance().outputs())
             outputs.append(output_to_json(o));
         write_response(socket, {{"ok", true}, {"outputs", outputs}});
+        return;
+    }
+
+    // The DEDICATED audio path, which list_outputs does not and cannot cover:
+    // a CoreVideoAudioSource is not a ZoomSource and is not registered with
+    // ZoomOutputManager. This is where the ring's loss counter
+    // (`overrun_slots`) and the dedicated path's measured latency become
+    // readable at all -- the spec requires both to be surfaced, and until this
+    // command existed neither reached anything but a rate-limited log line.
+    if (cmd == "list_audio_sources") {
+        QJsonArray sources;
+        for (const auto &a : corevideo_audio_source_infos()) {
+            QJsonObject obj;
+            obj["source_name"]  = QString::fromStdString(a.source_name);
+            obj["source_uuid"]  = QString::fromStdString(a.source_uuid);
+            obj["kind"]         = QString::fromUtf8(a.kind);
+            obj["participant_id"] = static_cast<double>(a.participant_id);
+            obj["subscribed"]   = a.subscribed;
+            obj["audio_delay_ms"] = static_cast<double>(a.audio_delay_ms);
+            // Same convention as list_outputs' av_offset_us: null means NOT
+            // MEASURED, which is not the same as zero.
+            obj["audio_latency_us"] = a.audio_latency_us == 0
+                ? QJsonValue(QJsonValue::Null)
+                : QJsonValue(static_cast<double>(a.audio_latency_us));
+            // Ring slots the engine overwrote before this source drained them.
+            obj["overrun_slots"] = static_cast<double>(a.overrun_slots);
+            obj["frame_count"]   = static_cast<double>(a.frame_count);
+            obj["audio_path"]    = "dedicated";
+            sources.append(obj);
+        }
+        write_response(socket, {{"ok", true}, {"audio_sources", sources}});
         return;
     }
 

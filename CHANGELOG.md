@@ -49,20 +49,42 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
   assigned to a source is never hidden, so switching a camera off can never make
   a picker lose its own selection.
 
-- **Audio no longer drops samples.** The engine wrote every Zoom audio buffer
-  into a single shared-memory slot, overwriting whatever had not been read yet
-  — so on a loaded machine, audio was being lost continuously and silently.
-  Audio now travels through an 8-slot ring, and the rare loss that does happen
-  is counted and logged instead of vanishing.
-- **Audio is stamped from a master clock.** Timestamps came from the moment the
-  plugin happened to read a buffer, so IPC jitter reached OBS and it resampled
-  continuously to compensate. Timestamps now derive from a running sample count,
-  so they advance by exactly one sample period regardless of arrival.
-- **Added an audio delay control (0–500 ms) and a measured A/V offset.** Video
-  is the slower path in any software production chain, so audio needs delaying
-  to match — the control every vMix operator expects. The Output Manager now
-  also shows the measured offset, so you can trim against a number instead of
-  by ear.
+CoreVideo has two independent audio paths, and the three entries below do not
+all land on the same one. The **dedicated** path is the audio-only CoreVideo
+Audio sources (participant / active speaker / audience) that most shows route to
+program. The **embedded** path is the audio track published alongside a CoreVideo
+video source's picture. No code connects them.
+
+- **Audio no longer drops samples — on the dedicated path.** The engine wrote
+  every Zoom audio buffer into a single shared-memory slot, overwriting whatever
+  had not been read yet — so on a loaded machine, audio was being lost
+  continuously and silently. The dedicated CoreVideo Audio sources now drain an
+  8-slot ring, and the loss that does happen is counted, logged, and readable
+  over the control API (`list_audio_sources` → `overrun_slots`) instead of
+  vanishing. A video source's own embedded audio track still reads
+  newest-slot-only and has no loss accounting.
+- **Audio is stamped from a master clock — on the dedicated path.** Timestamps
+  came from the moment the plugin happened to read a buffer, so IPC jitter
+  reached OBS and it resampled continuously to compensate. Dedicated CoreVideo
+  Audio source timestamps now derive from a running sample count, so they
+  advance by exactly one sample period regardless of arrival. The embedded track
+  is still stamped at arrival.
+- **Added audio delay controls (0–500 ms), one per path, and a measured A/V
+  offset for the embedded one.** Video is the slower path in any software
+  production chain, so audio needs delaying to match — the control every vMix
+  operator expects.
+  - **Tools → Zoom Plugin Settings → Audio → Audio delay (dedicated sources)** is
+    a single global trim for every dedicated CoreVideo Audio source. It takes
+    effect on the next audio buffer, including on sources that are already
+    running — no OBS restart, and no more hand-editing `AudioDelayMs` in
+    `global.ini`.
+  - The Output Manager's per-row **Delay (embedded)** spinbox trims one video
+    source's own embedded audio track, and **A/V Offset (embedded)** is the
+    measured number to trim it against. Both columns are labelled "(embedded)"
+    because they do not move the dedicated sources.
+
+  Trim either control off air: lowering a delay pushes the timestamp backward
+  once and briefly glitches the affected source.
 
 ## [0.1.39] - 2026-08-13
 

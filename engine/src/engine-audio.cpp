@@ -235,13 +235,37 @@ void EngineAudio::output_audio_frame(AudioTarget &target,
 
     auto *ring = static_cast<ShmAudioHeader *>(target.shm.ptr);
     // A buffer larger than the slots we sized for cannot be published without
-    // corrupting the neighbouring slot. ensure_shm() grows the region on the
-    // next call; drop this one loudly rather than write out of bounds.
+    // corrupting the neighbouring slot. Keep the bounds check -- but this
+    // condition is UNREACHABLE given ensure_shm()'s invariant, so it must not
+    // be reported as an operator-facing error.
+    //
+    // Proof of unreachability. ensure_shm() creates every region at exactly
+    // shm_audio_region_bytes(byte_len) and, in the same call, writes
+    // ring->slot_bytes = byte_len; shm_region_create()/shm_region_open_read()
+    // record r.size as exactly the size requested (no page rounding is folded
+    // in). So target.shm.size == shm_audio_region_bytes(ring->slot_bytes)
+    // holds for the life of the region. ensure_shm() early-returns only when
+    // target.shm.size >= shm_audio_region_bytes(byte_len), i.e. only when
+    // ring->slot_bytes >= byte_len; otherwise it recreates at the larger size
+    // and re-stamps slot_bytes. Either way, once ensure_shm() has returned
+    // true, ring->slot_bytes >= byte_len.
+    //
+    // It previously emitted {"cmd":"error","msg":"audio_slot_too_small"}. That
+    // message is not in zoom-engine-client.cpp's non-fatal whitelist, so every
+    // occurrence would have raised an operator-facing error banner AND cast a
+    // ZoomReconnectManager::on_join_failed() vote -- from a 100 Hz path, with
+    // no rate limit, mid-show. A defensive check that cannot fire has no
+    // business voting to tear down a meeting. Demoted to a latched debug
+    // record: if the invariant above is ever broken by a future change, it is
+    // still visible in the engine log, once, without amplification.
     if (byte_len > ring->slot_bytes) {
-        EngineIpc::write(
-            R"({"cmd":"error","msg":"audio_slot_too_small","source_uuid":")" +
-            source_uuid + R"(","byte_len":)" + std::to_string(byte_len) +
-            R"(,"slot_bytes":)" + std::to_string(ring->slot_bytes) + "}");
+        if (!target.slot_too_small_reported) {
+            target.slot_too_small_reported = true;
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"audio_slot_too_small","source_uuid":")" +
+                source_uuid + R"(","byte_len":)" + std::to_string(byte_len) +
+                R"(,"slot_bytes":)" + std::to_string(ring->slot_bytes) + "}");
+        }
         return;
     }
 

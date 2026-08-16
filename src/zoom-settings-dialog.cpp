@@ -5,7 +5,9 @@
 #include "zoom-control-server.h"
 #include "zoom-oauth.h"
 #include "zoom-osc-server.h"
+#include "zoom-participant-audio-source.h"
 #include "zoom-reconnect.h"
+#include <algorithm>
 #include <QVBoxLayout>
 #include <QFormLayout>
 #include <QDialogButtonBox>
@@ -119,6 +121,38 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     auto *hw_group = new QGroupBox("Hardware Video Acceleration", this);
     hw_group->setLayout(hw_form);
 
+    // ── Audio ─────────────────────────────────────────────────────────────────
+    // The delay control for the path an operator actually routes to program.
+    // The Output Manager's per-row Delay spinbox moves a video source's own
+    // EMBEDDED audio; most shows put the dedicated CoreVideo Audio sources on
+    // program instead, and until now the only way to delay those was to
+    // hand-edit AudioDelayMs in global.ini and restart OBS.
+    m_audio_delay_spin = new QSpinBox(this);
+    m_audio_delay_spin->setRange(0, 500);
+    m_audio_delay_spin->setSingleStep(5);
+    m_audio_delay_spin->setSuffix(" ms");
+    // Clamp what came off disk: load() clamps but save() does not, so a
+    // hand-edited or older global.ini can hold anything.
+    m_audio_delay_spin->setValue(
+        static_cast<int>(std::min<uint32_t>(s.audio_delay_ms, 500)));
+    m_audio_delay_spin->setToolTip(
+        "Delays every dedicated CoreVideo Audio source (participant, active "
+        "speaker, audience) by 0-500 ms, to align it with the slower video "
+        "path. Takes effect on the next audio buffer -- no OBS restart. This "
+        "is the control for audio you routed to program from a CoreVideo "
+        "Audio source; the Output Manager's per-row Delay is a separate "
+        "control for a video source's own embedded audio. Trim OFF AIR: "
+        "lowering the value pushes the timestamp backward once and briefly "
+        "glitches every dedicated audio source.");
+
+    auto *audio_form = new QFormLayout;
+    audio_form->setSpacing(8);
+    audio_form->addRow(new QLabel("Audio delay (dedicated sources):", this),
+                       m_audio_delay_spin);
+
+    auto *audio_group = new QGroupBox("Audio", this);
+    audio_group->setLayout(audio_form);
+
     // ── Updates ───────────────────────────────────────────────────────────────
     m_check_updates_cb = new QCheckBox("Check for updates on startup", this);
     m_check_updates_cb->setChecked(s.check_for_updates_on_startup);
@@ -198,6 +232,7 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     layout->addWidget(ctrl_group);
     layout->addWidget(osc_group);
     layout->addWidget(hw_group);
+    layout->addWidget(audio_group);
     layout->addWidget(updates_group);
     layout->addWidget(rc_group);
     layout->addWidget(version_label);
@@ -222,6 +257,11 @@ bool ZoomSettingsDialog::saveSettings(bool close_dialog, bool restart_servers)
     s.hw_accel_mode       = static_cast<HwAccelMode>(
         m_hw_accel_combo->currentData().toInt());
     s.check_for_updates_on_startup = m_check_updates_cb->isChecked();
+    // Clamp at the WRITE site: ZoomPluginSettings::save() does not clamp, and
+    // this is one of the paths that writes the field. The spinbox range
+    // already bounds it, but the invariant belongs here, not in the widget.
+    s.audio_delay_ms = std::min<uint32_t>(
+        static_cast<uint32_t>(std::max(0, m_audio_delay_spin->value())), 500);
     s.reconnect_policy.enabled         = m_rc_enabled_cb->isChecked();
     s.reconnect_policy.max_attempts    = m_rc_max_attempts_spin->value();
     s.reconnect_policy.base_delay_ms   = m_rc_base_delay_spin->value();
@@ -232,6 +272,11 @@ bool ZoomSettingsDialog::saveSettings(bool close_dialog, bool restart_servers)
     s.save();
     ZoomReconnectManager::instance().set_policy(s.reconnect_policy);
     ZoomControlServer::instance().set_token(s.control_token);
+    // Push to the live instances. Saving alone would only reach sources
+    // created AFTER this point -- apply_audio_settings() re-reads the file, but
+    // nothing calls it on an already-running source unless its own properties
+    // dialog is OK'd. This is what makes "no restart" true.
+    corevideo_set_global_audio_delay_ms(s.audio_delay_ms);
 
     if (!restart_servers) {
         updateOAuthStatus();

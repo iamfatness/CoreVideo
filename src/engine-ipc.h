@@ -105,6 +105,14 @@ struct ShmFrameHeader {
     // detect a skew that release-local.ps1 already prevents by packaging
     // plugin + engine + SDK as one matched build. Revisit if engine and
     // plugin are ever updated independently of each other.
+    //
+    // NOT WRITTEN BY EVERY PRODUCER. engine/src/engine-video.cpp stamps this;
+    // engine/src/engine-share.cpp does NOT -- the screen-share writer sets
+    // sequence/width/height/y_len and leaves capture_ns at whatever the fresh
+    // region was zero-filled to. The plugin's reader treats 0 as "not
+    // measured" and skips the latency store, so a screen-share output shows
+    // "-" for A/V Offset permanently and always will until the share writer
+    // stamps it too. That is a gap, not a design decision.
     uint64_t capture_ns;
 };
 // Audio is a RING, not a mailbox.

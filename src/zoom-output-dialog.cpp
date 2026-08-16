@@ -50,9 +50,10 @@ enum OutputColumns {
 };
 
 // Caps schedule_deferred_refresh()'s retry loop at 250ms/attempt (~2s total)
-// so a spinbox merely holding keyboard focus can't defer a refresh forever
-// the way an open combo popup legitimately can't either (it closes on its
-// own). See ZoomOutputDialog::m_deferred_refresh_attempts.
+// for the SPINBOX-FOCUS case only, which can be held indefinitely. An open
+// combo popup defers without a cap: it closes on its own, and force-closing it
+// under an operator mid-selection is worse than a stale table.
+// See ZoomOutputDialog::m_deferred_refresh_attempts.
 static constexpr int kMaxDeferredRefreshAttempts = 8;
 
 // QTableWidget stretches a cell widget to fill the whole (tall) row cell. A
@@ -668,7 +669,13 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     m_table->setColumnCount(ColumnCount);
     m_table->setHorizontalHeaderLabels({
         "Preview", "Output", "Assignment", "Request", "Signal",
-        "SDK Status", "Audio", "Delay", "A/V Offset", "Audio Role"
+        // "(embedded)" is load-bearing, not decoration: these two columns act on
+        // and measure the video source's OWN embedded audio track. A show that
+        // routes the dedicated CoreVideo Audio sources to program hears nothing
+        // change when it moves this Delay. The control for that path is the
+        // global "Audio delay (dedicated sources)" in Zoom Plugin Settings.
+        "SDK Status", "Audio", "Delay (embedded)", "A/V Offset (embedded)",
+        "Audio Role"
     });
     m_table->horizontalHeader()->setMinimumSectionSize(104);
     m_table->horizontalHeader()->setSectionResizeMode(ColumnPreview,    QHeaderView::Fixed);
@@ -688,8 +695,10 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     m_table->setColumnWidth(ColumnDelivered, 168);
     m_table->setColumnWidth(ColumnSdk, 208);
     m_table->setColumnWidth(ColumnAudio, 148);
-    m_table->setColumnWidth(ColumnAudioDelay, 112);
-    m_table->setColumnWidth(ColumnAvOffset, 116);
+    // Wide enough for the "(embedded)" qualifier in the header to be read
+    // rather than elided -- the qualifier is the point of the label.
+    m_table->setColumnWidth(ColumnAudioDelay, 148);
+    m_table->setColumnWidth(ColumnAvOffset, 172);
     m_table->setColumnWidth(ColumnAudioRole, 168);
     m_table->verticalHeader()->setVisible(false);
     m_table->verticalHeader()->setDefaultSectionSize(104);
@@ -794,10 +803,21 @@ bool ZoomOutputDialog::has_open_output_combo_popup() const
                     return true;
             }
         }
-        // The delay spinbox has no popup, but the operator can be
-        // mid-keystroke typing a number into it -- a rebuild mid-edit would
-        // reset its cursor/selection the same way an unguarded rebuild would
-        // clobber a combo's open popup.
+    }
+    return false;
+}
+
+// Deliberately SEPARATE from has_open_output_combo_popup(). The delay spinbox
+// has no popup, but the operator can be mid-keystroke typing a number into it
+// -- a rebuild mid-edit would reset its cursor/selection. Unlike a popup,
+// though, keyboard focus can be held indefinitely (click into it and walk
+// away), so only THIS predicate may be capped. Folding the two together, as an
+// earlier revision did, meant a genuinely open assignment dropdown got force-
+// torn-down after 8x250 ms -- on air, mid-scroll, on a 30-participant meeting.
+bool ZoomOutputDialog::has_focused_output_delay_spinbox() const
+{
+    if (!m_table) return false;
+    for (int row = 0; row < m_table->rowCount(); ++row) {
         if (auto *delay_spin = cell_spin(m_table, row, ColumnAudioDelay)) {
             if (delay_spin->hasFocus())
                 return true;
@@ -813,14 +833,22 @@ void ZoomOutputDialog::schedule_deferred_refresh()
     m_deferred_refresh_queued = true;
     QTimer::singleShot(250, this, [this]() {
         m_deferred_refresh_queued = false;
-        // A combo popup is transient -- it closes within a keystroke or two.
-        // Keyboard focus on the Delay spinbox is not: an operator who clicks
-        // into it and walks away must not freeze Signal/SDK/health/A/V
-        // Offset updates for the rest of the table forever. Cap retries;
-        // refresh() below re-checks the same cap and will force through once
-        // it's hit. Whatever the operator was mid-typing still survives via
-        // the PendingPick/user_dirty snapshot in refresh().
-        if (has_open_output_combo_popup() &&
+        // An open combo popup defers INDEFINITELY. It is transient by nature --
+        // it closes on the operator's next click or keystroke -- and tearing it
+        // down under them is exactly the on-air failure this guard exists to
+        // prevent: an assignment dropdown vanishing mid-scroll on a 30-person
+        // meeting.
+        if (has_open_output_combo_popup()) {
+            schedule_deferred_refresh();
+            return;
+        }
+        // Keyboard focus on the Delay spinbox is different: it can be held
+        // forever (click into it and walk away), and must not freeze
+        // Signal/SDK/health/A/V Offset updates for the rest of the table. Only
+        // this case is capped; refresh() below re-checks the same cap and
+        // forces through once it's hit. Whatever the operator was mid-typing
+        // still survives via the PendingPick/user_dirty snapshot in refresh().
+        if (has_focused_output_delay_spinbox() &&
             ++m_deferred_refresh_attempts < kMaxDeferredRefreshAttempts) {
             schedule_deferred_refresh();
             return;
@@ -831,7 +859,13 @@ void ZoomOutputDialog::schedule_deferred_refresh()
 
 void ZoomOutputDialog::refresh()
 {
-    if (has_open_output_combo_popup() &&
+    // Indefinite for a real popup, capped for spinbox focus -- see
+    // schedule_deferred_refresh().
+    if (has_open_output_combo_popup()) {
+        schedule_deferred_refresh();
+        return;
+    }
+    if (has_focused_output_delay_spinbox() &&
         m_deferred_refresh_attempts < kMaxDeferredRefreshAttempts) {
         schedule_deferred_refresh();
         return;
@@ -1050,11 +1084,17 @@ void ZoomOutputDialog::refresh()
         audio_delay->setMinimumWidth(88);
         audio_delay->setValue(static_cast<int>(output.audio_delay_ms));
         audio_delay->setToolTip(
-            "Delays this output's own embedded audio by 0-500 ms, to align it "
-            "with the slower video path. Trim toward the A/V Offset column to "
-            "the right. Does NOT affect the separate dedicated CoreVideo Audio "
-            "sources -- those take their delay from global.ini's AudioDelayMs "
-            "key, with no dialog of its own yet.");
+            "Delays THIS OUTPUT'S OWN EMBEDDED AUDIO by 0-500 ms -- the audio "
+            "track published alongside this video source's picture -- to align "
+            "it with the slower video path. Trim toward the A/V Offset "
+            "(embedded) column to the right.\n\n"
+            "Trim OFF AIR. Lowering the value pushes this source's timestamp "
+            "backward once, which glitches that source as OBS discards the "
+            "overlap; raising it is smooth.\n\n"
+            "This does NOT move the separate dedicated CoreVideo Audio sources "
+            "(participant / active speaker / audience) that most shows route "
+            "to program. Those are delayed by the global \"Audio delay "
+            "(dedicated sources)\" control in Tools -> Zoom Plugin Settings.");
         mark_dirty_on_user_change(audio_delay);
         m_table->setCellWidget(row, ColumnAudioDelay,
             center_in_cell(audio_delay, Qt::AlignVCenter, 6));
@@ -1068,11 +1108,20 @@ void ZoomOutputDialog::refresh()
         av_offset->setTextInteractionFlags(Qt::TextSelectableByMouse);
         av_offset->setText(av_offset_text(output));
         av_offset->setToolTip(
-            "Measured on this output's own embedded audio path (engine "
-            "capture to OBS publish) versus its video path -- not the "
-            "separate dedicated CoreVideo Audio sources. EBU R37 targets "
-            "+5 / -15 ms per production stage; ITU-R BT.1359-1 flags audio "
-            "leading video at +45 ms and lagging at -125 ms.");
+            "Measured on THIS OUTPUT'S OWN EMBEDDED AUDIO path (engine capture "
+            "to OBS publish) versus its video path -- not the separate "
+            "dedicated CoreVideo Audio sources. Positive means audio is early "
+            "relative to video; that many ms is what to dial into Delay "
+            "(embedded). \"-\" means nothing has been measured yet.\n\n"
+            "Known bias: the two numbers are sampled at slightly different "
+            "points. Video latency is taken AFTER letterbox/scale, audio "
+            "latency right after the shared-memory copy and before its own "
+            "channel conversion -- so this figure over-reports by roughly the "
+            "cost of scaling one frame. Treat it as a starting point and "
+            "confirm by ear or on a clap test.\n\n"
+            "EBU R37 targets +5 / -15 ms per production stage; ITU-R "
+            "BT.1359-1 flags audio leading video at +45 ms and lagging at "
+            "-125 ms.");
         m_table->setCellWidget(row, ColumnAvOffset, av_offset);
 
         auto *audio_role = new QComboBox(m_table);

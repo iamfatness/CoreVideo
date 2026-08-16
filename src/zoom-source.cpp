@@ -1229,8 +1229,16 @@ void ZoomSource::maybe_update_director_subscription()
     // is free when the engine rebuilds it (shm-resubscribe.h). This already
     // dropped the mapping; it now also forgets the generation and takes m_mtx
     // while doing so, because on_director_preview_frame() reads this same
-    // region under m_mtx. The lock is scoped to the release alone — m_mtx is
-    // never held across the engine writes either side of it.
+    // region under m_mtx. The lock is scoped to the release alone — HERE m_mtx
+    // is not held across the two engine writes either side of it.
+    //
+    // That is a statement about THIS function only, not a global invariant.
+    // on_engine_frame()'s director-cut branch does call
+    // ZoomEngineClient::unsubscribe()/subscribe() while holding m_mtx (see the
+    // commit_director_cut block in output_video_from_shared_memory()). It is
+    // still deadlock-free: ZoomEngineClient copies its callback list out from
+    // under its own lock before dispatching, so an engine write from inside a
+    // callback never waits on a lock that a callback dispatch holds.
     release_director_preview_shm();
     ZoomEngineClient::instance().subscribe(m_director_preview_uuid, directed_id,
                                            isolate_audio, audience_audio,
@@ -1561,8 +1569,10 @@ bool ZoomSource::output_video_from_shared_memory(
                                             std::memory_order_release);
             // Do NOT release the preview here. The subscribe() above is
             // asynchronous and the engine needs 735-1277 ms to rebuild this
-            // uuid's region; on_director_preview_frame() is what has been
-            // publishing the new speaker to air, and dropping it now leaves
+            // uuid's VIDEO region (the audio region comes back in ~10-20 ms --
+            // do not reuse this figure for audio, see
+            // on_director_preview_audio()). on_director_preview_frame() is what
+            // has been publishing the new speaker to air, and dropping it leaves
             // nothing publishing for the whole of that window. That was the
             // 2026-08-16 flash: 18 cuts in one show, each with ~850 ms of no
             // video mapping at all. Hold it until the main subscription
@@ -1632,7 +1642,19 @@ void ZoomSource::on_engine_audio(uint32_t event_byte_len,
                                  uint32_t resolved_participant_id,
                                  uint32_t event_shm_gen)
 {
+    // The mirror image of on_director_preview_audio()'s gate: while a handover
+    // is pending the PREVIEW slot owns this source's audio, so the main slot
+    // must stay silent. Exactly one of the two publishes at any instant.
+    // Without this gate both published the same participant's PCM into the same
+    // OBS source ~5 ms apart for the whole handover window, which comb-filters
+    // the speaker's voice on every cut.
+    if (m_director_handover_pending.load(std::memory_order_acquire)) return;
     std::lock_guard<std::mutex> lk(m_mtx);
+    // Re-checked under the lock for the same reason the preview path re-checks:
+    // a handover starting between the check above and here would put the
+    // preview slot on air, and publishing both is the doubling this gate exists
+    // to prevent.
+    if (m_director_handover_pending.load(std::memory_order_acquire)) return;
     output_audio_from_shared_memory(source_uuid, m_audio_shm, m_audio_shm_gen,
                                     event_byte_len, resolved_participant_id,
                                     event_shm_gen);
@@ -1643,15 +1665,24 @@ void ZoomSource::on_engine_audio(uint32_t event_byte_len,
 //
 // Before a cut this must stay silent: the preview follows the NEXT speaker, and
 // putting them on air early is the whole reason this callback used to be a
-// no-op. After the cut commits it is the opposite — the main subscription's
-// audio region has just been released and the engine needs 735-1277 ms to
-// rebuild it, so the preview is the only place this participant's audio exists.
-// That window is exactly what m_director_handover_pending marks, which is why
-// the video handover shipped first: this rides on the same flag.
+// no-op.
 //
-// Without this the operator heard a 1-2 second dropout on every speaker change
-// (measured 2026-08-16), and the video handover made it MORE obvious by keeping
-// the picture clean through a gap the sound still had.
+// CORRECTION (2026-08-16, final whole-branch review). This comment used to
+// claim the main audio region needs 735-1277 ms to rebuild after a cut, so the
+// preview was the only place the new speaker's audio existed. That premise was
+// FALSE. 735-1277 ms is the VIDEO renderer rebuild. Trace the audio path: the
+// cut sends unsubscribe(source_uuid) then subscribe(source_uuid, new_pid);
+// engine-side EngineAudio::remove() destroys the target and EngineAudio::init()
+// recreates it, while subscribe_if_needed() short-circuits because the SDK
+// audio subscription is PROCESS-WIDE and never drops. The next Zoom audio
+// callback (~10 ms later) calls ensure_shm(), creates the region and emits an
+// audio event -- so the MAIN audio path resumes in ~10-20 ms, while the
+// handover flag only clears when a VIDEO frame arrives.
+//
+// So this publish is not covering a gap. It exists only so that the ~10-20 ms
+// in which the main region is genuinely absent is still carried, and so that
+// there is exactly ONE publisher for the whole handover window: this path while
+// m_director_handover_pending is set, on_engine_audio() the rest of the time.
 void ZoomSource::on_director_preview_audio(uint32_t event_byte_len,
                                            uint32_t resolved_participant_id,
                                            uint32_t event_shm_gen)
@@ -1726,22 +1757,57 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
         }
         return;
     }
-    const uint32_t slot_count = ring->slot_count;
 
     // ensure_shm() only ever grows slot_bytes; the mapping this call opened
     // may have been sized against a smaller event_byte_len than the region
-    // now actually holds. Trusting ring->slot_bytes to derive an offset
-    // without this check reads past our own mapped view, even when the
-    // underlying region is large enough.
+    // now actually holds (e.g. an audio role flip Mix->Isolated shrinks the
+    // buffer while the region keeps the larger slot_bytes). Trusting
+    // ring->slot_bytes to derive an offset without this check reads past our
+    // own mapped view, even when the underlying region is large enough.
+    //
+    // Returning here used to mute this source PERMANENTLY: the reopen above is
+    // gated on audio_shm.size < shm_audio_region_bytes(event_byte_len), and
+    // event_byte_len is the current (small) buffer, so the trip condition
+    // could never clear itself -- and past the first buffer it logged nothing.
+    // The header sits inside the view we already hold, so the correct size is
+    // known: reopen at it here, in this same call.
     if (shm_audio_region_bytes(ring->slot_bytes) > audio_shm.size) {
-        if (m_audio_frame_count == 0) {
-            blog(LOG_WARNING,
-                 "[obs-zoom-plugin] Zoom audio mapping too small for the ring it describes: source=%s uuid=%s mapped_bytes=%zu needed_bytes=%zu slot_bytes=%u",
-                 output_name().c_str(), uuid.c_str(), audio_shm.size,
-                 shm_audio_region_bytes(ring->slot_bytes), ring->slot_bytes);
+        const size_t mapped_bytes = audio_shm.size;
+        const uint32_t described_slot_bytes = ring->slot_bytes;
+        const size_t needed_bytes = shm_audio_region_bytes(described_slot_bytes);
+        ring = nullptr; // the view backing it is about to be unmapped
+        shm_region_destroy(audio_shm);
+        if (!shm_region_open_read(audio_shm, shm_name, needed_bytes) &&
+            (event_shm_gen <= 1 ||
+             !shm_region_open_read(audio_shm, audio_base, needed_bytes))) {
+            ++m_audio_remap_count;
+            if (m_audio_remap_count == 1 || m_audio_remap_count % 250 == 0) {
+                blog(LOG_WARNING,
+                     "[obs-zoom-plugin] Zoom audio remap at the ring's own size FAILED: source=%s uuid=%s needed_bytes=%zu gen=%u",
+                     output_name().c_str(), uuid.c_str(), needed_bytes,
+                     event_shm_gen);
+            }
+            return;
         }
-        return;
+        audio_shm_gen = event_shm_gen;
+        ring = static_cast<const ShmAudioHeader *>(audio_shm.ptr);
+        ++m_audio_remap_count;
+        if (m_audio_remap_count == 1 || m_audio_remap_count % 250 == 0) {
+            blog(LOG_INFO,
+                 "[obs-zoom-plugin] Zoom audio mapping reopened at the ring's own size: source=%s uuid=%s was_bytes=%zu now_bytes=%zu slot_bytes=%u count=%llu",
+                 output_name().c_str(), uuid.c_str(), mapped_bytes,
+                 audio_shm.size, described_slot_bytes,
+                 static_cast<unsigned long long>(m_audio_remap_count));
+        }
+        // Re-validate against the NEW view -- the writer may have moved on
+        // again between the unmap and the remap, and the version guard above
+        // ran on a header we no longer hold.
+        if (ring->slot_count != kAudioRingSlots ||
+            shm_audio_region_bytes(ring->slot_bytes) > audio_shm.size) {
+            return;
+        }
     }
+    const uint32_t slot_count = ring->slot_count;
 
     const uint32_t index = (ring->write_index + slot_count - 1) % slot_count;
     const auto *slot = reinterpret_cast<const ShmAudioSlot *>(
@@ -2123,11 +2189,12 @@ static void *zoom_source_create_common(obs_data_t *settings, obs_source_t *sourc
                 if (!gate->alive) return;
                 // Audio cuts follow the committed current slot, so before a cut
                 // this publishes nothing — putting the NEXT speaker on air early
-                // is why this used to be a no-op outright. After the cut commits
-                // it is the only place the new speaker's audio exists, because
-                // the main slot's region has just been released and takes
-                // 735-1277 ms to rebuild. on_director_preview_audio() enforces
-                // that window.
+                // is why this used to be a no-op outright. While a cut is
+                // handing over, this slot is the SOLE publisher and
+                // on_engine_audio() stays quiet; see the corrected reasoning on
+                // on_director_preview_audio() (the main audio region rebuilds in
+                // ~10-20 ms, not the 735-1277 ms this comment used to claim —
+                // that figure is the VIDEO renderer rebuild).
                 ctx->on_director_preview_audio(byte_len, participant_id,
                                                shm_gen);
             },

@@ -10,7 +10,9 @@
 // THE DEFECT THIS EXISTS FOR (2026-08-16, live show). The cut released the main
 // source's SHM mapping, sent an asynchronous subscribe for the new participant
 // on the main uuid, and unsubscribed the preview in the same breath. The engine
-// needs 735-1277 ms to destroy and rebuild that uuid's region, and the preview
+// needs 735-1277 ms to destroy and rebuild that uuid's VIDEO region -- this is
+// a video figure only; the audio region comes back in ~10-20 ms because the
+// SDK audio subscription is process-wide and never drops -- and the preview
 // -- which had been publishing the new speaker to air via
 // on_director_preview_frame() -- stops delivering the moment it is
 // unsubscribed. So for the best part of a second nothing published at all. With

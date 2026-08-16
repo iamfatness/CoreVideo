@@ -1,4 +1,5 @@
 #include "zoom-source.h"
+#include "director-handover.h"
 #include "director-preview-frame-guard.h"
 #include "shm-resubscribe.h"
 #include "luma-range-probe.h"
@@ -871,6 +872,11 @@ void ZoomSource::clear_subscription_state()
     m_subscribed = false;
     m_current_subscription_id = 0;
     m_director_preview_subscription_id = 0;
+    // The preview this handover was waiting on has just been unsubscribed, so
+    // the pending state describes nothing. Left set, the next frame to arrive
+    // would try to release a slot that is already gone.
+    m_director_handover_pending.store(false, std::memory_order_release);
+    m_director_handover_target.store(0, std::memory_order_release);
     m_width.store(0, std::memory_order_relaxed);
     m_height.store(0, std::memory_order_relaxed);
     m_observed_fps_x100.store(0, std::memory_order_relaxed);
@@ -1176,6 +1182,14 @@ void ZoomSource::maybe_update_director_subscription()
         return;
     }
 
+    // Re-pointing the slot supersedes any handover still waiting on it: the
+    // preview is about to serve a different participant, so the pending state
+    // no longer describes anything. Left set, on_engine_frame() would release
+    // the slot the moment the old target's frame arrived, and the timeout
+    // would fire against a handover that no longer exists.
+    m_director_handover_pending.store(false, std::memory_order_release);
+    m_director_handover_target.store(0, std::memory_order_release);
+
     ZoomEngineClient::instance().unsubscribe(m_director_preview_uuid);
     // Between the unsubscribe and the subscribe, so the preview region's name
     // is free when the engine rebuilds it (shm-resubscribe.h). This already
@@ -1200,6 +1214,39 @@ void ZoomSource::on_engine_frame(uint32_t event_width, uint32_t event_height,
                                  uint32_t shm_generation)
 {
     std::lock_guard<std::mutex> lk(m_mtx);
+    // Mid-handover the preview slot is what is on air, because this
+    // subscription's region is still being rebuilt by the engine. Two things
+    // follow. A frame for anyone other than the participant we cut to is
+    // dropped: it is a stale in-flight frame for the PREVIOUS speaker, and
+    // publishing it would flash the old face over the preview's correct one.
+    // A frame for the participant we cut to means the rebuild is done, so the
+    // preview has served its purpose and is released here -- and only here.
+    if (m_director_handover_pending.load(std::memory_order_acquire)) {
+        const uint32_t target =
+            m_director_handover_target.load(std::memory_order_acquire);
+        const uint64_t started =
+            m_director_handover_started_ns.load(std::memory_order_acquire);
+        const uint64_t elapsed_ms = started == 0
+            ? 0 : (os_gettime_ns() - started) / 1'000'000ULL;
+        const DirectorHandoverAction action = director_handover_action(
+            true, target, resolved_participant_id, elapsed_ms,
+            kDirectorHandoverTimeoutMs);
+
+        if (action == DirectorHandoverAction::Hold)
+            return;
+
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] Director handover %s: source=%s uuid=%s participant=%u elapsed_ms=%llu",
+             action == DirectorHandoverAction::Complete
+                 ? "complete" : "abandoned (timeout)",
+             output_name().c_str(), source_uuid.c_str(), target,
+             static_cast<unsigned long long>(elapsed_ms));
+        ZoomEngineClient::instance().unsubscribe(m_director_preview_uuid);
+        m_director_preview_subscription_id.store(0, std::memory_order_release);
+        release_director_preview_shm_locked();
+        m_director_handover_pending.store(false, std::memory_order_release);
+        m_director_handover_target.store(0, std::memory_order_release);
+    }
     output_video_from_shared_memory(source_uuid, m_video_shm, m_video_shm_gen,
                                     m_video_buf, m_scaled_video_buf,
                                     event_width, event_height,
@@ -1229,6 +1276,34 @@ void ZoomSource::on_director_preview_frame(uint32_t event_width,
     // The decision itself lives in director-preview-frame-guard.h so it can be
     // tested without libobs: a regression here is silent everywhere except a
     // live broadcast, so it is not left as an untested inline condition.
+    // If the main subscription never delivers, on_engine_frame() never runs and
+    // nothing else would ever let this slot go -- pinning a Zoom subscription
+    // and one of kMaxShmSources for the rest of the session. This is the only
+    // other place that fires during a handover, so the timeout is checked here
+    // too. No SHM release: this function is about to read that very region.
+    if (m_director_handover_pending.load(std::memory_order_acquire)) {
+        const uint64_t started =
+            m_director_handover_started_ns.load(std::memory_order_acquire);
+        const uint64_t elapsed_ms = started == 0
+            ? 0 : (os_gettime_ns() - started) / 1'000'000ULL;
+        if (director_handover_action(
+                true,
+                m_director_handover_target.load(std::memory_order_acquire),
+                0, elapsed_ms, kDirectorHandoverTimeoutMs) ==
+            DirectorHandoverAction::AbandonOnTimeout) {
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] Director handover abandoned: the main subscription delivered nothing in %llu ms: source=%s uuid=%s",
+                 static_cast<unsigned long long>(elapsed_ms),
+                 output_name().c_str(), source_uuid.c_str());
+            ZoomEngineClient::instance().unsubscribe(m_director_preview_uuid);
+            m_director_preview_subscription_id.store(0,
+                                                     std::memory_order_release);
+            m_director_handover_pending.store(false, std::memory_order_release);
+            m_director_handover_target.store(0, std::memory_order_release);
+            return;
+        }
+    }
+
     const uint32_t awaited =
         m_director_preview_subscription_id.load(std::memory_order_acquire);
     if (!should_publish_director_preview_frame(awaited,
@@ -1442,9 +1517,23 @@ bool ZoomSource::output_video_from_shared_memory(
                                                    resolution);
             m_current_subscription_id.store(resolved_participant_id,
                                             std::memory_order_release);
-            ZoomEngineClient::instance().unsubscribe(m_director_preview_uuid);
-            m_director_preview_subscription_id.store(0,
-                                                     std::memory_order_release);
+            // Do NOT release the preview here. The subscribe() above is
+            // asynchronous and the engine needs 735-1277 ms to rebuild this
+            // uuid's region; on_director_preview_frame() is what has been
+            // publishing the new speaker to air, and dropping it now leaves
+            // nothing publishing for the whole of that window. That was the
+            // 2026-08-16 flash: 18 cuts in one show, each with ~850 ms of no
+            // video mapping at all. Hold it until the main subscription
+            // delivers this participant -- see director-handover.h.
+            //
+            // The main video/audio release above is unchanged and must stay:
+            // it is the 2026-08-10 white-flash fix, and it concerns a
+            // different uuid and region than the preview.
+            m_director_handover_target.store(resolved_participant_id,
+                                             std::memory_order_release);
+            m_director_handover_started_ns.store(os_gettime_ns(),
+                                                 std::memory_order_release);
+            m_director_handover_pending.store(true, std::memory_order_release);
             blog(LOG_INFO,
                  "[obs-zoom-plugin] Active speaker clean cut: source=%s from=%u to=%u",
                  output_name().c_str(), previous_id, resolved_participant_id);

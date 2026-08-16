@@ -181,4 +181,10 @@ private:
     std::atomic<bool> m_active{false};
     std::atomic<uint32_t> m_current_subscription_id{0};
     std::atomic<uint32_t> m_director_preview_subscription_id{0};
+    // Set at a cut and cleared when the main subscription delivers the
+    // participant we cut to. While set, the preview subscription is kept alive
+    // because it is the only thing publishing to air -- see director-handover.h.
+    std::atomic<bool>     m_director_handover_pending{false};
+    std::atomic<uint32_t> m_director_handover_target{0};
+    std::atomic<uint64_t> m_director_handover_started_ns{0};
 };

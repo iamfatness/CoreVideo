@@ -40,3 +40,6 @@ companion/companion-module-corevideo-obs/package-lock.json
 deploy-*.ps1
 deploy-*.done
 fix-*.ps1
+
+# Subagent-driven-development scratch (ledger, briefs, review packages)
+.superpowers/

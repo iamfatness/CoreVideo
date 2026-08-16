@@ -1,6 +1,7 @@
 #include "zoom-participant-audio-source.h"
 
 #include "audio-subscription-state.h"
+#include "audio-timeline.h"
 #include "engine-ipc.h"
 #include "shm-resubscribe.h"
 #include "speaker-director.h"
@@ -65,6 +66,10 @@ struct CoreVideoAudioSource {
     uint64_t frame_count = 0;
     std::shared_ptr<CallbackGate> callback_gate =
         std::make_shared<CallbackGate>();
+    // The master clock this source's audio is stamped from. Guarded by the
+    // same path that guards audio_buf: only the engine reader thread advances
+    // it. See src/audio-timeline.h.
+    AudioTimeline timeline;
 };
 
 static uint32_t target_participant_id(const CoreVideoAudioSource *ctx)
@@ -135,6 +140,10 @@ static void unsubscribe_audio(CoreVideoAudioSource *ctx)
     ZoomEngineClient::instance().unsubscribe(ctx->source_uuid);
     ctx->subscribed.store(false, std::memory_order_release);
     ctx->current_participant_id.store(0, std::memory_order_release);
+    // The next subscribe is a new timeline: a different participant, or the
+    // same one after a gap of unknown length. Neither can be stamped from the
+    // old sample count.
+    audio_timeline_reset(ctx->timeline);
 }
 
 // Drops this source's SHM read mapping. Called when a NEW ZoomObsEngine process
@@ -203,6 +212,9 @@ static void forget_subscription_for_new_engine(CoreVideoAudioSource *ctx)
         ctx->subscribed.exchange(cleared.subscribed, std::memory_order_acq_rel);
     ctx->current_participant_id.store(cleared.participant_id,
                                       std::memory_order_release);
+    // A new engine restarts its own generation counters; our accumulated
+    // samples describe a process that no longer exists.
+    audio_timeline_reset(ctx->timeline);
     if (!was_subscribed) return;
     blog(LOG_INFO,
          "[obs-zoom-plugin] Dropped CoreVideo audio subscription held with the previous engine: source=%s uuid=%s - will re-subscribe on the new engine's first roster",
@@ -339,7 +351,13 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
     const auto *pcm = reinterpret_cast<const int16_t *>(ctx->audio_buf.data());
     obs_source_audio audio = {};
     audio.samples_per_sec = sample_rate;
-    audio.timestamp = os_gettime_ns();
+    // Sample-derived, not arrival-derived: IPC jitter must not reach OBS.
+    // `frames` is what this buffer actually carries, so the timeline advances
+    // by exactly the audio published. See src/audio-timeline.h.
+    const uint32_t timeline_frames =
+        byte_len / (kZoomBytesPerSample * std::max<uint16_t>(channels, 1));
+    audio.timestamp = audio_timeline_stamp(ctx->timeline, sample_rate,
+                                           timeline_frames, os_gettime_ns());
 
     if (ctx->audio_mode.load(std::memory_order_acquire) == AudioChannelMode::Stereo &&
         channels == 1) {

@@ -61,6 +61,8 @@ struct ZoomOutputInfo {
     // Engine capture to OBS publish, microseconds. 0 = not yet measured.
     uint64_t audio_latency_us = 0;
     uint64_t video_latency_us = 0;
+    // Per-source override of ZoomPluginSettings::audio_delay_ms. 0-500 ms.
+    uint32_t audio_delay_ms = 0;
 };
 
 inline const char *output_health_reason_id(ZoomOutputHealthReason reason)

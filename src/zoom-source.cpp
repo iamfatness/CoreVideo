@@ -648,6 +648,7 @@ ZoomOutputInfo ZoomSource::output_info() const
     info.failover_participant_id = failover_participant_id.load(std::memory_order_acquire);
     info.audio_latency_us = m_audio_latency_us.load(std::memory_order_relaxed);
     info.video_latency_us = m_video_latency_us.load(std::memory_order_relaxed);
+    info.audio_delay_ms = audio_delay_ms.load(std::memory_order_relaxed);
     return info;
 }
 

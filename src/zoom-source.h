@@ -52,6 +52,12 @@ struct ZoomSource {
     // Failover: if the primary participant leaves the meeting (and we're in
     // Participant mode), switch to this secondary participant. 0 = no failover.
     std::atomic<uint32_t>       failover_participant_id{0};
+    // Per-source override of ZoomPluginSettings::audio_delay_ms, surfaced via
+    // output_info() for Task 7's Output Manager spinbox and control API. This
+    // is a ZoomSource (video output); it does not itself apply an audio delay
+    // -- CoreVideoAudioSource (src/zoom-participant-audio-source.cpp) is the
+    // disjoint class that owns the dedicated audio path this value drives.
+    std::atomic<uint32_t>       audio_delay_ms{0};
 
     void apply_settings(obs_data_t *settings);
     std::string output_name() const;

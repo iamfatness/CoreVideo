@@ -50,6 +50,13 @@ struct CoreVideoAudioSource {
     CoreVideoAudioKind kind = CoreVideoAudioKind::Participant;
     std::atomic<uint32_t> participant_id{0};
     std::atomic<AudioChannelMode> audio_mode{AudioChannelMode::Mono};
+    // Milliseconds to delay this source's audio, so it lands on the master
+    // clock later than sample-derived timing alone would put it -- aligning
+    // it with the slower video path (see the delay comment in
+    // output_audio_frame()). Loaded from ZoomPluginSettings::audio_delay_ms
+    // in apply_audio_settings(), which runs on create and on every
+    // audio_update(), so a change takes effect without an OBS restart.
+    std::atomic<uint32_t> audio_delay_ms{0};
     // The two fields of AudioSubscriptionState, held as atomics because they
     // are touched from the OBS UI thread (activate/deactivate/update), the
     // engine reader thread (roster callbacks) and whichever thread called
@@ -540,8 +547,14 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
         // by exactly the audio published. See src/audio-timeline.h.
         const uint32_t timeline_frames =
             byte_len / (kZoomBytesPerSample * std::max<uint16_t>(channels, 1));
+        // Delay is arithmetic on the timeline, not a buffer: OBS's async path
+        // holds timestamped audio until its time comes. Only ever pushes audio
+        // LATER -- ITU-R BT.1359-1 detects audio leading at +45 ms but
+        // tolerates lagging to -125 ms, so late is the safe direction to err.
         audio.timestamp = audio_timeline_stamp(ctx->timeline, sample_rate,
-                                               timeline_frames, now_ns);
+                                               timeline_frames, now_ns) +
+                          static_cast<uint64_t>(ctx->audio_delay_ms.load(
+                              std::memory_order_relaxed)) * 1'000'000ULL;
 
         if (ctx->audio_mode.load(std::memory_order_acquire) == AudioChannelMode::Stereo &&
             channels == 1) {
@@ -592,6 +605,16 @@ static void apply_audio_settings(CoreVideoAudioSource *ctx, obs_data_t *settings
 
     ctx->participant_id.store(new_participant, std::memory_order_release);
     ctx->audio_mode.store(new_mode, std::memory_order_release);
+
+    // The operator delay trim is a global setting (Task 7 will add a
+    // per-source override); re-read it here, the same site the other
+    // settings-driven state on this source is refreshed from, so a change in
+    // the plugin's settings dialog takes effect on the next roster/update tick
+    // without requiring an OBS restart. Clamp on every read, not just on
+    // load() -- config_get_int() returns whatever is on disk, trusted or not.
+    uint32_t new_delay_ms = ZoomPluginSettings::load().audio_delay_ms;
+    if (new_delay_ms > 500) new_delay_ms = 500;
+    ctx->audio_delay_ms.store(new_delay_ms, std::memory_order_relaxed);
 
     if (old_participant != new_participant || old_mode != new_mode)
         maybe_resubscribe_for_roster(ctx);

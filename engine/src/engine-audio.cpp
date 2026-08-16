@@ -273,7 +273,18 @@ void EngineAudio::output_audio_frame(AudioTarget &target,
     std::atomic_thread_fence(std::memory_order_release);
     // Published last: the reader treats everything below write_index as
     // complete, so this store is what makes the slot visible.
-    ring->write_index = (ring->write_index + 1) % ring->slot_count;
+    //
+    // FREE-RUNNING -- deliberately never % slot_count here. `index` above
+    // already applied that modulo to pick the physical slot; write_index
+    // itself has to keep counting so the reader can tell "caught up" (0
+    // slots behind) apart from "lapped by exactly one full ring" (slot_count
+    // slots behind). Wrapping it at slot_count made those two cases the same
+    // number, which is how a reader stalled for exactly 80ms silently lost
+    // the whole ring and reported no loss (see audio_ring_slots_behind() in
+    // engine-ipc.h). uint32_t wraps at 2^32 instead -- about 1.4 years at
+    // Zoom's ~100 buffers/sec -- and unsigned subtraction stays correct
+    // across that wrap without any special-casing on either side.
+    ring->write_index = ring->write_index + 1;
 
     ++target.frame_count;
     if (target.frame_count == 1 || target.frame_count % 250 == 0) {

@@ -41,6 +41,19 @@ inline void audio_timeline_reset(AudioTimeline &tl)
     tl = AudioTimeline{};
 }
 
+// Advances the timeline by `frames` without publishing anything -- for audio
+// that existed but was never read (a ring slot the writer lapped before the
+// reader got to it, or one that could not be verified un-torn). Same doctrine
+// as the comment above: a lost slot is silence of a KNOWN duration, and
+// skipping the accounting shifts this source permanently earlier relative to
+// everything else on the timeline, cumulatively, with no re-anchor to undo it.
+// A no-op before the timeline has an anchor -- there is nothing yet to shift.
+inline void audio_timeline_skip(AudioTimeline &tl, uint32_t frames)
+{
+    if (!tl.started) return;
+    tl.samples += frames;
+}
+
 // The timestamp this buffer publishes at, advancing the timeline by `frames`.
 //
 // `arrival_ns` is consulted only to anchor a new timeline; once running it is

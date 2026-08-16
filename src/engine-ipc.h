@@ -103,17 +103,33 @@ struct ShmAudioSlot {
     // Even and unchanged across a read = the payload was stable. Odd = a write
     // is in progress. Same seqlock discipline the single slot had, now per-slot.
     uint32_t sequence;
-    // The engine's os_gettime_ns() when the Zoom SDK handed this buffer over.
-    // Both processes are on one machine and os_gettime_ns() is QPC-based, so
-    // the plugin can subtract it directly to measure pipeline latency.
+    // The engine's tile_clock_now_ns() (engine/src/tile-clock-log.h) when the
+    // Zoom SDK handed this buffer over -- the engine is a standalone process
+    // with no libobs headers, so it cannot call os_gettime_ns() directly. On
+    // Windows both resolve to the same QPC counter (OBS's os_gettime_ns() and
+    // libc++'s std::chrono::steady_clock both read QueryPerformanceCounter),
+    // so the plugin can still subtract its own os_gettime_ns() reading
+    // directly to measure pipeline latency. WARNING: this equality does NOT
+    // hold on macOS -- libobs uses mach_absolute_time() there while libc++'s
+    // steady_clock uses CLOCK_MONOTONIC, a different clock with a different
+    // epoch. The mac-port branch must revisit this before trusting capture_ns
+    // for cross-process latency there.
     uint64_t capture_ns;
     uint32_t byte_len;
     uint32_t reserved;
 };
 
 struct ShmAudioHeader {
-    // Next slot the writer will fill. The reader drains up to (not including)
-    // this. Written last, after the slot is complete.
+    // FREE-RUNNING count of slots written so far -- NOT a slot index, and it
+    // never wraps at slot_count (only at 2^32, ~1.4 years at Zoom's ~100
+    // buffers/sec). Apply `% slot_count` only where a physical offset is
+    // derived (shm_audio_slot_offset()). This is what lets
+    // audio_ring_slots_behind() tell "reader caught up" (0) apart from
+    // "writer lapped the reader by exactly one full ring" (slot_count) --
+    // collapsing those two under slot_count-modulo arithmetic was the original
+    // bug (a stalled reader landed back on the same value as a caught-up one
+    // and silently lost a full lap, unreported). The reader drains up to (not
+    // including) this. Written last, after the slot is complete.
     uint32_t write_index;
     uint32_t slot_count;
     uint32_t slot_bytes;
@@ -135,14 +151,22 @@ inline size_t shm_audio_slot_offset(const ShmAudioHeader &h, uint32_t index)
            static_cast<size_t>(index) * (sizeof(ShmAudioSlot) + h.slot_bytes);
 }
 
-// How many slots the reader has yet to drain. Indices wrap, and a wrapped pair
-// is the steady state rather than an error.
+// How many slots the reader has yet to drain. write_index and read_index are
+// FREE-RUNNING counters (see ShmAudioHeader::write_index above) -- they never
+// wrap at slot_count, only at 2^32 -- so this is a plain, un-modulo'd
+// subtraction. Unsigned wraparound at 2^32 stays correct without special
+// casing it. The return value is therefore NOT bounded by slot_count: a
+// caller comparing it against slot_count is how a full-lap overrun is told
+// apart from a caught-up reader (0 vs slot_count), which a modulo would
+// collapse into the same value. slot_count is accepted for symmetry with the
+// rest of this ring's API but is not used in the arithmetic; the
+// caught-up-vs-overrun decision belongs to the caller.
 inline uint32_t audio_ring_slots_behind(uint32_t write_index,
                                         uint32_t read_index,
                                         uint32_t slot_count)
 {
-    if (slot_count == 0) return 0;
-    return (write_index + slot_count - read_index) % slot_count;
+    (void)slot_count;
+    return write_index - read_index;
 }
 
 // ── Platform-specific pipe / socket paths ─────────────────────────────────────

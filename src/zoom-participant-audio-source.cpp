@@ -356,8 +356,40 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
     if (!ctx->source) return;
 
     auto *ring = static_cast<const ShmAudioHeader *>(ctx->audio_shm.ptr);
+
+    // A mismatched wire format must fail loudly, not walk off into whatever
+    // offsets the old/new layout implies. slot_count != kAudioRingSlots means
+    // either an engine speaking a different generation of this format, or a
+    // region we opened before it was ever initialised -- neither is safe to
+    // read as this ring.
+    if (ring->slot_count != kAudioRingSlots) {
+        if (ctx->frame_count == 0) {
+            blog(LOG_ERROR,
+                 "[obs-zoom-plugin] CoreVideo audio ring version mismatch: source=%s uuid=%s expected_slot_count=%u actual_slot_count=%u",
+                 obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
+                 kAudioRingSlots, ring->slot_count);
+        }
+        return;
+    }
     const uint32_t slot_count = ring->slot_count;
-    if (slot_count == 0) return;
+
+    // ensure_shm() only ever grows slot_bytes. The mapping this call opened
+    // may have been sized against a SMALLER event_byte_len than the region
+    // now actually holds (e.g. attaching fresh right after a bigger buffer
+    // already grew it elsewhere). Trusting ring->slot_bytes to derive a slot
+    // offset without checking this reads past our own mapped VIEW, even when
+    // the underlying region is large enough -- an access violation, not a
+    // logic error.
+    if (shm_audio_region_bytes(ring->slot_bytes) > ctx->audio_shm.size) {
+        if (ctx->frame_count == 0) {
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] CoreVideo audio mapping too small for the ring it describes: source=%s uuid=%s mapped_bytes=%zu needed_bytes=%zu slot_bytes=%u",
+                 obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
+                 ctx->audio_shm.size, shm_audio_region_bytes(ring->slot_bytes),
+                 ring->slot_bytes);
+        }
+        return;
+    }
 
     // First event after a (re)subscribe: start level with the writer rather
     // than replaying whatever stale audio the region still holds.
@@ -367,16 +399,31 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
         return;
     }
 
+    // Nominal duration of one slot, from the ring header rather than any
+    // individual slot's (possibly unread or unreadable) byte_len -- this is
+    // what lets every discard path below keep the master clock honest about
+    // audio we never got to look at.
+    const uint32_t nominal_frames = ring->slot_bytes /
+        (kZoomBytesPerSample * std::max<uint16_t>(ring->channels, 1));
+
+    // write_index and read_index are free-running counters (never wrap at
+    // slot_count -- see ShmAudioHeader::write_index), so "pending" is exact:
+    // it cannot collapse a full lap into "caught up" the way a
+    // slot_count-modulo difference would.
     const uint32_t write_index = ring->write_index;
     uint32_t pending = audio_ring_slots_behind(write_index, ctx->read_index,
                                                slot_count);
-    // A full lap means the writer overwrote slots we never drained. Skip to the
-    // oldest slot still intact and count what was lost -- the point of the ring
-    // is that this is now visible, not that it can never happen.
-    if (pending >= slot_count) {
-        ctx->overrun_slots += pending - (slot_count - 1);
-        ctx->read_index = (write_index + 1) % slot_count;
-        pending = slot_count - 1;
+    // More has been written since our last drain than the ring can hold: the
+    // oldest `pending - slot_count` generations were overwritten before we
+    // ever read them. Skip to the oldest slot still intact and count -- and
+    // clock-compensate -- what was lost. The point of the ring is that this
+    // is now visible, not that it can never happen.
+    if (pending > slot_count) {
+        const uint32_t lost = pending - slot_count;
+        ctx->overrun_slots += lost;
+        audio_timeline_skip(ctx->timeline, lost * nominal_frames);
+        ctx->read_index = write_index - slot_count;
+        pending = slot_count;
         blog(LOG_WARNING,
              "[obs-zoom-plugin] CoreVideo audio ring overrun: source=%s uuid=%s lost_slots=%llu",
              obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
@@ -384,9 +431,10 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
     }
 
     for (uint32_t n = 0; n < pending; ++n) {
+        const uint32_t slot_index = ctx->read_index; // free-running generation
         const auto *slot = reinterpret_cast<const ShmAudioSlot *>(
             static_cast<const char *>(ctx->audio_shm.ptr) +
-            shm_audio_slot_offset(*ring, ctx->read_index));
+            shm_audio_slot_offset(*ring, slot_index % slot_count));
 
         uint32_t byte_len = 0;
         uint64_t capture_ns = 0;
@@ -411,8 +459,34 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
             const uint32_t seq2 = slot->sequence;
             if (seq1 == seq2 && (seq2 & 1u) == 0) { copied = true; break; }
         }
-        ctx->read_index = (ctx->read_index + 1) % slot_count;
-        if (!copied) continue;
+
+        // The seqlock only proves the payload was not TORN -- it does not
+        // prove it is the buffer we MEANT to read. If the writer has since
+        // advanced far enough past this generation, it has physically
+        // overwritten this slot at least once more while we were copying it:
+        // what we just read cleanly may be a newer buffer that happened to
+        // land on an even/even pair, about to be published in this older
+        // slot's timeline position.
+        if (copied && ring->write_index - slot_index > slot_count) {
+            copied = false;
+            ++ctx->overrun_slots;
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] CoreVideo audio slot overwritten mid-read: source=%s uuid=%s lost_slots=%llu",
+                 obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
+                 static_cast<unsigned long long>(ctx->overrun_slots));
+        }
+
+        ctx->read_index = slot_index + 1;
+        if (!copied) {
+            // Lost this slot's audio, whichever way: unread, unreadably torn
+            // after three attempts, or clobbered mid-copy above. Advance the
+            // timeline anyway -- a lost slot is silence of a KNOWN duration,
+            // and skipping the accounting shifts this source permanently
+            // earlier relative to everything else on the timeline (see
+            // src/audio-timeline.h's doctrine on gaps).
+            audio_timeline_skip(ctx->timeline, nominal_frames);
+            continue;
+        }
 
         const uint32_t sample_rate = ring->sample_rate;
         const uint16_t channels    = ring->channels;

@@ -1673,8 +1673,35 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
     // now that engine-audio.cpp writes the ring layout instead of the old
     // single-slot mailbox; it does not gain loss-accounting.
     auto *ring = static_cast<const ShmAudioHeader *>(audio_shm.ptr);
+
+    // A mismatched wire format must fail loudly, not walk off into whatever
+    // offsets the old/new layout implies.
+    if (ring->slot_count != kAudioRingSlots) {
+        if (m_audio_frame_count == 0) {
+            blog(LOG_ERROR,
+                 "[obs-zoom-plugin] Zoom audio ring version mismatch: source=%s uuid=%s expected_slot_count=%u actual_slot_count=%u",
+                 output_name().c_str(), uuid.c_str(), kAudioRingSlots,
+                 ring->slot_count);
+        }
+        return;
+    }
     const uint32_t slot_count = ring->slot_count;
-    if (slot_count == 0) return;
+
+    // ensure_shm() only ever grows slot_bytes; the mapping this call opened
+    // may have been sized against a smaller event_byte_len than the region
+    // now actually holds. Trusting ring->slot_bytes to derive an offset
+    // without this check reads past our own mapped view, even when the
+    // underlying region is large enough.
+    if (shm_audio_region_bytes(ring->slot_bytes) > audio_shm.size) {
+        if (m_audio_frame_count == 0) {
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] Zoom audio mapping too small for the ring it describes: source=%s uuid=%s mapped_bytes=%zu needed_bytes=%zu slot_bytes=%u",
+                 output_name().c_str(), uuid.c_str(), audio_shm.size,
+                 shm_audio_region_bytes(ring->slot_bytes), ring->slot_bytes);
+        }
+        return;
+    }
+
     const uint32_t index = (ring->write_index + slot_count - 1) % slot_count;
     const auto *slot = reinterpret_cast<const ShmAudioSlot *>(
         static_cast<const char *>(audio_shm.ptr) +

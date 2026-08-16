@@ -35,16 +35,24 @@ int main()
     check(audio_ring_slots_behind(5, 2, kAudioRingSlots) == 3,
           "a reader three slots behind was miscounted");
 
-    // --- The indices wrap. A reader near the top of the ring and a writer that
-    // has wrapped past zero is the normal steady state, not an error ---
-    check(audio_ring_slots_behind(1, kAudioRingSlots - 1, kAudioRingSlots) == 2,
-          "wrapped indices were miscounted -- this is the steady state, not an "
-          "edge case");
+    // --- write_index and read_index are FREE-RUNNING counters: they never
+    // wrap at slot_count, only at 2^32 (~1.4 years at Zoom's ~100 buffers/sec).
+    // Unsigned subtraction stays correct across that wrap with no special
+    // casing -- this is the case that actually exercises it ---
+    check(audio_ring_slots_behind(2, 0xFFFFFFFEu, kAudioRingSlots) == 4,
+          "free-running counter wraparound at 2^32 was miscounted");
 
     // --- Exactly full: the writer has lapped the reader by the whole ring.
-    // Every slot is unread and none is lost YET ---
-    check(audio_ring_slots_behind(0, 0, kAudioRingSlots) == 0,
-          "an equal pair must read as caught up, not as a full lap");
+    // Every slot is STILL INTACT (none overwritten yet), so this must read as
+    // slot_count pending, not as caught up. Collapsing the two was the actual
+    // defect: under the old slot_count-modulo arithmetic, a reader stalled
+    // for exactly one full lap (8 buffers, 80ms) computed the same value as a
+    // reader that was perfectly caught up, published nothing, and reported no
+    // loss ---
+    check(audio_ring_slots_behind(kAudioRingSlots, 0, kAudioRingSlots) ==
+              kAudioRingSlots,
+          "an exactly-full ring must read as slot_count pending, not as "
+          "caught up -- collapsing the two hides a full lap of silent loss");
 
     // --- Region sizing must account for header + every slot ---
     {

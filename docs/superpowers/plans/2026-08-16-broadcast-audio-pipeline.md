@@ -502,9 +502,17 @@ int main()
           "edge case");
 
     // --- Exactly full: the writer has lapped the reader by the whole ring.
-    // Every slot is unread and none is lost YET ---
-    check(audio_ring_slots_behind(0, 0, kAudioRingSlots) == 0,
-          "an equal pair must read as caught up, not as a full lap");
+    // Every slot is unread and none is lost YET. With free-running counters
+    // this is distinguishable from empty; with modulo indices it was not, and
+    // 80 ms of audio vanished with no publish, no log and no count ---
+    check(audio_ring_slots_behind(kAudioRingSlots, 0, kAudioRingSlots) == kAudioRingSlots,
+          "an exactly-full ring read as empty -- this is the silent 80ms hole");
+    check(audio_ring_slots_behind(5, 5, kAudioRingSlots) == 0,
+          "an equal pair must read as caught up");
+
+    // --- The free-running counters wrap at 2^32, not at slot_count ---
+    check(audio_ring_slots_behind(2, 0xFFFFFFFEu, kAudioRingSlots) == 4,
+          "unsigned subtraction across the 2^32 wrap was miscounted");
 
     // --- Region sizing must account for header + every slot ---
     {
@@ -622,14 +630,25 @@ inline size_t shm_audio_slot_offset(const ShmAudioHeader &h, uint32_t index)
            static_cast<size_t>(index) * (sizeof(ShmAudioSlot) + h.slot_bytes);
 }
 
-// How many slots the reader has yet to drain. Indices wrap, and a wrapped pair
-// is the steady state rather than an error.
+// How many slots the reader has yet to drain.
+//
+// CORRECTED 2026-08-16 after review. The first version of this plan stored both
+// indices modulo slot_count and returned (w + n - r) % n. That range is
+// [0, n-1], so the reader's `pending >= slot_count` overrun test was
+// UNREACHABLE -- the loss counter was hardcoded to zero by arithmetic, and an
+// exactly-full ring read as empty (8 lapped buffers => pending 0 => the reader
+// published nothing and reported nothing). The brief itself called an
+// under-reporting counter worse than no counter, and that is what it specified.
+//
+// Both indices are therefore FREE-RUNNING: they wrap only at 2^32, and unsigned
+// subtraction stays correct across that wrap. At 100 buffers/second that is
+// ~1.4 years. `% slot_count` is applied ONLY when deriving a slot offset.
 inline uint32_t audio_ring_slots_behind(uint32_t write_index,
                                         uint32_t read_index,
                                         uint32_t slot_count)
 {
-    if (slot_count == 0) return 0;
-    return (write_index + slot_count - read_index) % slot_count;
+    (void)slot_count;   // no longer needed; kept for call-site compatibility
+    return write_index - read_index;
 }
 ```
 
@@ -685,7 +704,7 @@ Replace the write block in `engine/src/engine-audio.cpp` (lines 224-236, from `a
         return;
     }
 
-    const uint32_t index = ring->write_index % ring->slot_count;
+    const uint32_t index = ring->write_index % ring->slot_count;   // free-running -> slot
     auto *slot = reinterpret_cast<ShmAudioSlot *>(
         static_cast<char *>(target.shm.ptr) +
         shm_audio_slot_offset(*ring, index));
@@ -706,8 +725,9 @@ Replace the write block in `engine/src/engine-audio.cpp` (lines 224-236, from `a
     ring->channels    = static_cast<uint16_t>(data->GetChannelNum());
     std::atomic_thread_fence(std::memory_order_release);
     // Published last: the reader treats everything below write_index as
-    // complete, so this store is what makes the slot visible.
-    ring->write_index = (ring->write_index + 1) % ring->slot_count;
+    // complete, so this store is what makes the slot visible. FREE-RUNNING --
+    // do NOT reduce modulo slot_count here, or overrun becomes undetectable.
+    ring->write_index = ring->write_index + 1;
 ```
 
 `os_gettime_ns()` needs `#include <util/platform.h>` — check the file's existing includes and add it only if absent.

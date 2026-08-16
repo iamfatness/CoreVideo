@@ -858,6 +858,18 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoDirectorPreviewFrameGuard
              COMMAND CoreVideoDirectorPreviewFrameGuardTest)
 
+    # How long the preview slot is kept alive AFTER a cut. Releasing it in the
+    # same breath as the re-subscribe left nothing publishing for the 735-1277ms
+    # the engine needs to rebuild the main region — the 2026-08-16 flash.
+    add_executable(CoreVideoDirectorHandoverTest
+        tests/director-handover-test.cpp
+    )
+    target_include_directories(CoreVideoDirectorHandoverTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoDirectorHandover
+             COMMAND CoreVideoDirectorHandoverTest)
+
     # Measures the luma range actually delivered by the SDK, so the full-range
     # vs limited-range question is settled by measurement, not assumption.
     add_executable(CoreVideoLumaRangeProbeTest

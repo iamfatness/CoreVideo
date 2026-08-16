@@ -62,8 +62,23 @@ struct ZoomOutputInfo {
     uint64_t audio_latency_us = 0;
     uint64_t video_latency_us = 0;
     // Per-source override of ZoomPluginSettings::audio_delay_ms. 0-500 ms.
+    // Applied to THIS ZoomSource's own embedded audio only -- see the
+    // audio_delay_ms parameter comment on configure_output()/configure_output_ex()
+    // below for how it is set, and zoom-source.cpp's on_engine_audio() for
+    // where it is applied.
     uint32_t audio_delay_ms = 0;
 };
+
+// Sentinel for the `audio_delay_ms` parameter of configure_output() and
+// configure_output_ex(): "leave this output's current delay override
+// unchanged." Every existing caller of these two functions (OSC server,
+// per-source hotkeys, ZoomSource's own active-speaker self-reconfigure)
+// fully re-specifies every OTHER field on each call, so a real (non-sentinel)
+// default here would silently reset an operator-set delay back to 0 on every
+// unrelated reconfigure -- e.g. simply switching which participant an output
+// shows. UINT32_MAX is never a valid clamped delay (range is 0-500), so it
+// cannot collide with a real value.
+inline constexpr uint32_t kAudioDelayKeepCurrentMs = 0xFFFFFFFFu;
 
 inline const char *output_health_reason_id(ZoomOutputHealthReason reason)
 {
@@ -177,7 +192,10 @@ public:
                           bool isolate_audio,
                           AudioChannelMode audio_mode,
                           VideoResolution video_resolution = VideoResolution::P720,
-                          bool audience_audio = false);
+                          bool audience_audio = false,
+                          // 0-500, or kAudioDelayKeepCurrentMs to leave the
+                          // output's current per-source delay untouched.
+                          uint32_t audio_delay_ms = kAudioDelayKeepCurrentMs);
     // Extended variant supporting ZoomISO-style assignment modes (spotlight,
     // screen share) plus failover. Returns true if the output was found.
     bool configure_output_ex(const std::string &source_name,
@@ -188,7 +206,8 @@ public:
                              bool isolate_audio,
                              AudioChannelMode audio_mode,
                              VideoResolution video_resolution = VideoResolution::P720,
-                             bool audience_audio = false);
+                             bool audience_audio = false,
+                             uint32_t audio_delay_ms = kAudioDelayKeepCurrentMs);
 
     // Re-send subscribe commands for all active sources after engine recovery.
     void resubscribe_all();

@@ -358,11 +358,18 @@ echo '{"cmd":"list_participants"}' | nc 127.0.0.1 19870
 # Reassign source to participant at runtime
 echo '{"cmd":"assign_output","source":"Zoom Participant 1","participant_id":123,"isolate_audio":true,"audio_channels":"stereo"}' | nc 127.0.0.1 19870
 
+# Set this output's own embedded-audio delay (0-500 ms). Omit the field
+# entirely on unrelated calls -- e.g. a plain reassignment -- to leave
+# whatever delay is already set untouched rather than resetting it to 0.
+echo '{"cmd":"assign_output","source":"Zoom Participant 1","participant_id":123,"audio_delay_ms":80}' | nc 127.0.0.1 19870
+
 # Forward OAuth callback URL from custom scheme helper
 echo '{"cmd":"oauth_callback","url":"corevideo://oauth/callback?broker_token=...&state=..."}' | nc 127.0.0.1 19870
 ```
 
 Commands: `help`, `status`, `list_participants`, `list_outputs`, `assign_output`, `assign_output_ex`, `recover_stale_outputs`, `upgrade_low_quality_outputs`, `join`, `leave`, `oauth_callback`, `iso_recording_start`, `iso_recording_stop`, `iso_recording_status`, `speaker_director_status`, `speaker_director_configure`, `speaker_director_take`, `speaker_director_release`.
+
+`list_outputs` includes `audio_delay_ms`, `audio_latency_us`, `video_latency_us`, and `av_offset_us` (`video_latency_us - audio_latency_us`; positive means audio is arriving early relative to video) per output, plus `audio_path: "embedded"` labeling which audio pipeline those four numbers describe -- see **Audio delay and the measured A/V offset** below before trimming against them.
 
 ### Auto ISO Recording
 
@@ -491,6 +498,14 @@ Use the **Zoom Output Manager** dock, or **OBS -> Tools -> Zoom Output Manager**
 **Hide participants without video.** The Output Manager has a checkbox beside the participant filter that hides camera-off participants from the video assignment lists — the participant table, the per-output assignment combos, and the CoreVideo Participant source picker. Someone with their camera off cannot feed an output or a tile, so on a large meeting they only crowd the list. The setting persists across sessions.
 
 Two deliberate exceptions. **Audio source pickers always show everyone**, because a dedicated CoreVideo audio source follows a microphone and camera-off participants are often exactly who you want one for. And a participant **already assigned** to a source is never hidden, even with their camera off — otherwise a picker could not display its own current value and would silently unbind a live source the moment somebody switched their camera off.
+
+**Audio delay and the measured A/V offset.** Every row in the Output Manager has a **Delay** spinbox (0-500 ms) and a read-only **A/V Offset** column. Video is the slower path in any software production chain — capture, scale, composite, encode — so audio arrives at OBS ahead of its matching video and needs delaying to line back up. The Delay spinbox only ever delays audio later; it can never advance it. **A/V Offset** is `video_latency_us - audio_latency_us` measured from Zoom-engine capture to OBS publish, in EBU R37 terms: positive means audio is early relative to video, and that many milliseconds is what to dial into Delay to close the gap. Trim toward `0`, or toward whatever residual your downstream encoder/stream adds; EBU R37's per-stage target is **+5 / -15 ms**, and ITU-R BT.1359-1 treats audio leading video by more than **+45 ms**, or lagging it by more than **-125 ms**, as perceptible.
+
+Read this carefully before trimming: **Delay and A/V Offset both describe one specific output's own embedded audio** — the audio baked into a `CoreVideo Participant`/`CoreVideo Active Speaker`/etc. video source, published alongside its video from the same Zoom engine feed. They say nothing about the **separate, dedicated CoreVideo Audio sources** (`CoreVideoAudioSource` — e.g. "Jamal Carter (CoreVideo)", the participant/active-speaker/audience audio-only sources many shows route to program instead of a video source's embedded track). Those dedicated sources have their own delay, `ZoomPluginSettings::audio_delay_ms` — set today via `global.ini`'s `AudioDelayMs` key or `speaker_director_configure`-style tooling, with no dialog of its own yet — and no measured offset. If your show's program audio comes from the dedicated sources, the Output Manager's Delay/A/V Offset columns are not the numbers to trim against; changing them will not move what you hear. The two audio paths are architecturally disjoint (no code path connects a `CoreVideoAudioSource` instance back to a video output's `ZoomOutputInfo`), so this cannot currently be collapsed into one control or one number — it is two controls for two different audio pipelines, both real, neither describing the other.
+
+The Delay value is not currently saved in Output Profiles (`ZoomOutputProfile::save()/load()`) — profiles preserve assignment, resolution, channel mode, and audio role only; loading a profile leaves each row's Delay spinbox as it was.
+
+Set it via the control API with `assign_output`'s `audio_delay_ms` field (0-500; omit it on unrelated calls rather than sending `0`, or you will reset a delay someone already dialed in).
 
 ## Repeatable Load Measurements
 

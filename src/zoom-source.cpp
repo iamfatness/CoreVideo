@@ -37,6 +37,7 @@
 #define PROP_ASSIGNMENT_MODE      "assignment_mode"
 #define PROP_SPOTLIGHT_SLOT       "spotlight_slot"
 #define PROP_FAILOVER_PARTICIPANT "failover_participant_id"
+#define PROP_AUDIO_DELAY_MS       "audio_delay_ms"
 
 #define VIDEO_LOSS_LAST_FRAME 0
 #define VIDEO_LOSS_BLACK      1
@@ -512,6 +513,15 @@ void ZoomSource::apply_settings(obs_data_t *settings)
     if (isolate_audio) audience_audio = false;
     audio_mode = audio_mode_from_data(settings);
     resolution = resolution_from_data(settings);
+    // Clamp on every read, not just on the write side in configure_output[_ex]()
+    // -- obs_data_get_int() returns whatever is on disk (hand-edited scene
+    // collection JSON, upgrade skew), trusted or not.
+    {
+        uint32_t delay_ms = static_cast<uint32_t>(
+            obs_data_get_int(settings, PROP_AUDIO_DELAY_MS));
+        if (delay_ms > 500) delay_ms = 500;
+        audio_delay_ms.store(delay_ms, std::memory_order_relaxed);
+    }
     video_loss_mode = obs_data_get_int(settings, PROP_VIDEO_LOSS_MODE) == VIDEO_LOSS_BLACK
         ? VideoLossMode::Black : VideoLossMode::LastFrame;
     hw_accel_override = static_cast<int>(obs_data_get_int(settings, PROP_HW_ACCEL_MODE));
@@ -657,10 +667,16 @@ void ZoomSource::configure_output(uint32_t new_participant_id,
                                   bool new_isolate_audio,
                                   AudioChannelMode new_audio_mode,
                                   VideoResolution new_resolution,
-                                  bool new_audience_audio)
+                                  bool new_audience_audio,
+                                  uint32_t new_audio_delay_ms)
 {
     // isolate wins if both somehow got requested — mirrors apply_settings().
     if (new_isolate_audio) new_audience_audio = false;
+    // kAudioDelayKeepCurrentMs means "caller doesn't want to touch this" --
+    // see the constant's comment in zoom-output-manager.h. Never trust a
+    // supplied value: clamp here too, not just at the control-API boundary.
+    const bool set_audio_delay = new_audio_delay_ms != kAudioDelayKeepCurrentMs;
+    if (set_audio_delay && new_audio_delay_ms > 500) new_audio_delay_ms = 500;
     if (source) {
         obs_data_t *settings = obs_source_get_settings(source);
         const AssignmentMode mode = new_active_speaker_mode
@@ -676,6 +692,8 @@ void ZoomSource::configure_output(uint32_t new_participant_id,
                          ? AUDIO_CH_STEREO : AUDIO_CH_MONO);
         obs_data_set_int(settings, PROP_RESOLUTION,
                          static_cast<int>(new_resolution));
+        if (set_audio_delay)
+            obs_data_set_int(settings, PROP_AUDIO_DELAY_MS, new_audio_delay_ms);
         obs_source_update(source, settings);
         obs_data_release(settings);
         return;
@@ -691,6 +709,8 @@ void ZoomSource::configure_output(uint32_t new_participant_id,
     audience_audio = new_audience_audio;
     audio_mode = new_audio_mode;
     resolution = new_resolution;
+    if (set_audio_delay)
+        audio_delay_ms.store(new_audio_delay_ms, std::memory_order_relaxed);
     if (m_subscribed) subscribe();
 }
 
@@ -701,7 +721,8 @@ void ZoomSource::configure_output_ex(AssignmentMode mode,
                                      bool new_isolate_audio,
                                      AudioChannelMode new_audio_mode,
                                      VideoResolution new_resolution,
-                                     bool new_audience_audio)
+                                     bool new_audience_audio,
+                                     uint32_t new_audio_delay_ms)
 {
     if (dedicated_active_speaker_source) {
         mode = AssignmentMode::ActiveSpeaker;
@@ -711,6 +732,11 @@ void ZoomSource::configure_output_ex(AssignmentMode mode,
     }
     if (new_isolate_audio) new_audience_audio = false;
     const bool active_speaker = (mode == AssignmentMode::ActiveSpeaker);
+    // kAudioDelayKeepCurrentMs means "caller doesn't want to touch this" --
+    // see the constant's comment in zoom-output-manager.h. Never trust a
+    // supplied value: clamp here too, not just at the control-API boundary.
+    const bool set_audio_delay = new_audio_delay_ms != kAudioDelayKeepCurrentMs;
+    if (set_audio_delay && new_audio_delay_ms > 500) new_audio_delay_ms = 500;
     if (source) {
         obs_data_t *settings = obs_source_get_settings(source);
         obs_data_set_int(settings, PROP_ASSIGNMENT_MODE, static_cast<int>(mode));
@@ -725,6 +751,8 @@ void ZoomSource::configure_output_ex(AssignmentMode mode,
                          ? AUDIO_CH_STEREO : AUDIO_CH_MONO);
         obs_data_set_int(settings, PROP_RESOLUTION,
                          static_cast<int>(new_resolution));
+        if (set_audio_delay)
+            obs_data_set_int(settings, PROP_AUDIO_DELAY_MS, new_audio_delay_ms);
         obs_source_update(source, settings);
         obs_data_release(settings);
         return;
@@ -739,6 +767,8 @@ void ZoomSource::configure_output_ex(AssignmentMode mode,
     audience_audio = new_audience_audio;
     audio_mode = new_audio_mode;
     resolution = new_resolution;
+    if (set_audio_delay)
+        audio_delay_ms.store(new_audio_delay_ms, std::memory_order_relaxed);
     if (m_subscribed) subscribe();
 }
 
@@ -1757,7 +1787,14 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
 
     obs_source_audio audio = {};
     audio.samples_per_sec = sample_rate;
-    audio.timestamp = ts;
+    // audio_latency_us above is measured against the raw ts, on purpose --
+    // it's an engine-capture-to-publish latency measurement, not something
+    // the operator's deliberate delay should move around. The delay itself
+    // is pure addition to the published timestamp (same technique Task 6
+    // used for CoreVideoAudioSource), so it can only ever push this output's
+    // own embedded audio later, never earlier.
+    audio.timestamp = ts + static_cast<uint64_t>(
+        audio_delay_ms.load(std::memory_order_relaxed)) * 1'000'000ULL;
 
     if (audio_mode == AudioChannelMode::Stereo && channels == 1) {
         const uint32_t mono_frames = byte_len / kZoomBytesPerSample;

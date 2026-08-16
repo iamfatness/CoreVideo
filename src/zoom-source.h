@@ -52,11 +52,17 @@ struct ZoomSource {
     // Failover: if the primary participant leaves the meeting (and we're in
     // Participant mode), switch to this secondary participant. 0 = no failover.
     std::atomic<uint32_t>       failover_participant_id{0};
-    // Per-source override of ZoomPluginSettings::audio_delay_ms, surfaced via
-    // output_info() for Task 7's Output Manager spinbox and control API. This
-    // is a ZoomSource (video output); it does not itself apply an audio delay
-    // -- CoreVideoAudioSource (src/zoom-participant-audio-source.cpp) is the
-    // disjoint class that owns the dedicated audio path this value drives.
+    // 0-500 ms delay applied to THIS ZoomSource's own embedded audio output
+    // (see on_engine_audio()'s obs_source_output_audio() call), set via
+    // configure_output()/configure_output_ex() and surfaced via output_info()
+    // for the Output Manager spinbox and control API (Task 7). This is
+    // independent of, and does NOT drive, ZoomPluginSettings::audio_delay_ms
+    // or CoreVideoAudioSource (src/zoom-participant-audio-source.cpp) --
+    // that is a disjoint OBS source type with its own dedicated audio path
+    // and its own (global, not per-output) delay setting. A show that routes
+    // program audio through the dedicated CoreVideo Audio sources rather than
+    // this source's embedded audio must use that separate setting instead;
+    // see README's Output Manager section.
     std::atomic<uint32_t>       audio_delay_ms{0};
 
     void apply_settings(obs_data_t *settings);
@@ -67,7 +73,8 @@ struct ZoomSource {
                           bool new_isolate_audio,
                           AudioChannelMode new_audio_mode,
                           VideoResolution new_resolution = VideoResolution::P720,
-                          bool new_audience_audio = false);
+                          bool new_audience_audio = false,
+                          uint32_t new_audio_delay_ms = kAudioDelayKeepCurrentMs);
     // Extended variant accepting full ZoomISO-style assignment information.
     void configure_output_ex(AssignmentMode mode,
                              uint32_t new_participant_id,
@@ -76,7 +83,8 @@ struct ZoomSource {
                              bool new_isolate_audio,
                              AudioChannelMode new_audio_mode,
                              VideoResolution new_resolution = VideoResolution::P720,
-                             bool new_audience_audio = false);
+                             bool new_audience_audio = false,
+                             uint32_t new_audio_delay_ms = kAudioDelayKeepCurrentMs);
     void subscribe();
     void unsubscribe();
     // Sends the engine unsubscribe and resets latched signal state without

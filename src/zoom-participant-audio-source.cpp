@@ -73,6 +73,13 @@ struct CoreVideoAudioSource {
     // (unsubscribe_audio()) and the new-engine callback
     // (forget_subscription_for_new_engine()).
     AudioTimeline timeline;
+    // Next ring slot this source will drain. Only the engine reader thread
+    // touches it, the same thread that owns `timeline`.
+    uint32_t read_index    = 0;
+    bool     read_started  = false;
+    // Slots the writer lapped before we drained them -- audio that was lost.
+    // Counted so loss is visible; the old mailbox lost audio invisibly.
+    uint64_t overrun_slots = 0;
 };
 
 static uint32_t target_participant_id(const CoreVideoAudioSource *ctx)
@@ -151,6 +158,7 @@ static void unsubscribe_audio(CoreVideoAudioSource *ctx)
     {
         std::lock_guard<std::mutex> lk(ctx->mtx);
         audio_timeline_reset(ctx->timeline);
+        ctx->read_started = false;
     }
 }
 
@@ -230,6 +238,7 @@ static void forget_subscription_for_new_engine(CoreVideoAudioSource *ctx)
     {
         std::lock_guard<std::mutex> lk(ctx->mtx);
         audio_timeline_reset(ctx->timeline);
+        ctx->read_started = false;
     }
     if (!was_subscribed) return;
     blog(LOG_INFO,
@@ -314,11 +323,18 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
     std::lock_guard<std::mutex> lk(ctx->mtx);
     const std::string audio_base = IPC_SHM_PREFIX + ctx->source_uuid + "_audio";
     const std::string shm_name = shm_region_name(audio_base, event_shm_gen);
-    const size_t audio_bytes = sizeof(ShmAudioHeader) + event_byte_len;
+    // engine-audio.cpp sizes and writes this region as an 8-slot ring
+    // (src/engine-ipc.h) — the mapping must cover the whole ring, not just
+    // header-plus-one-buffer.
+    const size_t audio_bytes = shm_audio_region_bytes(event_byte_len);
     const bool gen_changed = event_shm_gen != 0 &&
                              event_shm_gen != ctx->audio_shm_gen;
-    if (ctx->audio_shm.ptr && gen_changed)
+    if (ctx->audio_shm.ptr && gen_changed) {
         shm_region_destroy(ctx->audio_shm);
+        // A new region starts its own write_index at 0; our read_index
+        // described the region we just let go of.
+        ctx->read_started = false;
+    }
     if (!ctx->audio_shm.ptr || ctx->audio_shm.size < audio_bytes) {
         if (!shm_region_open_read(ctx->audio_shm, shm_name, audio_bytes) &&
             // Engines predating suffixed names recreate the legacy name for
@@ -334,78 +350,116 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
             return;
         }
         ctx->audio_shm_gen = event_shm_gen;
+        ctx->read_started = false;
     }
 
-    auto *hdr = static_cast<const ShmAudioHeader *>(ctx->audio_shm.ptr);
-    uint32_t byte_len = 0;
-    uint32_t sample_rate = 0;
-    uint16_t channels = 0;
-    bool copied = false;
-    for (int attempt = 0; attempt < 3; ++attempt) {
-        const uint32_t seq1 = hdr->sequence;
-        std::atomic_thread_fence(std::memory_order_acquire);
-        if ((seq1 & 1u) != 0) continue;
-        byte_len = hdr->byte_len;
-        sample_rate = hdr->sample_rate;
-        channels = hdr->channels;
-        if (!ctx->source || byte_len == 0) return;
-        if (sizeof(ShmAudioHeader) + byte_len > ctx->audio_shm.size) return;
-        const auto *pcm_src = static_cast<const uint8_t *>(ctx->audio_shm.ptr) +
-            sizeof(ShmAudioHeader);
-        if (ctx->audio_buf.size() < byte_len)
-            ctx->audio_buf.resize(byte_len);
-        std::memcpy(ctx->audio_buf.data(), pcm_src, byte_len);
-        std::atomic_thread_fence(std::memory_order_acquire);
-        const uint32_t seq2 = hdr->sequence;
-        if (seq1 == seq2 && (seq2 & 1u) == 0) {
-            copied = true;
-            break;
-        }
-    }
-    if (!copied) return;
+    if (!ctx->source) return;
 
-    const auto *pcm = reinterpret_cast<const int16_t *>(ctx->audio_buf.data());
-    obs_source_audio audio = {};
-    audio.samples_per_sec = sample_rate;
-    // Sample-derived, not arrival-derived: IPC jitter must not reach OBS.
-    // `frames` is what this buffer actually carries, so the timeline advances
-    // by exactly the audio published. See src/audio-timeline.h.
-    const uint32_t timeline_frames =
-        byte_len / (kZoomBytesPerSample * std::max<uint16_t>(channels, 1));
-    audio.timestamp = audio_timeline_stamp(ctx->timeline, sample_rate,
-                                           timeline_frames, os_gettime_ns());
+    auto *ring = static_cast<const ShmAudioHeader *>(ctx->audio_shm.ptr);
+    const uint32_t slot_count = ring->slot_count;
+    if (slot_count == 0) return;
 
-    if (ctx->audio_mode.load(std::memory_order_acquire) == AudioChannelMode::Stereo &&
-        channels == 1) {
-        const uint32_t mono_frames = byte_len / kZoomBytesPerSample;
-        const uint32_t stereo_count = mono_frames * 2;
-        if (ctx->stereo_buf.size() < stereo_count)
-            ctx->stereo_buf.resize(stereo_count);
-        for (uint32_t i = 0; i < mono_frames; ++i) {
-            ctx->stereo_buf[i * 2] = pcm[i];
-            ctx->stereo_buf[i * 2 + 1] = pcm[i];
-        }
-        audio.data[0] = reinterpret_cast<const uint8_t *>(ctx->stereo_buf.data());
-        audio.frames = mono_frames;
-        audio.format = AUDIO_FORMAT_16BIT;
-        audio.speakers = SPEAKERS_STEREO;
-    } else {
-        audio.data[0] = reinterpret_cast<const uint8_t *>(pcm);
-        audio.frames = byte_len /
-            (kZoomBytesPerSample * std::max<uint16_t>(channels, 1));
-        audio.format = AUDIO_FORMAT_16BIT;
-        audio.speakers = channels == 2 ? SPEAKERS_STEREO : SPEAKERS_MONO;
+    // First event after a (re)subscribe: start level with the writer rather
+    // than replaying whatever stale audio the region still holds.
+    if (!ctx->read_started) {
+        ctx->read_index   = ring->write_index;
+        ctx->read_started = true;
+        return;
     }
 
-    obs_source_output_audio(ctx->source, &audio);
-    ++ctx->frame_count;
-    if (ctx->frame_count == 1 || ctx->frame_count % 250 == 0) {
-        blog(LOG_INFO,
-             "[obs-zoom-plugin] Output CoreVideo audio frame: source=%s uuid=%s participant_id=%u count=%llu frames=%u sample_rate=%u channels=%u",
+    const uint32_t write_index = ring->write_index;
+    uint32_t pending = audio_ring_slots_behind(write_index, ctx->read_index,
+                                               slot_count);
+    // A full lap means the writer overwrote slots we never drained. Skip to the
+    // oldest slot still intact and count what was lost -- the point of the ring
+    // is that this is now visible, not that it can never happen.
+    if (pending >= slot_count) {
+        ctx->overrun_slots += pending - (slot_count - 1);
+        ctx->read_index = (write_index + 1) % slot_count;
+        pending = slot_count - 1;
+        blog(LOG_WARNING,
+             "[obs-zoom-plugin] CoreVideo audio ring overrun: source=%s uuid=%s lost_slots=%llu",
              obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
-             resolved_participant_id,
-             static_cast<unsigned long long>(ctx->frame_count),
-             audio.frames, sample_rate, channels);
+             static_cast<unsigned long long>(ctx->overrun_slots));
+    }
+
+    for (uint32_t n = 0; n < pending; ++n) {
+        const auto *slot = reinterpret_cast<const ShmAudioSlot *>(
+            static_cast<const char *>(ctx->audio_shm.ptr) +
+            shm_audio_slot_offset(*ring, ctx->read_index));
+
+        uint32_t byte_len = 0;
+        uint64_t capture_ns = 0;
+        bool copied = false;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            const uint32_t seq1 = slot->sequence;
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if ((seq1 & 1u) != 0) continue;      // write in progress
+            byte_len   = slot->byte_len;
+            capture_ns = slot->capture_ns;
+            // The payload can never exceed the slot the engine sized for it;
+            // a larger value means we are reading a region the writer has
+            // since resized, so drop it rather than read out of bounds.
+            if (byte_len == 0 || byte_len > ring->slot_bytes) break;
+            if (ctx->audio_buf.size() < byte_len)
+                ctx->audio_buf.resize(byte_len);
+            std::memcpy(ctx->audio_buf.data(),
+                        reinterpret_cast<const char *>(slot) +
+                            sizeof(ShmAudioSlot),
+                        byte_len);
+            std::atomic_thread_fence(std::memory_order_acquire);
+            const uint32_t seq2 = slot->sequence;
+            if (seq1 == seq2 && (seq2 & 1u) == 0) { copied = true; break; }
+        }
+        ctx->read_index = (ctx->read_index + 1) % slot_count;
+        if (!copied) continue;
+
+        const uint32_t sample_rate = ring->sample_rate;
+        const uint16_t channels    = ring->channels;
+
+        const auto *pcm = reinterpret_cast<const int16_t *>(ctx->audio_buf.data());
+        obs_source_audio audio = {};
+        audio.samples_per_sec = sample_rate;
+        // Sample-derived, not arrival-derived: IPC jitter must not reach OBS.
+        // `frames` is what this buffer actually carries, so the timeline advances
+        // by exactly the audio published. See src/audio-timeline.h.
+        const uint32_t timeline_frames =
+            byte_len / (kZoomBytesPerSample * std::max<uint16_t>(channels, 1));
+        audio.timestamp = audio_timeline_stamp(ctx->timeline, sample_rate,
+                                               timeline_frames, os_gettime_ns());
+
+        if (ctx->audio_mode.load(std::memory_order_acquire) == AudioChannelMode::Stereo &&
+            channels == 1) {
+            const uint32_t mono_frames = byte_len / kZoomBytesPerSample;
+            const uint32_t stereo_count = mono_frames * 2;
+            if (ctx->stereo_buf.size() < stereo_count)
+                ctx->stereo_buf.resize(stereo_count);
+            for (uint32_t i = 0; i < mono_frames; ++i) {
+                ctx->stereo_buf[i * 2] = pcm[i];
+                ctx->stereo_buf[i * 2 + 1] = pcm[i];
+            }
+            audio.data[0] = reinterpret_cast<const uint8_t *>(ctx->stereo_buf.data());
+            audio.frames = mono_frames;
+            audio.format = AUDIO_FORMAT_16BIT;
+            audio.speakers = SPEAKERS_STEREO;
+        } else {
+            audio.data[0] = reinterpret_cast<const uint8_t *>(pcm);
+            audio.frames = byte_len /
+                (kZoomBytesPerSample * std::max<uint16_t>(channels, 1));
+            audio.format = AUDIO_FORMAT_16BIT;
+            audio.speakers = channels == 2 ? SPEAKERS_STEREO : SPEAKERS_MONO;
+        }
+
+        obs_source_output_audio(ctx->source, &audio);
+        ++ctx->frame_count;
+        if (ctx->frame_count == 1 || ctx->frame_count % 250 == 0) {
+            blog(LOG_INFO,
+                 "[obs-zoom-plugin] Output CoreVideo audio frame: source=%s uuid=%s participant_id=%u count=%llu frames=%u sample_rate=%u channels=%u",
+                 obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
+                 resolved_participant_id,
+                 static_cast<unsigned long long>(ctx->frame_count),
+                 audio.frames, sample_rate, channels);
+        }
     }
 }
 

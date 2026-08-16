@@ -49,6 +49,12 @@ enum OutputColumns {
     ColumnCount
 };
 
+// Caps schedule_deferred_refresh()'s retry loop at 250ms/attempt (~2s total)
+// so a spinbox merely holding keyboard focus can't defer a refresh forever
+// the way an open combo popup legitimately can't either (it closes on its
+// own). See ZoomOutputDialog::m_deferred_refresh_attempts.
+static constexpr int kMaxDeferredRefreshAttempts = 8;
+
 // QTableWidget stretches a cell widget to fill the whole (tall) row cell. A
 // widget that cannot grow (fixed-size preview label) ends up anchored to the
 // top of the cell, while an unconstrained widget (a combo box) balloons to the
@@ -586,10 +592,16 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
 {
     setWindowTitle("Zoom Output Manager");
     setAttribute(Qt::WA_DeleteOnClose, false);
-    // +228 over the pre-Task-7 1500/1600 to fit the new Delay/A/V Offset
-    // columns without forcing horizontal scroll by default.
-    setMinimumSize(1728, 840);
-    resize(1828, 920);
+    // This widget is registered as an OBS dock (plugin-main.cpp), not shown
+    // standalone -- setMinimumSize() here forces the HOST dock, and the main
+    // window, to at least that width. Do not bump this for the Delay/A/V
+    // Offset columns added in Task 7: the table already scrolls
+    // horizontally (ColumnName is the only Stretch column; every other
+    // column, including the two new ones, is Fixed), so there is no need to
+    // force the whole dock wider on an operator's 1920x1080 canvas just to
+    // avoid a scrollbar.
+    setMinimumSize(1500, 840);
+    resize(1600, 920);
 
     // Profile toolbar.
     m_profile_combo = new QComboBox(this);
@@ -683,7 +695,11 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     m_table->verticalHeader()->setDefaultSectionSize(104);
     m_table->setSelectionMode(QAbstractItemView::NoSelection);
     m_table->setMinimumHeight(460);
-    m_table->setMinimumWidth(1668);
+    // Left at its pre-Task-7 value on purpose -- see the dock-width comment
+    // on setMinimumSize() in the constructor above. The table scrolls
+    // horizontally to reach the Delay/A/V Offset columns rather than forcing
+    // the host dock wider.
+    m_table->setMinimumWidth(1440);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Apply |
                                          QDialogButtonBox::Close, this);
@@ -797,7 +813,15 @@ void ZoomOutputDialog::schedule_deferred_refresh()
     m_deferred_refresh_queued = true;
     QTimer::singleShot(250, this, [this]() {
         m_deferred_refresh_queued = false;
-        if (has_open_output_combo_popup()) {
+        // A combo popup is transient -- it closes within a keystroke or two.
+        // Keyboard focus on the Delay spinbox is not: an operator who clicks
+        // into it and walks away must not freeze Signal/SDK/health/A/V
+        // Offset updates for the rest of the table forever. Cap retries;
+        // refresh() below re-checks the same cap and will force through once
+        // it's hit. Whatever the operator was mid-typing still survives via
+        // the PendingPick/user_dirty snapshot in refresh().
+        if (has_open_output_combo_popup() &&
+            ++m_deferred_refresh_attempts < kMaxDeferredRefreshAttempts) {
             schedule_deferred_refresh();
             return;
         }
@@ -807,10 +831,12 @@ void ZoomOutputDialog::schedule_deferred_refresh()
 
 void ZoomOutputDialog::refresh()
 {
-    if (has_open_output_combo_popup()) {
+    if (has_open_output_combo_popup() &&
+        m_deferred_refresh_attempts < kMaxDeferredRefreshAttempts) {
         schedule_deferred_refresh();
         return;
     }
+    m_deferred_refresh_attempts = 0;
 
     const int output_scroll =
         m_table && m_table->verticalScrollBar()
@@ -1027,7 +1053,8 @@ void ZoomOutputDialog::refresh()
             "Delays this output's own embedded audio by 0-500 ms, to align it "
             "with the slower video path. Trim toward the A/V Offset column to "
             "the right. Does NOT affect the separate dedicated CoreVideo Audio "
-            "sources (Tools > Zoom Plugin Settings has that delay).");
+            "sources -- those take their delay from global.ini's AudioDelayMs "
+            "key, with no dialog of its own yet.");
         mark_dirty_on_user_change(audio_delay);
         m_table->setCellWidget(row, ColumnAudioDelay,
             center_in_cell(audio_delay, Qt::AlignVCenter, 6));

@@ -61,11 +61,15 @@ struct ZoomOutputInfo {
     // Engine capture to OBS publish, microseconds. 0 = not yet measured.
     uint64_t audio_latency_us = 0;
     uint64_t video_latency_us = 0;
-    // Per-source override of ZoomPluginSettings::audio_delay_ms. 0-500 ms.
-    // Applied to THIS ZoomSource's own embedded audio only -- see the
-    // audio_delay_ms parameter comment on configure_output()/configure_output_ex()
-    // below for how it is set, and zoom-source.cpp's on_engine_audio() for
-    // where it is applied.
+    // 0-500 ms delay applied to THIS ZoomSource's own embedded audio only --
+    // see the audio_delay_ms parameter comment on configure_output()/
+    // configure_output_ex() below for how it is set, and
+    // zoom-source.cpp's on_engine_audio() for where it is applied. This is
+    // NOT an override of ZoomPluginSettings::audio_delay_ms -- that is a
+    // separate, disjoint setting consumed by CoreVideoAudioSource (a
+    // different OBS source type with no code path to or from a ZoomSource).
+    // The two delays are independent controls for two independent audio
+    // pipelines; see README's Output Manager section.
     uint32_t audio_delay_ms = 0;
 };
 

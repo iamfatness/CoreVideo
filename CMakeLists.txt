@@ -870,6 +870,18 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoDirectorHandover
              COMMAND CoreVideoDirectorHandoverTest)
 
+    # The master clock every audio buffer is stamped from. Wall-clock arrival
+    # stamps let IPC jitter reach OBS, which resampled continuously — the
+    # 2026-08-16 "audio is very bad" report.
+    add_executable(CoreVideoAudioTimelineTest
+        tests/audio-timeline-test.cpp
+    )
+    target_include_directories(CoreVideoAudioTimelineTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoAudioTimeline
+             COMMAND CoreVideoAudioTimelineTest)
+
     # Which participants a video-assignment picker offers. The rule that the
     # picker's own current selection is never hidden is the load-bearing one:
     # dropping it would unbind the source when somebody's camera goes off.

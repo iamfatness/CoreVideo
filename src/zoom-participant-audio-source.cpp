@@ -221,7 +221,7 @@ static void maybe_resubscribe_for_roster(CoreVideoAudioSource *ctx)
     // Audience follows no participant, and resolving a target is not free —
     // target_participant_id() also reconfigures and ticks the SpeakerDirector
     // for the ActiveSpeaker kind — so it is only asked of the kinds that use it.
-    const uint32_t target = ctx->kind == CoreVideoAudioKind::Audience
+    uint32_t target = ctx->kind == CoreVideoAudioKind::Audience
         ? 0 : target_participant_id(ctx);
 
     // Whether the participant this source currently holds is still in the
@@ -230,14 +230,29 @@ static void maybe_resubscribe_for_roster(CoreVideoAudioSource *ctx)
     // subscription — and the shared-memory region behind it, one of
     // kMaxShmSources — is held for the rest of the session after its person
     // leaves, and a long show with roster churn exhausts the budget.
+    //
+    // The same roster answers whether the TARGET is present, and it has to:
+    // releasing a departed participant without also refusing to re-subscribe to
+    // them just oscillates. A scene collection saved from an earlier meeting
+    // points at ids that no longer exist, so tick one released and tick two
+    // subscribed straight back — 19 cycles per source in 41 seconds, measured
+    // live on 2026-08-16. An absent target resolves to 0, which is the
+    // already-documented "nobody resolved yet, ask again next tick" case.
     bool held_participant_present = true;
-    if (state.subscribed && state.participant_id != 0) {
+    const bool needs_roster =
+        (state.subscribed && state.participant_id != 0) || target != 0;
+    if (needs_roster) {
         const auto roster = ZoomEngineClient::instance().roster();
-        held_participant_present = std::any_of(
-            roster.begin(), roster.end(),
-            [&](const ParticipantInfo &p) {
-                return p.user_id == state.participant_id;
-            });
+        const auto present = [&](uint32_t id) {
+            return std::any_of(roster.begin(), roster.end(),
+                               [&](const ParticipantInfo &p) {
+                                   return p.user_id == id;
+                               });
+        };
+        if (state.subscribed && state.participant_id != 0)
+            held_participant_present = present(state.participant_id);
+        if (target != 0 && !present(target))
+            target = 0;
     }
 
     switch (audio_resubscribe_action(ctx->kind, active, state, target,

@@ -236,6 +236,41 @@ void test_an_inactive_source_does_not_release()
           "an inactive source is left alone even when its person has left");
 }
 
+// ── The release must SETTLE, not oscillate ─────────────────────────────────
+// Found live on 2026-08-16, minutes after the release rule shipped: a scene
+// collection saved from an earlier meeting points its audio sources at
+// participant ids that no longer exist. Tick one released the subscription
+// because the held participant was absent. Tick two saw `subscribed == false`
+// and a non-zero configured target and SUBSCRIBED AGAIN -- to the same absent
+// person. Tick three released it. 19 release/re-subscribe cycles per source in
+// 41 seconds, each one an engine round trip and an SHM region built and torn
+// down.
+//
+// The caller resolves an absent target to 0 before asking (see
+// maybe_resubscribe_for_roster), so the second tick lands on the "nobody
+// resolved" rule and stops. This pins the fixed point: run the two ticks in
+// sequence and the second must do nothing.
+void test_releasing_an_absent_participant_settles()
+{
+    // Tick one: we hold Alice, Alice has left, so her target resolves to 0.
+    const AudioSubscriptionState holding_absent = subscribed_to(kAlice);
+    check(audio_resubscribe_action(CoreVideoAudioKind::Participant, true,
+                                   holding_absent, 0,
+                                   /*held_participant_present=*/false) ==
+              AudioResubscribeAction::Unsubscribe,
+          "tick one must release the departed participant's region");
+
+    // Tick two: the release above left us holding nothing. Alice is still
+    // absent, so her target is still 0 -- and this must NOT subscribe.
+    const AudioSubscriptionState after_release{false, 0};
+    check(audio_resubscribe_action(CoreVideoAudioKind::Participant, true,
+                                   after_release, 0,
+                                   /*held_participant_present=*/true) ==
+              AudioResubscribeAction::None,
+          "tick two re-subscribed to a participant who is not in the meeting — "
+          "this is the oscillation: release, re-subscribe, release, forever");
+}
+
 // Re-pointing at a different, present participant still rebuilds the region.
 void test_repointing_is_unchanged()
 {
@@ -260,6 +295,7 @@ int main()
     test_holding_nothing_never_unsubscribes();
     test_audience_is_unaffected_by_presence();
     test_an_inactive_source_does_not_release();
+    test_releasing_an_absent_participant_settles();
     test_repointing_is_unchanged();
 
     if (g_failures == 0)

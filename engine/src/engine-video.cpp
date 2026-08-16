@@ -551,6 +551,14 @@ void EngineVideo::resubscribe_all()
     });
 }
 
+void EngineVideo::suspend_all()
+{
+    m_subs.clear();
+    EngineIpc::write(
+        R"({"cmd":"debug","stage":"video_suspended","pending_sources":)" +
+        std::to_string(m_source_participants.size()) + "}");
+}
+
 void EngineVideo::unsubscribe_all()
 {
     m_subs.clear();

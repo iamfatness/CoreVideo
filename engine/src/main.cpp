@@ -822,7 +822,7 @@ public:
 #endif
         if (m_video_engine) {
             m_video_engine->set_raw_media_active(false);
-            m_video_engine->unsubscribe_all();
+            m_video_engine->suspend_all();
         }
         if (m_share_engine)
             m_share_engine->set_raw_media_active(false);

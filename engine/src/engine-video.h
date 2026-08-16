@@ -82,6 +82,15 @@ public:
     void unsubscribe(const std::string &source_uuid);
     void resubscribe_all();
     void unsubscribe_all();
+    // Drop the live renderers but KEEP the desired-state map, so a later
+    // resubscribe_all() can rebuild every subscription. This is the raw-media
+    // stop path; unsubscribe_all() is a real teardown and forgets intent.
+    //
+    // Mirrors EngineAudio::reset_subscription(), which drops the SDK
+    // subscription flag and preserves m_targets. Video had no equivalent, so a
+    // stop/start of raw recording silently forgot every video source and the
+    // operator had to re-pick participants by hand, on air.
+    void suspend_all();
 
 private:
     void unsubscribe_locked(const std::string &source_uuid);

@@ -918,6 +918,41 @@ public:
                 }
                 m_share_engine->attach(share_ctrl);
             }
+            // Re-entering a session (breakout room join or leave, or a
+            // reconnect) does not pass through DISCONNECTING/ENDED, so
+            // stop_raw_media() never runs and m_raw_media_active is still true
+            // from the session we just left. The SDK has meanwhile revoked the
+            // local-recording privilege, so every createRenderer() call
+            // returns SDKERR_NO_PERMISSION (12) and each source fails
+            // video_subscribe_failed_all -- observed on 2026-08-15 and again
+            // on 2026-08-16, both times a breakout round trip.
+            //
+            // Treat re-entry as "permission unknown": drop the stale active
+            // flag and run the ordinary request path again. If the privilege
+            // is still held, CanStartRawRecording() succeeds and
+            // start_raw_media() resubscribes immediately; if it is not,
+            // RequestLocalRecordingPrivilege() runs and
+            // onLocalRecordingPrivilegeRequestStatus() resubscribes on grant.
+            // Both are already-proven paths.
+            //
+            // Deliberately NOT stop_raw_media(): that clears
+            // m_raw_media_requested, throwing away the operator's intent, and
+            // calls StopRawRecording() on a session where recording is already
+            // not running.
+            if (m_raw_media_requested && m_raw_media_active) {
+                EngineIpc::write(
+                    R"({"cmd":"debug","stage":"raw_media_rearm","reason":"session_reentry"})");
+                m_raw_media_active = false;
+                if (m_video_engine) {
+                    m_video_engine->set_raw_media_active(false);
+                    m_video_engine->suspend_all();
+                }
+                if (m_share_engine)
+                    m_share_engine->set_raw_media_active(false);
+                EngineAudio::instance().set_raw_media_active(false);
+                EngineAudio::instance().reset_subscription("session_reentry");
+                start_raw_media("session_reentry");
+            }
             break;
         case ZOOMSDK::MEETING_STATUS_DISCONNECTING:
         case ZOOMSDK::MEETING_STATUS_ENDED:

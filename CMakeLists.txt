@@ -882,6 +882,17 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoAudioTimeline
              COMMAND CoreVideoAudioTimelineTest)
 
+    # Index arithmetic of the audio SHM ring. The single-slot mailbox it
+    # replaces dropped 10ms of audio on every reader stall, silently.
+    add_executable(CoreVideoAudioRingTest
+        tests/audio-ring-test.cpp
+    )
+    target_include_directories(CoreVideoAudioRingTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoAudioRing
+             COMMAND CoreVideoAudioRingTest)
+
     # Which participants a video-assignment picker offers. The rule that the
     # picker's own current selection is never hidden is the load-bearing one:
     # dropping it would unbind the source when somebody's camera goes off.

@@ -161,7 +161,7 @@ bool EngineAudio::ensure_shm(AudioTarget &target,
                              const std::string &source_uuid,
                              uint32_t byte_len)
 {
-    const size_t total = sizeof(ShmAudioHeader) + byte_len;
+    const size_t total = shm_audio_region_bytes(byte_len);
     if (target.shm.ptr && target.shm.size >= total) return true;
 
     // Bump the generation BEFORE creating and bake it into the name: a
@@ -179,6 +179,17 @@ bool EngineAudio::ensure_shm(AudioTarget &target,
                         IPC_SHM_PREFIX + source_uuid + "_audio");
     if (!shm_region_create(target.shm, region.name, total)) return false;
     target.shm_gen = region.gen; // old plugin-side mappings are now stale
+
+    // Initialise the header once, before any slot is published -- the reader
+    // relies on slot_count and slot_bytes being correct from the first read.
+    auto *ring = static_cast<ShmAudioHeader *>(target.shm.ptr);
+    ring->write_index = 0;
+    ring->slot_count  = kAudioRingSlots;
+    ring->slot_bytes  = byte_len;
+    ring->sample_rate = 0;
+    ring->channels    = 0;
+    ring->reserved    = 0;
+
     EngineIpc::write(
         R"({"cmd":"debug","stage":"audio_shm_created","source_uuid":")" +
         source_uuid + R"(","shm_gen":)" + std::to_string(region.gen) +
@@ -222,19 +233,47 @@ void EngineAudio::output_audio_frame(AudioTarget &target,
             source_uuid + "\"}");
     }
 
-    auto *hdr        = static_cast<ShmAudioHeader *>(target.shm.ptr);
-    uint32_t seq = hdr->sequence + 1;
+    auto *ring = static_cast<ShmAudioHeader *>(target.shm.ptr);
+    // A buffer larger than the slots we sized for cannot be published without
+    // corrupting the neighbouring slot. ensure_shm() grows the region on the
+    // next call; drop this one loudly rather than write out of bounds.
+    if (byte_len > ring->slot_bytes) {
+        EngineIpc::write(
+            R"({"cmd":"error","msg":"audio_slot_too_small","source_uuid":")" +
+            source_uuid + R"(","byte_len":)" + std::to_string(byte_len) +
+            R"(,"slot_bytes":)" + std::to_string(ring->slot_bytes) + "}");
+        return;
+    }
+
+    const uint32_t index = ring->write_index % ring->slot_count;
+    auto *slot = reinterpret_cast<ShmAudioSlot *>(
+        static_cast<char *>(target.shm.ptr) +
+        shm_audio_slot_offset(*ring, index));
+
+    uint32_t seq = slot->sequence + 1;
     if ((seq & 1u) == 0) ++seq;
-    hdr->sequence = seq;
+    slot->sequence = seq;                       // odd: write in progress
     std::atomic_thread_fence(std::memory_order_release);
-    hdr->sample_rate = data->GetSampleRate();
-    hdr->channels    = static_cast<uint16_t>(data->GetChannelNum());
-    hdr->reserved    = 0;
-    hdr->byte_len    = byte_len;
-    std::memcpy(static_cast<char *>(target.shm.ptr) + sizeof(ShmAudioHeader),
+    // The engine has no libobs headers to call os_gettime_ns() with (it is a
+    // standalone process); tile_clock_now_ns() is the same idea -- a
+    // monotonic, QPC-backed clock (std::chrono::steady_clock on Windows) that
+    // this process already uses for the tile clock probe. Both processes are
+    // on one machine, so the plugin can still subtract this from its own
+    // os_gettime_ns() reading to measure pipeline latency.
+    slot->capture_ns = tile_clock_now_ns();
+    slot->byte_len   = byte_len;
+    slot->reserved   = 0;
+    std::memcpy(reinterpret_cast<char *>(slot) + sizeof(ShmAudioSlot),
                 data->GetBuffer(), byte_len);
     std::atomic_thread_fence(std::memory_order_release);
-    hdr->sequence = seq + 1;
+    slot->sequence = seq + 1;                   // even: readable
+
+    ring->sample_rate = data->GetSampleRate();
+    ring->channels    = static_cast<uint16_t>(data->GetChannelNum());
+    std::atomic_thread_fence(std::memory_order_release);
+    // Published last: the reader treats everything below write_index as
+    // complete, so this store is what makes the slot visible.
+    ring->write_index = (ring->write_index + 1) % ring->slot_count;
 
     ++target.frame_count;
     if (target.frame_count == 1 || target.frame_count % 250 == 0) {

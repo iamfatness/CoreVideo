@@ -84,13 +84,66 @@ struct ShmFrameHeader {
     uint32_t height;
     uint32_t y_len;
 };
-struct ShmAudioHeader {
+// Audio is a RING, not a mailbox.
+//
+// It used to be one slot: the engine memcpy'd every Zoom buffer over the
+// previous one, guarded by a seqlock. A seqlock prevents the reader seeing a
+// TORN buffer and does nothing about LOSS -- so any reader stall destroyed
+// 10 ms of audio permanently, silently, on a box where stalls are routine.
+// Video keeps the mailbox on purpose (newest frame wins, a dropped frame is
+// nearly invisible); the ear is not so forgiving, and Viz Engine ring-buffers
+// audio for the same reason.
+//
+// 8 slots is 80 ms at Zoom's 10 ms buffer. That is CAPACITY, not latency: a
+// reader keeping up sees about one slot of delay, and the depth is only spent
+// while absorbing a stall.
+static constexpr uint32_t kAudioRingSlots = 8;
+
+struct ShmAudioSlot {
+    // Even and unchanged across a read = the payload was stable. Odd = a write
+    // is in progress. Same seqlock discipline the single slot had, now per-slot.
     uint32_t sequence;
+    // The engine's os_gettime_ns() when the Zoom SDK handed this buffer over.
+    // Both processes are on one machine and os_gettime_ns() is QPC-based, so
+    // the plugin can subtract it directly to measure pipeline latency.
+    uint64_t capture_ns;
+    uint32_t byte_len;
+    uint32_t reserved;
+};
+
+struct ShmAudioHeader {
+    // Next slot the writer will fill. The reader drains up to (not including)
+    // this. Written last, after the slot is complete.
+    uint32_t write_index;
+    uint32_t slot_count;
+    uint32_t slot_bytes;
     uint32_t sample_rate;
     uint16_t channels;
     uint16_t reserved;
-    uint32_t byte_len;
 };
+
+inline size_t shm_audio_region_bytes(uint32_t slot_bytes)
+{
+    return sizeof(ShmAudioHeader) +
+           static_cast<size_t>(kAudioRingSlots) *
+               (sizeof(ShmAudioSlot) + slot_bytes);
+}
+
+inline size_t shm_audio_slot_offset(const ShmAudioHeader &h, uint32_t index)
+{
+    return sizeof(ShmAudioHeader) +
+           static_cast<size_t>(index) * (sizeof(ShmAudioSlot) + h.slot_bytes);
+}
+
+// How many slots the reader has yet to drain. Indices wrap, and a wrapped pair
+// is the steady state rather than an error.
+inline uint32_t audio_ring_slots_behind(uint32_t write_index,
+                                        uint32_t read_index,
+                                        uint32_t slot_count)
+{
+    if (slot_count == 0) return 0;
+    return (write_index + slot_count - read_index) % slot_count;
+}
 
 // ── Platform-specific pipe / socket paths ─────────────────────────────────────
 #if defined(WIN32)

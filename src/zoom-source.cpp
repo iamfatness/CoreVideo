@@ -1641,7 +1641,10 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
     const std::string audio_base = IPC_SHM_PREFIX + uuid + "_audio";
     const std::string shm_name = shm_region_name(audio_base, event_shm_gen);
     if (event_byte_len == 0) return;
-    const size_t audio_bytes = sizeof(ShmAudioHeader) + event_byte_len;
+    // engine-audio.cpp now sizes and writes this region as an 8-slot ring
+    // (src/engine-ipc.h); the region must be opened at the ring's full size,
+    // not header-plus-one-buffer.
+    const size_t audio_bytes = shm_audio_region_bytes(event_byte_len);
     const bool gen_changed = event_shm_gen != 0 &&
                              event_shm_gen != audio_shm_gen;
     if (audio_shm.ptr && gen_changed)
@@ -1663,27 +1666,40 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
         audio_shm_gen = event_shm_gen;
     }
 
-    auto *hdr = static_cast<const ShmAudioHeader *>(audio_shm.ptr);
+    // This path still reads only the newest slot (mailbox semantics) rather
+    // than draining the ring — it is not on the CoreVideoAudioSource path
+    // that owns the ring-drain/overrun upgrade (src/zoom-participant-audio-
+    // source.cpp). It is adapted here only so it keeps reading a valid slot
+    // now that engine-audio.cpp writes the ring layout instead of the old
+    // single-slot mailbox; it does not gain loss-accounting.
+    auto *ring = static_cast<const ShmAudioHeader *>(audio_shm.ptr);
+    const uint32_t slot_count = ring->slot_count;
+    if (slot_count == 0) return;
+    const uint32_t index = (ring->write_index + slot_count - 1) % slot_count;
+    const auto *slot = reinterpret_cast<const ShmAudioSlot *>(
+        static_cast<const char *>(audio_shm.ptr) +
+        shm_audio_slot_offset(*ring, index));
+
     uint32_t byte_len = 0;
     uint32_t sample_rate = 0;
     uint16_t channels = 0;
     bool copied = false;
     for (int attempt = 0; attempt < 3; ++attempt) {
-        const uint32_t seq1 = hdr->sequence;
+        const uint32_t seq1 = slot->sequence;
         std::atomic_thread_fence(std::memory_order_acquire);
         if ((seq1 & 1u) != 0) continue;
-        byte_len = hdr->byte_len;
-        sample_rate = hdr->sample_rate;
-        channels = hdr->channels;
+        byte_len = slot->byte_len;
+        sample_rate = ring->sample_rate;
+        channels = ring->channels;
         if (!source || byte_len == 0) return;
-        if (sizeof(ShmAudioHeader) + byte_len > audio_shm.size) return;
-        const auto *pcm_src = static_cast<const uint8_t *>(audio_shm.ptr) +
-            sizeof(ShmAudioHeader);
+        if (byte_len > ring->slot_bytes) return;
+        const auto *pcm_src = reinterpret_cast<const uint8_t *>(slot) +
+            sizeof(ShmAudioSlot);
         if (m_audio_buf.size() < byte_len)
             m_audio_buf.resize(byte_len);
         std::memcpy(m_audio_buf.data(), pcm_src, byte_len);
         std::atomic_thread_fence(std::memory_order_acquire);
-        const uint32_t seq2 = hdr->sequence;
+        const uint32_t seq2 = slot->sequence;
         if (seq1 == seq2 && (seq2 & 1u) == 0) {
             copied = true;
             break;

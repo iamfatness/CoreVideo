@@ -7,6 +7,48 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+### Fixed
+- **Audio sources no longer hold a shared-memory slot after their participant
+  leaves.** The engine allows 32 shared-memory regions across audio, video and
+  screen share. A CoreVideo audio source released its region when the operator
+  deleted it, but not when the person it followed simply left the meeting — so a
+  long show with roster churn crept towards the cap and then began rejecting
+  every new subscribe with `too many active sources (limit 32)`. Because the cap
+  is shared, audio exhausting it could also block a video source from
+  re-binding. A departure now releases the region; the OBS source stays where
+  you put it and re-subscribes by itself if the person comes back.
+
+- **Breakout rooms no longer black out every video source.** Joining or leaving
+  a breakout room does not disconnect you, so the engine kept believing raw
+  recording was still running — while Zoom had quietly revoked the permission.
+  Every source then failed to subscribe with `SDKERR_NO_PERMISSION` and stayed
+  black until the operator manually stopped and started raw recording. Re-entry
+  now re-requests the recording privilege the same way the initial join does.
+
+- **Stopping and starting raw recording no longer forgets your video sources.**
+  The stop discarded the record of which participant each source wanted, and the
+  restart had nothing left to rebuild from — so sources came back empty and had
+  to be re-picked by hand, on air. The stop now suspends the subscriptions and
+  keeps the intent, matching what the audio path already did.
+
+- **The Active Speaker source no longer flashes on a cut.** Every speaker change
+  released the source's video mapping and asked the engine to build a new one,
+  which takes the better part of a second — and the hidden preview that had been
+  covering that gap was discarded at the same moment, so nothing was on air
+  until the new mapping arrived. On a busy panel with a short hold time the cuts
+  landed on top of each other and the source flashed almost continuously. The
+  preview is now held until the new mapping actually delivers a frame.
+
+### Added
+- **A "Hide participants without video" toggle in the Output Manager.** People
+  with their camera off cannot go into an output or a tile, and on a large
+  meeting they crowd out the ones who can. The toggle filters the participant
+  table, the output assignment lists and the participant source picker. Audio
+  source pickers are deliberately unaffected — a camera-off participant is
+  often exactly who you want a dedicated audio source for. A participant already
+  assigned to a source is never hidden, so switching a camera off can never make
+  a picker lose its own selection.
+
 ## [0.1.39] - 2026-08-13
 
 ### Added

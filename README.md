@@ -488,6 +488,10 @@ obs-studio/plugin_config/obs-zoom-plugin/profiles/<name>.json
 
 Use the **Zoom Output Manager** dock, or **OBS -> Tools -> Zoom Output Manager** to focus it, to save, load, and delete profiles interactively. Profiles preserve assignment mode, requested resolution, channel mode, and audio role (`Mix`, `Isolated`, or `Audience`). Loading a profile reports how many saved outputs matched the current OBS sources and lists missing saved source names so mismatched profiles are visible before Apply. Code can call `ZoomOutputProfile::save() / load() / list() / remove()` directly.
 
+**Hide participants without video.** The Output Manager has a checkbox beside the participant filter that hides camera-off participants from the video assignment lists — the participant table, the per-output assignment combos, and the CoreVideo Participant source picker. Someone with their camera off cannot feed an output or a tile, so on a large meeting they only crowd the list. The setting persists across sessions.
+
+Two deliberate exceptions. **Audio source pickers always show everyone**, because a dedicated CoreVideo audio source follows a microphone and camera-off participants are often exactly who you want one for. And a participant **already assigned** to a source is never hidden, even with their camera off — otherwise a picker could not display its own current value and would silently unbind a live source the moment somebody switched their camera off.
+
 ## Repeatable Load Measurements
 
 For 8-feed stability testing, start OBS in the target production state first:

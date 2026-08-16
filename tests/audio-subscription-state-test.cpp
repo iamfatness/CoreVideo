@@ -62,13 +62,13 @@ void test_a_stale_subscription_silences_the_next_roster_tick()
     const AudioSubscriptionState stale = subscribed_to(kAlice);
 
     check(audio_resubscribe_action(CoreVideoAudioKind::Participant, true, stale,
-                                   kAlice) == AudioResubscribeAction::None,
+                                   kAlice, true) == AudioResubscribeAction::None,
           "a Participant source pinned to Alice does nothing on a roster tick "
           "while it still believes it is subscribed to Alice — this is the "
           "silence, and it never ends because nothing else clears the flag");
 
     check(audio_resubscribe_action(CoreVideoAudioKind::Audience, true,
-                                   subscribed_to(0), 0) ==
+                                   subscribed_to(0), 0, true) ==
               AudioResubscribeAction::None,
           "an Audience source does nothing either: it follows no participant, "
           "so a re-point can never rescue it");
@@ -76,7 +76,7 @@ void test_a_stale_subscription_silences_the_next_roster_tick()
     // ActiveSpeaker only escaped by accident. Same stale state, and the SAME
     // speaker still talking, is the same dead end.
     check(audio_resubscribe_action(CoreVideoAudioKind::ActiveSpeaker, true,
-                                   stale, kAlice) ==
+                                   stale, kAlice, true) ==
               AudioResubscribeAction::None,
           "ActiveSpeaker is not exempt — it recovers only if the speaker "
           "CHANGES, so Alice holding the floor across the restart leaves it as "
@@ -95,13 +95,13 @@ void test_a_new_engine_process_makes_the_next_roster_tick_resubscribe()
           "…and no participant, so nothing is carried across the boundary");
 
     check(audio_resubscribe_action(CoreVideoAudioKind::Participant, true, fresh,
-                                   kAlice) == AudioResubscribeAction::Subscribe,
+                                   kAlice, true) == AudioResubscribeAction::Subscribe,
           "the Participant source subscribes on the new engine's first roster");
     check(audio_resubscribe_action(CoreVideoAudioKind::Audience, true, fresh,
-                                   0) == AudioResubscribeAction::Subscribe,
+                                   0, true) == AudioResubscribeAction::Subscribe,
           "the Audience source subscribes on the new engine's first roster");
     check(audio_resubscribe_action(CoreVideoAudioKind::ActiveSpeaker, true,
-                                   fresh, kAlice) ==
+                                   fresh, kAlice, true) ==
               AudioResubscribeAction::Subscribe,
           "the ActiveSpeaker source subscribes on the new engine's first "
           "roster, without waiting for the speaker to change");
@@ -110,7 +110,7 @@ void test_a_new_engine_process_makes_the_next_roster_tick_resubscribe()
     // unsubscribe for a subscription that died with the old process would name
     // a uuid the new engine has never heard of.
     check(audio_resubscribe_action(CoreVideoAudioKind::Participant, true, fresh,
-                                   kAlice) !=
+                                   kAlice, true) !=
               AudioResubscribeAction::UnsubscribeThenSubscribe,
           "and it does not try to cancel a subscription the new engine never "
           "had");
@@ -123,33 +123,33 @@ void test_a_new_engine_process_makes_the_next_roster_tick_resubscribe()
 void test_the_ordinary_roster_tick_is_unchanged()
 {
     check(audio_resubscribe_action(CoreVideoAudioKind::Participant, true,
-                                   subscribed_to(kAlice), kBob) ==
+                                   subscribed_to(kAlice), kBob, true) ==
               AudioResubscribeAction::UnsubscribeThenSubscribe,
           "a re-point to a different participant still cancels first — the "
           "explicit unsubscribe is what makes the engine rebuild the audio "
           "target on a fresh region name");
     check(audio_resubscribe_action(CoreVideoAudioKind::ActiveSpeaker, true,
-                                   subscribed_to(kAlice), kBob) ==
+                                   subscribed_to(kAlice), kBob, true) ==
               AudioResubscribeAction::UnsubscribeThenSubscribe,
           "…and so does an active-speaker cut");
 
     check(audio_resubscribe_action(CoreVideoAudioKind::ActiveSpeaker, true,
-                                   subscribed_to(kAlice), kAlice) ==
+                                   subscribed_to(kAlice), kAlice, true) ==
               AudioResubscribeAction::None,
           "the same speaker on a later tick is left alone, so a show's "
           "thousands of roster updates cost nothing");
     check(audio_resubscribe_action(CoreVideoAudioKind::Audience, true,
-                                   subscribed_to(0), 0) ==
+                                   subscribed_to(0), 0, true) ==
               AudioResubscribeAction::None,
           "a subscribed Audience source is left alone too");
 
     check(audio_resubscribe_action(CoreVideoAudioKind::ActiveSpeaker, true,
-                                   audio_state_for_new_engine_process(), 0) ==
+                                   audio_state_for_new_engine_process(), 0, true) ==
               AudioResubscribeAction::None,
           "an unresolved target (nobody speaking yet) waits rather than "
           "subscribing to participant 0");
     check(audio_resubscribe_action(CoreVideoAudioKind::Participant, true,
-                                   subscribed_to(kAlice), 0) ==
+                                   subscribed_to(kAlice), 0, true) ==
               AudioResubscribeAction::None,
           "…and an unresolved target never tears down a working subscription");
 }
@@ -162,16 +162,89 @@ void test_an_inactive_source_never_subscribes_on_a_roster_tick()
 {
     const AudioSubscriptionState fresh = audio_state_for_new_engine_process();
     check(audio_resubscribe_action(CoreVideoAudioKind::Participant, false,
-                                   fresh, kAlice) ==
+                                   fresh, kAlice, true) ==
               AudioResubscribeAction::None,
           "an inactive Participant source is left to audio_activate()");
     check(audio_resubscribe_action(CoreVideoAudioKind::Audience, false, fresh,
-                                   0) == AudioResubscribeAction::None,
+                                   0, true) == AudioResubscribeAction::None,
           "an inactive Audience source is left to audio_activate()");
     check(audio_resubscribe_action(CoreVideoAudioKind::ActiveSpeaker, false,
-                                   subscribed_to(kAlice), kBob) ==
+                                   subscribed_to(kAlice), kBob, true) ==
               AudioResubscribeAction::None,
           "and an inactive source does not re-point either");
+}
+
+// ── The leak, in the exact shape it reached air ─────────────────────────────
+// A departure looks identical to "not resolved yet": both give target == 0. The
+// old rule left the subscription alone for both, so a source whose participant
+// left held its shared-memory region for the rest of the session. Thirty
+// sources created and zero released over one show (2026-08-16) exhausted
+// kMaxShmSources and the engine began rejecting every new subscribe.
+void test_a_departed_participant_releases_its_region()
+{
+    check(audio_resubscribe_action(CoreVideoAudioKind::Participant, true,
+                                   subscribed_to(kAlice), 0,
+                                   /*held_participant_present=*/false) ==
+              AudioResubscribeAction::Unsubscribe,
+          "a Participant source whose person has left releases the region "
+          "instead of holding one of the 32 slots for the rest of the show");
+}
+
+// The reason the rule is keyed on the HELD participant and not on target == 0:
+// an ActiveSpeaker source resolves to 0 in every gap between speakers, and
+// releasing on that would destroy and rebuild the region each time the room
+// goes quiet.
+void test_a_speaker_gap_does_not_release_the_region()
+{
+    check(audio_resubscribe_action(CoreVideoAudioKind::ActiveSpeaker, true,
+                                   subscribed_to(kAlice), 0,
+                                   /*held_participant_present=*/true) ==
+              AudioResubscribeAction::None,
+          "an ActiveSpeaker source between speakers keeps its region — the "
+          "person it holds is still in the meeting");
+}
+
+// Nothing held, nothing resolved: unchanged, and no spurious unsubscribe.
+void test_holding_nothing_never_unsubscribes()
+{
+    const AudioSubscriptionState nothing = audio_state_for_new_engine_process();
+    check(audio_resubscribe_action(CoreVideoAudioKind::Participant, true,
+                                   nothing, 0,
+                                   /*held_participant_present=*/false) ==
+              AudioResubscribeAction::None,
+          "a source that holds no subscription has nothing to release");
+}
+
+// Audience subscribes to the mix, not to a person, so presence cannot apply.
+void test_audience_is_unaffected_by_presence()
+{
+    check(audio_resubscribe_action(CoreVideoAudioKind::Audience, true,
+                                   subscribed_to(0), 0,
+                                   /*held_participant_present=*/false) ==
+              AudioResubscribeAction::None,
+          "Audience follows the whole-meeting mix and is never released by a "
+          "departure");
+}
+
+// An inactive source is left to audio_activate(), departure or not.
+void test_an_inactive_source_does_not_release()
+{
+    check(audio_resubscribe_action(CoreVideoAudioKind::Participant, false,
+                                   subscribed_to(kAlice), 0,
+                                   /*held_participant_present=*/false) ==
+              AudioResubscribeAction::None,
+          "an inactive source is left alone even when its person has left");
+}
+
+// Re-pointing at a different, present participant still rebuilds the region.
+void test_repointing_is_unchanged()
+{
+    check(audio_resubscribe_action(CoreVideoAudioKind::Participant, true,
+                                   subscribed_to(kAlice), kBob,
+                                   /*held_participant_present=*/true) ==
+              AudioResubscribeAction::UnsubscribeThenSubscribe,
+          "re-pointing at somebody else still cancels and re-places, so the "
+          "region moves to a fresh generation name");
 }
 
 }  // namespace
@@ -182,6 +255,12 @@ int main()
     test_a_new_engine_process_makes_the_next_roster_tick_resubscribe();
     test_the_ordinary_roster_tick_is_unchanged();
     test_an_inactive_source_never_subscribes_on_a_roster_tick();
+    test_a_departed_participant_releases_its_region();
+    test_a_speaker_gap_does_not_release_the_region();
+    test_holding_nothing_never_unsubscribes();
+    test_audience_is_unaffected_by_presence();
+    test_an_inactive_source_does_not_release();
+    test_repointing_is_unchanged();
 
     if (g_failures == 0)
         std::cout << "audio-subscription-state: all tests passed\n";

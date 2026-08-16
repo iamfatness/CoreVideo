@@ -72,6 +72,13 @@ enum class AudioResubscribeAction {
     // unsubscribe is what makes the engine destroy and rebuild the audio
     // target, which is what lets the region move to a fresh generation name.
     UnsubscribeThenSubscribe,
+    // Cancel the subscription we hold and place nothing in its place. Used when
+    // the participant we follow has left the meeting: the region they occupied
+    // is one of kMaxShmSources (engine-ipc.h), and a long show with roster
+    // churn will exhaust that budget if departures never release. The OBS
+    // source stays exactly where the operator put it, silent, and re-subscribes
+    // through the ordinary Subscribe path if the participant returns.
+    Unsubscribe,
 };
 
 // Decides what a roster tick should do to this source's subscription.
@@ -85,14 +92,21 @@ enum class AudioResubscribeAction {
 //     when OBS shows it, so a roster tick must not do that work early.
 //   * Audience follows no participant, so the only question is whether it is
 //     subscribed at all.
+//   * A subscription whose participant has left the roster is released. The
+//     region is one of kMaxShmSources; departures that never release exhaust
+//     the budget over a long show.
 //   * A target of 0 means nobody has been resolved yet (no active speaker, or
 //     the operator has not picked a participant). Leave whatever we have; the
 //     next roster tick asks again.
 //   * Otherwise subscribe if we hold nothing, and re-point if we hold a
 //     subscription to somebody else.
+//
+// `held_participant_present` says whether the participant this source currently
+// holds a subscription to is still in the roster. It is meaningless when we
+// hold nothing, and callers pass true in that case.
 inline AudioResubscribeAction audio_resubscribe_action(
     CoreVideoAudioKind kind, bool active, const AudioSubscriptionState &state,
-    uint32_t target)
+    uint32_t target, bool held_participant_present)
 {
     if (!active) return AudioResubscribeAction::None;
 
@@ -100,6 +114,14 @@ inline AudioResubscribeAction audio_resubscribe_action(
         return state.subscribed ? AudioResubscribeAction::None
                                 : AudioResubscribeAction::Subscribe;
     }
+
+    // A subscription whose participant has left the roster is released, not
+    // held. This is deliberately keyed on the presence of the participant we
+    // HOLD, not on `target == 0`: an ActiveSpeaker source resolves to 0 in
+    // every gap between speakers, and releasing on that would destroy and
+    // rebuild the shared-memory region every time the room goes quiet.
+    if (state.subscribed && !held_participant_present)
+        return AudioResubscribeAction::Unsubscribe;
 
     if (target == 0) return AudioResubscribeAction::None;
     if (!state.subscribed) return AudioResubscribeAction::Subscribe;

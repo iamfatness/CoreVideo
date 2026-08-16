@@ -7,6 +7,7 @@
 #include "speaker-settings-merge.h"
 #include "zoom-engine-client.h"
 #include "zoom-iso-recorder.h"
+#include "participant-filter.h"
 #include "zoom-settings.h"
 #include <media-io/audio-io.h>
 #include <media-io/video-io.h>
@@ -2133,7 +2134,17 @@ static obs_properties_t *zoom_source_get_properties(void *data)
         obs_module_text("ZoomSource.ParticipantId"),
         OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
     obs_property_list_add_int(participant, obs_module_text("ZoomSource.NoParticipant"), 0);
-    for (const auto &p : ZoomEngineClient::instance().roster()) {
+    // Camera-off participants cannot feed this source, so they are hidden when
+    // the operator asks for it. This source's own participant is passed as
+    // keep_user_id and so stays listed even with their camera off: dropping it
+    // would leave the combo unable to show its own value, and OBS would reset
+    // the property to "No participant" -- unbinding a live source because
+    // somebody switched their camera off.
+    const auto assignable = visible_for_video_assignment(
+        ZoomEngineClient::instance().roster(),
+        ZoomPluginSettings::load().hide_participants_without_video,
+        ctx->participant_id.load(std::memory_order_acquire));
+    for (const auto &p : assignable) {
         std::string label = p.display_name.empty()
             ? "ID " + std::to_string(p.user_id)
             : p.display_name + " (" + std::to_string(p.user_id) + ")";

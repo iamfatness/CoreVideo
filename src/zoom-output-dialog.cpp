@@ -3,6 +3,8 @@
 #include "zoom-engine-client.h"
 #include "zoom-output-manager.h"
 #include "zoom-output-profile.h"
+#include "participant-filter.h"
+#include "zoom-settings.h"
 #include <QAbstractItemView>
 #include <QApplication>
 #include <QComboBox>
@@ -857,7 +859,16 @@ void ZoomOutputDialog::refresh()
             assignment->addItem(QString("Spotlight %1").arg(slot),
                                 QString("spotlight:%1").arg(slot));
         }
-        for (const auto &p : roster)
+        // Camera-off participants cannot go into an output, so they are hidden
+        // when the operator asks for it. The output's own participant is passed
+        // as keep_user_id so it survives with their camera off -- otherwise
+        // select_assignment_value() below would fail to match and the combo
+        // would fall back, silently re-pointing a live output.
+        const auto assignable = visible_for_video_assignment(
+            roster,
+            ZoomPluginSettings::load().hide_participants_without_video,
+            output.participant_id);
+        for (const auto &p : assignable)
             assignment->addItem(participant_label(p), QString("user:%1").arg(p.user_id));
         const QString current_assignment = assignment_data_for_output(output);
         select_assignment_value(assignment, current_assignment);

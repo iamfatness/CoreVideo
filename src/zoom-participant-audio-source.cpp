@@ -66,9 +66,12 @@ struct CoreVideoAudioSource {
     uint64_t frame_count = 0;
     std::shared_ptr<CallbackGate> callback_gate =
         std::make_shared<CallbackGate>();
-    // The master clock this source's audio is stamped from. Guarded by the
-    // same path that guards audio_buf: only the engine reader thread advances
-    // it. See src/audio-timeline.h.
+    // The master clock this source's audio is stamped from. Not
+    // self-synchronizing (see src/audio-timeline.h), so every access is
+    // guarded by ctx->mtx: advanced there by the engine reader thread in
+    // output_audio_frame(), reset there by the OBS lifecycle callbacks
+    // (unsubscribe_audio()) and the new-engine callback
+    // (forget_subscription_for_new_engine()).
     AudioTimeline timeline;
 };
 
@@ -142,8 +145,13 @@ static void unsubscribe_audio(CoreVideoAudioSource *ctx)
     ctx->current_participant_id.store(0, std::memory_order_release);
     // The next subscribe is a new timeline: a different participant, or the
     // same one after a gap of unknown length. Neither can be stamped from the
-    // old sample count.
-    audio_timeline_reset(ctx->timeline);
+    // old sample count. Reset under ctx->mtx: output_audio_frame() holds the
+    // same mutex while advancing this timeline on the engine reader thread,
+    // and AudioTimeline has no synchronization of its own.
+    {
+        std::lock_guard<std::mutex> lk(ctx->mtx);
+        audio_timeline_reset(ctx->timeline);
+    }
 }
 
 // Drops this source's SHM read mapping. Called when a NEW ZoomObsEngine process
@@ -202,8 +210,11 @@ static void release_audio_mapping(CoreVideoAudioSource *ctx)
 // registered source. So every successful rejoin produces at least one tick, and
 // that tick now finds `subscribed` false and subscribes.
 //
-// Touches only the two atomics, so it needs no lock; the caller already holds
-// the CallbackGate that keeps ctx alive.
+// Touches the two atomics lock-free; the caller already holds the
+// CallbackGate that keeps ctx alive. It also resets ctx->timeline, which is
+// NOT atomic and is shared with the engine reader thread (output_audio_frame()
+// advances it under ctx->mtx), so that reset takes ctx->mtx explicitly rather
+// than relying on this function's own lock-free style.
 static void forget_subscription_for_new_engine(CoreVideoAudioSource *ctx)
 {
     if (!ctx) return;
@@ -213,8 +224,13 @@ static void forget_subscription_for_new_engine(CoreVideoAudioSource *ctx)
     ctx->current_participant_id.store(cleared.participant_id,
                                       std::memory_order_release);
     // A new engine restarts its own generation counters; our accumulated
-    // samples describe a process that no longer exists.
-    audio_timeline_reset(ctx->timeline);
+    // samples describe a process that no longer exists. Reset under ctx->mtx:
+    // AudioTimeline has no synchronization of its own and the engine reader
+    // thread advances the same timeline under the same mutex.
+    {
+        std::lock_guard<std::mutex> lk(ctx->mtx);
+        audio_timeline_reset(ctx->timeline);
+    }
     if (!was_subscribed) return;
     blog(LOG_INFO,
          "[obs-zoom-plugin] Dropped CoreVideo audio subscription held with the previous engine: source=%s uuid=%s - will re-subscribe on the new engine's first roster",

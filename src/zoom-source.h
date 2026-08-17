@@ -1,5 +1,6 @@
 #pragma once
 
+#include "audio-timeline.h"
 #include "engine-ipc.h"
 #include "hw-video-pipeline.h"
 #include "zoom-output-manager.h"
@@ -152,9 +153,21 @@ private:
     void release_director_preview_shm_locked();
     // Caller must hold m_mtx. Serves both the main slot and the director
     // preview slot, mirroring output_video_from_shared_memory().
+    //
+    // read_index/read_started are the RING reader state and are passed in
+    // per-slot on purpose: the main slot and the preview slot are two DIFFERENT
+    // shared-memory regions with two independent free-running write_index
+    // counters, so one shared read_index would compute a meaningless "slots
+    // behind" the moment the other region's writer was consulted -- silently
+    // draining garbage out of both. The master clock (m_audio_timeline) and the
+    // loss counter (m_audio_overrun_slots) are deliberately NOT per-slot: they
+    // describe the single OBS audio stream this source publishes, which exactly
+    // one of the two slots feeds at any instant (see on_engine_audio()).
     void output_audio_from_shared_memory(const std::string &uuid,
                                          ShmRegion &audio_shm,
                                          uint32_t &audio_shm_gen,
+                                         uint32_t &read_index,
+                                         bool &read_started,
                                          uint32_t event_byte_len,
                                          uint32_t resolved_participant_id,
                                          uint32_t event_shm_gen);
@@ -210,6 +223,35 @@ private:
     // mapping because the ring header described a region larger than our view.
     // Rate-limits that log; guarded by m_mtx like the rest of the audio read.
     uint64_t m_audio_remap_count = 0;
+    // ── Embedded-audio ring reader state ─────────────────────────────────────
+    //
+    // ALL of these are plain (non-atomic) members guarded by m_mtx, the same
+    // convention output_audio_from_shared_memory() already follows for
+    // m_audio_shm / m_audio_buf / m_audio_frame_count: that function is called
+    // with m_mtx held (on_engine_audio() and on_director_preview_audio() both
+    // take it), and every other site that touches these -- clear_subscription_state()
+    // and release_shared_memory_for_new_engine() -- takes m_mtx too. AudioTimeline
+    // has no synchronization of its own, so this is not optional.
+    //
+    // The master clock every embedded buffer is stamped from. Sample-derived,
+    // so IPC arrival jitter never reaches OBS -- see src/audio-timeline.h. One
+    // clock for the source, not one per slot: it describes the single OBS audio
+    // stream this source publishes.
+    AudioTimeline m_audio_timeline;
+    // Next MAIN-slot ring slot to drain, and whether we have levelled with that
+    // ring's writer yet.
+    uint32_t m_audio_read_index   = 0;
+    bool     m_audio_read_started = false;
+    // The same pair for the director PREVIEW slot. Separate because it is a
+    // separate region with its own write_index -- see the comment on
+    // output_audio_from_shared_memory() above.
+    uint32_t m_director_preview_audio_read_index   = 0;
+    bool     m_director_preview_audio_read_started = false;
+    // Slots the writer lapped, or that were clobbered mid-copy, before we
+    // drained them -- audio that was lost. Counted so loss is visible; the old
+    // newest-slot-only read lost audio invisibly (and republished the survivor
+    // once per missed event, which is what the operator heard as jitter).
+    uint64_t m_audio_overrun_slots = 0;
     std::atomic<bool> m_subscribed{false};
     std::atomic<bool> m_active{false};
     std::atomic<uint32_t> m_current_subscription_id{0};

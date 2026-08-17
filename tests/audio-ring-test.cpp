@@ -12,6 +12,7 @@
 // the loss that does happen countable instead of invisible.
 
 #include "engine-ipc.h"
+#include "audio-timeline.h"
 
 #include <iostream>
 
@@ -83,6 +84,117 @@ int main()
                 check(off > previous, "slot offsets are not strictly ordered");
             previous = off;
         }
+    }
+
+    // --- The wire format must not have grown: participant_id reuses the old
+    // reserved word, and the notify flag reuses the header's. A size change
+    // here is a silent engine/plugin mismatch (see the version guard) ---
+    {
+        // 24, not 20: capture_ns forces 8-byte alignment, so there have
+        // always been 4 padding bytes after sequence. What matters is that
+        // the size is UNCHANGED from the v0.1.40 wire format -- renaming
+        // reserved to participant_id must not move anything.
+        check(sizeof(ShmAudioSlot) == 24,
+              "ShmAudioSlot changed size -- participant_id was meant to reuse "
+              "the reserved word, not extend the struct");
+        check(sizeof(ShmAudioHeader) == 4 * 4 + 2 + 2,
+              "ShmAudioHeader changed size -- notify was meant to reuse the "
+              "reserved u16, not extend the struct");
+        ShmAudioSlot slot{};
+        slot.participant_id = 16788480u;
+        check(slot.participant_id == 16788480u,
+              "slot participant_id does not round-trip");
+    }
+
+    // --- Notify-protocol liveness. The first shipped version of the edge
+    // trigger cleared the flag only at the drain-loop exit; the first-event
+    // leveling path returned early, left the flag set, and every source went
+    // silent after ONE buffer -- caught in review, not by these tests,
+    // because no test exercised the protocol at all. These do. (Single
+    // threaded, so they pin the STATE MACHINE, not the memory ordering; the
+    // fence-pair proof lives with ShmAudioHeader::notify.)
+    {
+        ShmAudioHeader h{};
+        h.slot_count = kAudioRingSlots;
+        uint32_t read_index = 0;
+
+        // First publish crosses the empty->non-empty edge: one event.
+        h.write_index = 1;
+        check(audio_ring_notify_after_publish(&h),
+              "the first publish after idle must send an event");
+        // Further publishes while the reader has not drained: silent.
+        h.write_index = 2;
+        check(!audio_ring_notify_after_publish(&h),
+              "a second publish before the reader drained must NOT send -- "
+              "this is the whole point of edge triggering");
+
+        // THE WEDGE REGRESSION: reader wakes, levels (or drains), and runs
+        // reader_done. If it were to skip that (the old early return), the
+        // flag would stay set and the writer above would never notify again.
+        read_index = 2;                     // drained/levelled to the writer
+        check(audio_ring_reader_done(&h, read_index),
+              "a reader level with the writer must be told it is safe to sleep");
+        h.write_index = 3;
+        check(audio_ring_notify_after_publish(&h),
+              "after the reader completed, the next publish must send a fresh "
+              "event -- if this fails, sources go silent after one buffer");
+
+        // Race window: data lands between the drain and the clear. reader_done
+        // must demand another pass and suppress redundant events meanwhile.
+        h.write_index = 5;
+        check(!audio_ring_reader_done(&h, 3),
+              "reader_done must demand another pass when data landed in the "
+              "race window");
+        check(!audio_ring_notify_after_publish(&h),
+              "no event needed while the reader has reclaimed the flag");
+        check(audio_ring_reader_done(&h, 5),
+              "the second pass reaches empty and may sleep");
+
+        // Abandon: any consumed wakeup that cannot drain must hand the flag
+        // back so the next publish re-notifies.
+        h.write_index = 6;
+        check(audio_ring_notify_after_publish(&h), "edge after sleep");
+        audio_ring_reader_abandon(&h);
+        h.write_index = 7;
+        check(audio_ring_notify_after_publish(&h),
+              "after an abandon the next publish must re-notify -- a wakeup "
+              "consumed without clearing the flag is a permanent mute");
+    }
+
+    // --- The timeline's burst allowance must track the ring's capacity. It is
+    // a literal in audio-timeline.h (to keep that header platform-free), so
+    // this is the assertion that keeps the two in step if kAudioRingSlots ever
+    // changes ---
+    check(kAudioTimelineBurstAllowanceNs ==
+              static_cast<uint64_t>(kAudioRingSlots) * 10'000'000ULL,
+          "kAudioTimelineBurstAllowanceNs no longer equals kAudioRingSlots x "
+          "10ms -- the backward drift clamp will misfire (too tight) or mask "
+          "real errors (too loose) after a ring-depth change");
+
+    // --- Ghost-writer detection: a "create" that lands on a name some other
+    // handle still holds must say so. This is the only signal the engine has
+    // that an orphaned predecessor is sharing (and possibly still writing) its
+    // ring -- the 2026-08-17 live defect where a ghost's notify=1 with a dead
+    // pipe suppressed every edge event and audio degraded to the 2.5s
+    // keepalive. Two regions in one process stand in for two processes here:
+    // the named section/shm object is process-agnostic either way ---
+    {
+        ShmRegion first{}, second{};
+        const size_t bytes = shm_audio_region_bytes(64);
+        check(shm_region_create(first, "cv_ring_test_collision", bytes),
+              "fresh create failed");
+        check(!first.already_existed,
+              "a fresh create must not report a collision");
+        check(shm_region_create(second, "cv_ring_test_collision", bytes),
+              "create over a held name failed outright -- it must open and "
+              "flag, not fail");
+        check(second.already_existed,
+              "a create that opened a section another handle still holds must "
+              "set already_existed -- silent sharing is the ghost-writer bug");
+        shm_region_destroy(second);
+        check(!second.already_existed,
+              "destroy must reset already_existed");
+        shm_region_destroy(first);
     }
 
     if (failures == 0)

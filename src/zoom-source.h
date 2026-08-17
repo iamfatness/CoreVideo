@@ -163,6 +163,10 @@ private:
     // loss counter (m_audio_overrun_slots) are deliberately NOT per-slot: they
     // describe the single OBS audio stream this source publishes, which exactly
     // one of the two slots feeds at any instant (see on_engine_audio()).
+    // publish=false is discard-drain: advance the ring and run the notify
+    // epilogue, but feed nothing to OBS, the ISO recorder or the shared
+    // timeline -- used by the director-handover gates, where the OTHER slot
+    // owns the audio (see on_engine_audio).
     void output_audio_from_shared_memory(const std::string &uuid,
                                          ShmRegion &audio_shm,
                                          uint32_t &audio_shm_gen,
@@ -170,7 +174,8 @@ private:
                                          bool &read_started,
                                          uint32_t event_byte_len,
                                          uint32_t resolved_participant_id,
-                                         uint32_t event_shm_gen);
+                                         uint32_t event_shm_gen,
+                                         bool publish = true);
     bool output_video_from_shared_memory(const std::string &uuid,
                                          ShmRegion &video_shm,
                                          uint32_t &video_shm_gen,

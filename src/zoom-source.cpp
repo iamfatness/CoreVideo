@@ -1671,17 +1671,22 @@ void ZoomSource::on_engine_audio(uint32_t event_byte_len,
     // Without this gate both published the same participant's PCM into the same
     // OBS source ~5 ms apart for the whole handover window, which comb-filters
     // the speaker's voice on every cut.
-    if (m_director_handover_pending.load(std::memory_order_acquire)) return;
     std::lock_guard<std::mutex> lk(m_mtx);
-    // Re-checked under the lock for the same reason the preview path re-checks:
-    // a handover starting between the check above and here would put the
-    // preview slot on air, and publishing both is the doubling this gate exists
-    // to prevent.
-    if (m_director_handover_pending.load(std::memory_order_acquire)) return;
+    // Gated paths DRAIN WITHOUT PUBLISHING rather than returning. The wakeup
+    // was consumed either way, and a return here left the ring's notify flag
+    // set -- after which the writer never notified again and this slot was
+    // silent for the rest of the show (review-caught wedge). Discarding is
+    // also semantically right: during a handover the preview slot publishes
+    // this same participant's audio into the SHARED timeline, so the main
+    // slot's copy must advance the ring but touch nothing else -- publishing
+    // would double the audio, and timeline-skipping would double-advance the
+    // clock.
+    const bool publish =
+        !m_director_handover_pending.load(std::memory_order_acquire);
     output_audio_from_shared_memory(source_uuid, m_audio_shm, m_audio_shm_gen,
                                     m_audio_read_index, m_audio_read_started,
                                     event_byte_len, resolved_participant_id,
-                                    event_shm_gen);
+                                    event_shm_gen, publish);
 }
 
 // Publishes audio for the director preview slot, and ONLY while a cut is
@@ -1711,12 +1716,14 @@ void ZoomSource::on_director_preview_audio(uint32_t event_byte_len,
                                            uint32_t resolved_participant_id,
                                            uint32_t event_shm_gen)
 {
-    if (!m_director_handover_pending.load(std::memory_order_acquire)) return;
     std::lock_guard<std::mutex> lk(m_mtx);
-    // Re-checked under the lock: a handover completing between the check above
-    // and here would mean the main region is live again, and publishing both
-    // would double this participant's audio.
-    if (!m_director_handover_pending.load(std::memory_order_acquire)) return;
+    // Discard-drain when NOT handing over, publish when we are -- the mirror
+    // of on_engine_audio()'s gate, for the same two reasons documented there:
+    // a plain return wedged the ring's notify flag (this slot then had no
+    // events left for the handover window it exists to cover), and exactly one
+    // of the two slots may feed the shared timeline at any instant.
+    const bool publish =
+        m_director_handover_pending.load(std::memory_order_acquire);
     // Its OWN read_index/read_started: this is a different region with a
     // different, independently free-running write_index, and pointing the main
     // slot's read_index at it would make audio_ring_slots_behind() return an
@@ -1731,7 +1738,7 @@ void ZoomSource::on_director_preview_audio(uint32_t event_byte_len,
                                     m_director_preview_audio_read_index,
                                     m_director_preview_audio_read_started,
                                     event_byte_len, resolved_participant_id,
-                                    event_shm_gen);
+                                    event_shm_gen, publish);
 }
 
 // Caller must hold m_mtx. Split out of on_engine_audio() so the director
@@ -1752,7 +1759,8 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
                                                  bool &read_started,
                                                  uint32_t event_byte_len,
                                                  uint32_t resolved_participant_id,
-                                                 uint32_t event_shm_gen)
+                                                 uint32_t event_shm_gen,
+                                                 bool publish)
 {
     const std::string audio_base = IPC_SHM_PREFIX + uuid + "_audio";
     const std::string shm_name = shm_region_name(audio_base, event_shm_gen);
@@ -1770,11 +1778,11 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
         read_started = false;
     }
     if (!audio_shm.ptr || audio_shm.size < audio_bytes) {
-        if (!shm_region_open_read(audio_shm, shm_name, audio_bytes) &&
+        if (!shm_region_open_readwrite(audio_shm, shm_name, audio_bytes) &&
             // Engines predating suffixed names recreate the legacy name for
             // every generation — fall back to it.
             (event_shm_gen <= 1 ||
-             !shm_region_open_read(audio_shm, audio_base, audio_bytes))) {
+             !shm_region_open_readwrite(audio_shm, audio_base, audio_bytes))) {
             if (m_audio_frame_count == 0) {
                 blog(LOG_WARNING,
                      "[obs-zoom-plugin] Failed to open audio shared memory: source=%s uuid=%s bytes=%zu gen=%u",
@@ -1814,6 +1822,9 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
                  output_name().c_str(), uuid.c_str(), kAudioRingSlots,
                  ring->slot_count);
         }
+        // Hand the wakeup back (leave notify clear); the keepalive covers the
+        // case where even this offset is garbage.
+        audio_ring_reader_abandon(const_cast<ShmAudioHeader *>(ring));
         return;
     }
 
@@ -1836,9 +1847,9 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
         const size_t needed_bytes = shm_audio_region_bytes(described_slot_bytes);
         ring = nullptr; // the view backing it is about to be unmapped
         shm_region_destroy(audio_shm);
-        if (!shm_region_open_read(audio_shm, shm_name, needed_bytes) &&
+        if (!shm_region_open_readwrite(audio_shm, shm_name, needed_bytes) &&
             (event_shm_gen <= 1 ||
-             !shm_region_open_read(audio_shm, audio_base, needed_bytes))) {
+             !shm_region_open_readwrite(audio_shm, audio_base, needed_bytes))) {
             read_started = false;
             ++m_audio_remap_count;
             if (m_audio_remap_count == 1 || m_audio_remap_count % 250 == 0) {
@@ -1847,6 +1858,8 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
                      output_name().c_str(), uuid.c_str(), needed_bytes,
                      event_shm_gen);
             }
+            // No view left to clear the flag through; the writer's keepalive
+            // re-notifies within ~2.5s.
             return;
         }
         audio_shm_gen = event_shm_gen;
@@ -1867,6 +1880,8 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
         // ran on a header we no longer hold.
         if (ring->slot_count != kAudioRingSlots ||
             shm_audio_region_bytes(ring->slot_bytes) > audio_shm.size) {
+            audio_ring_reader_abandon(
+                static_cast<ShmAudioHeader *>(audio_shm.ptr));
             return;
         }
     }
@@ -1875,191 +1890,222 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
     // First event after a (re)subscribe, a generation change or a reopen: start
     // level with the writer rather than replaying whatever stale audio the
     // region still holds.
+    // NO return after leveling -- the wakeup was consumed, so the loop below
+    // must still run its clear-and-recheck epilogue (see the identical note in
+    // zoom-participant-audio-source.cpp; returning here was the
+    // one-buffer-then-silence wedge).
     if (!read_started) {
         read_index   = ring->write_index;
         read_started = true;
-        return;
     }
 
-    // Nominal duration of one slot, taken from the ring HEADER rather than any
-    // individual slot's (possibly unread or unreadable) byte_len -- this is what
-    // lets every discard path below keep the master clock honest about audio we
-    // never got to look at.
-    const uint32_t nominal_frames = ring->slot_bytes /
-        (kZoomBytesPerSample * std::max<uint16_t>(ring->channels, 1));
+    // Same edge-triggered wakeup discipline as the dedicated audio sources:
+    // drain until the ring is seen empty AFTER clearing the notify flag
+    // (audio_ring_reader_done in engine-ipc.h). Pass-capped like the
+    // dedicated path. Serves both the main and director-preview slots --
+    // each has its own region, read_index and flag, passed in by the caller.
+    for (int drain_pass = 0; ; ++drain_pass) {
 
-    // write_index and read_index are free-running counters (never wrap at
-    // slot_count -- see ShmAudioHeader::write_index), so "pending" is exact: it
-    // cannot collapse a full lap into "caught up" the way a slot_count-modulo
-    // difference would.
-    const uint32_t write_index = ring->write_index;
-    uint32_t pending = audio_ring_slots_behind(write_index, read_index,
-                                               slot_count);
-    // More has been written since our last drain than the ring can hold: the
-    // oldest `pending - slot_count` generations were overwritten before we ever
-    // read them. Skip to the oldest slot still intact and count -- and
-    // clock-compensate -- what was lost.
-    if (pending > slot_count) {
-        const uint32_t lost = pending - slot_count;
-        const uint64_t overrun_before = m_audio_overrun_slots;
-        m_audio_overrun_slots += lost;
-        audio_timeline_skip(m_audio_timeline, lost * nominal_frames);
-        read_index = write_index - slot_count;
-        pending = slot_count;
-        // Rate-limited exactly like the dedicated path's: a sustained overrun
-        // at Zoom's ~100 buffers/sec would otherwise put hundreds of blog()
-        // calls/sec -- each taking libobs' log lock, under m_mtx -- on the path
-        // that is already starved.
-        if (overrun_before == 0 ||
-            overrun_before / 250 != m_audio_overrun_slots / 250) {
-            blog(LOG_WARNING,
-                 "[obs-zoom-plugin] Zoom audio ring overrun: source=%s uuid=%s lost_slots=%llu",
-                 output_name().c_str(), uuid.c_str(),
-                 static_cast<unsigned long long>(m_audio_overrun_slots));
-        }
-    }
+        // Nominal duration of one slot, taken from the ring HEADER rather than any
+        // individual slot's (possibly unread or unreadable) byte_len -- this is what
+        // lets every discard path below keep the master clock honest about audio we
+        // never got to look at.
+        const uint32_t nominal_frames = ring->slot_bytes /
+            (kZoomBytesPerSample * std::max<uint16_t>(ring->channels, 1));
 
-    for (uint32_t n = 0; n < pending; ++n) {
-        const uint32_t slot_index = read_index; // free-running generation
-        const auto *slot = reinterpret_cast<const ShmAudioSlot *>(
-            static_cast<const char *>(audio_shm.ptr) +
-            shm_audio_slot_offset(*ring, slot_index % slot_count));
-
-        uint32_t byte_len = 0;
-        uint64_t capture_ns = 0;
-        bool copied = false;
-        for (int attempt = 0; attempt < 3; ++attempt) {
-            const uint32_t seq1 = slot->sequence;
-            std::atomic_thread_fence(std::memory_order_acquire);
-            if ((seq1 & 1u) != 0) continue;      // write in progress
-            byte_len   = slot->byte_len;
-            capture_ns = slot->capture_ns;
-            // The payload can never exceed the slot the engine sized for it; a
-            // larger value means we are reading a region the writer has since
-            // resized, so drop it rather than read out of bounds.
-            if (byte_len == 0 || byte_len > ring->slot_bytes) break;
-            if (m_audio_buf.size() < byte_len)
-                m_audio_buf.resize(byte_len);
-            std::memcpy(m_audio_buf.data(),
-                        reinterpret_cast<const char *>(slot) +
-                            sizeof(ShmAudioSlot),
-                        byte_len);
-            std::atomic_thread_fence(std::memory_order_acquire);
-            const uint32_t seq2 = slot->sequence;
-            if (seq1 == seq2 && (seq2 & 1u) == 0) { copied = true; break; }
-        }
-
-        // The seqlock only proves the payload was not TORN -- it does not prove
-        // it is the buffer we MEANT to read. If the writer has since advanced
-        // far enough past this generation it has physically overwritten this
-        // slot at least once more while we were copying it, so what we just read
-        // cleanly may be a newer buffer about to be published in this older
-        // slot's timeline position.
-        if (copied && ring->write_index - slot_index > slot_count) {
-            copied = false;
+        // write_index and read_index are free-running counters (never wrap at
+        // slot_count -- see ShmAudioHeader::write_index), so "pending" is exact: it
+        // cannot collapse a full lap into "caught up" the way a slot_count-modulo
+        // difference would.
+        const uint32_t write_index = ring->write_index;
+        // Discard-drain: skip everything by declaring ourselves level. The
+        // for-loop below then runs zero passes and control falls straight to
+        // the notify epilogue, which is the part a gated wakeup MUST still
+        // run. No timeline, no counters, no PCM copies -- the other slot owns
+        // all of that while we are gated.
+        if (!publish)
+            read_index = write_index;
+        uint32_t pending = audio_ring_slots_behind(write_index, read_index,
+                                                   slot_count);
+        // More has been written since our last drain than the ring can hold: the
+        // oldest `pending - slot_count` generations were overwritten before we ever
+        // read them. Skip to the oldest slot still intact and count -- and
+        // clock-compensate -- what was lost.
+        if (pending > slot_count) {
+            const uint32_t lost = pending - slot_count;
             const uint64_t overrun_before = m_audio_overrun_slots;
-            ++m_audio_overrun_slots;
-            // Same rate-limit and the same reason as the overrun-skip log
-            // above; this one sits INSIDE the per-slot loop and could otherwise
-            // fire slot_count times per callback.
+            m_audio_overrun_slots += lost;
+            audio_timeline_skip(m_audio_timeline, lost * nominal_frames);
+            read_index = write_index - slot_count;
+            pending = slot_count;
+            // Rate-limited exactly like the dedicated path's: a sustained overrun
+            // at Zoom's ~100 buffers/sec would otherwise put hundreds of blog()
+            // calls/sec -- each taking libobs' log lock, under m_mtx -- on the path
+            // that is already starved.
             if (overrun_before == 0 ||
                 overrun_before / 250 != m_audio_overrun_slots / 250) {
                 blog(LOG_WARNING,
-                     "[obs-zoom-plugin] Zoom audio slot overwritten mid-read: source=%s uuid=%s lost_slots=%llu",
+                     "[obs-zoom-plugin] Zoom audio ring overrun: source=%s uuid=%s lost_slots=%llu",
                      output_name().c_str(), uuid.c_str(),
                      static_cast<unsigned long long>(m_audio_overrun_slots));
             }
         }
 
-        read_index = slot_index + 1;
-        if (!copied) {
-            // Lost this slot's audio, whichever way: unreadably torn after
-            // three attempts, a byte_len we refused, or clobbered mid-copy
-            // above. Advance the timeline anyway -- a lost slot is silence of a
-            // KNOWN duration, and skipping the accounting shifts this source
-            // permanently earlier relative to everything else on the timeline
-            // (see src/audio-timeline.h's doctrine on gaps).
-            audio_timeline_skip(m_audio_timeline, nominal_frames);
-            continue;
-        }
+        for (uint32_t n = 0; n < pending; ++n) {
+            const uint32_t slot_index = read_index; // free-running generation
+            const auto *slot = reinterpret_cast<const ShmAudioSlot *>(
+                static_cast<const char *>(audio_shm.ptr) +
+                shm_audio_slot_offset(*ring, slot_index % slot_count));
 
-        const uint32_t sample_rate = ring->sample_rate;
-        const uint16_t channels    = ring->channels;
-        const auto *pcm = reinterpret_cast<const int16_t *>(m_audio_buf.data());
-        const uint64_t ts = os_gettime_ns();
-
-        // Same cross-process clock as the video path above -- see
-        // ShmAudioSlot::capture_ns in engine-ipc.h.
-        if (capture_ns != 0 && ts > capture_ns)
-            m_audio_latency_us.store((ts - capture_ns) / 1000,
-                                     std::memory_order_relaxed);
-
-        obs_source_audio audio = {};
-        audio.samples_per_sec = sample_rate;
-        // Sample-derived, not arrival-derived: IPC jitter must not reach OBS.
-        // `timeline_frames` is what THIS buffer actually carries, so the
-        // timeline advances by exactly the audio published. See
-        // src/audio-timeline.h. Stamping every buffer with os_gettime_ns() --
-        // what this path did until 2026-08-17 -- handed OBS a stream whose
-        // timestamps advanced 8 ms, then 14 ms, then 3 ms, and OBS reconciled
-        // that by stretching, dropping and resampling, continuously.
-        //
-        // audio_latency_us above is still measured against the raw arrival ts,
-        // on purpose: it is an engine-capture-to-publish measurement, not
-        // something the timeline or the operator's delay should move around.
-        // The delay stays pure addition, now on the timeline value, so it can
-        // only ever push this output's embedded audio later, never earlier.
-        const uint32_t timeline_frames =
-            byte_len / (kZoomBytesPerSample * std::max<uint16_t>(channels, 1));
-        audio.timestamp = audio_timeline_stamp(m_audio_timeline, sample_rate,
-                                               timeline_frames, ts) +
-                          static_cast<uint64_t>(audio_delay_ms.load(
-                              std::memory_order_relaxed)) * 1'000'000ULL;
-
-        if (audio_mode == AudioChannelMode::Stereo && channels == 1) {
-            const uint32_t mono_frames = byte_len / kZoomBytesPerSample;
-            const uint32_t stereo_count = mono_frames * 2;
-            if (m_stereo_buf.size() < stereo_count)
-                m_stereo_buf.resize(stereo_count);
-            for (uint32_t i = 0; i < mono_frames; ++i) {
-                m_stereo_buf[i * 2] = pcm[i];
-                m_stereo_buf[i * 2 + 1] = pcm[i];
+            uint32_t byte_len = 0;
+            uint64_t capture_ns = 0;
+            // With coalesced events one wakeup covers many slots, so the
+            // event's participant_id may be stale for older slots -- each
+            // slot self-describes (src/engine-ipc.h).
+            uint32_t slot_participant = resolved_participant_id;
+            bool copied = false;
+            for (int attempt = 0; attempt < 3; ++attempt) {
+                const uint32_t seq1 = slot->sequence;
+                std::atomic_thread_fence(std::memory_order_acquire);
+                if ((seq1 & 1u) != 0) continue;      // write in progress
+                byte_len   = slot->byte_len;
+                capture_ns = slot->capture_ns;
+                slot_participant = slot->participant_id;
+                // The payload can never exceed the slot the engine sized for it; a
+                // larger value means we are reading a region the writer has since
+                // resized, so drop it rather than read out of bounds.
+                if (byte_len == 0 || byte_len > ring->slot_bytes) break;
+                if (m_audio_buf.size() < byte_len)
+                    m_audio_buf.resize(byte_len);
+                std::memcpy(m_audio_buf.data(),
+                            reinterpret_cast<const char *>(slot) +
+                                sizeof(ShmAudioSlot),
+                            byte_len);
+                std::atomic_thread_fence(std::memory_order_acquire);
+                const uint32_t seq2 = slot->sequence;
+                if (seq1 == seq2 && (seq2 & 1u) == 0) { copied = true; break; }
             }
-            audio.data[0] = reinterpret_cast<const uint8_t *>(m_stereo_buf.data());
-            audio.frames = mono_frames;
-            audio.format = AUDIO_FORMAT_16BIT;
-            audio.speakers = SPEAKERS_STEREO;
-        } else {
-            audio.data[0] = reinterpret_cast<const uint8_t *>(pcm);
-            audio.frames = byte_len /
-                (kZoomBytesPerSample * std::max<uint16_t>(channels, 1));
-            audio.format = AUDIO_FORMAT_16BIT;
-            audio.speakers = channels == 2 ? SPEAKERS_STEREO : SPEAKERS_MONO;
+
+            // The seqlock only proves the payload was not TORN -- it does not prove
+            // it is the buffer we MEANT to read. If the writer has since advanced
+            // far enough past this generation it has physically overwritten this
+            // slot at least once more while we were copying it, so what we just read
+            // cleanly may be a newer buffer about to be published in this older
+            // slot's timeline position.
+            if (copied && ring->write_index - slot_index > slot_count) {
+                copied = false;
+                const uint64_t overrun_before = m_audio_overrun_slots;
+                ++m_audio_overrun_slots;
+                // Same rate-limit and the same reason as the overrun-skip log
+                // above; this one sits INSIDE the per-slot loop and could otherwise
+                // fire slot_count times per callback.
+                if (overrun_before == 0 ||
+                    overrun_before / 250 != m_audio_overrun_slots / 250) {
+                    blog(LOG_WARNING,
+                         "[obs-zoom-plugin] Zoom audio slot overwritten mid-read: source=%s uuid=%s lost_slots=%llu",
+                         output_name().c_str(), uuid.c_str(),
+                         static_cast<unsigned long long>(m_audio_overrun_slots));
+                }
+            }
+
+            read_index = slot_index + 1;
+            if (!copied) {
+                // Lost this slot's audio, whichever way: unreadably torn after
+                // three attempts, a byte_len we refused, or clobbered mid-copy
+                // above. Advance the timeline anyway -- a lost slot is silence of a
+                // KNOWN duration, and skipping the accounting shifts this source
+                // permanently earlier relative to everything else on the timeline
+                // (see src/audio-timeline.h's doctrine on gaps).
+                audio_timeline_skip(m_audio_timeline, nominal_frames);
+                continue;
+            }
+
+            const uint32_t sample_rate = ring->sample_rate;
+            const uint16_t channels    = ring->channels;
+            const auto *pcm = reinterpret_cast<const int16_t *>(m_audio_buf.data());
+            const uint64_t ts = os_gettime_ns();
+
+            // Same cross-process clock as the video path above -- see
+            // ShmAudioSlot::capture_ns in engine-ipc.h.
+            if (capture_ns != 0 && ts > capture_ns)
+                m_audio_latency_us.store((ts - capture_ns) / 1000,
+                                         std::memory_order_relaxed);
+
+            obs_source_audio audio = {};
+            audio.samples_per_sec = sample_rate;
+            // Sample-derived, not arrival-derived: IPC jitter must not reach OBS.
+            // `timeline_frames` is what THIS buffer actually carries, so the
+            // timeline advances by exactly the audio published. See
+            // src/audio-timeline.h. Stamping every buffer with os_gettime_ns() --
+            // what this path did until 2026-08-17 -- handed OBS a stream whose
+            // timestamps advanced 8 ms, then 14 ms, then 3 ms, and OBS reconciled
+            // that by stretching, dropping and resampling, continuously.
+            //
+            // audio_latency_us above is still measured against the raw arrival ts,
+            // on purpose: it is an engine-capture-to-publish measurement, not
+            // something the timeline or the operator's delay should move around.
+            // The delay stays pure addition, now on the timeline value, so it can
+            // only ever push this output's embedded audio later, never earlier.
+            const uint32_t timeline_frames =
+                byte_len / (kZoomBytesPerSample * std::max<uint16_t>(channels, 1));
+            audio.timestamp = audio_timeline_stamp(m_audio_timeline, sample_rate,
+                                                   timeline_frames, ts) +
+                              static_cast<uint64_t>(audio_delay_ms.load(
+                                  std::memory_order_relaxed)) * 1'000'000ULL;
+
+            if (audio_mode == AudioChannelMode::Stereo && channels == 1) {
+                const uint32_t mono_frames = byte_len / kZoomBytesPerSample;
+                const uint32_t stereo_count = mono_frames * 2;
+                if (m_stereo_buf.size() < stereo_count)
+                    m_stereo_buf.resize(stereo_count);
+                for (uint32_t i = 0; i < mono_frames; ++i) {
+                    m_stereo_buf[i * 2] = pcm[i];
+                    m_stereo_buf[i * 2 + 1] = pcm[i];
+                }
+                audio.data[0] = reinterpret_cast<const uint8_t *>(m_stereo_buf.data());
+                audio.frames = mono_frames;
+                audio.format = AUDIO_FORMAT_16BIT;
+                audio.speakers = SPEAKERS_STEREO;
+            } else {
+                audio.data[0] = reinterpret_cast<const uint8_t *>(pcm);
+                audio.frames = byte_len /
+                    (kZoomBytesPerSample * std::max<uint16_t>(channels, 1));
+                audio.format = AUDIO_FORMAT_16BIT;
+                audio.speakers = channels == 2 ? SPEAKERS_STEREO : SPEAKERS_MONO;
+            }
+            obs_source_output_audio(source, &audio);
+            // ISO keeps the UNDELAYED arrival stamp it has always been given, and
+            // deliberately NOT the timeline value: the ISO video it is muxed
+            // against is stamped from the same raw os_gettime_ns() clock
+            // (record_video_frame above), so moving audio onto a different time
+            // base here would shift A/V in the recording while fixing nothing --
+            // the timeline exists for what OBS receives.
+            ZoomIsoRecorder::instance().record_audio_frame(
+                output_info(), slot_participant, m_audio_buf.data(),
+                byte_len, sample_rate, channels, ts);
+            ++m_audio_frame_count;
+            if (cv_zoom_verbose_logging() &&
+                (m_audio_frame_count == 1 || m_audio_frame_count % 250 == 0)) {
+                int peak = 0;
+                const uint32_t sample_count = byte_len / kZoomBytesPerSample;
+                for (uint32_t i = 0; i < sample_count; ++i)
+                    peak = std::max<int>(peak, std::abs(static_cast<int>(pcm[i])));
+                blog(LOG_INFO,
+                     "[obs-zoom-plugin] Output Zoom audio frame: source=%s uuid=%s count=%llu frames=%u sample_rate=%u channels=%u byte_len=%u peak=%d overruns=%llu",
+                     output_name().c_str(), uuid.c_str(),
+                     static_cast<unsigned long long>(m_audio_frame_count),
+                     audio.frames, sample_rate, channels, byte_len, peak,
+                     static_cast<unsigned long long>(m_audio_overrun_slots));
+            }
         }
-        obs_source_output_audio(source, &audio);
-        // ISO keeps the UNDELAYED arrival stamp it has always been given, and
-        // deliberately NOT the timeline value: the ISO video it is muxed
-        // against is stamped from the same raw os_gettime_ns() clock
-        // (record_video_frame above), so moving audio onto a different time
-        // base here would shift A/V in the recording while fixing nothing --
-        // the timeline exists for what OBS receives.
-        ZoomIsoRecorder::instance().record_audio_frame(
-            output_info(), resolved_participant_id, m_audio_buf.data(),
-            byte_len, sample_rate, channels, ts);
-        ++m_audio_frame_count;
-        if (cv_zoom_verbose_logging() &&
-            (m_audio_frame_count == 1 || m_audio_frame_count % 250 == 0)) {
-            int peak = 0;
-            const uint32_t sample_count = byte_len / kZoomBytesPerSample;
-            for (uint32_t i = 0; i < sample_count; ++i)
-                peak = std::max<int>(peak, std::abs(static_cast<int>(pcm[i])));
-            blog(LOG_INFO,
-                 "[obs-zoom-plugin] Output Zoom audio frame: source=%s uuid=%s count=%llu frames=%u sample_rate=%u channels=%u byte_len=%u peak=%d overruns=%llu",
-                 output_name().c_str(), uuid.c_str(),
-                 static_cast<unsigned long long>(m_audio_frame_count),
-                 audio.frames, sample_rate, channels, byte_len, peak,
-                 static_cast<unsigned long long>(m_audio_overrun_slots));
+
+        auto *ring_mut = static_cast<ShmAudioHeader *>(audio_shm.ptr);
+        if (drain_pass >= 16) {
+            audio_ring_reader_abandon(ring_mut);
+            break;
         }
+        if (audio_ring_reader_done(ring_mut, read_index))
+            break;              // seen empty after the clear; safe to sleep
     }
 }
 

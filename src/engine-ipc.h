@@ -147,7 +147,11 @@ struct ShmAudioSlot {
     // for cross-process latency there.
     uint64_t capture_ns;
     uint32_t byte_len;
-    uint32_t reserved;
+    // Who this buffer belongs to. With coalesced notifications (see
+    // ShmAudioHeader::notify) one pipe event can cover many slots, so the
+    // event can no longer describe each buffer -- the slot describes itself.
+    // 0 for the mixed/audience stream, which has no single participant.
+    uint32_t participant_id;
 };
 
 struct ShmAudioHeader {
@@ -166,7 +170,47 @@ struct ShmAudioHeader {
     uint32_t slot_bytes;
     uint32_t sample_rate;
     uint16_t channels;
-    uint16_t reserved;
+    // Edge-triggered notification flag. The engine used to send one
+    // {"cmd":"audio"} pipe line PER 10ms BUFFER PER SOURCE (~1,700
+    // messages/sec at full load), all parsed by the plugin's single reader
+    // thread; when that thread fell behind, the pipe filled, the engine's
+    // blocking write stalled the Zoom SDK callback thread, and audio queued
+    // upstream inside the SDK. Measured live 2026-08-17: engine->plugin
+    // latency 58-90ms under full gallery load vs 41-161us idle, with ring
+    // overruns at zero throughout -- the ring itself never fell behind, the
+    // wakeups did. The ring makes per-buffer events redundant: the reader
+    // drains everything available on any wakeup, so the event only needs to
+    // fire on the empty -> non-empty edge.
+    //
+    // Protocol (single writer, single reader; `notify` is plain uint16, the
+    // fences do the work):
+    //
+    //   WRITER, after publishing write_index:
+    //     atomic_thread_fence(seq_cst);
+    //     if (notify == 0) { notify = 1; send one pipe event; }
+    //
+    //   READER, after draining to its write_index snapshot:
+    //     notify = 0;
+    //     atomic_thread_fence(seq_cst);
+    //     if (read_index != write_index) { notify = 1; drain again; }
+    //     else break;                      // truly empty
+    //
+    // WHY NO WAKEUP IS EVER LOST. A lost wakeup needs BOTH: the writer to
+    // skip its event (it loaded notify == 1, missing the reader's clear) AND
+    // the reader to stop (it loaded write_index and saw no new data). Each
+    // side executes store -> seq_cst fence -> load. seq_cst fences are
+    // totally ordered: if the reader's fence comes first, its notify=0 store
+    // is visible to the writer's load, so the writer sends the event; if the
+    // writer's fence comes first, its write_index store is visible to the
+    // reader's re-check, so the reader drains again. Either way progress is
+    // made. Both flags set concurrently is benign (one redundant event); the
+    // seq_cst fences are REQUIRED -- plain x86 store->load may reorder, and
+    // a release fence is not enough here.
+    //
+    // A new region starts with notify = 0, so the first buffer after any
+    // generation change always sends its event and the reader learns to
+    // remap.
+    uint16_t notify;
 };
 
 inline size_t shm_audio_region_bytes(uint32_t slot_bytes)
@@ -198,6 +242,57 @@ inline uint32_t audio_ring_slots_behind(uint32_t write_index,
 {
     (void)slot_count;
     return write_index - read_index;
+}
+
+// ── The notify protocol, as code ─────────────────────────────────────────────
+// Both sides go through these helpers so the flag has exactly one
+// implementation to own. The first version inlined the flag handling at the
+// drain-loop exit only, and every OTHER return path -- the first-event
+// leveling, the director-handover gates, a failed remap -- consumed its wakeup
+// and left notify set, after which the writer never notified again: every
+// source played one 10ms buffer and went silent for its lifetime. Review
+// caught it before install. The rule the helpers enforce: whoever accepts a
+// wakeup OWNS the flag until audio_ring_reader_done() says the ring was seen
+// empty after clearing it, or audio_ring_reader_abandon() hands ownership
+// back to the writer.
+
+// WRITER, immediately after publishing write_index. Returns true exactly when
+// this publish crossed the empty->non-empty edge and one pipe event must be
+// sent. The seq_cst fence pairs with the reader's (see ShmAudioHeader::notify
+// for the total-order proof).
+inline bool audio_ring_notify_after_publish(ShmAudioHeader *hdr)
+{
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    if (hdr->notify != 0) return false;
+    hdr->notify = 1;
+    std::atomic_thread_fence(std::memory_order_release);
+    return true;
+}
+
+// READER, after draining to its snapshot. Clears the flag, then re-checks the
+// ring; returns true when the ring was seen empty AFTER the clear -- the only
+// state in which sleeping is safe. Returns false when more data landed in the
+// race window: the flag has been re-claimed (suppressing redundant events)
+// and the caller must drain again.
+inline bool audio_ring_reader_done(ShmAudioHeader *hdr, uint32_t read_index)
+{
+    hdr->notify = 0;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    if (read_index == hdr->write_index) return true;
+    hdr->notify = 1;
+    std::atomic_thread_fence(std::memory_order_release);
+    return false;
+}
+
+// READER, when it must stop without having seen the ring empty (bounded-pass
+// cap, or any exit after the mapping is valid but before a full drain).
+// Leaves the flag CLEAR so the writer's next publish re-notifies. The failure
+// mode this prevents is a consumed wakeup with the flag still set, which
+// silences the source forever.
+inline void audio_ring_reader_abandon(ShmAudioHeader *hdr)
+{
+    hdr->notify = 0;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
 }
 
 // ── Platform-specific pipe / socket paths ─────────────────────────────────────
@@ -242,6 +337,17 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
        void   *ptr        = nullptr;
        size_t  size       = 0;
        uint32_t last_error = 0; // GetLastError() of the most recent failure
+       // True when the most recent shm_region_create() OPENED a section that
+       // already existed instead of creating a fresh one. A named section
+       // outlives its creator for as long as ANY process maps it, so this
+       // firing in the engine means some other process -- in practice a
+       // wedged orphan ZoomObsEngine from a previous OBS session -- still
+       // holds (and may still be WRITING) a region by this name. Proven live
+       // 2026-08-17: a ghost writer sharing a ring sets ShmAudioHeader::notify
+       // with no pipe to deliver its event, permanently suppressing the live
+       // engine's edge notifications -- every source degrades to the 2.5s
+       // keepalive, ~92% audio loss. Callers must surface this loudly.
+       bool already_existed = false;
    };
 
    inline void shm_region_destroy(ShmRegion &r)
@@ -249,6 +355,7 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
        if (r.ptr)        { UnmapViewOfFile(r.ptr);   r.ptr        = nullptr; }
        if (r.map_handle) { CloseHandle(r.map_handle); r.map_handle = nullptr; }
        r.size = 0;
+       r.already_existed = false;
    }
 
    inline bool shm_region_create(ShmRegion &r, const std::string &name, size_t size)
@@ -258,6 +365,10 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
                                          PAGE_READWRITE, 0,
                                          static_cast<DWORD>(size), name.c_str());
        if (!r.map_handle) { r.last_error = GetLastError(); return false; }
+       // CreateFileMapping SUCCEEDS on an existing name and hands back the
+       // existing section; only GetLastError() distinguishes the two. See
+       // ShmRegion::already_existed for why callers must not ignore this.
+       r.already_existed = GetLastError() == ERROR_ALREADY_EXISTS;
        r.ptr  = MapViewOfFile(r.map_handle, FILE_MAP_WRITE, 0, 0, size);
        r.size = r.ptr ? size : 0;
        if (!r.ptr) {
@@ -279,9 +390,38 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
        if (!r.ptr) { shm_region_destroy(r); return false; }
        return true;
    }
+
+   // Read-write open, for AUDIO ring regions only. The edge-triggered
+   // notification protocol (ShmAudioHeader::notify) requires the READER to
+   // clear a flag the writer checks, so a read-only view cannot implement it.
+   // This deliberately relaxes the read-only mapping for audio: the engine
+   // never reads an audio region back -- it only writes -- so the read-only
+   // view never protected engine-side state; it only protected the plugin
+   // from its own stray writes into data the plugin alone consumes. Video
+   // regions keep read-only views: their protocol needs no reader writes.
+   inline bool shm_region_open_readwrite(ShmRegion &r, const std::string &name,
+                                         size_t size)
+   {
+       shm_region_destroy(r);
+       r.map_handle = OpenFileMappingA(FILE_MAP_READ | FILE_MAP_WRITE, FALSE,
+                                       name.c_str());
+       if (!r.map_handle) { r.last_error = GetLastError(); return false; }
+       r.ptr = MapViewOfFile(r.map_handle, FILE_MAP_READ | FILE_MAP_WRITE,
+                             0, 0, size);
+       r.size = r.ptr ? size : 0;
+       if (!r.ptr) {
+           r.last_error = GetLastError();
+           const DWORD err = r.last_error;
+           shm_region_destroy(r);
+           r.last_error = err; // survive the destroy's reset
+           return false;
+       }
+       return true;
+   }
 #else
 #  include <sys/mman.h>
 #  include <fcntl.h>
+#  include <cerrno>
    struct ShmRegion {
        int         fd   = -1;
        void       *ptr  = nullptr;
@@ -289,6 +429,11 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
        std::string name; // stored so we can shm_unlink on destroy
        bool        owner = false;
        uint32_t    last_error = 0; // errno of the most recent failure
+       // See the Windows counterpart: the most recent shm_region_create()
+       // found this name already present (another process created it and it
+       // has not been unlinked). Same ghost-writer hazard, same obligation on
+       // callers to surface it.
+       bool already_existed = false;
    };
 
    inline void shm_region_destroy(ShmRegion &r)
@@ -302,6 +447,7 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
        r.size = 0;
        r.name.clear();
        r.owner = false;
+       r.already_existed = false;
    }
 
    inline bool shm_region_create(ShmRegion &r, const std::string &name, size_t size)
@@ -309,7 +455,13 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
        shm_region_destroy(r);
        r.name = "/" + name; // shm_open requires a leading '/'
        r.owner = true;
-       r.fd   = shm_open(r.name.c_str(), O_CREAT | O_RDWR, 0600);
+       // O_EXCL first purely as a probe: EEXIST is the only portable way to
+       // learn the name was already present (see ShmRegion::already_existed).
+       r.fd = shm_open(r.name.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
+       if (r.fd < 0 && errno == EEXIST) {
+           r.already_existed = true;
+           r.fd = shm_open(r.name.c_str(), O_CREAT | O_RDWR, 0600);
+       }
        if (r.fd < 0) { r.last_error = static_cast<uint32_t>(errno); return false; }
        if (ftruncate(r.fd, static_cast<off_t>(size)) < 0) {
            r.last_error = static_cast<uint32_t>(errno);
@@ -338,6 +490,28 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
        r.ptr = mmap(nullptr, size, PROT_READ, MAP_SHARED, r.fd, 0);
        r.size = (r.ptr != MAP_FAILED) ? size : 0;
        if (r.ptr == MAP_FAILED) { r.ptr = nullptr; shm_region_destroy(r); return false; }
+       return true;
+   }
+
+   // See the Windows counterpart above: audio rings only, because the
+   // edge-triggered notify flag is reader-cleared by design.
+   inline bool shm_region_open_readwrite(ShmRegion &r, const std::string &name,
+                                         size_t size)
+   {
+       shm_region_destroy(r);
+       r.name = "/" + name;
+       r.owner = false;
+       r.fd = shm_open(r.name.c_str(), O_RDWR, 0600);
+       if (r.fd < 0) { r.last_error = static_cast<uint32_t>(errno); return false; }
+       r.ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, r.fd, 0);
+       r.size = (r.ptr != MAP_FAILED) ? size : 0;
+       if (r.ptr == MAP_FAILED) {
+           const uint32_t err = static_cast<uint32_t>(errno);
+           r.ptr = nullptr;
+           shm_region_destroy(r);
+           r.last_error = err;
+           return false;
+       }
        return true;
    }
 #endif

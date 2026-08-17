@@ -76,6 +76,10 @@ private:
         // ensure_shm()'s invariant, the engine log says so ONCE rather than 100
         // times a second.
         bool slot_too_small_reported = false;
+        // Consecutive publishes whose edge-trigger event was suppressed
+        // (notify already set). At 250 (~2.5s) the writer re-notifies anyway,
+        // healing any reader-side wedge -- see write_audio_target().
+        uint32_t notify_suppressed = 0;
     };
 
     bool ensure_shm(AudioTarget &target,

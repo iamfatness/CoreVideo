@@ -180,6 +180,23 @@ bool EngineAudio::ensure_shm(AudioTarget &target,
     if (!shm_region_create(target.shm, region.name, total)) return false;
     target.shm_gen = region.gen; // old plugin-side mappings are now stale
 
+    // A "create" that opened a pre-existing section means some OTHER process
+    // still holds a region by this name -- in practice a wedged orphan engine
+    // from a previous OBS session, which may still be WRITING it. A ghost
+    // writer poisons the notify flag (its events die on a dead pipe, ours get
+    // suppressed) and audio degrades to the 2.5s keepalive: measured live
+    // 2026-08-17 as ~92% loss on every source. The pre-launch stale-engine
+    // sweep in zoom-engine-client.cpp exists to prevent this; if this fires
+    // anyway, that defence has a hole -- say so loudly.
+    if (target.shm.already_existed) {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"audio_shm_name_collision","source_uuid":")" +
+            source_uuid + R"(","shm_gen":)" + std::to_string(region.gen) + "}");
+        EngineIpc::write(
+            R"({"cmd":"error","msg":"shm_name_collision","source_uuid":")" +
+            source_uuid + "\"}");
+    }
+
     // Initialise the header once, before any slot is published -- the reader
     // relies on slot_count and slot_bytes being correct from the first read.
     auto *ring = static_cast<ShmAudioHeader *>(target.shm.ptr);
@@ -188,7 +205,7 @@ bool EngineAudio::ensure_shm(AudioTarget &target,
     ring->slot_bytes  = byte_len;
     ring->sample_rate = 0;
     ring->channels    = 0;
-    ring->reserved    = 0;
+    ring->notify      = 0;   // clear: the first buffer always sends its event
 
     EngineIpc::write(
         R"({"cmd":"debug","stage":"audio_shm_created","source_uuid":")" +
@@ -286,7 +303,9 @@ void EngineAudio::output_audio_frame(AudioTarget &target,
     // os_gettime_ns() reading to measure pipeline latency.
     slot->capture_ns = tile_clock_now_ns();
     slot->byte_len   = byte_len;
-    slot->reserved   = 0;
+    // Self-describing: with coalesced events one wakeup covers many slots, so
+    // per-buffer attribution (ISO stems, latency) reads the slot, not the event.
+    slot->participant_id = target.participant_id;
     std::memcpy(reinterpret_cast<char *>(slot) + sizeof(ShmAudioSlot),
                 data->GetBuffer(), byte_len);
     std::atomic_thread_fence(std::memory_order_release);
@@ -322,11 +341,33 @@ void EngineAudio::output_audio_frame(AudioTarget &target,
             std::to_string(target.participant_id) + "}");
     }
 
-    EngineIpc::write(
-        R"({"cmd":"audio","source_uuid":")" + source_uuid +
-        R"(","participant_id":)" + std::to_string(target.participant_id) +
-        R"(,"byte_len":)" + std::to_string(byte_len) +
-        R"(,"shm_gen":)" + std::to_string(target.shm_gen) + "}");
+    // Edge-triggered wakeup -- one event per empty->non-empty edge instead of
+    // one per 10ms buffer (was ~1,700 msgs/sec at full load, enough to stall
+    // this very callback thread on the pipe write and queue audio inside the
+    // SDK). Protocol and proof: audio_ring_notify_after_publish() and
+    // ShmAudioHeader::notify in src/engine-ipc.h.
+    //
+    // The keepalive is the belt-and-braces the edge trigger needs: if the
+    // reader ever consumes a wakeup without clearing the flag -- a failed
+    // remap, a version-guard trip, a bug this side of the review -- the edge
+    // never fires again and the source is silent forever. Re-notifying after
+    // 250 consecutive suppressions (~2.5s) turns any such wedge into a 2.5s
+    // hiccup at ~0.4 events/sec of overhead.
+    if (audio_ring_notify_after_publish(ring)) {
+        target.notify_suppressed = 0;
+        EngineIpc::write(
+            R"({"cmd":"audio","source_uuid":")" + source_uuid +
+            R"(","participant_id":)" + std::to_string(target.participant_id) +
+            R"(,"byte_len":)" + std::to_string(byte_len) +
+            R"(,"shm_gen":)" + std::to_string(target.shm_gen) + "}");
+    } else if (++target.notify_suppressed >= 250) {
+        target.notify_suppressed = 0;
+        EngineIpc::write(
+            R"({"cmd":"audio","source_uuid":")" + source_uuid +
+            R"(","participant_id":)" + std::to_string(target.participant_id) +
+            R"(,"byte_len":)" + std::to_string(byte_len) +
+            R"(,"shm_gen":)" + std::to_string(target.shm_gen) + "}");
+    }
 }
 
 void EngineAudio::onMixedAudioRawDataReceived(AudioRawData *data)

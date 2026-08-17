@@ -40,6 +40,8 @@
 #include <algorithm>
 #include <string>
 #include <atomic>
+#include <exception>
+#include <cstdlib>
 #include <chrono>
 #include <mutex>
 #include <thread>
@@ -1165,6 +1167,26 @@ int main()
     IpcFd e2p = kIpcInvalidFd;
     if (!ipc_setup(p2e, e2p)) return 1;
     EngineIpc::init(e2p); // must be called before any SDK callbacks can fire
+
+    // An uncaught exception -- ours or the SDK's, on ANY thread -- otherwise
+    // dies as a bare 0xc0000409 fastfail in ucrtbase with nothing in our log
+    // (observed 2026-08-17: four such crashes in a reconnect loop while two
+    // OBS instances collided over this process's singletons, and the only
+    // evidence was Windows Error Reporting). Exit with a distinct code
+    // instead: the plugin already logs "ZoomObsEngine exited unexpectedly
+    // (code N)", so the code alone identifies terminate() vs a real crash.
+    //
+    // Deliberately NOTHING ELSE in this handler. A first version wrote a
+    // {"cmd":"error"} line to the pipe -- but EngineIpc::write takes a global
+    // mutex and then blocks in WriteFile with no timeout, and a FULL PIPE is
+    // precisely the condition most likely to have caused the terminate; the
+    // handler would hang the process instead of exiting, turning a
+    // diagnosable exit into a heartbeat timeout. It also allocated (a
+    // bad_alloc-induced terminate would re-enter), and exit code 3 is already
+    // mapped to RecoveryReason::SdkError, silently re-routing crashes around
+    // the operator's on_engine_crash reconnect policy. Code 5 is unmapped and
+    // falls through to the default EngineCrash classification.
+    std::set_terminate([]() { _exit(5); });
 
     EngineIpc::write(R"({"cmd":"ready"})");
 

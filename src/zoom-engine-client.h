@@ -1,8 +1,10 @@
 #pragma once
 
 #include "engine-ipc.h"
+#include "media-event-queue.h"
 #include "zoom-types.h"
 #include <atomic>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -170,8 +172,15 @@ public:
     void remove_error_callback(void *key);
 
 private:
-    ZoomEngineClient() = default;
+    // Starts the two media dispatch lanes; see MediaDispatchLane below.
+    ZoomEngineClient();
     ~ZoomEngineClient();
+
+    // Runs on a lane thread: resolves the uuid to its registered callbacks
+    // under m_mtx (the same lookup handle_event used to do inline) and
+    // invokes the frame or audio callback.
+    void dispatch_media_event(bool is_frame, const std::string &uuid,
+                              const MediaEvent &event);
 
     bool launch_engine();
     // Fires every registered source's on_new_engine_process callback. Called
@@ -308,6 +317,69 @@ private:
     // The exact init command to replay. Guarded by m_mtx; holds an SDK
     // credential, so it is cleared on teardown.
     std::string m_init_payload;
+
+    // One media dispatch lane: a coalescing queue plus the thread that drains
+    // it. Two exist -- video and audio -- so a burst of 1080p frame copies
+    // can never delay an audio drain by more than the single handler already
+    // in flight (the per-source callback gate serialises same-source work; see
+    // the constructor for the full rationale and the measured defect).
+    //
+    // Lanes are constructed with the client singleton and joined in its
+    // destructor -- they deliberately do NOT follow engine-session lifecycle.
+    // A pending entry that outlives its engine or its source dispatches into
+    // a lookup miss or a generation guard and does nothing, which is the same
+    // tolerance those handlers already need for events that were in the pipe
+    // when the engine died.
+    struct MediaDispatchLane {
+        MediaEventQueue queue;
+        std::mutex mtx;
+        std::condition_variable cv;
+        bool stop = false;
+        std::thread thread;
+
+        void push(const std::string &uuid, const MediaEvent &event)
+        {
+            if (queue.push(uuid, event)) {
+                std::lock_guard<std::mutex> lk(mtx);
+                cv.notify_one();
+            }
+        }
+        void run(const std::function<void(const std::string &,
+                                          const MediaEvent &)> &dispatch)
+        {
+            for (;;) {
+                {
+                    std::unique_lock<std::mutex> lk(mtx);
+                    cv.wait(lk, [this] { return stop || !queue.empty(); });
+                    if (stop) return;
+                }
+                for (const auto &entry : queue.drain())
+                    dispatch(entry.first, entry.second);
+            }
+        }
+        void shutdown()
+        {
+            {
+                std::lock_guard<std::mutex> lk(mtx);
+                stop = true;
+                cv.notify_one();
+            }
+            if (thread.joinable()) thread.join();
+        }
+    };
+    MediaDispatchLane m_video_lane;
+    MediaDispatchLane m_audio_lane;
+
+    // Serialises start() bodies. The m_running early-return only filters
+    // callers that arrive AFTER a start finished; two callers arriving
+    // together both read m_running == false and both launch — observed live
+    // 2026-08-17 as two "New ZoomObsEngine process" launches 9 ms apart, the
+    // first of which becomes an orphaned ghost writer (see
+    // terminate_stale_engine_processes() in the .cpp for what that ghost then
+    // does to the audio rings). The second caller now waits, re-checks
+    // m_running under the lock, and returns the first caller's outcome
+    // instead of launching a rival.
+    std::mutex m_start_mtx;
 
 #if defined(WIN32)
     void *m_process = nullptr;

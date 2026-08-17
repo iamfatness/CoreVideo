@@ -7,7 +7,29 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.40] - 2026-08-17
+
 ### Fixed
+- **Audio no longer jitters continuously.** Timestamps were derived from a
+  running sample count, which is correct while audio is flowing — but Zoom only
+  sends a participant's audio while they are actually making sound. Every
+  silence, nothing advanced the clock, so the next buffer was stamped as though
+  it followed the previous one immediately: after a five-second pause it landed
+  five seconds in the past, and never caught up. In an ordinary conversation,
+  where everyone is quiet most of the time, each source walked steadily further
+  behind until OBS gave up and restarted it — `Source X audio is lagging (over
+  by 102 ms) at max audio buffering`, roughly once a second, on every source.
+  The clock now resyncs once it has fallen further behind than jitter can
+  explain, so a silent participant can no longer drag their source into the
+  past. Measured on a live meeting: 856 such restarts before, zero after.
+
+- **The audio embedded in each participant source now uses the same lossless
+  path as the standalone audio sources.** It had been reading only the newest
+  buffer in the queue, so whenever the machine fell behind it republished one
+  buffer several times over and threw the others away — duplication and loss
+  at once, and nothing counted it. It now drains the queue in order, stamps
+  from the same clock, and reports anything it does lose.
+
 - **Audio sources no longer hold a shared-memory slot after their participant
   leaves.** The engine allows 32 shared-memory regions across audio, video and
   screen share. A CoreVideo audio source released its region when the operator

@@ -65,9 +65,16 @@ int main()
         audio_timeline_stamp(tl, kRate, kFrames, base);
         // Caller keeps the timeline moving through the mute by stamping the
         // silence it emits: 5 seconds is 500 buffers of 10 ms.
+        //
+        // arrival ADVANCES with each buffer, because that is what a real caller
+        // does -- wall clock moves while it emits silence. Freezing arrival here
+        // (as this fixture originally did) is a scenario no caller produces, and
+        // it now reads as 5 seconds of drift, which correctly trips the resync.
         for (int i = 0; i < 500; ++i)
-            audio_timeline_stamp(tl, kRate, kFrames, base + 999'999'999ULL);
-        const uint64_t after = audio_timeline_stamp(tl, kRate, kFrames, base);
+            audio_timeline_stamp(tl, kRate, kFrames,
+                                 base + static_cast<uint64_t>(i + 1) * k10ms);
+        const uint64_t after =
+            audio_timeline_stamp(tl, kRate, kFrames, base + 501 * k10ms);
         check(after == base + 501 * k10ms,
               "a 5-second mute did not produce 5 seconds of timeline -- "
               "re-anchoring on gaps is the drift EBU R37 exists to prevent");
@@ -81,8 +88,11 @@ int main()
         audio_timeline_stamp(tl, kRate, kFrames, base);
         const uint64_t buffers = 1'000'000ULL / kFrames;   // 2083
         uint64_t last = 0;
+        // arrival advances in lockstep, as it does in a live stream, so the
+        // drift guard never fires and this measures pure timeline arithmetic.
         for (uint64_t i = 0; i < buffers; ++i)
-            last = audio_timeline_stamp(tl, kRate, kFrames, base);
+            last = audio_timeline_stamp(tl, kRate, kFrames,
+                                        base + (i + 1) * k10ms);
         check(last == buffers * k10ms,
               "timestamps accumulated rounding error over 2083 buffers");
     }
@@ -118,6 +128,52 @@ int main()
         check(ts == 4'500'000'000ULL,
               "a zero sample rate must fall back to arrival rather than divide "
               "by zero");
+    }
+
+    // --- THE DEFECT THIS FILE MISSED (2026-08-17, live meeting) ---
+    // Zoom emits one-way audio ONLY while a participant is producing sound.
+    // Every silence, no buffer arrives and the timeline does not advance -- so
+    // the next buffer after a 5-second mute was stamped as if it followed the
+    // previous one immediately, putting it 5 seconds behind wall clock. In a
+    // normal conversation each person is quiet most of the time, so every
+    // source walked progressively into the past until OBS gave up:
+    //   "Source X audio is lagging (over by 102.56 ms) at max audio buffering.
+    //    Restarting source audio."
+    // ...repeating every ~1.3s on every source. That is the jitter the operator
+    // heard, and it is WORSE than the arrival-stamped clock this replaced:
+    // arrival stamping has jitter, this had unbounded drift.
+    //
+    // The spec required "underrun emits silence at the correct timestamp" to
+    // hold the timeline continuous through a mute. That was never implemented,
+    // and the "never re-anchor on a gap" rule is only safe WITH it. Bounding
+    // the drift is the cheaper half: keep sample-accurate stamping while the
+    // stream is continuous, and resync when it has fallen too far behind to be
+    // explained by jitter.
+    {
+        AudioTimeline tl{};
+        const uint64_t base = 100'000'000'000ULL;
+        audio_timeline_stamp(tl, kRate, kFrames, base);
+        // Participant goes quiet for 5 seconds: no callbacks at all, so nothing
+        // advances the timeline. They speak again at base + 5s + 10ms.
+        const uint64_t after_mute = base + 5'010'000'000ULL;
+        const uint64_t ts = audio_timeline_stamp(tl, kRate, kFrames, after_mute);
+        check(ts > after_mute - kAudioTimelineMaxDriftNs,
+              "a buffer arriving after a 5-second silence was stamped ~5 seconds "
+              "in the past -- OBS reports the source lagging and restarts its "
+              "audio, over and over, which is what the operator hears");
+    }
+
+    // --- Jitter within the threshold must still be absorbed. If this fails the
+    // resync is too tight and we are back to arrival stamping ---
+    {
+        AudioTimeline tl{};
+        const uint64_t base = 200'000'000'000ULL;
+        audio_timeline_stamp(tl, kRate, kFrames, base);
+        const uint64_t t1 = audio_timeline_stamp(tl, kRate, kFrames, base + 3'000'000ULL);
+        const uint64_t t2 = audio_timeline_stamp(tl, kRate, kFrames, base + 24'000'000ULL);
+        check(t1 == base + k10ms && t2 == base + 2 * k10ms,
+              "ordinary arrival jitter triggered a resync -- the threshold is too "
+              "tight and the clock has degenerated back into arrival stamping");
     }
 
     if (failures == 0)

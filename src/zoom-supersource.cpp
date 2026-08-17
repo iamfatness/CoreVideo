@@ -443,9 +443,26 @@ static void tile_feed_on_frame(const TileFeedPtr &feed, uint32_t event_width,
     feed->has_frame = true;
 }
 
-// P720 is a deliberate default: past 2-up a tile is at most half the canvas in
-// each axis, so a 720p feed is already oversampled, and the Zoom SDK caps how
-// many high-resolution streams may be subscribed at once.
+// P360 is a deliberate default. Two facts decide it:
+//
+// Downlink budget. Every tile used to subscribe at 720p, and the wall
+// subscribes EVERY video participant — so a gallery on top of assigned
+// outputs oversubscribed the Zoom raw-data envelope. Measured live
+// (2026-08-17): with the wall up, Zoom throttled the whole feed to 0.3-0.45x
+// real time — audio arrived slower than it plays, broke up, and drifted
+// seconds behind video while Zoom flushed its queue. Dropping subscription
+// load restored real-time delivery within seconds. A tile past 2-up renders
+// at less than a quarter of the canvas per axis, where 360p is adequate;
+// only a 1-2 up wall would notice, and an operator showing one person big
+// has an output source for that.
+//
+// Shared feeds are NOT degraded by this. The engine holds one subscription
+// per participant with an upgrade-only resolution policy
+// (EngineVideo::subscribe: a request at or below the active resolution
+// attaches to the existing feed as a no-op). So a participant already on a
+// 720p/1080p program output keeps that quality, and the tile simply reuses
+// the high-quality feed. 360p is paid only for participants the wall alone
+// is showing.
 //
 // video_only: a tile never plays audio (tile_feed_register supplies no
 // on_audio), so without this flag every slot registered an engine-side target
@@ -458,7 +475,7 @@ static void tile_feed_on_frame(const TileFeedPtr &feed, uint32_t event_width,
 static void tile_feed_subscribe(const TileFeedPtr &feed)
 {
     ZoomEngineClient::instance().subscribe(feed->uuid, feed->slot.participant_id(),
-                                           false, false, VideoResolution::P720,
+                                           false, false, VideoResolution::P360,
                                            /*video_only=*/true);
 }
 

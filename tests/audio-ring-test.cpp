@@ -105,6 +105,61 @@ int main()
               "slot participant_id does not round-trip");
     }
 
+    // --- Notify-protocol liveness. The first shipped version of the edge
+    // trigger cleared the flag only at the drain-loop exit; the first-event
+    // leveling path returned early, left the flag set, and every source went
+    // silent after ONE buffer -- caught in review, not by these tests,
+    // because no test exercised the protocol at all. These do. (Single
+    // threaded, so they pin the STATE MACHINE, not the memory ordering; the
+    // fence-pair proof lives with ShmAudioHeader::notify.)
+    {
+        ShmAudioHeader h{};
+        h.slot_count = kAudioRingSlots;
+        uint32_t read_index = 0;
+
+        // First publish crosses the empty->non-empty edge: one event.
+        h.write_index = 1;
+        check(audio_ring_notify_after_publish(&h),
+              "the first publish after idle must send an event");
+        // Further publishes while the reader has not drained: silent.
+        h.write_index = 2;
+        check(!audio_ring_notify_after_publish(&h),
+              "a second publish before the reader drained must NOT send -- "
+              "this is the whole point of edge triggering");
+
+        // THE WEDGE REGRESSION: reader wakes, levels (or drains), and runs
+        // reader_done. If it were to skip that (the old early return), the
+        // flag would stay set and the writer above would never notify again.
+        read_index = 2;                     // drained/levelled to the writer
+        check(audio_ring_reader_done(&h, read_index),
+              "a reader level with the writer must be told it is safe to sleep");
+        h.write_index = 3;
+        check(audio_ring_notify_after_publish(&h),
+              "after the reader completed, the next publish must send a fresh "
+              "event -- if this fails, sources go silent after one buffer");
+
+        // Race window: data lands between the drain and the clear. reader_done
+        // must demand another pass and suppress redundant events meanwhile.
+        h.write_index = 5;
+        check(!audio_ring_reader_done(&h, 3),
+              "reader_done must demand another pass when data landed in the "
+              "race window");
+        check(!audio_ring_notify_after_publish(&h),
+              "no event needed while the reader has reclaimed the flag");
+        check(audio_ring_reader_done(&h, 5),
+              "the second pass reaches empty and may sleep");
+
+        // Abandon: any consumed wakeup that cannot drain must hand the flag
+        // back so the next publish re-notifies.
+        h.write_index = 6;
+        check(audio_ring_notify_after_publish(&h), "edge after sleep");
+        audio_ring_reader_abandon(&h);
+        h.write_index = 7;
+        check(audio_ring_notify_after_publish(&h),
+              "after an abandon the next publish must re-notify -- a wakeup "
+              "consumed without clearing the flag is a permanent mute");
+    }
+
     if (failures == 0)
         std::cout << "audio-ring: all tests passed\n";
     return failures == 0 ? 0 : 1;

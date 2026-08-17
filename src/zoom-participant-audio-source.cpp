@@ -470,6 +470,10 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
                  obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
                  kAudioRingSlots, ring->slot_count);
         }
+        // Hand the wakeup back: leave notify clear so the writer's next
+        // publish re-notifies (audio_ring_reader_abandon in engine-ipc.h);
+        // the keepalive covers the case where even this offset is garbage.
+        audio_ring_reader_abandon(const_cast<ShmAudioHeader *>(ring));
         return;
     }
 
@@ -507,6 +511,9 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
                      obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
                      needed_bytes, event_shm_gen);
             }
+            // No view left to clear the notify flag through; the writer's
+            // 250-buffer keepalive re-notifies within ~2.5s, which is what
+            // turns this from a permanent mute into a hiccup.
             return;
         }
         ctx->audio_shm_gen = event_shm_gen;
@@ -527,24 +534,30 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
         // a header we no longer hold.
         if (ring->slot_count != kAudioRingSlots ||
             shm_audio_region_bytes(ring->slot_bytes) > ctx->audio_shm.size) {
+            audio_ring_reader_abandon(
+                static_cast<ShmAudioHeader *>(ctx->audio_shm.ptr));
             return;
         }
     }
     const uint32_t slot_count = ring->slot_count;
 
     // First event after a (re)subscribe: start level with the writer rather
-    // than replaying whatever stale audio the region still holds.
+    // than replaying whatever stale audio the region still holds. NO return
+    // here -- the wakeup was consumed, so the loop below must still run its
+    // clear-and-recheck epilogue or the notify flag stays set and the writer
+    // never notifies again (the one-buffer-then-silence wedge review caught).
     if (!ctx->read_started) {
         ctx->read_index   = ring->write_index;
         ctx->read_started = true;
-        return;
     }
 
     // One wakeup drains until the ring is seen empty AFTER the notify flag is
-    // cleared -- the clear-then-recheck ordering is what makes the
-    // edge-triggered protocol lose no wakeups; the fence-pair proof lives
-    // with ShmAudioHeader::notify in src/engine-ipc.h.
-    for (;;) {
+    // cleared (audio_ring_reader_done in engine-ipc.h carries the fence-pair
+    // proof). Pass-capped: the writer produces at ~100 buffers/sec, so a
+    // reader that cannot reach empty in 16 passes is starved by something
+    // bigger; abandoning leaves the flag CLEAR and the next publish re-wakes
+    // us rather than spinning under ctx->mtx forever.
+    for (int drain_pass = 0; ; ++drain_pass) {
 
         // Nominal duration of one slot, from the ring header rather than any
         // individual slot's (possibly unread or unreadable) byte_len -- this is
@@ -694,8 +707,10 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
             // Read from the file-scope global here rather than a per-source cached
             // copy: that is what makes a change in Zoom Plugin Settings take effect
             // on the next buffer, on every live source, with no restart.
-            audio.timestamp = audio_timeline_stamp(ctx->timeline, sample_rate,
-                                                   timeline_frames, now_ns) +
+            audio.timestamp = audio_timeline_stamp(
+                                  ctx->timeline, sample_rate, timeline_frames,
+                                  now_ns,
+                                  /*allow_backward_resync=*/pending <= 1) +
                               static_cast<uint64_t>(g_global_audio_delay_ms.load(
                                   std::memory_order_relaxed)) * 1'000'000ULL;
 
@@ -734,15 +749,12 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
         }
 
         auto *ring_mut = static_cast<ShmAudioHeader *>(ctx->audio_shm.ptr);
-        ring_mut->notify = 0;
-        std::atomic_thread_fence(std::memory_order_seq_cst);
-        if (ctx->read_index == ring_mut->write_index)
-            break;              // truly empty; the next publish re-notifies
-        // Data landed between our drain and the flag clear. Reclaim the flag
-        // (suppressing redundant events -- a spurious one is harmless) and
-        // drain again rather than wait for an event that will never come.
-        ring_mut->notify = 1;
-        std::atomic_thread_fence(std::memory_order_release);
+        if (drain_pass >= 16) {
+            audio_ring_reader_abandon(ring_mut);
+            break;
+        }
+        if (audio_ring_reader_done(ring_mut, ctx->read_index))
+            break;              // seen empty after the clear; safe to sleep
     }
 }
 

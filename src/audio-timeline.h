@@ -86,10 +86,20 @@ inline void audio_timeline_skip(AudioTimeline &tl, uint32_t frames)
 //
 // `arrival_ns` is consulted only to anchor a new timeline; once running it is
 // ignored entirely, which is the whole point.
+// `allow_backward_resync`: pass false while draining a BURST (a wakeup that
+// found more than one buffer queued). Within a burst the whole backlog drains
+// in microseconds, so arrival is effectively frozen while derived time
+// advances 10ms per slot -- by slot 6 of 8 the timeline reads 60ms "ahead of
+// arrival" and the backward clamp would re-anchor mid-burst, handing OBS a
+// backwards timestamp jump (its "audio is lagging... Restarting source
+// audio"). That apparent drift is an artifact of draining faster than real
+// time, not a clock error; the FORWARD clamp (arrival far ahead of derived
+// time -- the silent-participant case) stays active regardless.
 inline uint64_t audio_timeline_stamp(AudioTimeline &tl,
                                      uint32_t sample_rate,
                                      uint32_t frames,
-                                     uint64_t arrival_ns)
+                                     uint64_t arrival_ns,
+                                     bool allow_backward_resync = true)
 {
     // A rate change invalidates the accumulated sample count: N samples at
     // 16 kHz is not N samples at 48 kHz. Re-anchor rather than mis-scale.
@@ -124,7 +134,7 @@ inline uint64_t audio_timeline_stamp(AudioTimeline &tl,
     const int64_t drift = static_cast<int64_t>(arrival_ns) -
                           static_cast<int64_t>(ts);
     const int64_t limit = static_cast<int64_t>(kAudioTimelineMaxDriftNs);
-    if (drift > limit || drift < -limit) {
+    if (drift > limit || (allow_backward_resync && drift < -limit)) {
         tl.anchor_ns = arrival_ns;
         tl.samples   = 0;
         ts           = arrival_ns;

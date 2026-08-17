@@ -1671,17 +1671,22 @@ void ZoomSource::on_engine_audio(uint32_t event_byte_len,
     // Without this gate both published the same participant's PCM into the same
     // OBS source ~5 ms apart for the whole handover window, which comb-filters
     // the speaker's voice on every cut.
-    if (m_director_handover_pending.load(std::memory_order_acquire)) return;
     std::lock_guard<std::mutex> lk(m_mtx);
-    // Re-checked under the lock for the same reason the preview path re-checks:
-    // a handover starting between the check above and here would put the
-    // preview slot on air, and publishing both is the doubling this gate exists
-    // to prevent.
-    if (m_director_handover_pending.load(std::memory_order_acquire)) return;
+    // Gated paths DRAIN WITHOUT PUBLISHING rather than returning. The wakeup
+    // was consumed either way, and a return here left the ring's notify flag
+    // set -- after which the writer never notified again and this slot was
+    // silent for the rest of the show (review-caught wedge). Discarding is
+    // also semantically right: during a handover the preview slot publishes
+    // this same participant's audio into the SHARED timeline, so the main
+    // slot's copy must advance the ring but touch nothing else -- publishing
+    // would double the audio, and timeline-skipping would double-advance the
+    // clock.
+    const bool publish =
+        !m_director_handover_pending.load(std::memory_order_acquire);
     output_audio_from_shared_memory(source_uuid, m_audio_shm, m_audio_shm_gen,
                                     m_audio_read_index, m_audio_read_started,
                                     event_byte_len, resolved_participant_id,
-                                    event_shm_gen);
+                                    event_shm_gen, publish);
 }
 
 // Publishes audio for the director preview slot, and ONLY while a cut is
@@ -1711,12 +1716,14 @@ void ZoomSource::on_director_preview_audio(uint32_t event_byte_len,
                                            uint32_t resolved_participant_id,
                                            uint32_t event_shm_gen)
 {
-    if (!m_director_handover_pending.load(std::memory_order_acquire)) return;
     std::lock_guard<std::mutex> lk(m_mtx);
-    // Re-checked under the lock: a handover completing between the check above
-    // and here would mean the main region is live again, and publishing both
-    // would double this participant's audio.
-    if (!m_director_handover_pending.load(std::memory_order_acquire)) return;
+    // Discard-drain when NOT handing over, publish when we are -- the mirror
+    // of on_engine_audio()'s gate, for the same two reasons documented there:
+    // a plain return wedged the ring's notify flag (this slot then had no
+    // events left for the handover window it exists to cover), and exactly one
+    // of the two slots may feed the shared timeline at any instant.
+    const bool publish =
+        m_director_handover_pending.load(std::memory_order_acquire);
     // Its OWN read_index/read_started: this is a different region with a
     // different, independently free-running write_index, and pointing the main
     // slot's read_index at it would make audio_ring_slots_behind() return an
@@ -1731,7 +1738,7 @@ void ZoomSource::on_director_preview_audio(uint32_t event_byte_len,
                                     m_director_preview_audio_read_index,
                                     m_director_preview_audio_read_started,
                                     event_byte_len, resolved_participant_id,
-                                    event_shm_gen);
+                                    event_shm_gen, publish);
 }
 
 // Caller must hold m_mtx. Split out of on_engine_audio() so the director
@@ -1752,7 +1759,8 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
                                                  bool &read_started,
                                                  uint32_t event_byte_len,
                                                  uint32_t resolved_participant_id,
-                                                 uint32_t event_shm_gen)
+                                                 uint32_t event_shm_gen,
+                                                 bool publish)
 {
     const std::string audio_base = IPC_SHM_PREFIX + uuid + "_audio";
     const std::string shm_name = shm_region_name(audio_base, event_shm_gen);
@@ -1814,6 +1822,9 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
                  output_name().c_str(), uuid.c_str(), kAudioRingSlots,
                  ring->slot_count);
         }
+        // Hand the wakeup back (leave notify clear); the keepalive covers the
+        // case where even this offset is garbage.
+        audio_ring_reader_abandon(const_cast<ShmAudioHeader *>(ring));
         return;
     }
 
@@ -1847,6 +1858,8 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
                      output_name().c_str(), uuid.c_str(), needed_bytes,
                      event_shm_gen);
             }
+            // No view left to clear the flag through; the writer's keepalive
+            // re-notifies within ~2.5s.
             return;
         }
         audio_shm_gen = event_shm_gen;
@@ -1867,6 +1880,8 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
         // ran on a header we no longer hold.
         if (ring->slot_count != kAudioRingSlots ||
             shm_audio_region_bytes(ring->slot_bytes) > audio_shm.size) {
+            audio_ring_reader_abandon(
+                static_cast<ShmAudioHeader *>(audio_shm.ptr));
             return;
         }
     }
@@ -1875,18 +1890,21 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
     // First event after a (re)subscribe, a generation change or a reopen: start
     // level with the writer rather than replaying whatever stale audio the
     // region still holds.
+    // NO return after leveling -- the wakeup was consumed, so the loop below
+    // must still run its clear-and-recheck epilogue (see the identical note in
+    // zoom-participant-audio-source.cpp; returning here was the
+    // one-buffer-then-silence wedge).
     if (!read_started) {
         read_index   = ring->write_index;
         read_started = true;
-        return;
     }
 
     // Same edge-triggered wakeup discipline as the dedicated audio sources:
-    // drain until the ring is seen empty AFTER clearing the notify flag.
-    // Fence-pair proof: ShmAudioHeader::notify in src/engine-ipc.h. Serves
-    // both the main and director-preview slots -- each has its own region,
-    // read_index and flag, passed in by the caller.
-    for (;;) {
+    // drain until the ring is seen empty AFTER clearing the notify flag
+    // (audio_ring_reader_done in engine-ipc.h). Pass-capped like the
+    // dedicated path. Serves both the main and director-preview slots --
+    // each has its own region, read_index and flag, passed in by the caller.
+    for (int drain_pass = 0; ; ++drain_pass) {
 
         // Nominal duration of one slot, taken from the ring HEADER rather than any
         // individual slot's (possibly unread or unreadable) byte_len -- this is what
@@ -1900,6 +1918,13 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
         // cannot collapse a full lap into "caught up" the way a slot_count-modulo
         // difference would.
         const uint32_t write_index = ring->write_index;
+        // Discard-drain: skip everything by declaring ourselves level. The
+        // for-loop below then runs zero passes and control falls straight to
+        // the notify epilogue, which is the part a gated wakeup MUST still
+        // run. No timeline, no counters, no PCM copies -- the other slot owns
+        // all of that while we are gated.
+        if (!publish)
+            read_index = write_index;
         uint32_t pending = audio_ring_slots_behind(write_index, read_index,
                                                    slot_count);
         // More has been written since our last drain than the ring can hold: the
@@ -2023,8 +2048,10 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
             // only ever push this output's embedded audio later, never earlier.
             const uint32_t timeline_frames =
                 byte_len / (kZoomBytesPerSample * std::max<uint16_t>(channels, 1));
-            audio.timestamp = audio_timeline_stamp(m_audio_timeline, sample_rate,
-                                                   timeline_frames, ts) +
+            audio.timestamp = audio_timeline_stamp(
+                                  m_audio_timeline, sample_rate,
+                                  timeline_frames, ts,
+                                  /*allow_backward_resync=*/pending <= 1) +
                               static_cast<uint64_t>(audio_delay_ms.load(
                                   std::memory_order_relaxed)) * 1'000'000ULL;
 
@@ -2075,12 +2102,12 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
         }
 
         auto *ring_mut = static_cast<ShmAudioHeader *>(audio_shm.ptr);
-        ring_mut->notify = 0;
-        std::atomic_thread_fence(std::memory_order_seq_cst);
-        if (read_index == ring_mut->write_index)
-            break;              // truly empty; the next publish re-notifies
-        ring_mut->notify = 1;
-        std::atomic_thread_fence(std::memory_order_release);
+        if (drain_pass >= 16) {
+            audio_ring_reader_abandon(ring_mut);
+            break;
+        }
+        if (audio_ring_reader_done(ring_mut, read_index))
+            break;              // seen empty after the clear; safe to sleep
     }
 }
 

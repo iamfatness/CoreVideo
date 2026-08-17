@@ -176,6 +176,29 @@ int main()
               "tight and the clock has degenerated back into arrival stamping");
     }
 
+    // --- Burst drains must not trip the backward clamp. Draining a backlog
+    // stamps several slots against one frozen arrival; by slot 6 the derived
+    // time reads 60ms "ahead" and the backward resync would hand OBS a
+    // backwards timestamp jump mid-recovery. allow_backward_resync=false is
+    // what the drain loops pass whenever a wakeup found more than one buffer.
+    {
+        AudioTimeline tl{};
+        const uint64_t base = 300'000'000'000ULL;
+        audio_timeline_stamp(tl, kRate, kFrames, base);
+        uint64_t prev = base;
+        bool monotonic = true;
+        for (int i = 1; i <= 7; ++i) {
+            const uint64_t ts = audio_timeline_stamp(
+                tl, kRate, kFrames, base, /*allow_backward_resync=*/false);
+            if (ts < prev) monotonic = false;
+            prev = ts;
+        }
+        check(monotonic && prev == base + 7 * k10ms,
+              "a 7-slot burst against a frozen arrival re-anchored backwards -- "
+              "OBS reads that as 'audio is lagging' and restarts the source "
+              "during exactly the recovery the burst drain performs");
+    }
+
     if (failures == 0)
         std::cout << "audio-timeline: all tests passed\n";
     return failures == 0 ? 0 : 1;

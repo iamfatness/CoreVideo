@@ -244,6 +244,57 @@ inline uint32_t audio_ring_slots_behind(uint32_t write_index,
     return write_index - read_index;
 }
 
+// ── The notify protocol, as code ─────────────────────────────────────────────
+// Both sides go through these helpers so the flag has exactly one
+// implementation to own. The first version inlined the flag handling at the
+// drain-loop exit only, and every OTHER return path -- the first-event
+// leveling, the director-handover gates, a failed remap -- consumed its wakeup
+// and left notify set, after which the writer never notified again: every
+// source played one 10ms buffer and went silent for its lifetime. Review
+// caught it before install. The rule the helpers enforce: whoever accepts a
+// wakeup OWNS the flag until audio_ring_reader_done() says the ring was seen
+// empty after clearing it, or audio_ring_reader_abandon() hands ownership
+// back to the writer.
+
+// WRITER, immediately after publishing write_index. Returns true exactly when
+// this publish crossed the empty->non-empty edge and one pipe event must be
+// sent. The seq_cst fence pairs with the reader's (see ShmAudioHeader::notify
+// for the total-order proof).
+inline bool audio_ring_notify_after_publish(ShmAudioHeader *hdr)
+{
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    if (hdr->notify != 0) return false;
+    hdr->notify = 1;
+    std::atomic_thread_fence(std::memory_order_release);
+    return true;
+}
+
+// READER, after draining to its snapshot. Clears the flag, then re-checks the
+// ring; returns true when the ring was seen empty AFTER the clear -- the only
+// state in which sleeping is safe. Returns false when more data landed in the
+// race window: the flag has been re-claimed (suppressing redundant events)
+// and the caller must drain again.
+inline bool audio_ring_reader_done(ShmAudioHeader *hdr, uint32_t read_index)
+{
+    hdr->notify = 0;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    if (read_index == hdr->write_index) return true;
+    hdr->notify = 1;
+    std::atomic_thread_fence(std::memory_order_release);
+    return false;
+}
+
+// READER, when it must stop without having seen the ring empty (bounded-pass
+// cap, or any exit after the mapping is valid but before a full drain).
+// Leaves the flag CLEAR so the writer's next publish re-notifies. The failure
+// mode this prevents is a consumed wakeup with the flag still set, which
+// silences the source forever.
+inline void audio_ring_reader_abandon(ShmAudioHeader *hdr)
+{
+    hdr->notify = 0;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+}
+
 // ── Platform-specific pipe / socket paths ─────────────────────────────────────
 #if defined(WIN32)
 #  include <windows.h>
@@ -338,11 +389,17 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
        shm_region_destroy(r);
        r.map_handle = OpenFileMappingA(FILE_MAP_READ | FILE_MAP_WRITE, FALSE,
                                        name.c_str());
-       if (!r.map_handle) return false;
+       if (!r.map_handle) { r.last_error = GetLastError(); return false; }
        r.ptr = MapViewOfFile(r.map_handle, FILE_MAP_READ | FILE_MAP_WRITE,
                              0, 0, size);
        r.size = r.ptr ? size : 0;
-       if (!r.ptr) { shm_region_destroy(r); return false; }
+       if (!r.ptr) {
+           r.last_error = GetLastError();
+           const DWORD err = r.last_error;
+           shm_region_destroy(r);
+           r.last_error = err; // survive the destroy's reset
+           return false;
+       }
        return true;
    }
 #else

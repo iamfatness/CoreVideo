@@ -324,16 +324,27 @@ void EngineAudio::output_audio_frame(AudioTarget &target,
             std::to_string(target.participant_id) + "}");
     }
 
-    // Edge-triggered wakeup -- the fence pair and the lost-wakeup proof live
-    // with ShmAudioHeader::notify in src/engine-ipc.h. One event per
-    // empty->non-empty edge instead of one per 10ms buffer: the reader drains
-    // everything available on any wakeup, so per-buffer events only ever added
-    // pipe traffic -- ~1,700 msgs/sec at full load, enough to stall this very
-    // callback thread on the pipe write and queue audio inside the SDK.
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-    if (ring->notify == 0) {
-        ring->notify = 1;
-        std::atomic_thread_fence(std::memory_order_release);
+    // Edge-triggered wakeup -- one event per empty->non-empty edge instead of
+    // one per 10ms buffer (was ~1,700 msgs/sec at full load, enough to stall
+    // this very callback thread on the pipe write and queue audio inside the
+    // SDK). Protocol and proof: audio_ring_notify_after_publish() and
+    // ShmAudioHeader::notify in src/engine-ipc.h.
+    //
+    // The keepalive is the belt-and-braces the edge trigger needs: if the
+    // reader ever consumes a wakeup without clearing the flag -- a failed
+    // remap, a version-guard trip, a bug this side of the review -- the edge
+    // never fires again and the source is silent forever. Re-notifying after
+    // 250 consecutive suppressions (~2.5s) turns any such wedge into a 2.5s
+    // hiccup at ~0.4 events/sec of overhead.
+    if (audio_ring_notify_after_publish(ring)) {
+        target.notify_suppressed = 0;
+        EngineIpc::write(
+            R"({"cmd":"audio","source_uuid":")" + source_uuid +
+            R"(","participant_id":)" + std::to_string(target.participant_id) +
+            R"(,"byte_len":)" + std::to_string(byte_len) +
+            R"(,"shm_gen":)" + std::to_string(target.shm_gen) + "}");
+    } else if (++target.notify_suppressed >= 250) {
+        target.notify_suppressed = 0;
         EngineIpc::write(
             R"({"cmd":"audio","source_uuid":")" + source_uuid +
             R"(","participant_id":)" + std::to_string(target.participant_id) +

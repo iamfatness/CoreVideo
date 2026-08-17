@@ -231,9 +231,70 @@ ZoomEngineClient &ZoomEngineClient::instance()
     return inst;
 }
 
+// THE READER THREAD MUST NOT DO MEDIA WORK (2026-08-17, full-1080p pressure
+// test). handle_event() used to invoke the frame and audio callbacks inline,
+// so every video event carried its whole SHM->OBS copy (~3MB at 1080p) on the
+// pipe reader thread before the next line could be read. With Zoom granting
+// 4x1920x1080 + 3x1600x900 feeds that thread fell behind its own pipe: audio
+// events queued behind video events and arrived a measured 0.5-0.94s late,
+// starving the audio ring's edge-triggered wakeups into the writer's 2.5s
+// keepalive -- ~92% audio loss on every source, the same on-air signature as
+// the ghost-writer wedge but with a healthy protocol underneath.
+//
+// The lanes fix the queuing discipline, not the unit cost. Media events are
+// prompts, not payloads -- the video handler reads the NEWEST frame in the
+// region, the audio handler drains EVERYTHING pending in the ring -- so the
+// coalescing queue collapses any backlog to one dispatch per source
+// (media-event-queue.h). Overloaded video degrades to fewer whole frames
+// (latest-wins, the correct failure mode for an unbuffered source) instead of
+// growing seconds of queue. Audio gets its OWN lane so its near-zero-cost
+// drains never wait behind a video copy for a DIFFERENT source; same-source
+// audio-vs-video ordering is guaranteed by the per-source callback gate both
+// handlers already take, exactly as it was when one thread ran everything.
+//
+// Control events (roster, joined, left, debug) stay inline on the reader
+// thread: they are cheap, and their relative order matters.
+ZoomEngineClient::ZoomEngineClient()
+{
+    m_video_lane.thread = std::thread([this]() {
+        m_video_lane.run([this](const std::string &uuid, const MediaEvent &e) {
+            dispatch_media_event(true, uuid, e);
+        });
+    });
+    m_audio_lane.thread = std::thread([this]() {
+        m_audio_lane.run([this](const std::string &uuid, const MediaEvent &e) {
+            dispatch_media_event(false, uuid, e);
+        });
+    });
+}
+
 ZoomEngineClient::~ZoomEngineClient()
 {
     stop();
+    m_video_lane.shutdown();
+    m_audio_lane.shutdown();
+}
+
+void ZoomEngineClient::dispatch_media_event(bool is_frame,
+                                            const std::string &uuid,
+                                            const MediaEvent &event)
+{
+    SourceCallbacks callbacks;
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        auto it = m_sources.find(uuid);
+        // A miss is the designed outcome for an entry that outlived its
+        // source (unregistered between enqueue and dispatch) -- drop it.
+        if (it == m_sources.end()) return;
+        callbacks = it->second;
+    }
+    if (is_frame) {
+        if (callbacks.on_frame)
+            callbacks.on_frame(event.p1, event.p2, event.p3, event.p4);
+    } else {
+        if (callbacks.on_audio)
+            callbacks.on_audio(event.p1, event.p2, event.p3);
+    }
 }
 
 // The fourth and last shape of one defect class: a plugin-side SHM read mapping
@@ -1240,14 +1301,14 @@ void ZoomEngineClient::handle_event(const std::string &line)
 
     if (cmd != "frame" && cmd != "audio") return;
     const std::string uuid = obj.value("source_uuid").toString().toStdString();
-    SourceCallbacks callbacks;
-    {
-        std::lock_guard<std::mutex> lk(m_mtx);
-        auto it = m_sources.find(uuid);
-        if (it == m_sources.end()) return;
-        callbacks = it->second;
-    }
-    if (cmd == "frame" && callbacks.on_frame) {
+    // No callback lookup here: the reader thread's whole job for a media
+    // event is to enqueue the prompt and get back to the pipe. Resolution to
+    // callbacks happens on the lane thread (dispatch_media_event), which also
+    // absorbs the enqueue-vs-unregister race as a lookup miss. shm_gen guards
+    // against reading a stale/orphaned SHM region after the engine recreated
+    // it (0 = not sent, old engine); it rides in the event so the handler can
+    // remap before it drains.
+    if (cmd == "frame") {
         static std::mutex frame_log_mtx;
         uint64_t frame_count = 0;
         {
@@ -1258,23 +1319,22 @@ void ZoomEngineClient::handle_event(const std::string &line)
         if (cv_zoom_verbose_logging() &&
             (frame_count == 1 || frame_count % 120 == 0)) {
             blog(LOG_INFO,
-                 "[obs-zoom-plugin] Dispatching Zoom video frame: source_uuid=%s count=%llu w=%d h=%d",
+                 "[obs-zoom-plugin] Queueing Zoom video frame: source_uuid=%s count=%llu w=%d h=%d coalesced=%llu",
                  uuid.c_str(), static_cast<unsigned long long>(frame_count),
-                 obj.value("w").toInt(), obj.value("h").toInt());
+                 obj.value("w").toInt(), obj.value("h").toInt(),
+                 static_cast<unsigned long long>(
+                     m_video_lane.queue.coalesced()));
         }
-        // shm_gen guards against reading a stale/orphaned SHM region after the
-        // engine recreated it (e.g. engine restart). 0 = not sent (old engine).
-        callbacks.on_frame(static_cast<uint32_t>(obj.value("w").toInt()),
-                           static_cast<uint32_t>(obj.value("h").toInt()),
-                           static_cast<uint32_t>(
-                               obj.value("participant_id").toInt()),
-                           static_cast<uint32_t>(obj.value("shm_gen").toInt()));
-    }
-    if (cmd == "audio" && callbacks.on_audio) {
-        callbacks.on_audio(static_cast<uint32_t>(obj.value("byte_len").toInt()),
-                           static_cast<uint32_t>(
-                               obj.value("participant_id").toInt()),
-                           static_cast<uint32_t>(obj.value("shm_gen").toInt()));
+        m_video_lane.push(uuid, MediaEvent{
+            static_cast<uint32_t>(obj.value("w").toInt()),
+            static_cast<uint32_t>(obj.value("h").toInt()),
+            static_cast<uint32_t>(obj.value("participant_id").toInt()),
+            static_cast<uint32_t>(obj.value("shm_gen").toInt())});
+    } else {
+        m_audio_lane.push(uuid, MediaEvent{
+            static_cast<uint32_t>(obj.value("byte_len").toInt()),
+            static_cast<uint32_t>(obj.value("participant_id").toInt()),
+            static_cast<uint32_t>(obj.value("shm_gen").toInt()), 0});
     }
 }
 

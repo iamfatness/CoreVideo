@@ -893,6 +893,18 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoAudioRing
              COMMAND CoreVideoAudioRingTest)
 
+    # Coalescing rules of the reader-thread -> media-lane queue. Inline media
+    # dispatch let a 1080p video backlog delay audio events ~1s and starve the
+    # ring's edge wakeups; the queue makes that backlog impossible.
+    add_executable(CoreVideoMediaEventQueueTest
+        tests/media-event-queue-test.cpp
+    )
+    target_include_directories(CoreVideoMediaEventQueueTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoMediaEventQueue
+             COMMAND CoreVideoMediaEventQueueTest)
+
     # Which participants a video-assignment picker offers. The rule that the
     # picker's own current selection is never hidden is the load-bearing one:
     # dropping it would unbind the source when somebody's camera goes off.

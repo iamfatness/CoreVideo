@@ -188,7 +188,7 @@ bool EngineAudio::ensure_shm(AudioTarget &target,
     ring->slot_bytes  = byte_len;
     ring->sample_rate = 0;
     ring->channels    = 0;
-    ring->reserved    = 0;
+    ring->notify      = 0;   // clear: the first buffer always sends its event
 
     EngineIpc::write(
         R"({"cmd":"debug","stage":"audio_shm_created","source_uuid":")" +
@@ -286,7 +286,9 @@ void EngineAudio::output_audio_frame(AudioTarget &target,
     // os_gettime_ns() reading to measure pipeline latency.
     slot->capture_ns = tile_clock_now_ns();
     slot->byte_len   = byte_len;
-    slot->reserved   = 0;
+    // Self-describing: with coalesced events one wakeup covers many slots, so
+    // per-buffer attribution (ISO stems, latency) reads the slot, not the event.
+    slot->participant_id = target.participant_id;
     std::memcpy(reinterpret_cast<char *>(slot) + sizeof(ShmAudioSlot),
                 data->GetBuffer(), byte_len);
     std::atomic_thread_fence(std::memory_order_release);
@@ -322,11 +324,22 @@ void EngineAudio::output_audio_frame(AudioTarget &target,
             std::to_string(target.participant_id) + "}");
     }
 
-    EngineIpc::write(
-        R"({"cmd":"audio","source_uuid":")" + source_uuid +
-        R"(","participant_id":)" + std::to_string(target.participant_id) +
-        R"(,"byte_len":)" + std::to_string(byte_len) +
-        R"(,"shm_gen":)" + std::to_string(target.shm_gen) + "}");
+    // Edge-triggered wakeup -- the fence pair and the lost-wakeup proof live
+    // with ShmAudioHeader::notify in src/engine-ipc.h. One event per
+    // empty->non-empty edge instead of one per 10ms buffer: the reader drains
+    // everything available on any wakeup, so per-buffer events only ever added
+    // pipe traffic -- ~1,700 msgs/sec at full load, enough to stall this very
+    // callback thread on the pipe write and queue audio inside the SDK.
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    if (ring->notify == 0) {
+        ring->notify = 1;
+        std::atomic_thread_fence(std::memory_order_release);
+        EngineIpc::write(
+            R"({"cmd":"audio","source_uuid":")" + source_uuid +
+            R"(","participant_id":)" + std::to_string(target.participant_id) +
+            R"(,"byte_len":)" + std::to_string(byte_len) +
+            R"(,"shm_gen":)" + std::to_string(target.shm_gen) + "}");
+    }
 }
 
 void EngineAudio::onMixedAudioRawDataReceived(AudioRawData *data)

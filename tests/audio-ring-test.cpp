@@ -85,6 +85,26 @@ int main()
         }
     }
 
+    // --- The wire format must not have grown: participant_id reuses the old
+    // reserved word, and the notify flag reuses the header's. A size change
+    // here is a silent engine/plugin mismatch (see the version guard) ---
+    {
+        // 24, not 20: capture_ns forces 8-byte alignment, so there have
+        // always been 4 padding bytes after sequence. What matters is that
+        // the size is UNCHANGED from the v0.1.40 wire format -- renaming
+        // reserved to participant_id must not move anything.
+        check(sizeof(ShmAudioSlot) == 24,
+              "ShmAudioSlot changed size -- participant_id was meant to reuse "
+              "the reserved word, not extend the struct");
+        check(sizeof(ShmAudioHeader) == 4 * 4 + 2 + 2,
+              "ShmAudioHeader changed size -- notify was meant to reuse the "
+              "reserved u16, not extend the struct");
+        ShmAudioSlot slot{};
+        slot.participant_id = 16788480u;
+        check(slot.participant_id == 16788480u,
+              "slot participant_id does not round-trip");
+    }
+
     if (failures == 0)
         std::cout << "audio-ring: all tests passed\n";
     return failures == 0 ? 0 : 1;

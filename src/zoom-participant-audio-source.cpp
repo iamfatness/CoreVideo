@@ -437,11 +437,11 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
         ctx->read_started = false;
     }
     if (!ctx->audio_shm.ptr || ctx->audio_shm.size < audio_bytes) {
-        if (!shm_region_open_read(ctx->audio_shm, shm_name, audio_bytes) &&
+        if (!shm_region_open_readwrite(ctx->audio_shm, shm_name, audio_bytes) &&
             // Engines predating suffixed names recreate the legacy name for
             // every generation — fall back to it.
             (event_shm_gen <= 1 ||
-             !shm_region_open_read(ctx->audio_shm, audio_base, audio_bytes))) {
+             !shm_region_open_readwrite(ctx->audio_shm, audio_base, audio_bytes))) {
             if (ctx->frame_count == 0) {
                 blog(LOG_WARNING,
                      "[obs-zoom-plugin] Failed to open CoreVideo audio shared memory: source=%s uuid=%s bytes=%zu gen=%u",
@@ -496,9 +496,9 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
         const size_t needed_bytes = shm_audio_region_bytes(described_slot_bytes);
         ring = nullptr; // the view backing it is about to be unmapped
         shm_region_destroy(ctx->audio_shm);
-        if (!shm_region_open_read(ctx->audio_shm, shm_name, needed_bytes) &&
+        if (!shm_region_open_readwrite(ctx->audio_shm, shm_name, needed_bytes) &&
             (event_shm_gen <= 1 ||
-             !shm_region_open_read(ctx->audio_shm, audio_base, needed_bytes))) {
+             !shm_region_open_readwrite(ctx->audio_shm, audio_base, needed_bytes))) {
             ctx->read_started = false;
             ++ctx->remap_count;
             if (ctx->remap_count == 1 || ctx->remap_count % 250 == 0) {
@@ -540,187 +540,209 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
         return;
     }
 
-    // Nominal duration of one slot, from the ring header rather than any
-    // individual slot's (possibly unread or unreadable) byte_len -- this is
-    // what lets every discard path below keep the master clock honest about
-    // audio we never got to look at.
-    const uint32_t nominal_frames = ring->slot_bytes /
-        (kZoomBytesPerSample * std::max<uint16_t>(ring->channels, 1));
+    // One wakeup drains until the ring is seen empty AFTER the notify flag is
+    // cleared -- the clear-then-recheck ordering is what makes the
+    // edge-triggered protocol lose no wakeups; the fence-pair proof lives
+    // with ShmAudioHeader::notify in src/engine-ipc.h.
+    for (;;) {
 
-    // write_index and read_index are free-running counters (never wrap at
-    // slot_count -- see ShmAudioHeader::write_index), so "pending" is exact:
-    // it cannot collapse a full lap into "caught up" the way a
-    // slot_count-modulo difference would.
-    const uint32_t write_index = ring->write_index;
-    uint32_t pending = audio_ring_slots_behind(write_index, ctx->read_index,
-                                               slot_count);
-    // More has been written since our last drain than the ring can hold: the
-    // oldest `pending - slot_count` generations were overwritten before we
-    // ever read them. Skip to the oldest slot still intact and count -- and
-    // clock-compensate -- what was lost. The point of the ring is that this
-    // is now visible, not that it can never happen.
-    if (pending > slot_count) {
-        const uint32_t lost = pending - slot_count;
-        const uint64_t overrun_before = ctx->overrun_slots;
-        ctx->overrun_slots += lost;
-        audio_timeline_skip(ctx->timeline, lost * nominal_frames);
-        ctx->read_index = write_index - slot_count;
-        pending = slot_count;
-        // Rate-limited the same way every other high-frequency log in this
-        // file is: first occurrence loud, then periodically (see the
-        // frame_count == 1 || frame_count % 250 == 0 pattern below). Without
-        // this, a sustained overrun at Zoom's ~100 callbacks/sec would put up
-        // to 900 blog() calls/sec -- each taking libobs' log lock and writing
-        // to disk, under ctx->mtx -- on the exact path that is already
-        // CPU-starved, amplifying the stall being reported. overrun_slots is
-        // already maintained cumulatively for Task 7 to surface; this only
-        // decides when a change in it also goes to the log.
-        if (overrun_before == 0 ||
-            overrun_before / 250 != ctx->overrun_slots / 250) {
-            blog(LOG_WARNING,
-                 "[obs-zoom-plugin] CoreVideo audio ring overrun: source=%s uuid=%s lost_slots=%llu",
-                 obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
-                 static_cast<unsigned long long>(ctx->overrun_slots));
-        }
-    }
+        // Nominal duration of one slot, from the ring header rather than any
+        // individual slot's (possibly unread or unreadable) byte_len -- this is
+        // what lets every discard path below keep the master clock honest about
+        // audio we never got to look at.
+        const uint32_t nominal_frames = ring->slot_bytes /
+            (kZoomBytesPerSample * std::max<uint16_t>(ring->channels, 1));
 
-    for (uint32_t n = 0; n < pending; ++n) {
-        const uint32_t slot_index = ctx->read_index; // free-running generation
-        const auto *slot = reinterpret_cast<const ShmAudioSlot *>(
-            static_cast<const char *>(ctx->audio_shm.ptr) +
-            shm_audio_slot_offset(*ring, slot_index % slot_count));
-
-        uint32_t byte_len = 0;
-        uint64_t capture_ns = 0;
-        bool copied = false;
-        for (int attempt = 0; attempt < 3; ++attempt) {
-            const uint32_t seq1 = slot->sequence;
-            std::atomic_thread_fence(std::memory_order_acquire);
-            if ((seq1 & 1u) != 0) continue;      // write in progress
-            byte_len   = slot->byte_len;
-            capture_ns = slot->capture_ns;
-            // The payload can never exceed the slot the engine sized for it;
-            // a larger value means we are reading a region the writer has
-            // since resized, so drop it rather than read out of bounds.
-            if (byte_len == 0 || byte_len > ring->slot_bytes) break;
-            if (ctx->audio_buf.size() < byte_len)
-                ctx->audio_buf.resize(byte_len);
-            std::memcpy(ctx->audio_buf.data(),
-                        reinterpret_cast<const char *>(slot) +
-                            sizeof(ShmAudioSlot),
-                        byte_len);
-            std::atomic_thread_fence(std::memory_order_acquire);
-            const uint32_t seq2 = slot->sequence;
-            if (seq1 == seq2 && (seq2 & 1u) == 0) { copied = true; break; }
-        }
-
-        // The seqlock only proves the payload was not TORN -- it does not
-        // prove it is the buffer we MEANT to read. If the writer has since
-        // advanced far enough past this generation, it has physically
-        // overwritten this slot at least once more while we were copying it:
-        // what we just read cleanly may be a newer buffer that happened to
-        // land on an even/even pair, about to be published in this older
-        // slot's timeline position.
-        if (copied && ring->write_index - slot_index > slot_count) {
-            copied = false;
+        // write_index and read_index are free-running counters (never wrap at
+        // slot_count -- see ShmAudioHeader::write_index), so "pending" is exact:
+        // it cannot collapse a full lap into "caught up" the way a
+        // slot_count-modulo difference would.
+        const uint32_t write_index = ring->write_index;
+        uint32_t pending = audio_ring_slots_behind(write_index, ctx->read_index,
+                                                   slot_count);
+        // More has been written since our last drain than the ring can hold: the
+        // oldest `pending - slot_count` generations were overwritten before we
+        // ever read them. Skip to the oldest slot still intact and count -- and
+        // clock-compensate -- what was lost. The point of the ring is that this
+        // is now visible, not that it can never happen.
+        if (pending > slot_count) {
+            const uint32_t lost = pending - slot_count;
             const uint64_t overrun_before = ctx->overrun_slots;
-            ++ctx->overrun_slots;
-            // Same rate-limit, and the same reason, as the overrun-skip log
-            // above -- this one sits INSIDE the per-slot loop and could
-            // otherwise fire up to slot_count times per callback. Sharing the
-            // gate on the one overrun_slots counter (rather than a second
-            // one) keeps "first occurrence, then periodically" meaningful
-            // regardless of which of the two loss paths produced it. This
-            // check can also false-positive if the reader is preempted
-            // between the seqlock's seq2 read and this write_index re-read --
-            // a still-valid buffer gets discarded and counted -- which is a
-            // second reason not to treat every occurrence as log-worthy.
+            ctx->overrun_slots += lost;
+            audio_timeline_skip(ctx->timeline, lost * nominal_frames);
+            ctx->read_index = write_index - slot_count;
+            pending = slot_count;
+            // Rate-limited the same way every other high-frequency log in this
+            // file is: first occurrence loud, then periodically (see the
+            // frame_count == 1 || frame_count % 250 == 0 pattern below). Without
+            // this, a sustained overrun at Zoom's ~100 callbacks/sec would put up
+            // to 900 blog() calls/sec -- each taking libobs' log lock and writing
+            // to disk, under ctx->mtx -- on the exact path that is already
+            // CPU-starved, amplifying the stall being reported. overrun_slots is
+            // already maintained cumulatively for Task 7 to surface; this only
+            // decides when a change in it also goes to the log.
             if (overrun_before == 0 ||
                 overrun_before / 250 != ctx->overrun_slots / 250) {
                 blog(LOG_WARNING,
-                     "[obs-zoom-plugin] CoreVideo audio slot overwritten mid-read: source=%s uuid=%s lost_slots=%llu",
+                     "[obs-zoom-plugin] CoreVideo audio ring overrun: source=%s uuid=%s lost_slots=%llu",
                      obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
                      static_cast<unsigned long long>(ctx->overrun_slots));
             }
         }
 
-        ctx->read_index = slot_index + 1;
-        if (!copied) {
-            // Lost this slot's audio, whichever way: unread, unreadably torn
-            // after three attempts, or clobbered mid-copy above. Advance the
-            // timeline anyway -- a lost slot is silence of a KNOWN duration,
-            // and skipping the accounting shifts this source permanently
-            // earlier relative to everything else on the timeline (see
-            // src/audio-timeline.h's doctrine on gaps).
-            audio_timeline_skip(ctx->timeline, nominal_frames);
-            continue;
-        }
+        for (uint32_t n = 0; n < pending; ++n) {
+            const uint32_t slot_index = ctx->read_index; // free-running generation
+            const auto *slot = reinterpret_cast<const ShmAudioSlot *>(
+                static_cast<const char *>(ctx->audio_shm.ptr) +
+                shm_audio_slot_offset(*ring, slot_index % slot_count));
 
-        const uint32_t sample_rate = ring->sample_rate;
-        const uint16_t channels    = ring->channels;
-        const uint64_t now_ns = os_gettime_ns();
-
-        // Both processes share a QPC-based monotonic clock, so this
-        // subtraction is meaningful across the boundary -- see
-        // ShmAudioSlot::capture_ns in engine-ipc.h.
-        if (capture_ns != 0 && now_ns > capture_ns) {
-            ctx->audio_latency_us.store((now_ns - capture_ns) / 1000,
-                                        std::memory_order_relaxed);
-        }
-
-        const auto *pcm = reinterpret_cast<const int16_t *>(ctx->audio_buf.data());
-        obs_source_audio audio = {};
-        audio.samples_per_sec = sample_rate;
-        // Sample-derived, not arrival-derived: IPC jitter must not reach OBS.
-        // `frames` is what this buffer actually carries, so the timeline advances
-        // by exactly the audio published. See src/audio-timeline.h.
-        const uint32_t timeline_frames =
-            byte_len / (kZoomBytesPerSample * std::max<uint16_t>(channels, 1));
-        // Delay is arithmetic on the timeline, not a buffer: OBS's async path
-        // holds timestamped audio until its time comes. Only ever pushes audio
-        // LATER -- ITU-R BT.1359-1 detects audio leading at +45 ms but
-        // tolerates lagging to -125 ms, so late is the safe direction to err.
-        //
-        // Read from the file-scope global here rather than a per-source cached
-        // copy: that is what makes a change in Zoom Plugin Settings take effect
-        // on the next buffer, on every live source, with no restart.
-        audio.timestamp = audio_timeline_stamp(ctx->timeline, sample_rate,
-                                               timeline_frames, now_ns) +
-                          static_cast<uint64_t>(g_global_audio_delay_ms.load(
-                              std::memory_order_relaxed)) * 1'000'000ULL;
-
-        if (ctx->audio_mode.load(std::memory_order_acquire) == AudioChannelMode::Stereo &&
-            channels == 1) {
-            const uint32_t mono_frames = byte_len / kZoomBytesPerSample;
-            const uint32_t stereo_count = mono_frames * 2;
-            if (ctx->stereo_buf.size() < stereo_count)
-                ctx->stereo_buf.resize(stereo_count);
-            for (uint32_t i = 0; i < mono_frames; ++i) {
-                ctx->stereo_buf[i * 2] = pcm[i];
-                ctx->stereo_buf[i * 2 + 1] = pcm[i];
+            uint32_t byte_len = 0;
+            uint64_t capture_ns = 0;
+            // Per-slot attribution -- see src/engine-ipc.h; the coalesced
+            // event's participant can be stale for older slots.
+            uint32_t slot_participant = resolved_participant_id;
+            bool copied = false;
+            for (int attempt = 0; attempt < 3; ++attempt) {
+                const uint32_t seq1 = slot->sequence;
+                std::atomic_thread_fence(std::memory_order_acquire);
+                if ((seq1 & 1u) != 0) continue;      // write in progress
+                byte_len   = slot->byte_len;
+                capture_ns = slot->capture_ns;
+                slot_participant = slot->participant_id;
+                // The payload can never exceed the slot the engine sized for it;
+                // a larger value means we are reading a region the writer has
+                // since resized, so drop it rather than read out of bounds.
+                if (byte_len == 0 || byte_len > ring->slot_bytes) break;
+                if (ctx->audio_buf.size() < byte_len)
+                    ctx->audio_buf.resize(byte_len);
+                std::memcpy(ctx->audio_buf.data(),
+                            reinterpret_cast<const char *>(slot) +
+                                sizeof(ShmAudioSlot),
+                            byte_len);
+                std::atomic_thread_fence(std::memory_order_acquire);
+                const uint32_t seq2 = slot->sequence;
+                if (seq1 == seq2 && (seq2 & 1u) == 0) { copied = true; break; }
             }
-            audio.data[0] = reinterpret_cast<const uint8_t *>(ctx->stereo_buf.data());
-            audio.frames = mono_frames;
-            audio.format = AUDIO_FORMAT_16BIT;
-            audio.speakers = SPEAKERS_STEREO;
-        } else {
-            audio.data[0] = reinterpret_cast<const uint8_t *>(pcm);
-            audio.frames = byte_len /
-                (kZoomBytesPerSample * std::max<uint16_t>(channels, 1));
-            audio.format = AUDIO_FORMAT_16BIT;
-            audio.speakers = channels == 2 ? SPEAKERS_STEREO : SPEAKERS_MONO;
+
+            // The seqlock only proves the payload was not TORN -- it does not
+            // prove it is the buffer we MEANT to read. If the writer has since
+            // advanced far enough past this generation, it has physically
+            // overwritten this slot at least once more while we were copying it:
+            // what we just read cleanly may be a newer buffer that happened to
+            // land on an even/even pair, about to be published in this older
+            // slot's timeline position.
+            if (copied && ring->write_index - slot_index > slot_count) {
+                copied = false;
+                const uint64_t overrun_before = ctx->overrun_slots;
+                ++ctx->overrun_slots;
+                // Same rate-limit, and the same reason, as the overrun-skip log
+                // above -- this one sits INSIDE the per-slot loop and could
+                // otherwise fire up to slot_count times per callback. Sharing the
+                // gate on the one overrun_slots counter (rather than a second
+                // one) keeps "first occurrence, then periodically" meaningful
+                // regardless of which of the two loss paths produced it. This
+                // check can also false-positive if the reader is preempted
+                // between the seqlock's seq2 read and this write_index re-read --
+                // a still-valid buffer gets discarded and counted -- which is a
+                // second reason not to treat every occurrence as log-worthy.
+                if (overrun_before == 0 ||
+                    overrun_before / 250 != ctx->overrun_slots / 250) {
+                    blog(LOG_WARNING,
+                         "[obs-zoom-plugin] CoreVideo audio slot overwritten mid-read: source=%s uuid=%s lost_slots=%llu",
+                         obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
+                         static_cast<unsigned long long>(ctx->overrun_slots));
+                }
+            }
+
+            ctx->read_index = slot_index + 1;
+            if (!copied) {
+                // Lost this slot's audio, whichever way: unread, unreadably torn
+                // after three attempts, or clobbered mid-copy above. Advance the
+                // timeline anyway -- a lost slot is silence of a KNOWN duration,
+                // and skipping the accounting shifts this source permanently
+                // earlier relative to everything else on the timeline (see
+                // src/audio-timeline.h's doctrine on gaps).
+                audio_timeline_skip(ctx->timeline, nominal_frames);
+                continue;
+            }
+
+            const uint32_t sample_rate = ring->sample_rate;
+            const uint16_t channels    = ring->channels;
+            const uint64_t now_ns = os_gettime_ns();
+
+            // Both processes share a QPC-based monotonic clock, so this
+            // subtraction is meaningful across the boundary -- see
+            // ShmAudioSlot::capture_ns in engine-ipc.h.
+            if (capture_ns != 0 && now_ns > capture_ns) {
+                ctx->audio_latency_us.store((now_ns - capture_ns) / 1000,
+                                            std::memory_order_relaxed);
+            }
+
+            const auto *pcm = reinterpret_cast<const int16_t *>(ctx->audio_buf.data());
+            obs_source_audio audio = {};
+            audio.samples_per_sec = sample_rate;
+            // Sample-derived, not arrival-derived: IPC jitter must not reach OBS.
+            // `frames` is what this buffer actually carries, so the timeline advances
+            // by exactly the audio published. See src/audio-timeline.h.
+            const uint32_t timeline_frames =
+                byte_len / (kZoomBytesPerSample * std::max<uint16_t>(channels, 1));
+            // Delay is arithmetic on the timeline, not a buffer: OBS's async path
+            // holds timestamped audio until its time comes. Only ever pushes audio
+            // LATER -- ITU-R BT.1359-1 detects audio leading at +45 ms but
+            // tolerates lagging to -125 ms, so late is the safe direction to err.
+            //
+            // Read from the file-scope global here rather than a per-source cached
+            // copy: that is what makes a change in Zoom Plugin Settings take effect
+            // on the next buffer, on every live source, with no restart.
+            audio.timestamp = audio_timeline_stamp(ctx->timeline, sample_rate,
+                                                   timeline_frames, now_ns) +
+                              static_cast<uint64_t>(g_global_audio_delay_ms.load(
+                                  std::memory_order_relaxed)) * 1'000'000ULL;
+
+            if (ctx->audio_mode.load(std::memory_order_acquire) == AudioChannelMode::Stereo &&
+                channels == 1) {
+                const uint32_t mono_frames = byte_len / kZoomBytesPerSample;
+                const uint32_t stereo_count = mono_frames * 2;
+                if (ctx->stereo_buf.size() < stereo_count)
+                    ctx->stereo_buf.resize(stereo_count);
+                for (uint32_t i = 0; i < mono_frames; ++i) {
+                    ctx->stereo_buf[i * 2] = pcm[i];
+                    ctx->stereo_buf[i * 2 + 1] = pcm[i];
+                }
+                audio.data[0] = reinterpret_cast<const uint8_t *>(ctx->stereo_buf.data());
+                audio.frames = mono_frames;
+                audio.format = AUDIO_FORMAT_16BIT;
+                audio.speakers = SPEAKERS_STEREO;
+            } else {
+                audio.data[0] = reinterpret_cast<const uint8_t *>(pcm);
+                audio.frames = byte_len /
+                    (kZoomBytesPerSample * std::max<uint16_t>(channels, 1));
+                audio.format = AUDIO_FORMAT_16BIT;
+                audio.speakers = channels == 2 ? SPEAKERS_STEREO : SPEAKERS_MONO;
+            }
+
+            obs_source_output_audio(ctx->source, &audio);
+            ++ctx->frame_count;
+            if (ctx->frame_count == 1 || ctx->frame_count % 250 == 0) {
+                blog(LOG_INFO,
+                     "[obs-zoom-plugin] Output CoreVideo audio frame: source=%s uuid=%s participant_id=%u count=%llu frames=%u sample_rate=%u channels=%u",
+                     obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
+                     slot_participant,
+                     static_cast<unsigned long long>(ctx->frame_count),
+                     audio.frames, sample_rate, channels);
+            }
         }
 
-        obs_source_output_audio(ctx->source, &audio);
-        ++ctx->frame_count;
-        if (ctx->frame_count == 1 || ctx->frame_count % 250 == 0) {
-            blog(LOG_INFO,
-                 "[obs-zoom-plugin] Output CoreVideo audio frame: source=%s uuid=%s participant_id=%u count=%llu frames=%u sample_rate=%u channels=%u",
-                 obs_source_get_name(ctx->source), ctx->source_uuid.c_str(),
-                 resolved_participant_id,
-                 static_cast<unsigned long long>(ctx->frame_count),
-                 audio.frames, sample_rate, channels);
-        }
+        auto *ring_mut = static_cast<ShmAudioHeader *>(ctx->audio_shm.ptr);
+        ring_mut->notify = 0;
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        if (ctx->read_index == ring_mut->write_index)
+            break;              // truly empty; the next publish re-notifies
+        // Data landed between our drain and the flag clear. Reclaim the flag
+        // (suppressing redundant events -- a spurious one is harmless) and
+        // drain again rather than wait for an event that will never come.
+        ring_mut->notify = 1;
+        std::atomic_thread_fence(std::memory_order_release);
     }
 }
 

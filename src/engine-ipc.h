@@ -147,7 +147,11 @@ struct ShmAudioSlot {
     // for cross-process latency there.
     uint64_t capture_ns;
     uint32_t byte_len;
-    uint32_t reserved;
+    // Who this buffer belongs to. With coalesced notifications (see
+    // ShmAudioHeader::notify) one pipe event can cover many slots, so the
+    // event can no longer describe each buffer -- the slot describes itself.
+    // 0 for the mixed/audience stream, which has no single participant.
+    uint32_t participant_id;
 };
 
 struct ShmAudioHeader {
@@ -166,7 +170,47 @@ struct ShmAudioHeader {
     uint32_t slot_bytes;
     uint32_t sample_rate;
     uint16_t channels;
-    uint16_t reserved;
+    // Edge-triggered notification flag. The engine used to send one
+    // {"cmd":"audio"} pipe line PER 10ms BUFFER PER SOURCE (~1,700
+    // messages/sec at full load), all parsed by the plugin's single reader
+    // thread; when that thread fell behind, the pipe filled, the engine's
+    // blocking write stalled the Zoom SDK callback thread, and audio queued
+    // upstream inside the SDK. Measured live 2026-08-17: engine->plugin
+    // latency 58-90ms under full gallery load vs 41-161us idle, with ring
+    // overruns at zero throughout -- the ring itself never fell behind, the
+    // wakeups did. The ring makes per-buffer events redundant: the reader
+    // drains everything available on any wakeup, so the event only needs to
+    // fire on the empty -> non-empty edge.
+    //
+    // Protocol (single writer, single reader; `notify` is plain uint16, the
+    // fences do the work):
+    //
+    //   WRITER, after publishing write_index:
+    //     atomic_thread_fence(seq_cst);
+    //     if (notify == 0) { notify = 1; send one pipe event; }
+    //
+    //   READER, after draining to its write_index snapshot:
+    //     notify = 0;
+    //     atomic_thread_fence(seq_cst);
+    //     if (read_index != write_index) { notify = 1; drain again; }
+    //     else break;                      // truly empty
+    //
+    // WHY NO WAKEUP IS EVER LOST. A lost wakeup needs BOTH: the writer to
+    // skip its event (it loaded notify == 1, missing the reader's clear) AND
+    // the reader to stop (it loaded write_index and saw no new data). Each
+    // side executes store -> seq_cst fence -> load. seq_cst fences are
+    // totally ordered: if the reader's fence comes first, its notify=0 store
+    // is visible to the writer's load, so the writer sends the event; if the
+    // writer's fence comes first, its write_index store is visible to the
+    // reader's re-check, so the reader drains again. Either way progress is
+    // made. Both flags set concurrently is benign (one redundant event); the
+    // seq_cst fences are REQUIRED -- plain x86 store->load may reorder, and
+    // a release fence is not enough here.
+    //
+    // A new region starts with notify = 0, so the first buffer after any
+    // generation change always sends its event and the reader learns to
+    // remap.
+    uint16_t notify;
 };
 
 inline size_t shm_audio_region_bytes(uint32_t slot_bytes)
@@ -279,6 +323,28 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
        if (!r.ptr) { shm_region_destroy(r); return false; }
        return true;
    }
+
+   // Read-write open, for AUDIO ring regions only. The edge-triggered
+   // notification protocol (ShmAudioHeader::notify) requires the READER to
+   // clear a flag the writer checks, so a read-only view cannot implement it.
+   // This deliberately relaxes the read-only mapping for audio: the engine
+   // never reads an audio region back -- it only writes -- so the read-only
+   // view never protected engine-side state; it only protected the plugin
+   // from its own stray writes into data the plugin alone consumes. Video
+   // regions keep read-only views: their protocol needs no reader writes.
+   inline bool shm_region_open_readwrite(ShmRegion &r, const std::string &name,
+                                         size_t size)
+   {
+       shm_region_destroy(r);
+       r.map_handle = OpenFileMappingA(FILE_MAP_READ | FILE_MAP_WRITE, FALSE,
+                                       name.c_str());
+       if (!r.map_handle) return false;
+       r.ptr = MapViewOfFile(r.map_handle, FILE_MAP_READ | FILE_MAP_WRITE,
+                             0, 0, size);
+       r.size = r.ptr ? size : 0;
+       if (!r.ptr) { shm_region_destroy(r); return false; }
+       return true;
+   }
 #else
 #  include <sys/mman.h>
 #  include <fcntl.h>
@@ -336,6 +402,22 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
        r.fd = shm_open(r.name.c_str(), O_RDONLY, 0600);
        if (r.fd < 0) return false;
        r.ptr = mmap(nullptr, size, PROT_READ, MAP_SHARED, r.fd, 0);
+       r.size = (r.ptr != MAP_FAILED) ? size : 0;
+       if (r.ptr == MAP_FAILED) { r.ptr = nullptr; shm_region_destroy(r); return false; }
+       return true;
+   }
+
+   // See the Windows counterpart above: audio rings only, because the
+   // edge-triggered notify flag is reader-cleared by design.
+   inline bool shm_region_open_readwrite(ShmRegion &r, const std::string &name,
+                                         size_t size)
+   {
+       shm_region_destroy(r);
+       r.name = "/" + name;
+       r.owner = false;
+       r.fd = shm_open(r.name.c_str(), O_RDWR, 0600);
+       if (r.fd < 0) return false;
+       r.ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, r.fd, 0);
        r.size = (r.ptr != MAP_FAILED) ? size : 0;
        if (r.ptr == MAP_FAILED) { r.ptr = nullptr; shm_region_destroy(r); return false; }
        return true;

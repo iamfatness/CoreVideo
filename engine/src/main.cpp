@@ -40,6 +40,8 @@
 #include <algorithm>
 #include <string>
 #include <atomic>
+#include <exception>
+#include <cstdlib>
 #include <chrono>
 #include <mutex>
 #include <thread>
@@ -1165,6 +1167,19 @@ int main()
     IpcFd e2p = kIpcInvalidFd;
     if (!ipc_setup(p2e, e2p)) return 1;
     EngineIpc::init(e2p); // must be called before any SDK callbacks can fire
+
+    // An uncaught exception -- ours or the SDK's, on ANY thread -- otherwise
+    // dies as a bare 0xc0000409 fastfail in ucrtbase with nothing in our log
+    // (observed 2026-08-17: four such crashes in a reconnect loop while two
+    // OBS instances collided over this process's singletons, and the only
+    // evidence was Windows Error Reporting). Say what happened on the pipe
+    // first, then exit cleanly so the plugin's reconnect logic sees an exit
+    // code instead of a crash bucket.
+    std::set_terminate([]() {
+        EngineIpc::write(
+            R"({"cmd":"error","msg":"engine_terminate","detail":"uncaught exception or terminate() -- see preceding engine log lines"})");
+        _exit(3);
+    });
 
     EngineIpc::write(R"({"cmd":"ready"})");
 

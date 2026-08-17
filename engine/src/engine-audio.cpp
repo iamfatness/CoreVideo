@@ -180,6 +180,23 @@ bool EngineAudio::ensure_shm(AudioTarget &target,
     if (!shm_region_create(target.shm, region.name, total)) return false;
     target.shm_gen = region.gen; // old plugin-side mappings are now stale
 
+    // A "create" that opened a pre-existing section means some OTHER process
+    // still holds a region by this name -- in practice a wedged orphan engine
+    // from a previous OBS session, which may still be WRITING it. A ghost
+    // writer poisons the notify flag (its events die on a dead pipe, ours get
+    // suppressed) and audio degrades to the 2.5s keepalive: measured live
+    // 2026-08-17 as ~92% loss on every source. The pre-launch stale-engine
+    // sweep in zoom-engine-client.cpp exists to prevent this; if this fires
+    // anyway, that defence has a hole -- say so loudly.
+    if (target.shm.already_existed) {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"audio_shm_name_collision","source_uuid":")" +
+            source_uuid + R"(","shm_gen":)" + std::to_string(region.gen) + "}");
+        EngineIpc::write(
+            R"({"cmd":"error","msg":"shm_name_collision","source_uuid":")" +
+            source_uuid + "\"}");
+    }
+
     // Initialise the header once, before any slot is published -- the reader
     // relies on slot_count and slot_bytes being correct from the first read.
     auto *ring = static_cast<ShmAudioHeader *>(target.shm.ptr);

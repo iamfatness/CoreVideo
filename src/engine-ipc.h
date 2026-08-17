@@ -337,6 +337,17 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
        void   *ptr        = nullptr;
        size_t  size       = 0;
        uint32_t last_error = 0; // GetLastError() of the most recent failure
+       // True when the most recent shm_region_create() OPENED a section that
+       // already existed instead of creating a fresh one. A named section
+       // outlives its creator for as long as ANY process maps it, so this
+       // firing in the engine means some other process -- in practice a
+       // wedged orphan ZoomObsEngine from a previous OBS session -- still
+       // holds (and may still be WRITING) a region by this name. Proven live
+       // 2026-08-17: a ghost writer sharing a ring sets ShmAudioHeader::notify
+       // with no pipe to deliver its event, permanently suppressing the live
+       // engine's edge notifications -- every source degrades to the 2.5s
+       // keepalive, ~92% audio loss. Callers must surface this loudly.
+       bool already_existed = false;
    };
 
    inline void shm_region_destroy(ShmRegion &r)
@@ -344,6 +355,7 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
        if (r.ptr)        { UnmapViewOfFile(r.ptr);   r.ptr        = nullptr; }
        if (r.map_handle) { CloseHandle(r.map_handle); r.map_handle = nullptr; }
        r.size = 0;
+       r.already_existed = false;
    }
 
    inline bool shm_region_create(ShmRegion &r, const std::string &name, size_t size)
@@ -353,6 +365,10 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
                                          PAGE_READWRITE, 0,
                                          static_cast<DWORD>(size), name.c_str());
        if (!r.map_handle) { r.last_error = GetLastError(); return false; }
+       // CreateFileMapping SUCCEEDS on an existing name and hands back the
+       // existing section; only GetLastError() distinguishes the two. See
+       // ShmRegion::already_existed for why callers must not ignore this.
+       r.already_existed = GetLastError() == ERROR_ALREADY_EXISTS;
        r.ptr  = MapViewOfFile(r.map_handle, FILE_MAP_WRITE, 0, 0, size);
        r.size = r.ptr ? size : 0;
        if (!r.ptr) {
@@ -413,6 +429,11 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
        std::string name; // stored so we can shm_unlink on destroy
        bool        owner = false;
        uint32_t    last_error = 0; // errno of the most recent failure
+       // See the Windows counterpart: the most recent shm_region_create()
+       // found this name already present (another process created it and it
+       // has not been unlinked). Same ghost-writer hazard, same obligation on
+       // callers to surface it.
+       bool already_existed = false;
    };
 
    inline void shm_region_destroy(ShmRegion &r)
@@ -426,6 +447,7 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
        r.size = 0;
        r.name.clear();
        r.owner = false;
+       r.already_existed = false;
    }
 
    inline bool shm_region_create(ShmRegion &r, const std::string &name, size_t size)
@@ -433,7 +455,13 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
        shm_region_destroy(r);
        r.name = "/" + name; // shm_open requires a leading '/'
        r.owner = true;
-       r.fd   = shm_open(r.name.c_str(), O_CREAT | O_RDWR, 0600);
+       // O_EXCL first purely as a probe: EEXIST is the only portable way to
+       // learn the name was already present (see ShmRegion::already_existed).
+       r.fd = shm_open(r.name.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
+       if (r.fd < 0 && errno == EEXIST) {
+           r.already_existed = true;
+           r.fd = shm_open(r.name.c_str(), O_CREAT | O_RDWR, 0600);
+       }
        if (r.fd < 0) { r.last_error = static_cast<uint32_t>(errno); return false; }
        if (ftruncate(r.fd, static_cast<off_t>(size)) < 0) {
            r.last_error = static_cast<uint32_t>(errno);

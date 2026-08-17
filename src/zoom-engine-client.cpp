@@ -13,6 +13,9 @@
 #include <cstdlib>
 #include <thread>
 #include <unordered_map>
+#if defined(WIN32)
+#include <tlhelp32.h> // stale-engine sweep in terminate_stale_engine_processes()
+#endif
 
 bool cv_zoom_verbose_logging()
 {
@@ -284,6 +287,87 @@ ZoomEngineClient::~ZoomEngineClient()
 // re-subscribe from the new engine's first roster
 // (forget_subscription_for_new_engine() in
 // src/zoom-participant-audio-source.cpp says why that is the trigger).
+// Terminates every ZoomObsEngine process that exists before we launch a fresh
+// one. Runs unconditionally on the launch path.
+//
+// THE DEFECT THIS EXISTS FOR (2026-08-17, live meeting, root-caused by
+// controlled repro). An OBS exit or crash while the Zoom SDK is wedged leaves
+// the engine process alive as an orphan -- still in the meeting, still
+// receiving audio callbacks, still WRITING its shared-memory rings, with
+// nobody reading its pipes. The next engine restarts its per-process
+// generation counters, so it re-creates every region under the SAME name and
+// CreateFileMapping silently hands it the ORPHAN'S section: two writers, one
+// ring. The ghost's publishes set ShmAudioHeader::notify with no live pipe to
+// deliver the event, which permanently suppresses the live engine's
+// edge-triggered audio events -- every source degrades to the 2.5s keepalive
+// (~92% audio loss; the exact live signature was reproduced on demand by
+// attaching a synthetic 10Hz ghost writer to one healthy ring). It also holds
+// the SDK singleton (the SDKERR_OTHER_SDK_INSTANCE_RUNNING init retry) and
+// the named-pipe server instances.
+//
+// A wedged SDK ignores every polite signal -- that is what made it an orphan
+// -- so hard termination is the only lever that works. Killing by image name
+// is deliberate: any ZoomObsEngine that predates the process we are about to
+// launch is stale by definition (the plugin only ever wants one), and the
+// one we do want does not exist yet.
+static void terminate_stale_engine_processes()
+{
+#if defined(WIN32)
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) {
+        blog(LOG_WARNING,
+             "[obs-zoom-plugin] Stale-engine sweep: process snapshot failed "
+             "(error %lu) — launching anyway",
+             GetLastError());
+        return;
+    }
+    int killed = 0, refused = 0;
+    // Explicit W variants: this is a UNICODE build, where the un-suffixed
+    // names alias to them anyway and szExeFile is WCHAR[].
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (_wcsicmp(pe.szExeFile, L"ZoomObsEngine.exe") != 0)
+                continue;
+            HANDLE h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE,
+                                   pe.th32ProcessID);
+            if (!h) {
+                // Another session's engine running as another user, or gone
+                // between snapshot and open. Count it: a refusal here is the
+                // lead if shm_name_collision fires later anyway.
+                ++refused;
+                blog(LOG_WARNING,
+                     "[obs-zoom-plugin] Stale-engine sweep: could not open "
+                     "ZoomObsEngine pid=%lu (error %lu)",
+                     pe.th32ProcessID, GetLastError());
+                continue;
+            }
+            TerminateProcess(h, 1);
+            // Bounded wait so the SDK singleton, pipe names and section names
+            // are actually free before launch_engine() runs; an unwaited kill
+            // can lose the race to its own replacement.
+            WaitForSingleObject(h, 2000);
+            CloseHandle(h);
+            ++killed;
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] Stale-engine sweep: terminated orphaned "
+                 "ZoomObsEngine pid=%lu before launching a fresh engine",
+                 pe.th32ProcessID);
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    if (killed == 0 && refused == 0)
+        blog(LOG_INFO, "[obs-zoom-plugin] Stale-engine sweep: none found");
+#else
+    // POSIX (mac port): same rationale, pkill by exact image name. -9 because
+    // the process this hunts is by definition wedged past SIGTERM. Exit
+    // status intentionally unchecked -- "nothing matched" and "killed one"
+    // both leave the field clear for the launch that follows.
+    (void)system("pkill -9 -x ZoomObsEngine 2>/dev/null");
+#endif
+}
+
 void ZoomEngineClient::release_source_mappings_for_new_engine()
 {
     std::vector<std::function<void()>> callbacks;
@@ -311,6 +395,14 @@ void ZoomEngineClient::release_source_mappings_for_new_engine()
 bool ZoomEngineClient::start(const std::string &jwt_token,
                              const std::string &public_app_key)
 {
+    if (m_running.load(std::memory_order_acquire)) return true;
+    // Serialise the launch: see m_start_mtx in the header for the 9ms-apart
+    // double-launch this closes. Deadlock note: nothing inside this body
+    // calls start() and stop() never takes this lock, so the only wait here
+    // is one racing starter finishing its launch.
+    std::lock_guard<std::mutex> start_lock(m_start_mtx);
+    // Re-check under the lock: if the racing caller we waited on succeeded,
+    // the engine they launched is the engine we wanted.
     if (m_running.load(std::memory_order_acquire)) return true;
     if (jwt_token.empty() && public_app_key.empty()) {
         const std::string message =
@@ -356,6 +448,12 @@ bool ZoomEngineClient::start(const std::string &jwt_token,
     // dead, and the regions are reopened from the first frame or audio event
     // whenever an engine does come up.
     release_source_mappings_for_new_engine();
+
+    // AFTER the release (our own mappings on those names are gone), BEFORE the
+    // launch (so the SDK singleton, pipe names and section names are free for
+    // the process we are about to create). See the function's comment for the
+    // ghost-writer defect this closes.
+    terminate_stale_engine_processes();
 
     if (!launch_engine() || !connect_ipc()) {
         disconnect_ipc();
@@ -1034,7 +1132,8 @@ void ZoomEngineClient::handle_event(const std::string &line)
         // Media-path errors: the meeting itself is still healthy, so surface
         // them loudly to the operator but do NOT tear the session down or
         // trigger the reconnect flow.
-        if (emsg == "shm_create_failed" || emsg == "subscribe_rejected") {
+        if (emsg == "shm_create_failed" || emsg == "subscribe_rejected" ||
+            emsg == "shm_name_collision") {
             const std::string uuid =
                 obj.value("source_uuid").toString().toStdString();
             std::string error_message;
@@ -1043,6 +1142,19 @@ void ZoomEngineClient::handle_event(const std::string &line)
                     "Zoom engine could not allocate shared memory for source " +
                     (uuid.empty() ? std::string("(unknown)") : uuid) +
                     " — its frames are being dropped";
+            } else if (emsg == "shm_name_collision") {
+                // engine-audio.cpp::ensure_shm() — the engine's "create" opened
+                // a section another process still holds, i.e. a ghost
+                // ZoomObsEngine survived the pre-launch sweep. The audio it
+                // writes into that shared ring suppresses this engine's edge
+                // notifications (2026-08-17 root cause). The meeting itself is
+                // healthy: tell the operator, do not tear anything down.
+                error_message =
+                    "A stale ZoomObsEngine process is sharing audio memory "
+                    "with source " +
+                    (uuid.empty() ? std::string("(unknown)") : uuid) +
+                    " — audio will stutter until it is killed. Restart the "
+                    "engine (or end stray ZoomObsEngine.exe processes).";
             } else {
                 const int limit = obj.value("limit").toInt(0);
                 error_message =

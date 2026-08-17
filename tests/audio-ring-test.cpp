@@ -171,6 +171,32 @@ int main()
           "10ms -- the backward drift clamp will misfire (too tight) or mask "
           "real errors (too loose) after a ring-depth change");
 
+    // --- Ghost-writer detection: a "create" that lands on a name some other
+    // handle still holds must say so. This is the only signal the engine has
+    // that an orphaned predecessor is sharing (and possibly still writing) its
+    // ring -- the 2026-08-17 live defect where a ghost's notify=1 with a dead
+    // pipe suppressed every edge event and audio degraded to the 2.5s
+    // keepalive. Two regions in one process stand in for two processes here:
+    // the named section/shm object is process-agnostic either way ---
+    {
+        ShmRegion first{}, second{};
+        const size_t bytes = shm_audio_region_bytes(64);
+        check(shm_region_create(first, "cv_ring_test_collision", bytes),
+              "fresh create failed");
+        check(!first.already_existed,
+              "a fresh create must not report a collision");
+        check(shm_region_create(second, "cv_ring_test_collision", bytes),
+              "create over a held name failed outright -- it must open and "
+              "flag, not fail");
+        check(second.already_existed,
+              "a create that opened a section another handle still holds must "
+              "set already_existed -- silent sharing is the ghost-writer bug");
+        shm_region_destroy(second);
+        check(!second.already_existed,
+              "destroy must reset already_existed");
+        shm_region_destroy(first);
+    }
+
     if (failures == 0)
         std::cout << "audio-ring: all tests passed\n";
     return failures == 0 ? 0 : 1;

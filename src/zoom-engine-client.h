@@ -309,6 +309,17 @@ private:
     // credential, so it is cleared on teardown.
     std::string m_init_payload;
 
+    // Serialises start() bodies. The m_running early-return only filters
+    // callers that arrive AFTER a start finished; two callers arriving
+    // together both read m_running == false and both launch — observed live
+    // 2026-08-17 as two "New ZoomObsEngine process" launches 9 ms apart, the
+    // first of which becomes an orphaned ghost writer (see
+    // terminate_stale_engine_processes() in the .cpp for what that ghost then
+    // does to the audio rings). The second caller now waits, re-checks
+    // m_running under the lock, and returns the first caller's outcome
+    // instead of launching a rival.
+    std::mutex m_start_mtx;
+
 #if defined(WIN32)
     void *m_process = nullptr;
 #else

@@ -12,6 +12,7 @@
 // the loss that does happen countable instead of invisible.
 
 #include "engine-ipc.h"
+#include "audio-timeline.h"
 
 #include <iostream>
 
@@ -159,6 +160,16 @@ int main()
               "after an abandon the next publish must re-notify -- a wakeup "
               "consumed without clearing the flag is a permanent mute");
     }
+
+    // --- The timeline's burst allowance must track the ring's capacity. It is
+    // a literal in audio-timeline.h (to keep that header platform-free), so
+    // this is the assertion that keeps the two in step if kAudioRingSlots ever
+    // changes ---
+    check(kAudioTimelineBurstAllowanceNs ==
+              static_cast<uint64_t>(kAudioRingSlots) * 10'000'000ULL,
+          "kAudioTimelineBurstAllowanceNs no longer equals kAudioRingSlots x "
+          "10ms -- the backward drift clamp will misfire (too tight) or mask "
+          "real errors (too loose) after a ring-depth change");
 
     if (failures == 0)
         std::cout << "audio-ring: all tests passed\n";

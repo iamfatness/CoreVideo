@@ -2048,10 +2048,8 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
             // only ever push this output's embedded audio later, never earlier.
             const uint32_t timeline_frames =
                 byte_len / (kZoomBytesPerSample * std::max<uint16_t>(channels, 1));
-            audio.timestamp = audio_timeline_stamp(
-                                  m_audio_timeline, sample_rate,
-                                  timeline_frames, ts,
-                                  /*allow_backward_resync=*/pending <= 1) +
+            audio.timestamp = audio_timeline_stamp(m_audio_timeline, sample_rate,
+                                                   timeline_frames, ts) +
                               static_cast<uint64_t>(audio_delay_ms.load(
                                   std::memory_order_relaxed)) * 1'000'000ULL;
 

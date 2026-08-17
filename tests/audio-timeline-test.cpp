@@ -187,16 +187,43 @@ int main()
         audio_timeline_stamp(tl, kRate, kFrames, base);
         uint64_t prev = base;
         bool monotonic = true;
+        // The burst itself: 7 more slots against one frozen arrival.
         for (int i = 1; i <= 7; ++i) {
-            const uint64_t ts = audio_timeline_stamp(
-                tl, kRate, kFrames, base, /*allow_backward_resync=*/false);
+            const uint64_t ts = audio_timeline_stamp(tl, kRate, kFrames, base);
             if (ts < prev) monotonic = false;
             prev = ts;
         }
         check(monotonic && prev == base + 7 * k10ms,
-              "a 7-slot burst against a frozen arrival re-anchored backwards -- "
-              "OBS reads that as 'audio is lagging' and restarts the source "
-              "during exactly the recovery the burst drain performs");
+              "a full-ring burst against a frozen arrival re-anchored "
+              "backwards mid-burst");
+        // THE CASE THE FIRST FIX MISSED (review-reproduced): the wakeup AFTER
+        // the burst. The timeline still reads ~70ms ahead of wall clock; a
+        // symmetric 50ms clamp re-anchored backwards right here, handing OBS
+        // one reversed timestamp. The burst allowance in the backward limit is
+        // what this pins.
+        const uint64_t after = audio_timeline_stamp(tl, kRate, kFrames,
+                                                    base + 8 * k10ms + 500'000ULL);
+        check(after >= prev,
+              "the first wakeup AFTER a burst re-anchored backwards -- the "
+              "backward limit must absorb one full ring of drain-ahead");
+        // And the allowance must be a BOUNDED grace, not a license to run
+        // ahead forever: stamping indefinitely against a frozen arrival, the
+        // derived time may lead arrival by at most forward-limit + one ring
+        // (the clamp re-anchors mid-stream whenever it would exceed that).
+        AudioTimeline tl2{};
+        const uint64_t t2 = 400'000'000'000ULL;
+        audio_timeline_stamp(tl2, kRate, kFrames, t2);
+        bool bounded = true;
+        for (int i = 0; i < 40; ++i) {                     // 400ms of content
+            const uint64_t ts = audio_timeline_stamp(tl2, kRate, kFrames, t2);
+            if (ts > t2 + kAudioTimelineMaxDriftNs +
+                         kAudioTimelineBurstAllowanceNs)
+                bounded = false;
+        }
+        check(bounded,
+              "derived time ran ahead of a frozen arrival past "
+              "forward-limit-plus-one-ring without re-anchoring -- the burst "
+              "allowance must bound run-ahead, not license it");
     }
 
     if (failures == 0)

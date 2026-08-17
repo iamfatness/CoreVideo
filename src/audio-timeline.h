@@ -48,6 +48,14 @@
 // clock exists to absorb.
 constexpr uint64_t kAudioTimelineMaxDriftNs = 50'000'000ULL;
 
+// One full audio ring's worth of content: kAudioRingSlots (8, engine-ipc.h) x
+// 10ms Zoom buffers. Added to the BACKWARD clamp limit only -- derived time
+// running up to this far ahead of arrival is the normal artifact of draining
+// a backlog faster than real time, never a clock error. Kept as a literal so
+// this header stays free of engine-ipc.h's platform includes;
+// tests/audio-ring-test.cpp asserts the two stay in step.
+constexpr uint64_t kAudioTimelineBurstAllowanceNs = 80'000'000ULL;
+
 struct AudioTimeline {
     // Wall-clock instant the current timeline began.
     uint64_t anchor_ns   = 0;
@@ -86,20 +94,10 @@ inline void audio_timeline_skip(AudioTimeline &tl, uint32_t frames)
 //
 // `arrival_ns` is consulted only to anchor a new timeline; once running it is
 // ignored entirely, which is the whole point.
-// `allow_backward_resync`: pass false while draining a BURST (a wakeup that
-// found more than one buffer queued). Within a burst the whole backlog drains
-// in microseconds, so arrival is effectively frozen while derived time
-// advances 10ms per slot -- by slot 6 of 8 the timeline reads 60ms "ahead of
-// arrival" and the backward clamp would re-anchor mid-burst, handing OBS a
-// backwards timestamp jump (its "audio is lagging... Restarting source
-// audio"). That apparent drift is an artifact of draining faster than real
-// time, not a clock error; the FORWARD clamp (arrival far ahead of derived
-// time -- the silent-participant case) stays active regardless.
 inline uint64_t audio_timeline_stamp(AudioTimeline &tl,
                                      uint32_t sample_rate,
                                      uint32_t frames,
-                                     uint64_t arrival_ns,
-                                     bool allow_backward_resync = true)
+                                     uint64_t arrival_ns)
 {
     // A rate change invalidates the accumulated sample count: N samples at
     // 16 kHz is not N samples at 48 kHz. Re-anchor rather than mis-scale.
@@ -129,12 +127,28 @@ inline uint64_t audio_timeline_stamp(AudioTimeline &tl,
     // explained by jitter. The dominant cause is a participant going silent:
     // Zoom stops delivering entirely, the timeline stops advancing, and the
     // stream resumes stamped by however long they were quiet -- see
-    // kAudioTimelineMaxDriftNs. Compared signed, because a timeline running
-    // AHEAD of arrival is equally wrong and equally worth correcting.
+    // kAudioTimelineMaxDriftNs.
+    //
+    // The limits are deliberately ASYMMETRIC. Forward drift (arrival ahead of
+    // derived time) means real wall-clock passed without audio -- clamp at
+    // kAudioTimelineMaxDriftNs. Backward "drift" (derived time ahead of
+    // arrival) up to one full ring is NOT a clock error: draining a backlog
+    // stamps up to kAudioRingSlots buffers against one frozen arrival, so the
+    // timeline legitimately reads up to 80ms "ahead" during and just after a
+    // burst. A first fix gated the backward clamp per-pass (pending <= 1),
+    // which review reproduced as still broken: the wakeup AFTER the burst has
+    // pending == 1, re-enables the clamp, sees the burst's leftover -60ms,
+    // and re-anchors backwards anyway -- one reversed timestamp handed to
+    // OBS, exactly the "Restarting source audio" trigger. Widening the
+    // backward limit by the ring's capacity makes the gate a property of the
+    // timeline instead of the pass, which is the property that was actually
+    // violated.
     const int64_t drift = static_cast<int64_t>(arrival_ns) -
                           static_cast<int64_t>(ts);
-    const int64_t limit = static_cast<int64_t>(kAudioTimelineMaxDriftNs);
-    if (drift > limit || (allow_backward_resync && drift < -limit)) {
+    const int64_t fwd_limit = static_cast<int64_t>(kAudioTimelineMaxDriftNs);
+    const int64_t back_limit = fwd_limit +
+        static_cast<int64_t>(kAudioTimelineBurstAllowanceNs);
+    if (drift > fwd_limit || drift < -back_limit) {
         tl.anchor_ns = arrival_ns;
         tl.samples   = 0;
         ts           = arrival_ns;

@@ -405,6 +405,7 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
 #else
 #  include <sys/mman.h>
 #  include <fcntl.h>
+#  include <cerrno>
    struct ShmRegion {
        int         fd   = -1;
        void       *ptr  = nullptr;
@@ -473,10 +474,16 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
        r.name = "/" + name;
        r.owner = false;
        r.fd = shm_open(r.name.c_str(), O_RDWR, 0600);
-       if (r.fd < 0) return false;
+       if (r.fd < 0) { r.last_error = static_cast<uint32_t>(errno); return false; }
        r.ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, r.fd, 0);
        r.size = (r.ptr != MAP_FAILED) ? size : 0;
-       if (r.ptr == MAP_FAILED) { r.ptr = nullptr; shm_region_destroy(r); return false; }
+       if (r.ptr == MAP_FAILED) {
+           const uint32_t err = static_cast<uint32_t>(errno);
+           r.ptr = nullptr;
+           shm_region_destroy(r);
+           r.last_error = err;
+           return false;
+       }
        return true;
    }
 #endif

@@ -707,10 +707,8 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
             // Read from the file-scope global here rather than a per-source cached
             // copy: that is what makes a change in Zoom Plugin Settings take effect
             // on the next buffer, on every live source, with no restart.
-            audio.timestamp = audio_timeline_stamp(
-                                  ctx->timeline, sample_rate, timeline_frames,
-                                  now_ns,
-                                  /*allow_backward_resync=*/pending <= 1) +
+            audio.timestamp = audio_timeline_stamp(ctx->timeline, sample_rate,
+                                                   timeline_frames, now_ns) +
                               static_cast<uint64_t>(g_global_audio_delay_ms.load(
                                   std::memory_order_relaxed)) * 1'000'000ULL;
 

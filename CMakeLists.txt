@@ -858,6 +858,53 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoDirectorPreviewFrameGuard
              COMMAND CoreVideoDirectorPreviewFrameGuardTest)
 
+    # How long the preview slot is kept alive AFTER a cut. Releasing it in the
+    # same breath as the re-subscribe left nothing publishing for the 735-1277ms
+    # the engine needs to rebuild the main region — the 2026-08-16 flash.
+    add_executable(CoreVideoDirectorHandoverTest
+        tests/director-handover-test.cpp
+    )
+    target_include_directories(CoreVideoDirectorHandoverTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoDirectorHandover
+             COMMAND CoreVideoDirectorHandoverTest)
+
+    # The master clock every audio buffer is stamped from. Wall-clock arrival
+    # stamps let IPC jitter reach OBS, which resampled continuously — the
+    # 2026-08-16 "audio is very bad" report.
+    add_executable(CoreVideoAudioTimelineTest
+        tests/audio-timeline-test.cpp
+    )
+    target_include_directories(CoreVideoAudioTimelineTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoAudioTimeline
+             COMMAND CoreVideoAudioTimelineTest)
+
+    # Index arithmetic of the audio SHM ring. The single-slot mailbox it
+    # replaces dropped 10ms of audio on every reader stall, silently.
+    add_executable(CoreVideoAudioRingTest
+        tests/audio-ring-test.cpp
+    )
+    target_include_directories(CoreVideoAudioRingTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoAudioRing
+             COMMAND CoreVideoAudioRingTest)
+
+    # Which participants a video-assignment picker offers. The rule that the
+    # picker's own current selection is never hidden is the load-bearing one:
+    # dropping it would unbind the source when somebody's camera goes off.
+    add_executable(CoreVideoParticipantFilterTest
+        tests/participant-filter-test.cpp
+    )
+    target_include_directories(CoreVideoParticipantFilterTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoParticipantFilter
+             COMMAND CoreVideoParticipantFilterTest)
+
     # Measures the luma range actually delivered by the SDK, so the full-range
     # vs limited-range question is settled by measurement, not assumption.
     add_executable(CoreVideoLumaRangeProbeTest

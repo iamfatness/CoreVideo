@@ -81,7 +81,23 @@ public:
     void set_raw_media_active(bool active);
     void unsubscribe(const std::string &source_uuid);
     void resubscribe_all();
+    // Real teardown: drops the renderers AND forgets which participant each
+    // source wanted. Called only at a meeting boundary (main.cpp's
+    // clear_media_intent(), on DISCONNECTING/ENDED), because Zoom user IDs are
+    // meeting-scoped 32-bit values -- intent carried from one meeting into the
+    // next can resubscribe a colliding ID and put the wrong participant on an
+    // output. Never call this for a raw-recording stop; use suspend_all().
     void unsubscribe_all();
+    // Drop the live renderers but KEEP the desired-state map, so a later
+    // resubscribe_all() can rebuild every subscription. This is the raw-media
+    // stop path; unsubscribe_all() is a real teardown and forgets intent. The
+    // distinction is load-bearing -- see both comments before merging them.
+    //
+    // Mirrors EngineAudio::reset_subscription(), which drops the SDK
+    // subscription flag and preserves m_targets. Video had no equivalent, so a
+    // stop/start of raw recording silently forgot every video source and the
+    // operator had to re-pick participants by hand, on air.
+    void suspend_all();
 
 private:
     void unsubscribe_locked(const std::string &source_uuid);

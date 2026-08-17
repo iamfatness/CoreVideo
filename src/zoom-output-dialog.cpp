@@ -3,8 +3,11 @@
 #include "zoom-engine-client.h"
 #include "zoom-output-manager.h"
 #include "zoom-output-profile.h"
+#include "participant-filter.h"
+#include "zoom-settings.h"
 #include <QAbstractItemView>
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QHBoxLayout>
@@ -19,6 +22,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QSpinBox>
 #include <QStringList>
 #include <QTableWidget>
 #include <QTimer>
@@ -39,9 +43,18 @@ enum OutputColumns {
     ColumnDelivered,
     ColumnSdk,
     ColumnAudio,
+    ColumnAudioDelay,
+    ColumnAvOffset,
     ColumnAudioRole,
     ColumnCount
 };
+
+// Caps schedule_deferred_refresh()'s retry loop at 250ms/attempt (~2s total)
+// for the SPINBOX-FOCUS case only, which can be held indefinitely. An open
+// combo popup defers without a cap: it closes on its own, and force-closing it
+// under an operator mid-selection is worse than a stale table.
+// See ZoomOutputDialog::m_deferred_refresh_attempts.
+static constexpr int kMaxDeferredRefreshAttempts = 8;
 
 // QTableWidget stretches a cell widget to fill the whole (tall) row cell. A
 // widget that cannot grow (fixed-size preview label) ends up anchored to the
@@ -71,6 +84,18 @@ static QComboBox *cell_combo(QTableWidget *table, int row, int col)
     if (auto *c = qobject_cast<QComboBox *>(w))
         return c;
     return w->findChild<QComboBox *>();
+}
+
+// Same lookup for the audio-delay spinbox, which lives inside its own
+// center_in_cell() holder exactly like the combos above.
+static QSpinBox *cell_spin(QTableWidget *table, int row, int col)
+{
+    QWidget *w = table->cellWidget(row, col);
+    if (!w)
+        return nullptr;
+    if (auto *s = qobject_cast<QSpinBox *>(w))
+        return s;
+    return w->findChild<QSpinBox *>();
 }
 
 // Fast I420 -> RGB888 conversion for preview thumbnails.
@@ -495,6 +520,37 @@ static bool combo_has_user_edit(QComboBox *combo)
     return combo->view() && combo->view()->isVisible();
 }
 
+// QSpinBox has no equivalent to QComboBox::activated (a signal that only
+// fires on user interaction, never a programmatic setCurrentIndex). Callers
+// must connect this AFTER setting the widget's initial value from live
+// state, exactly as the combo helpers above are used, so that initial set
+// doesn't itself mark the row dirty.
+static void mark_dirty_on_user_change(QSpinBox *spin)
+{
+    QObject::connect(spin, QOverload<int>::of(&QSpinBox::valueChanged), spin,
+                     [spin](int) { spin->setProperty("user_dirty", true); });
+}
+
+static bool spinbox_has_user_edit(QSpinBox *spin)
+{
+    return spin && spin->property("user_dirty").toBool();
+}
+
+// output.audio_latency_us/video_latency_us are 0 until measured (see
+// task-5-report.md); showing an offset before then would be a fabricated
+// number, not a measurement.
+static QString av_offset_text(const ZoomOutputInfo &output)
+{
+    if (output.audio_latency_us == 0 || output.video_latency_us == 0)
+        return QStringLiteral("-");
+    const int64_t offset_us = static_cast<int64_t>(output.video_latency_us) -
+                              static_cast<int64_t>(output.audio_latency_us);
+    const double offset_ms = static_cast<double>(offset_us) / 1000.0;
+    return QString("%1%2 ms")
+        .arg(offset_ms >= 0.0 ? QStringLiteral("+") : QString())
+        .arg(offset_ms, 0, 'f', 1);
+}
+
 static AssignmentMode assignment_mode_from_data(const QString &data,
                                                 uint32_t &participant_id,
                                                 uint32_t &spotlight_slot)
@@ -537,6 +593,14 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
 {
     setWindowTitle("Zoom Output Manager");
     setAttribute(Qt::WA_DeleteOnClose, false);
+    // This widget is registered as an OBS dock (plugin-main.cpp), not shown
+    // standalone -- setMinimumSize() here forces the HOST dock, and the main
+    // window, to at least that width. Do not bump this for the Delay/A/V
+    // Offset columns added in Task 7: the table already scrolls
+    // horizontally (ColumnName is the only Stretch column; every other
+    // column, including the two new ones, is Fixed), so there is no need to
+    // force the whole dock wider on an operator's 1920x1080 canvas just to
+    // avoid a scrollbar.
     setMinimumSize(1500, 840);
     resize(1600, 920);
 
@@ -566,6 +630,20 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     connect(m_filter, &QLineEdit::textChanged, this,
             [this]() { refresh_participants(); });
 
+    m_hide_non_video = new QCheckBox("Hide participants without video", this);
+    m_hide_non_video->setToolTip(
+        "Hide camera-off participants from video assignment lists. Audio "
+        "source pickers always show everyone.");
+    m_hide_non_video->setChecked(
+        ZoomPluginSettings::load().hide_participants_without_video);
+    connect(m_hide_non_video, &QCheckBox::toggled, this, [this](bool on) {
+        ZoomPluginSettings s = ZoomPluginSettings::load();
+        s.hide_participants_without_video = on;
+        s.save();
+        refresh_participants();
+        refresh();
+    });
+
     m_output_summary = new QLabel(this);
     m_output_summary->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_output_summary->setWordWrap(true);
@@ -591,7 +669,13 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     m_table->setColumnCount(ColumnCount);
     m_table->setHorizontalHeaderLabels({
         "Preview", "Output", "Assignment", "Request", "Signal",
-        "SDK Status", "Audio", "Audio Role"
+        // "(embedded)" is load-bearing, not decoration: these two columns act on
+        // and measure the video source's OWN embedded audio track. A show that
+        // routes the dedicated CoreVideo Audio sources to program hears nothing
+        // change when it moves this Delay. The control for that path is the
+        // global "Audio delay (dedicated sources)" in Zoom Plugin Settings.
+        "SDK Status", "Audio", "Delay (embedded)", "A/V Offset (embedded)",
+        "Audio Role"
     });
     m_table->horizontalHeader()->setMinimumSectionSize(104);
     m_table->horizontalHeader()->setSectionResizeMode(ColumnPreview,    QHeaderView::Fixed);
@@ -601,6 +685,8 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     m_table->horizontalHeader()->setSectionResizeMode(ColumnDelivered,  QHeaderView::Fixed);
     m_table->horizontalHeader()->setSectionResizeMode(ColumnSdk,        QHeaderView::Fixed);
     m_table->horizontalHeader()->setSectionResizeMode(ColumnAudio,      QHeaderView::Fixed);
+    m_table->horizontalHeader()->setSectionResizeMode(ColumnAudioDelay, QHeaderView::Fixed);
+    m_table->horizontalHeader()->setSectionResizeMode(ColumnAvOffset,   QHeaderView::Fixed);
     m_table->horizontalHeader()->setSectionResizeMode(ColumnAudioRole,  QHeaderView::Fixed);
     m_table->setColumnWidth(ColumnPreview, 162);
     m_table->setColumnWidth(ColumnName, 240);
@@ -609,11 +695,19 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     m_table->setColumnWidth(ColumnDelivered, 168);
     m_table->setColumnWidth(ColumnSdk, 208);
     m_table->setColumnWidth(ColumnAudio, 148);
+    // Wide enough for the "(embedded)" qualifier in the header to be read
+    // rather than elided -- the qualifier is the point of the label.
+    m_table->setColumnWidth(ColumnAudioDelay, 148);
+    m_table->setColumnWidth(ColumnAvOffset, 172);
     m_table->setColumnWidth(ColumnAudioRole, 168);
     m_table->verticalHeader()->setVisible(false);
     m_table->verticalHeader()->setDefaultSectionSize(104);
     m_table->setSelectionMode(QAbstractItemView::NoSelection);
     m_table->setMinimumHeight(460);
+    // Left at its pre-Task-7 value on purpose -- see the dock-width comment
+    // on setMinimumSize() in the constructor above. The table scrolls
+    // horizontally to reach the Delay/A/V Offset columns rather than forcing
+    // the host dock wider.
     m_table->setMinimumWidth(1440);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Apply |
@@ -656,6 +750,7 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     layout->addLayout(profile_row);
     layout->addWidget(new QLabel("Participants", this));
     layout->addWidget(m_filter);
+    layout->addWidget(m_hide_non_video);
     layout->addWidget(m_participant_table);
     layout->addWidget(new QLabel("Outputs", this));
     layout->addWidget(m_output_summary);
@@ -712,6 +807,25 @@ bool ZoomOutputDialog::has_open_output_combo_popup() const
     return false;
 }
 
+// Deliberately SEPARATE from has_open_output_combo_popup(). The delay spinbox
+// has no popup, but the operator can be mid-keystroke typing a number into it
+// -- a rebuild mid-edit would reset its cursor/selection. Unlike a popup,
+// though, keyboard focus can be held indefinitely (click into it and walk
+// away), so only THIS predicate may be capped. Folding the two together, as an
+// earlier revision did, meant a genuinely open assignment dropdown got force-
+// torn-down after 8x250 ms -- on air, mid-scroll, on a 30-participant meeting.
+bool ZoomOutputDialog::has_focused_output_delay_spinbox() const
+{
+    if (!m_table) return false;
+    for (int row = 0; row < m_table->rowCount(); ++row) {
+        if (auto *delay_spin = cell_spin(m_table, row, ColumnAudioDelay)) {
+            if (delay_spin->hasFocus())
+                return true;
+        }
+    }
+    return false;
+}
+
 void ZoomOutputDialog::schedule_deferred_refresh()
 {
     if (m_deferred_refresh_queued)
@@ -719,7 +833,23 @@ void ZoomOutputDialog::schedule_deferred_refresh()
     m_deferred_refresh_queued = true;
     QTimer::singleShot(250, this, [this]() {
         m_deferred_refresh_queued = false;
+        // An open combo popup defers INDEFINITELY. It is transient by nature --
+        // it closes on the operator's next click or keystroke -- and tearing it
+        // down under them is exactly the on-air failure this guard exists to
+        // prevent: an assignment dropdown vanishing mid-scroll on a 30-person
+        // meeting.
         if (has_open_output_combo_popup()) {
+            schedule_deferred_refresh();
+            return;
+        }
+        // Keyboard focus on the Delay spinbox is different: it can be held
+        // forever (click into it and walk away), and must not freeze
+        // Signal/SDK/health/A/V Offset updates for the rest of the table. Only
+        // this case is capped; refresh() below re-checks the same cap and
+        // forces through once it's hit. Whatever the operator was mid-typing
+        // still survives via the PendingPick/user_dirty snapshot in refresh().
+        if (has_focused_output_delay_spinbox() &&
+            ++m_deferred_refresh_attempts < kMaxDeferredRefreshAttempts) {
             schedule_deferred_refresh();
             return;
         }
@@ -729,10 +859,18 @@ void ZoomOutputDialog::schedule_deferred_refresh()
 
 void ZoomOutputDialog::refresh()
 {
+    // Indefinite for a real popup, capped for spinbox focus -- see
+    // schedule_deferred_refresh().
     if (has_open_output_combo_popup()) {
         schedule_deferred_refresh();
         return;
     }
+    if (has_focused_output_delay_spinbox() &&
+        m_deferred_refresh_attempts < kMaxDeferredRefreshAttempts) {
+        schedule_deferred_refresh();
+        return;
+    }
+    m_deferred_refresh_attempts = 0;
 
     const int output_scroll =
         m_table && m_table->verticalScrollBar()
@@ -748,6 +886,7 @@ void ZoomOutputDialog::refresh()
         QVariant resolution;
         QVariant audio;
         QVariant audio_role;
+        QVariant audio_delay;
     };
     std::unordered_map<std::string, PendingPick> pending;
     if (m_table) {
@@ -757,7 +896,9 @@ void ZoomOutputDialog::refresh()
             auto *resolution = cell_combo(m_table, row, ColumnResolution);
             auto *audio = cell_combo(m_table, row, ColumnAudio);
             auto *audio_role = cell_combo(m_table, row, ColumnAudioRole);
-            if (!name_item || !assignment || !resolution || !audio || !audio_role)
+            auto *audio_delay = cell_spin(m_table, row, ColumnAudioDelay);
+            if (!name_item || !assignment || !resolution || !audio ||
+                !audio_role || !audio_delay)
                 continue;
 
             // Preserve only unapplied USER edits across the rebuild; an
@@ -773,8 +914,11 @@ void ZoomOutputDialog::refresh()
                 pick.audio = audio->currentData();
             if (combo_has_user_edit(audio_role))
                 pick.audio_role = audio_role->currentData();
+            if (spinbox_has_user_edit(audio_delay))
+                pick.audio_delay = audio_delay->value();
             if (pick.assignment.isValid() || pick.resolution.isValid() ||
-                pick.audio.isValid() || pick.audio_role.isValid())
+                pick.audio.isValid() || pick.audio_role.isValid() ||
+                pick.audio_delay.isValid())
                 pending[name_item->data(Qt::UserRole).toString()
                             .toStdString()] = pick;
         }
@@ -857,7 +1001,16 @@ void ZoomOutputDialog::refresh()
             assignment->addItem(QString("Spotlight %1").arg(slot),
                                 QString("spotlight:%1").arg(slot));
         }
-        for (const auto &p : roster)
+        // Camera-off participants cannot go into an output, so they are hidden
+        // when the operator asks for it. The output's own participant is passed
+        // as keep_user_id so it survives with their camera off -- otherwise
+        // select_assignment_value() below would fail to match and the combo
+        // would fall back, silently re-pointing a live output.
+        const auto assignable = visible_for_video_assignment(
+            roster,
+            ZoomPluginSettings::load().hide_participants_without_video,
+            output.participant_id);
+        for (const auto &p : assignable)
             assignment->addItem(participant_label(p), QString("user:%1").arg(p.user_id));
         const QString current_assignment = assignment_data_for_output(output);
         select_assignment_value(assignment, current_assignment);
@@ -921,6 +1074,56 @@ void ZoomOutputDialog::refresh()
         m_table->setCellWidget(row, ColumnAudio,
             center_in_cell(audio, Qt::AlignVCenter, 6));
 
+        // Delays THIS output's own embedded audio only -- not the separate
+        // dedicated CoreVideo Audio sources (e.g. "Jamal Carter (CoreVideo)")
+        // a show may route to program instead. See README's Output Manager
+        // section.
+        auto *audio_delay = new QSpinBox(m_table);
+        audio_delay->setRange(0, 500);
+        audio_delay->setSuffix(" ms");
+        audio_delay->setMinimumWidth(88);
+        audio_delay->setValue(static_cast<int>(output.audio_delay_ms));
+        audio_delay->setToolTip(
+            "Delays THIS OUTPUT'S OWN EMBEDDED AUDIO by 0-500 ms -- the audio "
+            "track published alongside this video source's picture -- to align "
+            "it with the slower video path. Trim toward the A/V Offset "
+            "(embedded) column to the right.\n\n"
+            "Trim OFF AIR. Lowering the value pushes this source's timestamp "
+            "backward once, which glitches that source as OBS discards the "
+            "overlap; raising it is smooth.\n\n"
+            "This does NOT move the separate dedicated CoreVideo Audio sources "
+            "(participant / active speaker / audience) that most shows route "
+            "to program. Those are delayed by the global \"Audio delay "
+            "(dedicated sources)\" control in Tools -> Zoom Plugin Settings.");
+        mark_dirty_on_user_change(audio_delay);
+        m_table->setCellWidget(row, ColumnAudioDelay,
+            center_in_cell(audio_delay, Qt::AlignVCenter, 6));
+
+        // Read-only: engine-capture-to-OBS-publish latency on this output's
+        // own video vs. its own embedded audio. Positive = audio arrives
+        // early relative to video; that many ms is what to dial into Delay.
+        auto *av_offset = new QLabel(m_table);
+        av_offset->setAlignment(Qt::AlignCenter);
+        av_offset->setMinimumWidth(96);
+        av_offset->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        av_offset->setText(av_offset_text(output));
+        av_offset->setToolTip(
+            "Measured on THIS OUTPUT'S OWN EMBEDDED AUDIO path (engine capture "
+            "to OBS publish) versus its video path -- not the separate "
+            "dedicated CoreVideo Audio sources. Positive means audio is early "
+            "relative to video; that many ms is what to dial into Delay "
+            "(embedded). \"-\" means nothing has been measured yet.\n\n"
+            "Known bias: the two numbers are sampled at slightly different "
+            "points. Video latency is taken AFTER letterbox/scale, audio "
+            "latency right after the shared-memory copy and before its own "
+            "channel conversion -- so this figure over-reports by roughly the "
+            "cost of scaling one frame. Treat it as a starting point and "
+            "confirm by ear or on a clap test.\n\n"
+            "EBU R37 targets +5 / -15 ms per production stage; ITU-R "
+            "BT.1359-1 flags audio leading video at +45 ms and lagging at "
+            "-125 ms.");
+        m_table->setCellWidget(row, ColumnAvOffset, av_offset);
+
         auto *audio_role = new QComboBox(m_table);
         audio_role->setMinimumWidth(132);
         audio_role->addItem("Mix", "mix");
@@ -964,6 +1167,10 @@ void ZoomOutputDialog::refresh()
                 audio_role->setCurrentIndex(idx);
                 audio_role->setProperty("user_dirty", true);
             }
+            if (pit->second.audio_delay.isValid()) {
+                audio_delay->setValue(pit->second.audio_delay.toInt());
+                audio_delay->setProperty("user_dirty", true);
+            }
         }
     }
 
@@ -984,9 +1191,14 @@ void ZoomOutputDialog::refresh_participants()
     const QString filter = m_filter ? m_filter->text().trimmed() : QString{};
     const std::vector<ParticipantInfo> roster = ZoomEngineClient::instance().roster();
 
+    // keep_user_id is 0 here: this table is a roster view, not a picker bound to
+    // a participant, so there is no selection that hiding somebody could break.
+    const auto visible = visible_for_video_assignment(
+        roster, ZoomPluginSettings::load().hide_participants_without_video, 0);
+
     int row = 0;
     m_participant_table->setRowCount(0);
-    for (const auto &p : roster) {
+    for (const auto &p : visible) {
         const QString name = p.display_name.empty()
             ? QString("ID %1").arg(p.user_id)
             : QString::fromStdString(p.display_name);
@@ -1221,7 +1433,9 @@ void ZoomOutputDialog::apply()
         auto *resolution = cell_combo(m_table, row, ColumnResolution);
         auto *audio = cell_combo(m_table, row, ColumnAudio);
         auto *audio_role = cell_combo(m_table, row, ColumnAudioRole);
-        if (!name_item || !assignment || !resolution || !audio || !audio_role) continue;
+        auto *audio_delay = cell_spin(m_table, row, ColumnAudioDelay);
+        if (!name_item || !assignment || !resolution || !audio || !audio_role ||
+            !audio_delay) continue;
 
         const std::string source_name =
             name_item->data(Qt::UserRole).toString().toStdString();
@@ -1241,9 +1455,15 @@ void ZoomOutputDialog::apply()
                                     isolate_audio,
                                     audience_audio);
 
+        // The spinbox already enforces 0-500 via setRange(), but never trust
+        // a supplied value at a write site -- clamp again here regardless.
+        const uint32_t audio_delay_ms = static_cast<uint32_t>(
+            std::clamp(audio_delay->value(), 0, 500));
+
         ZoomOutputManager::instance().configure_output_ex(
             source_name, assignment_mode, participant_id, spotlight_slot, 0,
-            isolate_audio, audio_mode, video_resolution, audience_audio);
+            isolate_audio, audio_mode, video_resolution, audience_audio,
+            audio_delay_ms);
     }
     refresh();
 }

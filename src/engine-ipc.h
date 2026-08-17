@@ -83,14 +83,122 @@ struct ShmFrameHeader {
     uint32_t width;
     uint32_t height;
     uint32_t y_len;
+    // The engine's tile_clock_now_ns() when the Zoom SDK handed this frame
+    // over. Same clock, same cross-process equivalence caveat (Windows-only)
+    // as ShmAudioSlot::capture_ns below -- see the comment there rather than
+    // repeating it here. Paired with ShmAudioSlot::capture_ns this is what
+    // makes the A/V offset a measured number instead of an assertion -- on
+    // 2026-08-16 the product could not answer "what is our render latency"
+    // because nothing carried a timestamp across the boundary.
+    //
+    // Deliberately UNLIKE ShmAudioSlot below, this header carries no version
+    // guard. A new-engine/old-plugin skew (old plugin requests the smaller,
+    // pre-capture_ns frame_bytes; that request succeeds as a partial view
+    // into the larger region; width/height/y_len read fine from their
+    // unchanged offsets; the pixel memcpy then reads from the wrong offset)
+    // is SILENT -- no failed map, no rejected read, just a subtly wrong
+    // frame. That is the one direction shm_mapping_stale()'s size check does
+    // not catch (old-engine/new-plugin is the reverse skew and IS caught: the
+    // larger request fails MapViewOfFile outright). Accepted anyway: unlike
+    // the audio ring, no field here is available to repurpose as a guard the
+    // way slot_count was, so a guard would mean adding a new field solely to
+    // detect a skew that release-local.ps1 already prevents by packaging
+    // plugin + engine + SDK as one matched build. Revisit if engine and
+    // plugin are ever updated independently of each other.
+    //
+    // NOT WRITTEN BY EVERY PRODUCER. engine/src/engine-video.cpp stamps this;
+    // engine/src/engine-share.cpp does NOT -- the screen-share writer sets
+    // sequence/width/height/y_len and leaves capture_ns at whatever the fresh
+    // region was zero-filled to. The plugin's reader treats 0 as "not
+    // measured" and skips the latency store, so a screen-share output shows
+    // "-" for A/V Offset permanently and always will until the share writer
+    // stamps it too. That is a gap, not a design decision.
+    uint64_t capture_ns;
 };
-struct ShmAudioHeader {
+// Audio is a RING, not a mailbox.
+//
+// It used to be one slot: the engine memcpy'd every Zoom buffer over the
+// previous one, guarded by a seqlock. A seqlock prevents the reader seeing a
+// TORN buffer and does nothing about LOSS -- so any reader stall destroyed
+// 10 ms of audio permanently, silently, on a box where stalls are routine.
+// Video keeps the mailbox on purpose (newest frame wins, a dropped frame is
+// nearly invisible); the ear is not so forgiving, and Viz Engine ring-buffers
+// audio for the same reason.
+//
+// 8 slots is 80 ms at Zoom's 10 ms buffer. That is CAPACITY, not latency: a
+// reader keeping up sees about one slot of delay, and the depth is only spent
+// while absorbing a stall.
+static constexpr uint32_t kAudioRingSlots = 8;
+
+struct ShmAudioSlot {
+    // Even and unchanged across a read = the payload was stable. Odd = a write
+    // is in progress. Same seqlock discipline the single slot had, now per-slot.
     uint32_t sequence;
+    // The engine's tile_clock_now_ns() (engine/src/tile-clock-log.h) when the
+    // Zoom SDK handed this buffer over -- the engine is a standalone process
+    // with no libobs headers, so it cannot call os_gettime_ns() directly. On
+    // Windows both resolve to the same QPC counter (OBS's os_gettime_ns() and
+    // libc++'s std::chrono::steady_clock both read QueryPerformanceCounter),
+    // so the plugin can still subtract its own os_gettime_ns() reading
+    // directly to measure pipeline latency. WARNING: this equality does NOT
+    // hold on macOS -- libobs uses mach_absolute_time() there while libc++'s
+    // steady_clock uses CLOCK_MONOTONIC, a different clock with a different
+    // epoch. The mac-port branch must revisit this before trusting capture_ns
+    // for cross-process latency there.
+    uint64_t capture_ns;
+    uint32_t byte_len;
+    uint32_t reserved;
+};
+
+struct ShmAudioHeader {
+    // FREE-RUNNING count of slots written so far -- NOT a slot index, and it
+    // never wraps at slot_count (only at 2^32, ~1.4 years at Zoom's ~100
+    // buffers/sec). Apply `% slot_count` only where a physical offset is
+    // derived (shm_audio_slot_offset()). This is what lets
+    // audio_ring_slots_behind() tell "reader caught up" (0) apart from
+    // "writer lapped the reader by exactly one full ring" (slot_count) --
+    // collapsing those two under slot_count-modulo arithmetic was the original
+    // bug (a stalled reader landed back on the same value as a caught-up one
+    // and silently lost a full lap, unreported). The reader drains up to (not
+    // including) this. Written last, after the slot is complete.
+    uint32_t write_index;
+    uint32_t slot_count;
+    uint32_t slot_bytes;
     uint32_t sample_rate;
     uint16_t channels;
     uint16_t reserved;
-    uint32_t byte_len;
 };
+
+inline size_t shm_audio_region_bytes(uint32_t slot_bytes)
+{
+    return sizeof(ShmAudioHeader) +
+           static_cast<size_t>(kAudioRingSlots) *
+               (sizeof(ShmAudioSlot) + slot_bytes);
+}
+
+inline size_t shm_audio_slot_offset(const ShmAudioHeader &h, uint32_t index)
+{
+    return sizeof(ShmAudioHeader) +
+           static_cast<size_t>(index) * (sizeof(ShmAudioSlot) + h.slot_bytes);
+}
+
+// How many slots the reader has yet to drain. write_index and read_index are
+// FREE-RUNNING counters (see ShmAudioHeader::write_index above) -- they never
+// wrap at slot_count, only at 2^32 -- so this is a plain, un-modulo'd
+// subtraction. Unsigned wraparound at 2^32 stays correct without special
+// casing it. The return value is therefore NOT bounded by slot_count: a
+// caller comparing it against slot_count is how a full-lap overrun is told
+// apart from a caught-up reader (0 vs slot_count), which a modulo would
+// collapse into the same value. slot_count is accepted for symmetry with the
+// rest of this ring's API but is not used in the arithmetic; the
+// caught-up-vs-overrun decision belongs to the caller.
+inline uint32_t audio_ring_slots_behind(uint32_t write_index,
+                                        uint32_t read_index,
+                                        uint32_t slot_count)
+{
+    (void)slot_count;
+    return write_index - read_index;
+}
 
 // ── Platform-specific pipe / socket paths ─────────────────────────────────────
 #if defined(WIN32)
@@ -265,7 +373,9 @@ enum class ShmFrameRead {
 // reuses one buffer stops allocating after the first frame. out_w/out_h/
 // out_y_len are filled from the header whenever it was readable (including the
 // TooSmall case, so callers can report the shortfall); dst is only meaningful
-// on Ok.
+// on Ok. out_capture_ns is optional (default nullptr, so existing callers are
+// unaffected) and, when Ok, receives the engine's capture_ns for latency
+// measurement -- see ShmFrameHeader::capture_ns.
 inline ShmFrameRead shm_read_i420_frame(ShmRegion &region,
                                         const std::string &base_name,
                                         uint32_t event_width,
@@ -275,7 +385,8 @@ inline ShmFrameRead shm_read_i420_frame(ShmRegion &region,
                                         std::vector<uint8_t> &dst,
                                         uint32_t &out_w,
                                         uint32_t &out_h,
-                                        uint32_t &out_y_len)
+                                        uint32_t &out_y_len,
+                                        uint64_t *out_capture_ns = nullptr)
 {
     out_w = 0;
     out_h = 0;
@@ -312,6 +423,7 @@ inline ShmFrameRead shm_read_i420_frame(ShmRegion &region,
         const uint32_t w = hdr->width;
         const uint32_t h = hdr->height;
         const uint32_t y_len = hdr->y_len;
+        const uint64_t capture_ns = hdr->capture_ns;
         out_w = w;
         out_h = h;
         out_y_len = y_len;
@@ -331,7 +443,10 @@ inline ShmFrameRead shm_read_i420_frame(ShmRegion &region,
                     payload);
         std::atomic_thread_fence(std::memory_order_acquire);
         const uint32_t seq2 = hdr->sequence;
-        if (seq1 == seq2 && (seq2 & 1u) == 0) return ShmFrameRead::Ok;
+        if (seq1 == seq2 && (seq2 & 1u) == 0) {
+            if (out_capture_ns) *out_capture_ns = capture_ns;
+            return ShmFrameRead::Ok;
+        }
     }
     return ShmFrameRead::Invalid;
 }

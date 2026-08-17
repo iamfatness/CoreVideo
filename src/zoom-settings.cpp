@@ -354,6 +354,11 @@ ZoomPluginSettings ZoomPluginSettings::load()
     s.last_meeting_id   = last_id   ? last_id   : "";
     s.last_display_name = last_name ? last_name : "";
     s.last_was_webinar  = config_get_int(cfg, SECTION, "LastWasWebinar") != 0;
+    s.hide_participants_without_video =
+        config_get_int(cfg, SECTION, "HideParticipantsWithoutVideo") != 0;
+    s.audio_delay_ms = static_cast<uint32_t>(
+        config_get_int(cfg, SECTION, "AudioDelayMs"));
+    if (s.audio_delay_ms > 500) s.audio_delay_ms = 500;
 
     const char *iso_output_dir = config_get_string(cfg, SECTION, "IsoOutputDir");
     const char *iso_ffmpeg_path = config_get_string(cfg, SECTION, "IsoFfmpegPath");
@@ -509,6 +514,9 @@ void ZoomPluginSettings::save() const
     config_set_string(cfg, SECTION, "LastMeetingId",          last_meeting_id.c_str());
     config_set_string(cfg, SECTION, "LastDisplayName",        last_display_name.c_str());
     config_set_int   (cfg, SECTION, "LastWasWebinar",         last_was_webinar ? 1 : 0);
+    config_set_int   (cfg, SECTION, "HideParticipantsWithoutVideo",
+                      hide_participants_without_video ? 1 : 0);
+    config_set_int   (cfg, SECTION, "AudioDelayMs", audio_delay_ms);
     config_set_string(cfg, SECTION, "IsoOutputDir",           iso_output_dir.c_str());
     config_set_string(cfg, SECTION, "IsoFfmpegPath",          iso_ffmpeg_path.c_str());
     config_set_string(cfg, SECTION, "IsoVideoEncoder",        iso_video_encoder.c_str());

@@ -358,11 +358,20 @@ echo '{"cmd":"list_participants"}' | nc 127.0.0.1 19870
 # Reassign source to participant at runtime
 echo '{"cmd":"assign_output","source":"Zoom Participant 1","participant_id":123,"isolate_audio":true,"audio_channels":"stereo"}' | nc 127.0.0.1 19870
 
+# Set this output's own embedded-audio delay (0-500 ms). Omit the field
+# entirely on unrelated calls -- e.g. a plain reassignment -- to leave
+# whatever delay is already set untouched rather than resetting it to 0.
+echo '{"cmd":"assign_output","source":"Zoom Participant 1","participant_id":123,"audio_delay_ms":80}' | nc 127.0.0.1 19870
+
 # Forward OAuth callback URL from custom scheme helper
 echo '{"cmd":"oauth_callback","url":"corevideo://oauth/callback?broker_token=...&state=..."}' | nc 127.0.0.1 19870
 ```
 
-Commands: `help`, `status`, `list_participants`, `list_outputs`, `assign_output`, `assign_output_ex`, `recover_stale_outputs`, `upgrade_low_quality_outputs`, `join`, `leave`, `oauth_callback`, `iso_recording_start`, `iso_recording_stop`, `iso_recording_status`, `speaker_director_status`, `speaker_director_configure`, `speaker_director_take`, `speaker_director_release`.
+Commands: `help`, `status`, `list_participants`, `list_outputs`, `list_audio_sources`, `assign_output`, `assign_output_ex`, `recover_stale_outputs`, `upgrade_low_quality_outputs`, `join`, `leave`, `oauth_callback`, `iso_recording_start`, `iso_recording_stop`, `iso_recording_status`, `speaker_director_status`, `speaker_director_configure`, `speaker_director_take`, `speaker_director_release`.
+
+`list_outputs` includes `audio_delay_ms`, `audio_latency_us`, `video_latency_us`, and `av_offset_us` (`video_latency_us - audio_latency_us`; positive means audio is arriving early relative to video) per output, plus `audio_path: "embedded"` labeling which audio pipeline those four numbers describe -- see **Audio delay and the measured A/V offset** below before trimming against them. `av_offset_us` is **`null`**, not `0`, until both latencies have actually been measured; a latency of `0` likewise means "nothing has been through this path yet", not "zero latency". The dock draws `-` in exactly the same case.
+
+`list_audio_sources` covers the **dedicated** audio path that `list_outputs` structurally cannot: a `CoreVideoAudioSource` is not a `ZoomSource` and never appears as an output. Per live source it returns `source_name`, `source_uuid`, `kind` (`participant` / `active_speaker` / `audience`), `participant_id`, `subscribed`, `audio_delay_ms` (the global trim, see below), `audio_latency_us` (`null` until measured), `frame_count`, `audio_path: "dedicated"`, and **`overrun_slots`** — the count of shared-memory ring slots the engine overwrote before the plugin drained them, i.e. audio that was lost. `overrun_slots` should stay at `0`; a rising value is the signal that the box is not keeping up.
 
 ### Auto ISO Recording
 
@@ -487,6 +496,24 @@ obs-studio/plugin_config/obs-zoom-plugin/profiles/<name>.json
 ```
 
 Use the **Zoom Output Manager** dock, or **OBS -> Tools -> Zoom Output Manager** to focus it, to save, load, and delete profiles interactively. Profiles preserve assignment mode, requested resolution, channel mode, and audio role (`Mix`, `Isolated`, or `Audience`). Loading a profile reports how many saved outputs matched the current OBS sources and lists missing saved source names so mismatched profiles are visible before Apply. Code can call `ZoomOutputProfile::save() / load() / list() / remove()` directly.
+
+**Hide participants without video.** The Output Manager has a checkbox beside the participant filter that hides camera-off participants from the video assignment lists — the participant table, the per-output assignment combos, and the CoreVideo Participant source picker. Someone with their camera off cannot feed an output or a tile, so on a large meeting they only crowd the list. The setting persists across sessions.
+
+Two deliberate exceptions. **Audio source pickers always show everyone**, because a dedicated CoreVideo audio source follows a microphone and camera-off participants are often exactly who you want one for. And a participant **already assigned** to a source is never hidden, even with their camera off — otherwise a picker could not display its own current value and would silently unbind a live source the moment somebody switched their camera off.
+
+**Audio delay and the measured A/V offset.** Every row in the Output Manager has a **Delay** spinbox (0-500 ms) and a read-only **A/V Offset** column. Video is the slower path in any software production chain — capture, scale, composite, encode — so audio arrives at OBS ahead of its matching video and needs delaying to line back up. The Delay spinbox only ever delays audio later; it can never advance it. **A/V Offset** is `video_latency_us - audio_latency_us` measured from Zoom-engine capture to OBS publish, in EBU R37 terms: positive means audio is early relative to video, and that many milliseconds is what to dial into Delay to close the gap. Trim toward `0`, or toward whatever residual your downstream encoder/stream adds; EBU R37's per-stage target is **+5 / -15 ms**, and ITU-R BT.1359-1 treats audio leading video by more than **+45 ms**, or lagging it by more than **-125 ms**, as perceptible.
+
+Read this carefully before trimming: the Output Manager's **Delay (embedded)** and **A/V Offset (embedded)** columns describe one specific output's own embedded audio — the audio baked into a `CoreVideo Participant`/`CoreVideo Active Speaker`/etc. video source, published alongside its video from the same Zoom engine feed. They say nothing about the **separate, dedicated CoreVideo Audio sources** (`CoreVideoAudioSource` — e.g. "Jamal Carter (CoreVideo)", the participant/active-speaker/audience audio-only sources many shows route to program instead of a video source's embedded track). The two audio paths are architecturally disjoint (no code path connects a `CoreVideoAudioSource` instance back to a video output's `ZoomOutputInfo`), so they cannot be collapsed into one number — hence two labelled controls.
+
+**Delaying the dedicated audio sources.** If your program audio comes from the dedicated CoreVideo Audio sources — which is what most shows route — use **Tools → Zoom Plugin Settings → Audio → Audio delay (dedicated sources)**. It is a single global trim (0–500 ms) applied to every participant, active-speaker, and audience audio source, and it takes effect **on the next audio buffer with no OBS restart**, including on sources that are already running. Trim it **off air**: lowering the value pushes the timestamp backward once and briefly glitches every dedicated audio source, while raising it is smooth. The value is persisted as `AudioDelayMs` under `[ZoomPlugin]` in `global.ini`, but there is no longer any need to hand-edit it.
+
+There is no measured A/V Offset for the dedicated path — its counterpart source has no video to measure against — so trim it by ear or against a clap test. `list_audio_sources` (below) reports its current delay, its measured `audio_latency_us`, and its `overrun_slots` loss counter.
+
+**A caveat on the A/V Offset number.** Video latency is sampled after letterbox/scale; audio latency is sampled right after the shared-memory copy and before its own channel conversion. The two sample points are not identical, so the figure over-reports by roughly the cost of scaling one frame. It is a starting point, not a calibration standard.
+
+The Delay (embedded) value is not currently saved in Output Profiles (`ZoomOutputProfile::save()/load()`) — profiles preserve assignment, resolution, channel mode, and audio role only; loading a profile leaves each row's Delay spinbox as it was.
+
+Set it via the control API with `assign_output`'s `audio_delay_ms` field (0-500; omit it on unrelated calls rather than sending `0`, or you will reset a delay someone already dialed in).
 
 ## Repeatable Load Measurements
 

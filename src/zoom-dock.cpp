@@ -10,6 +10,7 @@
 #include "zoom-output-manager.h"
 #include "zoom-output-dialog.h"
 #include "zoom-reconnect.h"
+#include "participant-filter.h"
 #include "zoom-settings.h"
 #include "zoom-settings-dialog.h"
 #include <QAbstractItemView>
@@ -1346,7 +1347,16 @@ void ZoomDock::refresh_outputs()
         const QString filter = m_participant_filter
             ? m_participant_filter->text().trimmed().toLower()
             : QString();
-        for (const auto &p : roster) {
+        // Camera-off participants cannot go into an output at all, so they are
+        // hidden when the operator asks for it. The currently assigned
+        // participant is passed as keep_user_id and so survives even with their
+        // camera off -- the re-add below is the second line of defence, not the
+        // first, because losing the selection would unbind the output.
+        const auto assignable = visible_for_video_assignment(
+            roster,
+            ZoomPluginSettings::load().hide_participants_without_video,
+            output.participant_id);
+        for (const auto &p : assignable) {
             if (!filter.isEmpty()) {
                 const QString name = QString::fromStdString(p.display_name).toLower();
                 const QString idstr = QString::number(p.user_id);

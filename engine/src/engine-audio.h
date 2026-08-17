@@ -70,6 +70,12 @@ private:
         // True after an ensure_shm() failure has been surfaced as an error —
         // avoids re-emitting once per audio callback while the failure persists.
         bool shm_fail_reported = false;
+        // Latch for the byte_len > slot_bytes bounds check in
+        // output_audio_frame(). That branch is provably unreachable (see the
+        // proof there); the latch exists so that if a future change ever breaks
+        // ensure_shm()'s invariant, the engine log says so ONCE rather than 100
+        // times a second.
+        bool slot_too_small_reported = false;
     };
 
     bool ensure_shm(AudioTarget &target,

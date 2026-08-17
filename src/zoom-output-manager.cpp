@@ -208,7 +208,8 @@ bool ZoomOutputManager::configure_output_ex(const std::string &source_name,
                                             bool isolate_audio,
                                             AudioChannelMode audio_mode,
                                             VideoResolution video_resolution,
-                                            bool audience_audio)
+                                            bool audience_audio,
+                                            uint32_t audio_delay_ms)
 {
     std::lock_guard<std::mutex> lk(m_mtx);
     const auto it = std::find_if(m_sources.begin(), m_sources.end(),
@@ -222,7 +223,7 @@ bool ZoomOutputManager::configure_output_ex(const std::string &source_name,
     source->configure_output_ex(mode, participant_id, spotlight_slot,
                                 failover_participant_id, isolate_audio,
                                 audio_mode, video_resolution,
-                                audience_audio);
+                                audience_audio, audio_delay_ms);
     ZoomIsoRecorder::instance().on_output_updated(source->output_info());
     return true;
 }
@@ -274,7 +275,8 @@ bool ZoomOutputManager::configure_output(const std::string &source_name,
                                          bool isolate_audio,
                                          AudioChannelMode audio_mode,
                                          VideoResolution video_resolution,
-                                         bool audience_audio)
+                                         bool audience_audio,
+                                         uint32_t audio_delay_ms)
 {
     // Hold the mutex for the full operation so a source cannot be unregistered
     // (and freed) between the find and the configure call.
@@ -284,7 +286,7 @@ bool ZoomOutputManager::configure_output(const std::string &source_name,
         if (source->output_name() != source_name) continue;
         source->configure_output(participant_id, active_speaker,
                                  isolate_audio, audio_mode, video_resolution,
-                                 audience_audio);
+                                 audience_audio, audio_delay_ms);
         ZoomIsoRecorder::instance().on_output_updated(source->output_info());
         return true;
     }

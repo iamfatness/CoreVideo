@@ -33,6 +33,14 @@ struct ZoomPluginSettings {
     std::string         last_display_name;
     bool                last_was_webinar     = false;
 
+    // Hide camera-off participants from VIDEO-assignment pickers. Audio
+    // pickers ignore this -- see src/participant-filter.h for why.
+    bool                hide_participants_without_video = false;
+
+    // Milliseconds to delay CoreVideo audio, to align it with the slower video
+    // path. vMix operators routinely run 20-100+ ms here. 0-500 ms.
+    uint32_t            audio_delay_ms = 0;
+
     // ISO recorder panel defaults.
     std::string         iso_output_dir;
     std::string         iso_ffmpeg_path = "ffmpeg";

@@ -31,6 +31,10 @@ private:
     QSpinBox  *m_osc_port_spin          = nullptr;
     QLineEdit *m_control_token_edit     = nullptr;
     QComboBox *m_hw_accel_combo         = nullptr;
+    // Global delay for the DEDICATED CoreVideo audio sources -- the ones a
+    // show routes to program. Not the Output Manager's per-row Delay, which
+    // acts on a video source's own embedded audio.
+    QSpinBox  *m_audio_delay_spin       = nullptr;
     // Auto-reconnect
     QCheckBox *m_rc_enabled_cb          = nullptr;
     QSpinBox  *m_rc_max_attempts_spin   = nullptr;

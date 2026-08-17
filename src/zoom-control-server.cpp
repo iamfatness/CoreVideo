@@ -6,6 +6,7 @@
 #include "zoom-iso-recorder.h"
 #include "zoom-oauth.h"
 #include "zoom-output-manager.h"
+#include "zoom-participant-audio-source.h"
 #include "zoom-reconnect.h"
 #include "zoom-settings.h"
 #include <QHostAddress>
@@ -280,6 +281,33 @@ static QJsonObject output_to_json(const ZoomOutputInfo &o)
     obj["quality_upgrade_cooldown_ms"] =
         static_cast<double>(o.quality_upgrade_cooldown_ms);
     obj["subscribed_age_ms"] = static_cast<double>(o.subscribed_age_ms);
+    obj["audio_delay_ms"]   = static_cast<double>(o.audio_delay_ms);
+    obj["audio_latency_us"] = static_cast<double>(o.audio_latency_us);
+    obj["video_latency_us"] = static_cast<double>(o.video_latency_us);
+    // The EBU R37 number: positive means audio is EARLY relative to video, so
+    // that much delay (in ms) is what to dial into audio_delay_ms to close it.
+    //
+    // NULL, not 0, when either latency has not been measured yet. A latency of
+    // 0 means "no frame/buffer has been through this path", and emitting an
+    // av_offset_us of 0 for it told automation the rig was PERFECTLY IN SYNC --
+    // the most confident possible reading of no data at all. The dock has
+    // always drawn "-" in exactly this case (av_offset_text()); the API now
+    // agrees with it.
+    if (o.audio_latency_us == 0 || o.video_latency_us == 0) {
+        obj["av_offset_us"] = QJsonValue(QJsonValue::Null);
+    } else {
+        obj["av_offset_us"] =
+            static_cast<double>(static_cast<int64_t>(o.video_latency_us) -
+                                static_cast<int64_t>(o.audio_latency_us));
+    }
+    // audio_delay_ms/audio_latency_us/video_latency_us/av_offset_us all
+    // describe THIS output's own embedded audio path (this ZoomSource's
+    // obs_source_output_audio() call) -- NOT the separate, disjoint
+    // CoreVideoAudioSource participant/active-speaker/audience sources a show
+    // may route to program instead. See README's Output Manager section for
+    // why these two audio paths cannot currently be reconciled into one
+    // number.
+    obj["audio_path"] = "embedded";
     obj["duplicate_participant_assignment"] = o.duplicate_participant_assignment;
     obj["health_reason"] = output_health_reason_id(o.health_reason);
     obj["health_label"] = output_health_reason_label(o.health_reason);
@@ -512,6 +540,37 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
         return;
     }
 
+    // The DEDICATED audio path, which list_outputs does not and cannot cover:
+    // a CoreVideoAudioSource is not a ZoomSource and is not registered with
+    // ZoomOutputManager. This is where the ring's loss counter
+    // (`overrun_slots`) and the dedicated path's measured latency become
+    // readable at all -- the spec requires both to be surfaced, and until this
+    // command existed neither reached anything but a rate-limited log line.
+    if (cmd == "list_audio_sources") {
+        QJsonArray sources;
+        for (const auto &a : corevideo_audio_source_infos()) {
+            QJsonObject obj;
+            obj["source_name"]  = QString::fromStdString(a.source_name);
+            obj["source_uuid"]  = QString::fromStdString(a.source_uuid);
+            obj["kind"]         = QString::fromUtf8(a.kind);
+            obj["participant_id"] = static_cast<double>(a.participant_id);
+            obj["subscribed"]   = a.subscribed;
+            obj["audio_delay_ms"] = static_cast<double>(a.audio_delay_ms);
+            // Same convention as list_outputs' av_offset_us: null means NOT
+            // MEASURED, which is not the same as zero.
+            obj["audio_latency_us"] = a.audio_latency_us == 0
+                ? QJsonValue(QJsonValue::Null)
+                : QJsonValue(static_cast<double>(a.audio_latency_us));
+            // Ring slots the engine overwrote before this source drained them.
+            obj["overrun_slots"] = static_cast<double>(a.overrun_slots);
+            obj["frame_count"]   = static_cast<double>(a.frame_count);
+            obj["audio_path"]    = "dedicated";
+            sources.append(obj);
+        }
+        write_response(socket, {{"ok", true}, {"audio_sources", sources}});
+        return;
+    }
+
     if (cmd == "recover_stale_outputs") {
         const bool force = req.value("force").toBool(false);
         const uint32_t recovered =
@@ -583,9 +642,24 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
             ? AudioChannelMode::Stereo : AudioChannelMode::Mono;
         const VideoResolution video_resolution = video_resolution_from_json(req);
 
+        // kAudioDelayKeepCurrentMs (not 0) is the default so an assign_output
+        // call that doesn't mention audio_delay_ms -- e.g. automation
+        // reassigning a participant -- can't silently reset a delay the
+        // operator dialed in through the Output Manager. A malformed value
+        // (wrong type, negative, non-integral) is likewise left as "keep
+        // current" rather than coerced to 0 or 500. Clamp whatever IS
+        // validly supplied; never trust a caller-provided value.
+        uint32_t audio_delay_ms = kAudioDelayKeepCurrentMs;
+        if (req.contains("audio_delay_ms")) {
+            uint32_t parsed = 0;
+            if (json_to_uint32(req, "audio_delay_ms", parsed))
+                audio_delay_ms = std::min<uint32_t>(parsed, 500);
+        }
+
         const bool ok = ZoomOutputManager::instance().configure_output(
             source.toStdString(), participant_id, active_speaker,
-            isolate_audio, audio_mode, video_resolution);
+            isolate_audio, audio_mode, video_resolution,
+            /*audience_audio=*/false, audio_delay_ms);
         QJsonObject response;
         response["ok"] = ok;
         if (!ok) response["error"] = "unknown_output";

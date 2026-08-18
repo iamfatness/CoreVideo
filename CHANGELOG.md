@@ -7,6 +7,48 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.41] - 2026-08-18
+
+This release also delivers everything listed under 0.1.40 below, which was
+built and verified but never published — installations updating from 0.1.39
+receive both sets of changes.
+
+### Fixed
+- **Audio survives full 1080p load.** With four or five participants delivering
+  genuine 1920×1080, every plugin event — video and audio alike — was handled
+  on one thread, and each video event carried a whole frame copy before the
+  next event could even be read. Audio notifications queued behind video and
+  arrived up to a full second late, which starved the audio transport and broke
+  audio up on every source; at 720p the same build was clean. Media events are
+  now handed to two dedicated dispatch lanes (one video, one audio) through a
+  coalescing queue: a backlog can no longer form, overloaded video degrades to
+  fewer whole frames instead of growing a queue, and audio never waits behind a
+  video copy. Measured in the same meeting at the same load: audio pipeline
+  latency fell from as high as 0.94 s to under 200 µs, with zero ring overruns.
+
+- **A crashed OBS session can no longer poison the next one.** If OBS exited
+  while the Zoom SDK was wedged, the engine process survived as an orphan —
+  still in the meeting, still writing into shared memory under the same names
+  the next session would use. The new session then shared its audio transport
+  with a ghost writer, which silently suppressed its audio wakeups (audio broke
+  up on every source), corrupted video regions, and held the SDK singleton so
+  the first engine start of the day failed. Every engine start now removes any
+  stale engine process first and logs what it removed; if a shared-memory name
+  collision somehow still occurs, it is reported as a visible error naming the
+  cure instead of degrading quietly.
+
+- **Two simultaneous engine-start requests no longer launch two engines.**
+  Both racers passed the already-running check together; the losing engine
+  became exactly the kind of orphaned process described above.
+
+### Changed
+- **The engine sends one audio notification per burst, not one per 10 ms
+  buffer.** At full load that was ~1,700 pipe messages per second, enough to
+  stall the engine's Zoom callback thread on a slow reader and queue audio
+  inside the SDK itself (audible as breakup with A/V drift). Notifications are
+  now edge-triggered with a self-healing keepalive: if a wakeup is ever lost,
+  the source recovers within ~2.5 s instead of staying silent.
+
 ## [0.1.40] - 2026-08-17
 
 ### Fixed

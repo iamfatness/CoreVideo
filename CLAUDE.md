@@ -73,6 +73,13 @@ Every one of these is documented at length where it lives; the list is the map.
   poisons the notify flag (~92% audio loss, no error anywhere) — root-caused
   live 2026-08-17. `start()` is serialized (`m_start_mtx`); a name collision
   is surfaced as `shm_name_collision` (non-fatal, no reconnect vote).
+- **FFmpeg runtime preload** (`cv_ffmpeg_loader_init` in
+  `src/cv-ffmpeg-loader.cpp`): the delay-loaded avfilter family must be
+  resident before any media flows — pinned by CoreVideoFfmpegPreloadTest.
+  Left to the delay-load hook, the load fired on the first video frame inside
+  `on_engine_frame` under `m_mtx` (which `on_engine_audio` also takes): a cold
+  ~1.06 s load vs. the ring's ~80 ms dropped ~1 s of audio on every audible
+  source at the first join of each OBS run (2026-08-18 soak).
 - **Director handover** (`src/director-handover.h`): on an Active Speaker cut
   the hidden preview covers air until the main subscription delivers the
   participant we cut TO; exactly one of the two slots publishes audio at any

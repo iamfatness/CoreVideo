@@ -7,6 +7,18 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+### Fixed
+- **First join of an OBS session no longer drops ~1 second of audio.** The
+  hardware-acceleration FFmpeg runtime (`cvfilter-11.dll` and the codec family
+  it pulls in) was delay-loaded on the first video frame after subscribing —
+  on the media dispatch path, holding the source lock the audio drain also
+  needs. A cold load measured ~1.06 s, thirteen times the audio ring's ~80 ms
+  of buffering, so every source with audio flowing lost ~1 s of audio exactly
+  once per OBS run, at the moment of the first join. The runtime is now
+  preloaded when the plugin initializes, before any meeting exists; the frame
+  path never pays a DLL load again. (Warm loads sometimes fit inside the ring,
+  which is why the dropout appeared on some days and not others.)
+
 ## [0.1.41] - 2026-08-18
 
 This release also delivers everything listed under 0.1.40 below, which was

@@ -62,6 +62,26 @@ static bool is_delayed_ffmpeg_dll(const char *name)
            _strnicmp(name, "cvutil", 6) == 0;
 }
 
+static HMODULE load_private_dll(const char *name)
+{
+    std::wstring path = g_private_dir + widen(name);
+    // DLL_LOAD_DIR makes avfilter's own imports (avcodec/swscale/...) resolve
+    // from corevideo-ffmpeg/ first instead of OBS's bin directory.
+    HMODULE mod = LoadLibraryExW(path.c_str(), nullptr,
+                                 LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+                                     LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    if (!mod) {
+        blog(LOG_ERROR,
+             "[obs-zoom-plugin] Failed to load private FFmpeg runtime '%s' "
+             "(error %lu) — hardware acceleration will fail over to CPU",
+             name, GetLastError());
+        return nullptr;
+    }
+    blog(LOG_INFO, "[obs-zoom-plugin] Loaded private FFmpeg runtime '%s'",
+         name);
+    return mod;
+}
+
 static FARPROC WINAPI cv_delayload_hook(unsigned event, DelayLoadInfo *info)
 {
     if (event != dliNotePreLoadLibrary || !info || !info->szDll)
@@ -77,22 +97,7 @@ static FARPROC WINAPI cv_delayload_hook(unsigned event, DelayLoadInfo *info)
     if (g_runtime != CvFfmpegRuntime::PrivateCopies || g_private_dir.empty())
         return nullptr; // fall through to default search; init() already warned
 
-    std::wstring path = g_private_dir + widen(info->szDll);
-    // DLL_LOAD_DIR makes avfilter's own imports (avcodec/swscale/...) resolve
-    // from corevideo-ffmpeg/ first instead of OBS's bin directory.
-    HMODULE mod = LoadLibraryExW(path.c_str(), nullptr,
-                                 LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
-                                     LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-    if (!mod) {
-        blog(LOG_ERROR,
-             "[obs-zoom-plugin] Failed to load private FFmpeg runtime '%s' "
-             "(error %lu) — hardware acceleration will fail over to CPU",
-             info->szDll, GetLastError());
-        return nullptr;
-    }
-    blog(LOG_INFO, "[obs-zoom-plugin] Loaded private FFmpeg runtime '%s'",
-         info->szDll);
-    return reinterpret_cast<FARPROC>(mod);
+    return reinterpret_cast<FARPROC>(load_private_dll(info->szDll));
 }
 
 extern "C" const PfnDliHook __pfnDliNotifyHook2 = cv_delayload_hook;
@@ -149,6 +154,23 @@ CvFfmpegRuntime cv_ffmpeg_loader_init()
         (g_private_dir + widen(COREVIDEO_AVFILTER_DLL)).c_str());
     if (attrs != INVALID_FILE_ATTRIBUTES) {
         g_runtime = CvFfmpegRuntime::PrivateCopies;
+        // Load avfilter NOW, while no meeting audio can be flowing. Left to
+        // the delay-load hook, the first avfilter call happens in
+        // HwVideoPipeline::build_filter_graph() on the FIRST VIDEO FRAME —
+        // on the media dispatch path, under the source's m_mtx, which
+        // on_engine_audio() also takes. A cold load of this DLL family
+        // measured ~1.06 s (2026-08-18 soak), 13x the 8-slot audio ring's
+        // ~80 ms of slack: every source with audio flowing dropped ~106
+        // slots (~1 s, audible) at the first join of each OBS run. Loading
+        // avfilter pulls the rest of the family as ordinary imports. On
+        // failure keep PrivateCopies: the hook retries per call site and
+        // logs the same error, so behavior degrades exactly as before.
+        const ULONGLONG t0 = GetTickCount64();
+        if (load_private_dll(COREVIDEO_AVFILTER_DLL))
+            blog(LOG_INFO,
+                 "[obs-zoom-plugin] FFmpeg runtime preloaded at plugin init "
+                 "in %llu ms (kept off the media path)",
+                 static_cast<unsigned long long>(GetTickCount64() - t0));
     } else {
         blog(LOG_ERROR,
              "[obs-zoom-plugin] Bundled FFmpeg runtime missing at "

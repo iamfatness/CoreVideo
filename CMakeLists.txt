@@ -545,6 +545,24 @@ if(BUILD_TESTING)
         add_dependencies(CoreVideoFfmpegRuntimeTest obs-zoom-plugin)
         add_test(NAME CoreVideoFfmpegRuntime
                  COMMAND CoreVideoFfmpegRuntimeTest)
+
+        # Compiles the real loader (blog stubbed in the test) against the
+        # staged runtime; libobs supplies headers only, never a link dep.
+        add_executable(CoreVideoFfmpegPreloadTest
+            tests/ffmpeg-preload-test.cpp
+            src/cv-ffmpeg-loader.cpp
+        )
+        target_include_directories(CoreVideoFfmpegPreloadTest PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            $<TARGET_PROPERTY:OBS::libobs,INTERFACE_INCLUDE_DIRECTORIES>
+        )
+        target_compile_definitions(CoreVideoFfmpegPreloadTest PRIVATE
+            COREVIDEO_HW_ACCEL
+            "COREVIDEO_AVFILTER_DLL=\"${_cv_avfilter_dll}\""
+            "COREVIDEO_AVUTIL_DLL=\"${_cv_avutil_dll}\"")
+        add_dependencies(CoreVideoFfmpegPreloadTest obs-zoom-plugin)
+        add_test(NAME CoreVideoFfmpegPreload
+                 COMMAND CoreVideoFfmpegPreloadTest)
     endif()
 
     add_executable(CoreVideoIsoEncoderPlanTest

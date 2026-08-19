@@ -2,7 +2,7 @@
 
 Project notes for Claude Code sessions working in this repository: CoreVideo,
 the OBS Studio plugin that pulls Zoom meeting video and audio into OBS as
-native sources. Current release: **v0.1.41** (2026-08-18). Update this file in
+native sources. Current release: **v0.1.42** (2026-08-19). Update this file in
 the same change as any substantive work — docs-updated is part of done.
 
 ## Architecture in one paragraph

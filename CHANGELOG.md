@@ -7,6 +7,8 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.42] - 2026-08-19
+
 ### Fixed
 - **Every automatic Active Speaker cut was force-resubscribing all other
   outputs.** A 100ms UI timer called the engine-reconnect-only

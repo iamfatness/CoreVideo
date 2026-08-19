@@ -8,6 +8,22 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 ## [Unreleased]
 
 ### Fixed
+- **Audible clicks/pops on the embedded audio, tied to whoever is currently
+  talking.** Diagnosed live by probing the engine's audio shared-memory ring
+  directly, bypassing OBS entirely: Zoom keeps calling back on schedule, but
+  the payload itself is true digital silence for 190-650 ms at a stretch
+  between spoken turns — not a dropped callback (audio-timeline.h already
+  handles those), real ring slots whose content is exact zero, most likely a
+  bot rig whose virtual microphone streams continuously and only goes silent
+  between synthesized utterances rather than stopping. The stream then
+  resumed at full speech amplitude with no ramp — an instant 0 → full-scale
+  jump is exactly what an audible pop is made of. The first buffer after a
+  run of true silence is now ramped in over 3 ms on both the embedded
+  Active Speaker/Participant path and the dedicated per-participant audio
+  sources. This does not restore genuinely missing speech (if the far end
+  was actually silent, that duration stays silent) — it removes the
+  discontinuity at the edge.
+
 - **ISO video recording actually records.** Every 1080p ISO session wrote
   exactly 5 frames and produced a 0-byte MP4, with hundreds of "encoder
   falling behind" drops and 15-second shutdown kills — regardless of encoder

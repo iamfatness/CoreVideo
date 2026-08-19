@@ -1,5 +1,6 @@
 #include "zoom-participant-audio-source.h"
 
+#include "audio-silence-fade.h"
 #include "audio-subscription-state.h"
 #include "audio-timeline.h"
 #include "engine-ipc.h"
@@ -93,6 +94,9 @@ struct CoreVideoAudioSource {
     // (unsubscribe_audio()) and the new-engine callback
     // (forget_subscription_for_new_engine()).
     AudioTimeline timeline;
+    // Was the last published buffer true digital silence? See
+    // src/audio-silence-fade.h. Same ownership as `timeline`.
+    bool prev_was_silent = false;
     // Next ring slot this source will drain. Only the engine reader thread
     // touches it, the same thread that owns `timeline`.
     uint32_t read_index    = 0;
@@ -691,7 +695,23 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
                                             std::memory_order_relaxed);
             }
 
-            const auto *pcm = reinterpret_cast<const int16_t *>(ctx->audio_buf.data());
+            auto *pcm_mut = reinterpret_cast<int16_t *>(ctx->audio_buf.data());
+            const uint32_t pcm_sample_count = byte_len / kZoomBytesPerSample;
+            const uint32_t pcm_frames =
+                pcm_sample_count / std::max<uint16_t>(channels, 1);
+            // See src/audio-silence-fade.h: Zoom keeps calling back on
+            // schedule but the payload is true zero for a stretch (a bot's
+            // virtual mic streaming through its own pauses rather than
+            // stopping) -- ramp the resume instead of an instant
+            // 0 -> full-scale jump.
+            const bool cur_silent =
+                audio_buffer_is_silent(pcm_mut, pcm_sample_count);
+            if (!cur_silent && ctx->prev_was_silent) {
+                audio_apply_resume_fade(pcm_mut, pcm_frames, channels,
+                                        sample_rate / 1000 * kAudioResumeFadeMs);
+            }
+            ctx->prev_was_silent = cur_silent;
+            const auto *pcm = pcm_mut;
             obs_source_audio audio = {};
             audio.samples_per_sec = sample_rate;
             // Sample-derived, not arrival-derived: IPC jitter must not reach OBS.

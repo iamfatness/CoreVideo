@@ -1,6 +1,7 @@
 #pragma once
 
 #include "audio-timeline.h"
+#include "audio-silence-fade.h"
 #include "engine-ipc.h"
 #include "hw-video-pipeline.h"
 #include "zoom-output-manager.h"
@@ -243,6 +244,13 @@ private:
     // clock for the source, not one per slot: it describes the single OBS audio
     // stream this source publishes.
     AudioTimeline m_audio_timeline;
+    // Was the last buffer this source actually PUBLISHED true digital
+    // silence? One flag for the whole source, matching m_audio_timeline: the
+    // director-handover gate guarantees exactly one of the main/preview
+    // slots publishes at any instant (see on_engine_audio()), so this
+    // correctly tracks "what OBS last received" regardless of which slot fed
+    // it. See src/audio-silence-fade.h for why this exists.
+    bool m_audio_prev_was_silent = false;
     // Next MAIN-slot ring slot to drain, and whether we have levelled with that
     // ring's writer yet.
     uint32_t m_audio_read_index   = 0;

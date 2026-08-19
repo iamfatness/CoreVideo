@@ -901,6 +901,19 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoDirectorHandover
              COMMAND CoreVideoDirectorHandoverTest)
 
+    # Ramps in the first buffer after true digital silence (a bot's mic
+    # streaming zero-valued PCM between spoken turns, not a dropped
+    # callback) instead of jumping straight to full amplitude — the
+    # 2026-08-18 "clicks/pops on the active speaker feed" report.
+    add_executable(CoreVideoAudioSilenceFadeTest
+        tests/audio-silence-fade-test.cpp
+    )
+    target_include_directories(CoreVideoAudioSilenceFadeTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoAudioSilenceFade
+             COMMAND CoreVideoAudioSilenceFadeTest)
+
     # The master clock every audio buffer is stamped from. Wall-clock arrival
     # stamps let IPC jitter reach OBS, which resampled continuously — the
     # 2026-08-16 "audio is very bad" report.

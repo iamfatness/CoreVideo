@@ -84,6 +84,16 @@ Every one of these is documented at length where it lives; the list is the map.
   the hidden preview covers air until the main subscription delivers the
   participant we cut TO; exactly one of the two slots publishes audio at any
   instant (gate polarity in `on_engine_audio` / `on_director_preview_audio`).
+- **Silence-resume fade** (`src/audio-silence-fade.h`): Zoom's one-way audio
+  callback fires on schedule but can carry true zero-valued PCM for hundreds
+  of ms (a bot's virtual mic idling between synthesized utterances, not a
+  dropped callback — distinct from audio-timeline.h's gap handling). The
+  first buffer after such a run is ramped in over `kAudioResumeFadeMs`
+  rather than jumping straight to full amplitude — live-diagnosed as
+  clicks/pops on the active-speaker feed by probing the audio SHM ring
+  directly (2026-08-18/19). Applied in both `zoom-source.cpp`
+  (`output_audio_from_shared_memory`, shared by the main and director-preview
+  slots) and `zoom-participant-audio-source.cpp`.
 - **ISO ffmpeg feed** (`src/iso-ffmpeg-pipe.h`): QProcess is banned on the
   media threads — its Windows stdin chaining needs the owner thread's Qt
   event loop, and the dispatch lanes have none (live 2026-08-18: every ISO

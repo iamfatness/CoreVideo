@@ -2022,7 +2022,24 @@ void ZoomSource::output_audio_from_shared_memory(const std::string &uuid,
 
             const uint32_t sample_rate = ring->sample_rate;
             const uint16_t channels    = ring->channels;
-            const auto *pcm = reinterpret_cast<const int16_t *>(m_audio_buf.data());
+            auto *pcm_mut = reinterpret_cast<int16_t *>(m_audio_buf.data());
+            const uint32_t pcm_sample_count = byte_len / kZoomBytesPerSample;
+            const uint32_t pcm_frames =
+                pcm_sample_count / std::max<uint16_t>(channels, 1);
+            // Zoom keeps calling back on schedule but the payload itself is
+            // true zero for a stretch (a bot's virtual mic streaming through
+            // its own inter-utterance pauses rather than stopping) -- ramp
+            // the resume instead of handing OBS an instant 0 -> full-scale
+            // jump. See src/audio-silence-fade.h for the live-diagnosed
+            // defect this fixes.
+            const bool cur_silent =
+                audio_buffer_is_silent(pcm_mut, pcm_sample_count);
+            if (!cur_silent && m_audio_prev_was_silent) {
+                audio_apply_resume_fade(pcm_mut, pcm_frames, channels,
+                                        sample_rate / 1000 * kAudioResumeFadeMs);
+            }
+            m_audio_prev_was_silent = cur_silent;
+            const auto *pcm = pcm_mut;
             const uint64_t ts = os_gettime_ns();
 
             // Same cross-process clock as the video path above -- see

@@ -845,12 +845,24 @@ void ZoomIsoRecorder::record_video_frame(const ZoomOutputInfo &info,
         // session-budget estimate was wrong for this GPU (driver caps
         // vary). Demote this source one tier and recreate on the next
         // frame instead of surfacing a dead "Encoder error" row.
+        //
+        // Deliberately NOT gated on "has this uuid ever been demoted
+        // before": that was the bug. iso_demote_encoder() is a CHAIN
+        // (nvenc -> qsv -> amf -> libx264), but the old guard let a uuid
+        // take exactly one hop for the rest of the run -- on a box with a
+        // real GPU but no working QSV or AMF runtime (live 2026-08-19:
+        // "Error creating a MFX session" / "DLL amfrt64.dll failed to
+        // open"), a source demoted nvenc->qsv failed qsv too, could not
+        // demote again, and sat at video_frames=2 permanently instead of
+        // ever reaching libx264 (CPU, no hardware dependency, the one
+        // tier guaranteed to work). `session.video_encoder != "libx264"`
+        // is the only guard the chain needs: it is what iso_demote_encoder
+        // eventually returns for every input, so re-arming this on every
+        // startup failure still terminates, in at most 3 hops.
         const uint64_t now_ns = os_gettime_ns();
         if (session.video_encoder != "libx264" &&
             session.ffmpeg_started_ns != 0 &&
-            now_ns - session.ffmpeg_started_ns < 10000000000ULL &&
-            m_encoder_demotions.find(session.source_uuid) ==
-                m_encoder_demotions.end()) {
+            now_ns - session.ffmpeg_started_ns < 10000000000ULL) {
             const std::string next =
                 iso_demote_encoder(session.video_encoder, m_encoder_avail);
             blog(LOG_WARNING,

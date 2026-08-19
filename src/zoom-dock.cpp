@@ -823,11 +823,29 @@ ZoomDock::ZoomDock(QWidget *parent)
 
     // Periodic tick updates the lightweight state indicator, active speaker
     // director, and join-timeout watchdog.
+    //
+    // Deliberately NOT calling resubscribe_all() on an ordinary promotion
+    // here (live-caught 2026-08-19: every automatic Active Speaker cut was
+    // force-resubscribing all 8 unrelated fixed-participant outputs, every
+    // 12-90s for the length of a show). That call was copied from the
+    // manual Take/Release override buttons below, where resubscribe_all()
+    // is at least a rare, deliberate operator action; the periodic tick
+    // fires on every ordinary automatic cut. It was also never load-bearing
+    // for the cut itself: SpeakerDirector::tick()'s return value only says
+    // a promotion happened, and the Active Speaker source already picks up
+    // the new directed_speaker_id() on its own, through the existing
+    // director-handover machinery in zoom-source.cpp -- see
+    // ZoomEngineClient::active_speaker_id(), which reads
+    // SpeakerDirector::directed_speaker_id() directly and has no
+    // dependency on resubscribe_all() ever having run.
+    // resubscribe_all()'s own doc comment says what it is actually for:
+    // recovering every source after an engine crash/reconnect, when the
+    // engine "is brand new and knows nothing" -- not a routine speaker
+    // change.
     m_refresh_timer = new QTimer(this);
     m_refresh_timer->setInterval(100);
     connect(m_refresh_timer, &QTimer::timeout, this, [this]() {
-        if (SpeakerDirector::instance().tick(os_gettime_ns() / 1000000ULL))
-            ZoomOutputManager::instance().resubscribe_all();
+        SpeakerDirector::instance().tick(os_gettime_ns() / 1000000ULL);
         update_state_indicator();
     });
     m_refresh_timer->start();

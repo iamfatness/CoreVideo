@@ -26,6 +26,9 @@
 #include <windows.h>
 #include <fcntl.h>
 #include <io.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <unistd.h>
 #else
 #include <unistd.h>
 #endif
@@ -47,6 +50,20 @@ static std::string self_path()
 #ifdef _WIN32
     char buf[MAX_PATH];
     GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    return buf;
+#elif defined(__APPLE__)
+    // No /proc on Darwin -- readlink("/proc/self/exe", ...) silently
+    // returned -1 here, self_path() returned "", and start("", ...)
+    // still reported success (fork() succeeded; only the child's later
+    // execvp("", ...) failed). The child exited immediately, closing its
+    // end of the pipe, so every write after that failed fast -- but the
+    // test's own retry loop doesn't distinguish "permanently broken" from
+    // "transiently full" and burned all 2000 retries x 50 buffers before
+    // CTest's timeout caught it (2026-08-19 macOS CI).
+    char buf[4096];
+    uint32_t size = sizeof(buf);
+    if (_NSGetExecutablePath(buf, &size) != 0)
+        return "";
     return buf;
 #else
     char buf[4096];
@@ -98,6 +115,17 @@ int main(int argc, char **argv)
 
     const std::string self = self_path();
     check(!self.empty(), "self path resolves");
+    if (self.empty()) {
+        // Every remaining check spawns a child at this (empty) path: fork()
+        // still reports success, only the child's exec fails, and the
+        // dependent retry loops below cannot tell "transiently full" from
+        // "permanently broken" -- exactly the mismatch that turned one
+        // resolution failure into a full CTest timeout (2026-08-19 macOS
+        // CI). Fail fast and loud instead of cascading.
+        std::fprintf(stderr, "FAIL: cannot resolve this test binary's own "
+                             "path; skipping the rest (see self_path())\n");
+        return 1;
+    }
 
     // ── 1+3: sustained writes and clean EOF ─────────────────────────────
     {
@@ -111,10 +139,18 @@ int main(int argc, char **argv)
         for (size_t i = 0; i < kCount; ++i) {
             std::vector<uint8_t> buf(kBuf, static_cast<uint8_t>(i));
             // A normally-consuming child may briefly hit the bound; retry
-            // rather than drop so the byte total is exact.
+            // rather than drop so the byte total is exact. Bail the moment
+            // the child is provably gone instead of spinning out every
+            // remaining retry against a pipe that can never drain again.
             for (int tries = 0; tries < 2000; ++tries) {
                 if (pipe.try_queue(std::move(buf))) {
                     ++queued;
+                    break;
+                }
+                if (!pipe.running()) {
+                    std::fprintf(stderr,
+                                 "FAIL: child exited mid-transfer after "
+                                 "queuing %zu/%zu buffers\n", queued, kCount);
                     break;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));

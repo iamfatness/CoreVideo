@@ -281,6 +281,7 @@ if(COREVIDEO_BUILD_PLUGIN)
         src/zoom-diagnostics-dialog.cpp
         src/zoom-output-profile.cpp
         src/zoom-iso-recorder.cpp
+        src/iso-ffmpeg-pipe.cpp
         src/zoom-iso-panel.cpp
         src/zoom-dock.cpp
         src/zoom-control-server.cpp
@@ -564,6 +565,18 @@ if(BUILD_TESTING)
         add_test(NAME CoreVideoFfmpegPreload
                  COMMAND CoreVideoFfmpegPreloadTest)
     endif()
+
+    # Self-spawning: the test binary is its own slow/fast/wedged child, so
+    # it needs no external programs. Qt-free by design (see the header).
+    add_executable(CoreVideoIsoFfmpegPipeTest
+        tests/iso-ffmpeg-pipe-test.cpp
+        src/iso-ffmpeg-pipe.cpp
+    )
+    target_include_directories(CoreVideoIsoFfmpegPipeTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoIsoFfmpegPipe
+             COMMAND CoreVideoIsoFfmpegPipeTest)
 
     add_executable(CoreVideoIsoEncoderPlanTest
         tests/iso-encoder-plan-test.cpp

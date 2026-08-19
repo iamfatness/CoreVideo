@@ -306,7 +306,7 @@ void ZoomIsoRecorder::stop()
         session.wav.close();
         if (session.ffmpeg) {
             refresh_ffmpeg_status_locked(session);
-            session.ffmpeg->closeWriteChannel();
+            session.ffmpeg->close_stdin();
         }
     }
 
@@ -322,7 +322,7 @@ void ZoomIsoRecorder::stop()
         qint64 remaining = kShutdownBudgetMs - deadline.elapsed();
         if (remaining < 100)
             remaining = 100;
-        if (!session.ffmpeg->waitForFinished(static_cast<int>(remaining))) {
+        if (!session.ffmpeg->wait_finished(static_cast<int>(remaining))) {
             mark_ffmpeg_failure_locked(
                 session,
                 QString("FFmpeg did not exit within the %1s shutdown budget "
@@ -330,13 +330,12 @@ void ZoomIsoRecorder::stop()
                         "its final index (moov).")
                     .arg(kShutdownBudgetMs / 1000));
             session.ffmpeg->kill();
-            if (!session.ffmpeg->waitForFinished(2000) &&
-                session.ffmpeg->state() != QProcess::NotRunning) {
+            if (!session.ffmpeg->wait_finished(2000) &&
+                session.ffmpeg->running()) {
                 blog(LOG_WARNING,
                      "[obs-zoom-plugin] ISO ffmpeg for %s did not exit after "
                      "kill(); process may not be reaped (pid=%lld)",
-                     session.source_name.c_str(),
-                     static_cast<long long>(session.ffmpeg->processId()));
+                     session.source_name.c_str(), session.ffmpeg->pid());
             }
         }
         refresh_ffmpeg_status_locked(session);
@@ -519,8 +518,7 @@ ZoomIsoRecorder::ensure_session_locked(const ZoomOutputInfo &info,
         int nvenc_in_use_iso = 0;
         for (const auto &other : m_sessions) {
             if (other.second.video_encoder == "h264_nvenc" &&
-                other.second.ffmpeg &&
-                other.second.ffmpeg->state() == QProcess::Running)
+                other.second.ffmpeg && other.second.ffmpeg->running())
                 ++nvenc_in_use_iso;
         }
         const int remaining = m_nvenc_session_limit -
@@ -532,37 +530,43 @@ ZoomIsoRecorder::ensure_session_locked(const ZoomOutputInfo &info,
     session.encoder_fallback =
         session.requested_video_encoder != session.video_encoder;
 
-    session.ffmpeg = std::make_unique<QProcess>();
-    session.ffmpeg->setProgram(QString::fromStdString(m_config.ffmpeg_path));
-    QStringList args = {
+    session.ffmpeg = std::make_unique<IsoFfmpegPipe>();
+    std::vector<std::string> args = {
         "-hide_banner", "-loglevel", "warning", "-y",
         "-f", "rawvideo",
         "-pix_fmt", "yuv420p",
-        "-s", QString("%1x%2").arg(width).arg(height),
+        "-s", std::to_string(width) + "x" + std::to_string(height),
         "-r", "30",
         "-i", "pipe:0",
         "-an",
     };
-    args.append(ffmpeg_video_encoder_args(session.video_encoder));
-    args.append({
-        // Fragmented MP4: the file is playable up to the last written
-        // fragment even if FFmpeg is killed or the machine loses power
-        // (+faststart wrote the index only during finalize — and rewrote
-        // the whole file, which made shutdown slow on synced folders and
-        // left killed recordings unplayable).
-        "-movflags", "+frag_keyframe+empty_moov",
-        session.video_path,
-    });
-    session.ffmpeg->setArguments(args);
-    session.ffmpeg->setProcessChannelMode(QProcess::MergedChannels);
-    session.ffmpeg->start(QIODevice::ReadWrite);
-    if (!session.ffmpeg->waitForStarted(2000)) {
-        session.ffmpeg_error = session.ffmpeg->errorString();
+    for (const QString &a : ffmpeg_video_encoder_args(session.video_encoder))
+        args.push_back(a.toStdString());
+    // Fragmented MP4: the file is playable up to the last written
+    // fragment even if FFmpeg is killed or the machine loses power
+    // (+faststart wrote the index only during finalize — and rewrote
+    // the whole file, which made shutdown slow on synced folders and
+    // left killed recordings unplayable).
+    args.push_back("-movflags");
+    args.push_back("+frag_keyframe+empty_moov");
+    args.push_back(session.video_path.toStdString());
+
+    // Queue bound = 4 whole frames, the same realtime backpressure budget
+    // the drop path enforces; the writer thread does blocking pipe writes
+    // beneath it. FFmpeg's stdout+stderr go to a sidecar log so nothing has
+    // to drain them and the tail survives any exit.
+    const size_t frame_cap =
+        static_cast<size_t>(width) * height * 3 / 2 * 4;
+    std::string start_error;
+    if (!session.ffmpeg->start(
+            m_config.ffmpeg_path, args,
+            (session.base_path + ".ffmpeg.log").toStdString(),
+            frame_cap, &start_error)) {
+        session.ffmpeg_error = QString::fromStdString(start_error);
         session.ffmpeg_error_logged = true;
         blog(LOG_WARNING,
              "[obs-zoom-plugin] ISO ffmpeg failed to start for %s: %s",
-             session.source_name.c_str(),
-             session.ffmpeg->errorString().toUtf8().constData());
+             session.source_name.c_str(), start_error.c_str());
     } else {
         session.ffmpeg_started_ns = os_gettime_ns();
     }
@@ -595,7 +599,7 @@ void ZoomIsoRecorder::begin_finishing_locked(Session &&session)
     session.wav.close();
     if (session.ffmpeg) {
         refresh_ffmpeg_status_locked(session);
-        session.ffmpeg->closeWriteChannel();
+        session.ffmpeg->close_stdin();
     }
     session.finishing_since_ns = os_gettime_ns();
     m_finishing.push_back(std::move(session));
@@ -608,8 +612,7 @@ void ZoomIsoRecorder::reap_finishing_locked()
     for (auto it = m_finishing.begin(); it != m_finishing.end();) {
         Session &session = *it;
         bool done = true;
-        if (session.ffmpeg &&
-            session.ffmpeg->state() != QProcess::NotRunning) {
+        if (session.ffmpeg && session.ffmpeg->running()) {
             const uint64_t age_ns =
                 now_ns >= session.finishing_since_ns
                     ? now_ns - session.finishing_since_ns
@@ -622,12 +625,9 @@ void ZoomIsoRecorder::reap_finishing_locked()
                         "and was terminated — the recording may be missing "
                         "its final index (moov)."));
                 session.ffmpeg->kill();
-                session.ffmpeg->waitForFinished(100);
-            } else {
-                // Give it another poll interval to exit on its own.
-                session.ffmpeg->waitForFinished(0);
+                session.ffmpeg->wait_finished(100);
             }
-            done = session.ffmpeg->state() == QProcess::NotRunning;
+            done = !session.ffmpeg->running();
         }
         if (!done) {
             ++it;
@@ -705,7 +705,7 @@ QJsonObject ZoomIsoRecorder::session_status_json_locked(Session &s,
         ? static_cast<double>((now_ns - s.last_audio_ns) / 1000000ULL)
         : -1.0;
     const bool ffmpeg_running =
-        !completed && s.ffmpeg && s.ffmpeg->state() == QProcess::Running;
+        !completed && s.ffmpeg && s.ffmpeg->running();
     obj["ffmpeg_running"] = ffmpeg_running;
     obj["ffmpeg_error"] = s.ffmpeg_error;
     obj["disk_full"] = s.disk_full;
@@ -753,33 +753,35 @@ void ZoomIsoRecorder::refresh_ffmpeg_status_locked(Session &session)
     if (!session.ffmpeg)
         return;
 
-    const QByteArray output = session.ffmpeg->readAll();
-    if (!output.isEmpty()) {
-        session.ffmpeg_output_tail += QString::fromUtf8(output).trimmed();
-        if (session.ffmpeg_output_tail.size() > kFfmpegOutputTailChars)
-            session.ffmpeg_output_tail =
-                session.ffmpeg_output_tail.right(kFfmpegOutputTailChars);
-    }
+    // The child's stdout+stderr live in its sidecar log file; the tail is
+    // re-read whole rather than accumulated, so it stays available after
+    // any kind of exit (the merged-pipe readAll() was empty once the
+    // process was gone).
+    const std::string tail =
+        session.ffmpeg->log_tail(kFfmpegOutputTailChars);
+    if (!tail.empty())
+        session.ffmpeg_output_tail =
+            QString::fromUtf8(tail.data(),
+                              static_cast<int>(tail.size())).trimmed();
 
-    if (session.ffmpeg->state() != QProcess::NotRunning)
+    if (session.ffmpeg->running())
         return;
 
-    session.ffmpeg_exit_code = session.ffmpeg->exitCode();
-    session.ffmpeg_exit_status =
-        session.ffmpeg->exitStatus() == QProcess::CrashExit
-            ? QStringLiteral("crashed")
-            : QStringLiteral("normal");
+    session.ffmpeg_exit_code = session.ffmpeg->exit_code();
+    session.ffmpeg_exit_status = session.ffmpeg->crashed()
+        ? QStringLiteral("crashed")
+        : QStringLiteral("normal");
 
     if (!session.ffmpeg_error.isEmpty())
         return;
 
-    if (session.ffmpeg->exitStatus() == QProcess::CrashExit) {
+    if (session.ffmpeg->crashed()) {
         mark_ffmpeg_failure_locked(session, QStringLiteral("FFmpeg crashed."));
-    } else if (session.ffmpeg->exitCode() != 0) {
+    } else if (session.ffmpeg->exit_code() != 0) {
         mark_ffmpeg_failure_locked(
             session,
             QString("FFmpeg exited with code %1.")
-                .arg(session.ffmpeg->exitCode()));
+                .arg(session.ffmpeg->exit_code()));
     }
 }
 
@@ -819,38 +821,6 @@ void ZoomIsoRecorder::close_session_on_disk_full_locked(
     close_session_locked(source_uuid);
 }
 
-bool ZoomIsoRecorder::write_ffmpeg_locked(Session &session,
-                                         const uint8_t *data,
-                                         uint32_t byte_len)
-{
-    if (!session.ffmpeg || !data || byte_len == 0)
-        return false;
-
-    const char *cursor = reinterpret_cast<const char *>(data);
-    qint64 remaining = byte_len;
-    while (remaining > 0) {
-        errno = 0;
-        const qint64 written = session.ffmpeg->write(cursor, remaining);
-        if (written <= 0) {
-            // Distinguish a full disk (the underlying ::write to FFmpeg's
-            // pipe / its output file reports ENOSPC) from a broken pipe so
-            // the operator sees an actionable message.
-            if (errno == ENOSPC)
-                mark_disk_full_locked(session);
-            else
-                mark_ffmpeg_failure_locked(
-                    session,
-                    QString("FFmpeg pipe write failed: %1")
-                        .arg(session.ffmpeg->errorString()));
-            refresh_ffmpeg_status_locked(session);
-            return false;
-        }
-        cursor += written;
-        remaining -= written;
-    }
-
-    return true;
-}
 
 void ZoomIsoRecorder::record_video_frame(const ZoomOutputInfo &info,
                                          uint32_t resolved_participant_id,
@@ -870,8 +840,7 @@ void ZoomIsoRecorder::record_video_frame(const ZoomOutputInfo &info,
                                              width, height, timestamp_ns);
     session.unresolved_since_ns = 0; // frames flowing == resolved
     refresh_ffmpeg_status_locked(session);
-    if (!session.ffmpeg ||
-        session.ffmpeg->state() != QProcess::Running) {
+    if (!session.ffmpeg || !session.ffmpeg->running()) {
         // Startup-time death of a hardware encoder usually means the
         // session-budget estimate was wrong for this GPU (driver caps
         // vary). Demote this source one tier and recreate on the next
@@ -900,25 +869,41 @@ void ZoomIsoRecorder::record_video_frame(const ZoomOutputInfo &info,
         return;
     }
 
-    // Realtime backpressure: if FFmpeg consumes slower than frames arrive
-    // (typically an oversubscribed hardware encoder), QProcess buffers the
-    // pipe writes in RAM without bound. Drop whole frames past a small
-    // backlog instead — memory stays flat, EOF at stop drains quickly, and
-    // the operator sees the drop count instead of a mystery hang/kill.
-    const qint64 frame_bytes =
-        static_cast<qint64>(width) * height * 3 / 2;
-    const qint64 backlog = session.ffmpeg->bytesToWrite();
-    if (backlog > frame_bytes * 4) {
+    // One contiguous I420 frame, then a single bounded queue attempt.
+    // Whole-frame granularity is load-bearing: a partially written frame
+    // would shift every following frame's bytes and shear the video. The
+    // pipe's writer thread does the blocking writes; a stalled encoder
+    // shows up here as try_queue() == false (drop), never as RAM growth or
+    // a wedge (the QProcess feed stalled after ~5 frames — see
+    // iso-ffmpeg-pipe.h).
+    const size_t frame_bytes =
+        static_cast<size_t>(width) * height * 3 / 2;
+    std::vector<uint8_t> frame(frame_bytes);
+    uint8_t *dst = frame.data();
+    for (uint32_t row = 0; row < height; ++row) {
+        std::memcpy(dst, y + row * stride_y, width);
+        dst += width;
+    }
+    for (uint32_t row = 0; row < height / 2; ++row) {
+        std::memcpy(dst, u + row * stride_uv, width / 2);
+        dst += width / 2;
+    }
+    for (uint32_t row = 0; row < height / 2; ++row) {
+        std::memcpy(dst, v + row * stride_uv, width / 2);
+        dst += width / 2;
+    }
+
+    if (!session.ffmpeg->try_queue(std::move(frame))) {
         ++session.video_frames_dropped;
         session.last_drop_ns = timestamp_ns;
         if (!session.backlog_reported) {
             session.backlog_reported = true;
             blog(LOG_WARNING,
                  "[obs-zoom-plugin] ISO encoder for %s is falling behind "
-                 "(write backlog %lld bytes) — dropping frames to protect "
-                 "memory and the meeting. Hardware encoder session limit?",
+                 "(queue %zu bytes) — dropping frames to protect memory "
+                 "and the meeting. Hardware encoder session limit?",
                  session.source_name.c_str(),
-                 static_cast<long long>(backlog));
+                 session.ffmpeg->queued_bytes());
         }
         return;
     }
@@ -929,20 +914,6 @@ void ZoomIsoRecorder::record_video_frame(const ZoomOutputInfo &info,
              "%llu frames",
              session.source_name.c_str(),
              static_cast<unsigned long long>(session.video_frames_dropped));
-    }
-
-    const std::string source_uuid = session.source_uuid;
-    for (uint32_t row = 0; row < height; ++row) {
-        if (!write_ffmpeg_locked(session, y + row * stride_y, width))
-            return close_session_on_disk_full_locked(source_uuid);
-    }
-    for (uint32_t row = 0; row < height / 2; ++row) {
-        if (!write_ffmpeg_locked(session, u + row * stride_uv, width / 2))
-            return close_session_on_disk_full_locked(source_uuid);
-    }
-    for (uint32_t row = 0; row < height / 2; ++row) {
-        if (!write_ffmpeg_locked(session, v + row * stride_uv, width / 2))
-            return close_session_on_disk_full_locked(source_uuid);
     }
     ++session.video_frames;
     session.last_video_ns = timestamp_ns;

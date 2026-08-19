@@ -3,9 +3,9 @@
 #include "zoom-output-manager.h"
 #include "zoom-types.h"
 #include "iso-encoder-plan.h"
+#include "iso-ffmpeg-pipe.h"
 #include <QJsonArray>
 #include <QJsonObject>
-#include <QProcess>
 #include <QString>
 #include <atomic>
 #include <cstdint>
@@ -103,7 +103,12 @@ private:
         std::string requested_video_encoder;
         std::string video_encoder;
         bool encoder_fallback = false;
-        std::unique_ptr<QProcess> ffmpeg;
+        // Raw-pipe process feed — QProcess is banned here: its Windows stdin
+        // chaining needs the owner thread's Qt event loop, and every caller
+        // of record_video_frame() is a plain std::thread (measured live
+        // 2026-08-18: exactly 5 frames per session, then a permanent
+        // backlog). See iso-ffmpeg-pipe.h.
+        std::unique_ptr<IsoFfmpegPipe> ffmpeg;
         WavFile wav;
     };
 
@@ -127,8 +132,6 @@ private:
     // WAV header and reaping FFmpeg). No-op otherwise. Note: this may
     // invalidate any Session reference for source_uuid.
     void close_session_on_disk_full_locked(const std::string &source_uuid);
-    bool write_ffmpeg_locked(Session &session, const uint8_t *data,
-                             uint32_t byte_len);
     bool should_record(const ZoomOutputInfo &info,
                        uint32_t resolved_participant_id) const;
 

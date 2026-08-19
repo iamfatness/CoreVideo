@@ -84,6 +84,13 @@ Every one of these is documented at length where it lives; the list is the map.
   the hidden preview covers air until the main subscription delivers the
   participant we cut TO; exactly one of the two slots publishes audio at any
   instant (gate polarity in `on_engine_audio` / `on_director_preview_audio`).
+- **ISO ffmpeg feed** (`src/iso-ffmpeg-pipe.h`): QProcess is banned on the
+  media threads — its Windows stdin chaining needs the owner thread's Qt
+  event loop, and the dispatch lanes have none (live 2026-08-18: every ISO
+  session froze at exactly 5 frames, 0-byte MP4s, 15 s shutdown kills).
+  FFmpeg is fed by a raw pipe + blocking writer thread + bounded
+  drop-oldest queue, pinned by CoreVideoIsoFfmpegPipeTest. The `-encoders`
+  availability probe may keep QProcess: `waitFor*` pumps without a loop.
 - **Engine teardown**: never let SDK callbacks race teardown; `set_terminate`
   is a bare `_exit(5)` (code 5 maps to EngineCrash recovery; no pipe writes,
   no locks, no allocation in the handler).

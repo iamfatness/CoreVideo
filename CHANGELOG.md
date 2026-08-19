@@ -8,6 +8,19 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 ## [Unreleased]
 
 ### Fixed
+- **ISO video recording actually records.** Every 1080p ISO session wrote
+  exactly 5 frames and produced a 0-byte MP4, with hundreds of "encoder
+  falling behind" drops and 15-second shutdown kills — regardless of encoder
+  (x264 and NVENC alike). The FFmpeg stdin feed used QProcess, whose Windows
+  write machinery chains buffered chunks through the owning thread's Qt event
+  loop; ISO sessions are created on the media dispatch lane, a plain thread
+  with no event loop, so after the first in-flight chunk nothing was ever
+  written again. FFmpeg is now fed through a dedicated raw pipe with a
+  blocking writer thread and a bounded drop-oldest frame queue, and its
+  stdout/stderr go to a per-session `.ffmpeg.log` next to the recording (the
+  in-dialog error tail now survives any kind of exit). The 2026-08-08 "ISO
+  stop stalls the engine" and memory-balloon incidents were earlier symptoms
+  of this same defect.
 - **First join of an OBS session no longer drops ~1 second of audio.** The
   hardware-acceleration FFmpeg runtime (`cvfilter-11.dll` and the codec family
   it pulls in) was delay-loaded on the first video frame after subscribing —

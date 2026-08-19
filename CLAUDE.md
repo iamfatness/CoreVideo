@@ -94,6 +94,27 @@ Every one of these is documented at length where it lives; the list is the map.
   directly (2026-08-18/19). Applied in both `zoom-source.cpp`
   (`output_audio_from_shared_memory`, shared by the main and director-preview
   slots) and `zoom-participant-audio-source.cpp`.
+- **Speaker-director tick stays local to the cut** (`src/zoom-dock.cpp`'s
+  100ms refresh timer): the Active Speaker cut is entirely self-contained
+  in `zoom-source.cpp`'s director-handover machinery. Never call
+  `ZoomOutputManager::resubscribe_all()` from the automatic tick path —
+  that function is for engine crash/reconnect recovery only (its own doc
+  comment says so), and calling it on every ordinary promotion churns
+  every unrelated fixed-participant output's video mapping on every
+  speaker change (live-caught 2026-08-19, 8 sources resubscribing every
+  12-90s for a whole show). The manual speaker Take/Release buttons still
+  call it deliberately — that's a rare, operator-initiated action, not
+  the automatic path.
+- **ISO encoder demotion chain must actually chain**
+  (`src/zoom-iso-recorder.cpp`'s `record_video_frame`): never gate a
+  fresh demotion attempt on "has this uuid ever been demoted before" —
+  `iso_demote_encoder()` (nvenc→qsv→amf→libx264) only terminates because
+  `session.video_encoder != "libx264"` eventually goes false; re-checking
+  that on every startup failure is the only guard the chain needs. A
+  stricter one-shot guard leaves a source stuck at whatever the first
+  demotion picked if that tier is ALSO unavailable (live-caught
+  2026-08-19: two sources permanently stuck at 2 frames when neither QSV
+  nor AMF worked on the box).
 - **ISO ffmpeg feed** (`src/iso-ffmpeg-pipe.h`): QProcess is banned on the
   media threads — its Windows stdin chaining needs the owner thread's Qt
   event loop, and the dispatch lanes have none (live 2026-08-18: every ISO

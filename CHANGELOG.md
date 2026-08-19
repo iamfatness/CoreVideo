@@ -8,6 +8,23 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 ## [Unreleased]
 
 ### Fixed
+- **Every automatic Active Speaker cut was force-resubscribing all other
+  outputs.** A 100ms UI timer called the engine-reconnect-only
+  `resubscribe_all()` on every ordinary speaker promotion — copied from the
+  manual speaker override buttons, where it made more sense as a rare,
+  deliberate action. On a show with frequent speaker changes this tore down
+  and rebuilt every fixed-participant source's video mapping every 12-90
+  seconds, for the length of the meeting. The Active Speaker cut itself
+  never depended on this call; removed it from the automatic path.
+
+- **Two ISO sessions could get permanently stuck failing.** The hardware
+  encoder fallback chain (NVENC → QSV → AMF → libx264) only ever advanced
+  one step per source, for the life of the run — on a machine with no
+  working QSV or AMF runtime, a source demoted off NVENC took its one
+  allowed hop, failed again, and stayed stuck at 2 video frames forever
+  instead of ever reaching libx264, the CPU tier with no hardware
+  dependency to fail on.
+
 - **Audible clicks/pops on the embedded audio, tied to whoever is currently
   talking.** Diagnosed live by probing the engine's audio shared-memory ring
   directly, bypassing OBS entirely: Zoom keeps calling back on schedule, but

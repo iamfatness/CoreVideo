@@ -1299,6 +1299,27 @@ void ZoomEngineClient::handle_event(const std::string &line)
         // but either way the meeting itself is healthy: never route this
         // into the join-failure / reconnect machinery below (doing so
         // flipped the session to "Connection failed" mid-meeting).
+        // raw_media_start_failed with privilege_requested is the NORMAL first
+        // half of the record-privilege handshake: canStartRawRecording returns
+        // NoPermission(6), the engine requests the privilege, and the grant
+        // lands moments later (121ms observed live 2026-08-20) followed by
+        // raw_media_ready. Routing it into the join-failure tail flipped a
+        // healthy joined session to Failed, which then gated start_engine,
+        // resubscription and recovery for the rest of the session. Surface
+        // the message; never vote against the meeting.
+        if (emsg == "raw_media_start_failed" &&
+            obj.value("privilege_requested").toBool()) {
+            std::vector<ErrorCallback> error_callbacks;
+            const std::string error_message = zoom_error_message(obj);
+            {
+                std::lock_guard<std::mutex> lk(m_mtx);
+                m_last_error = error_message;
+                for (const auto &entry : m_error_callbacks)
+                    if (entry.second) error_callbacks.push_back(entry.second);
+            }
+            for (const auto &cb : error_callbacks) cb(error_message);
+            return;
+        }
         if (emsg == "video_subscribe_failed") {
             const uint32_t participant_id =
                 static_cast<uint32_t>(obj.value("participant_id").toInt());

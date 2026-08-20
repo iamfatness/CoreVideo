@@ -52,7 +52,7 @@ jobs:
       # needed at link time; OBS resolves all obs_* symbols at load time.
       - name: Get OBS headers
         run: |
-          OBS_VER=30.2.2
+          OBS_VER=32.2.2
           curl -fL \
               "https://github.com/obsproject/obs-studio/archive/refs/tags/${OBS_VER}.tar.gz" \
               -o obs-source.tar.gz
@@ -60,20 +60,45 @@ jobs:
           tar -xzf obs-source.tar.gz --strip-components=1 \
               -C /tmp/obs-source \
               "obs-studio-${OBS_VER}/libobs" \
-              "obs-studio-${OBS_VER}/UI/obs-frontend-api"
+              "obs-studio-${OBS_VER}/frontend/api"
 
           mkdir -p /tmp/obs-sdk/include/obs \
                    /tmp/obs-sdk/cmake/LibObs \
                    /tmp/obs-sdk/cmake/obs-frontend-api
 
           cp -R /tmp/obs-source/libobs/*                            /tmp/obs-sdk/include/obs/
-          cp /tmp/obs-source/UI/obs-frontend-api/obs-frontend-api.h /tmp/obs-sdk/include/obs/
+          cp /tmp/obs-source/frontend/api/obs-frontend-api.h /tmp/obs-sdk/include/obs/
+
+          # OBS 31+ removed the vendored simde tree (util/sse-intrin.h needs
+          # it on ARM; it now ships via obs-deps prebuilts) and obs-config.h
+          # includes the build-generated obsconfig.h unconditionally. Stage
+          # header-only simde and synthesize a minimal obsconfig.h -- the
+          # values are irrelevant to a plugin, they only have to resolve.
+          SIMDE_VER=0.8.2
+          curl -fL \
+              "https://github.com/simd-everywhere/simde/archive/refs/tags/v${SIMDE_VER}.tar.gz" \
+              -o simde.tar.gz
+          mkdir -p /tmp/simde-src
+          tar -xzf simde.tar.gz --strip-components=1 -C /tmp/simde-src
+          cp -R /tmp/simde-src/simde /tmp/obs-sdk/include/
+
+          printf '%s\n' \
+              '#pragma once' \
+              '#define OBS_VERSION "32.2.2"' \
+              '#define OBS_VERSION_CANONICAL "32.2.2"' \
+              '#define OBS_DATA_PATH "data"' \
+              '#define OBS_INSTALL_PREFIX "/usr/local"' \
+              '#define OBS_PLUGIN_DESTINATION "obs-plugins"' \
+              '#define OBS_QT_VERSION 6' \
+              '#define OBS_RELEASE_CANDIDATE 0' \
+              '#define OBS_BETA 0' \
+              > /tmp/obs-sdk/include/obs/obsconfig.h
 
           # Write cmake config files using printf (avoids heredoc quoting issues).
           printf '%s\n' \
               'add_library(OBS::libobs INTERFACE IMPORTED GLOBAL)' \
               'set_target_properties(OBS::libobs PROPERTIES' \
-              '    INTERFACE_INCLUDE_DIRECTORIES "/tmp/obs-sdk/include/obs")' \
+              '    INTERFACE_INCLUDE_DIRECTORIES "/tmp/obs-sdk/include/obs;/tmp/obs-sdk/include")' \
               'set(LibObs_FOUND TRUE)' \
               > /tmp/obs-sdk/cmake/LibObs/LibObsConfig.cmake
 

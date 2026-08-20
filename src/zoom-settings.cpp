@@ -8,6 +8,11 @@
 #include <QMessageAuthenticationCode>
 #include <obs-frontend-api.h>
 #include <util/base.h>
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 #include <util/config-file.h>
 #if defined(_WIN32)
 #include <windows.h>
@@ -229,9 +234,38 @@ static std::string unprotect_secret(const char *stored, const char *account)
 #endif
 }
 
+// OBS 31 split the frontend "global" config into app and user scopes and
+// deprecated obs_frontend_get_global_config — which also logs a DEPRECATION
+// warning on EVERY call, flooding logs on OBS 31+. The deprecated accessor
+// maps to the app config (the same global.ini this plugin has always written),
+// so obs_frontend_get_app_config is the drop-in successor with zero settings
+// migration. It does not exist on OBS 30, and referencing it statically would
+// stop the plugin from loading there, so resolve it at runtime and keep the
+// old accessor as the OBS 30 fallback.
+static config_t *frontend_settings_config()
+{
+    using config_fn = config_t *(*)(void);
+    static const config_fn app_config_fn = []() -> config_fn {
+#if defined(_WIN32)
+        HMODULE mod = GetModuleHandleA("obs-frontend-api.dll");
+        return mod ? reinterpret_cast<config_fn>(reinterpret_cast<void *>(
+                         GetProcAddress(mod, "obs_frontend_get_app_config")))
+                   : nullptr;
+#else
+        return reinterpret_cast<config_fn>(
+            dlsym(RTLD_DEFAULT, "obs_frontend_get_app_config"));
+#endif
+    }();
+    if (app_config_fn) return app_config_fn();
+    QT_WARNING_PUSH
+    QT_WARNING_DISABLE_DEPRECATED
+    return obs_frontend_get_global_config();
+    QT_WARNING_POP
+}
+
 ZoomPluginSettings ZoomPluginSettings::load()
 {
-    config_t *cfg = obs_frontend_get_global_config();
+    config_t *cfg = frontend_settings_config();
     ZoomPluginSettings s;
 
     const bool embedded_public_app_key =
@@ -446,7 +480,7 @@ bool ZoomPluginSettings::use_broker_sdk_jwt() const
 
 void ZoomPluginSettings::save() const
 {
-    config_t *cfg = obs_frontend_get_global_config();
+    config_t *cfg = frontend_settings_config();
     const bool embedded_public_app_key =
         has_embedded_value(kEmbeddedMeetingSdkPublicAppKey);
     const bool embedded_oauth_client_id =

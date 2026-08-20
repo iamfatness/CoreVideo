@@ -401,7 +401,7 @@ static QJsonObject speaker_director_to_json()
     return obj;
 }
 
-void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
+void ZoomControlServer::handle_line(QPointer<QTcpSocket> socket, const QByteArray &line)
 {
     const ParsedControlRequest parsed = parse_control_request(line, m_token);
     if (parsed.error == ControlRequestError::InvalidJson) {
@@ -843,10 +843,10 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
 
     // Keep the socket open and stream JSON events until it disconnects.
     if (cmd == "subscribe_events") {
-        m_event_subs.insert(socket);
+        m_event_subs.insert(socket.data());
         // Remove from the set if the client disconnects.
-        connect(socket, &QTcpSocket::disconnected, this,
-                [this, socket]() { remove_subscriber(socket); },
+        connect(socket.data(), &QTcpSocket::disconnected, this,
+                [this, socket]() { remove_subscriber(socket.data()); },
                 Qt::UniqueConnection);
         write_response(socket, {{"ok", true}, {"subscribed", true}});
         // Send current state immediately so the subscriber starts with fresh data.
@@ -872,9 +872,14 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
     });
 }
 
-void ZoomControlServer::write_response(QTcpSocket *socket,
+void ZoomControlServer::write_response(const QPointer<QTcpSocket> &socket,
                                        const QJsonObject &response)
 {
+    // The client may have disconnected (and its socket been deleted) while
+    // the handler was blocked; a dead QPointer makes that a dropped response
+    // instead of a use-after-free.
+    if (!socket || socket->state() != QAbstractSocket::ConnectedState)
+        return;
     QJsonDocument doc(response);
     socket->write(doc.toJson(QJsonDocument::Compact));
     socket->write("\n");

@@ -200,6 +200,15 @@ jobs:
               throw "No directory with h/zoom_sdk.h + lib/sdk.lib found in $assetName"
           }
           Write-Host "Using SDK root: $($sdkRoot.FullName)"
+          # third_party/zoom-sdk holds a TRACKED partial header set (31 files,
+          # enough for compile-validation without the SDK). Move-Item into an
+          # existing directory NESTS the download inside it and the partial
+          # set keeps winning the include path - setting_service_interface.h
+          # then fails on the untracked zoom_sdk_util_define.h. Replace the
+          # directory wholesale, as release-windows.yml always has.
+          if (Test-Path third_party/zoom-sdk) {
+            Remove-Item third_party/zoom-sdk -Recurse -Force
+          }
           Move-Item $sdkRoot.FullName third_party/zoom-sdk
           "COREVIDEO_HAS_ZOOM_RUNTIME=true" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "has_zoom_runtime=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append

@@ -171,11 +171,18 @@ void ZoomControlServer::on_new_connection()
         return;
     while (m_server->hasPendingConnections()) {
         auto *socket = m_server->nextPendingConnection();
-        connect(socket, &QTcpSocket::readyRead, this, [this, socket]() {
+        // The guard, not the raw pointer, drives the read loop: handle_line
+        // can block (nested event loop in the join path), and a client that
+        // disconnects meanwhile has this socket deleteLater'd inside that
+        // nested loop. The raw pointer then dangles and the loop's next
+        // canReadLine() is a use-after-free (second live SIGSEGV of
+        // 2026-08-20, after the write_response one was already guarded).
+        QPointer<QTcpSocket> guard(socket);
+        connect(socket, &QTcpSocket::readyRead, this, [this, guard]() {
             if (!m_running)
                 return;
-            while (socket->canReadLine())
-                handle_line(socket, socket->readLine(4096).trimmed());
+            while (guard && guard->canReadLine())
+                handle_line(guard, guard->readLine(4096).trimmed());
         });
         connect(socket, &QTcpSocket::disconnected, socket, &QTcpSocket::deleteLater);
     }

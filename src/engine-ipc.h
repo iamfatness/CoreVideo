@@ -420,6 +420,7 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
    }
 #else
 #  include <sys/mman.h>
+#  include <sys/stat.h>
 #  include <fcntl.h>
 #  include <cerrno>
    struct ShmRegion {
@@ -460,13 +461,48 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
        r.fd = shm_open(r.name.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
        if (r.fd < 0 && errno == EEXIST) {
            r.already_existed = true;
-           r.fd = shm_open(r.name.c_str(), O_CREAT | O_RDWR, 0600);
-       }
-       if (r.fd < 0) { r.last_error = static_cast<uint32_t>(errno); return false; }
-       if (ftruncate(r.fd, static_cast<off_t>(size)) < 0) {
-           r.last_error = static_cast<uint32_t>(errno);
-           shm_region_destroy(r);
-           return false;
+           r.fd = shm_open(r.name.c_str(), O_RDWR, 0600);
+           if (r.fd >= 0) {
+               // An existing object must be size-checked with fstat, not
+               // blindly ftruncated: on macOS a POSIX shm object is sized
+               // exactly once and ftruncate on an existing one fails EINVAL,
+               // which made every create-over-a-held-name fail outright
+               // there. Big enough -> map as-is (open-and-flag). Undersized
+               // -> grow it where the OS allows, recreate where it does not;
+               // already_existed stays true either way so callers still
+               // learn about the ghost holder.
+               struct stat st {};
+               const bool fits = fstat(r.fd, &st) == 0 &&
+                                 static_cast<size_t>(st.st_size) >= size;
+               if (!fits) {
+#if defined(__APPLE__)
+                   close(r.fd);
+                   shm_unlink(r.name.c_str());
+                   r.fd = shm_open(r.name.c_str(),
+                                   O_CREAT | O_EXCL | O_RDWR, 0600);
+                   if (r.fd >= 0 &&
+                       ftruncate(r.fd, static_cast<off_t>(size)) < 0) {
+                       r.last_error = static_cast<uint32_t>(errno);
+                       shm_region_destroy(r);
+                       return false;
+                   }
+#else
+                   if (ftruncate(r.fd, static_cast<off_t>(size)) < 0) {
+                       r.last_error = static_cast<uint32_t>(errno);
+                       shm_region_destroy(r);
+                       return false;
+                   }
+#endif
+               }
+           }
+           if (r.fd < 0) { r.last_error = static_cast<uint32_t>(errno); return false; }
+       } else {
+           if (r.fd < 0) { r.last_error = static_cast<uint32_t>(errno); return false; }
+           if (ftruncate(r.fd, static_cast<off_t>(size)) < 0) {
+               r.last_error = static_cast<uint32_t>(errno);
+               shm_region_destroy(r);
+               return false;
+           }
        }
        r.ptr  = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, r.fd, 0);
        r.size = (r.ptr != MAP_FAILED) ? size : 0;

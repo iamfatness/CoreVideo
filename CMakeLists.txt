@@ -448,12 +448,32 @@ if(BUILD_ZOOM_ENGINE)
             "-F${ZOOM_SDK_ACTIVE_DIR}"
             "-framework ZoomSDK"
             "-framework Foundation"
+            # The engine hosts an NSApplication: the Zoom macOS SDK is an AppKit
+            # client (its own sample is built on NSApplicationMain), so a bare
+            # NSRunLoop is not enough to service its delegate callbacks.
+            "-framework AppKit"
         )
         # rpath so the linker/loader can resolve ZoomSDK.framework from where the
         # SDK was fetched (CI compile/link validation only; not a shippable rpath).
+        #
+        # BUILD_RPATH is required, not optional: the framework is linked through
+        # raw "-F<dir>"/"-framework ZoomSDK" flags rather than an imported target
+        # with a known location, so CMake cannot infer any build-tree rpath on its
+        # own. Without this the binary is emitted with ZERO LC_RPATH entries and
+        # dyld aborts at launch with "no LC_RPATH's found" -- a link-clean build
+        # that cannot run. CI never caught it because it only compiles and links.
+        #
+        # INSTALL_RPATH targets the shipped layout: the engine runs as
+        # ZoomObsEngine.app/Contents/MacOS/ZoomObsEngine with the Zoom SDK
+        # runtime in Contents/Frameworks, so "@executable_path/../Frameworks"
+        # resolves it. That layout is not a packaging preference -- the SDK
+        # loads its runtime bundles through the main bundle's Frameworks dir,
+        # and without them sdkAuth fails synchronously with no callback. See the
+        # header note in engine/src/main-macos.mm.
         set_target_properties(ZoomObsEngine PROPERTIES
             BUILD_WITH_INSTALL_RPATH OFF
-            INSTALL_RPATH "@loader_path/zoom-runtime"
+            BUILD_RPATH "${ZOOM_SDK_ACTIVE_DIR}"
+            INSTALL_RPATH "@executable_path/../Frameworks"
         )
         # Relative DESTINATION (resolved against the install prefix). An
         # absolute "${CMAKE_INSTALL_PREFIX}/..." expands to the configure-time
@@ -501,6 +521,33 @@ if(COREVIDEO_BUILD_PLUGIN)
             "${COREVIDEO_QT_PLUGIN_DIR}/tls/qschannelbackend.dll"
             DESTINATION "obs-plugins/64bit/plugins/tls"
         )
+    endif()
+    # macOS counterpart of the Windows TLS-backend install above. OBS.app bundles
+    # Qt but ships NO Qt TLS backend plugin (there is no PlugIns/tls directory),
+    # so QtNetwork in the OBS process has no TLS provider and every https request
+    # fails with "TLS initialization failed" -- which broke the OAuth broker
+    # redeem. securetransport is the native backend and needs no OpenSSL dylib;
+    # certonly is Qt's no-TLS fallback and is what it loads when nothing else is
+    # present. plugin-main.cpp adds this directory to the Qt library paths.
+    if(APPLE AND COREVIDEO_QT_PLUGIN_DIR AND EXISTS "${COREVIDEO_QT_PLUGIN_DIR}/tls")
+        set(_cv_macos_tls_backends "")
+        foreach(_cv_tls_lib
+            "libqsecuretransportbackend.dylib"
+            "libqcertonlybackend.dylib")
+            if(EXISTS "${COREVIDEO_QT_PLUGIN_DIR}/tls/${_cv_tls_lib}")
+                list(APPEND _cv_macos_tls_backends
+                    "${COREVIDEO_QT_PLUGIN_DIR}/tls/${_cv_tls_lib}")
+            else()
+                message(WARNING
+                    "Qt TLS backend not found: ${COREVIDEO_QT_PLUGIN_DIR}/tls/${_cv_tls_lib}. "
+                    "https requests (OAuth broker redeem, update check) will fail at runtime.")
+            endif()
+        endforeach()
+        if(_cv_macos_tls_backends)
+            install(FILES ${_cv_macos_tls_backends}
+                DESTINATION "obs-plugins/64bit/plugins/tls"
+            )
+        endif()
     endif()
     if(WIN32 AND COREVIDEO_QT_PLUGIN_DIR AND EXISTS "${COREVIDEO_QT_PLUGIN_DIR}/platforms/qwindows.dll")
         install(FILES

@@ -4,6 +4,8 @@
 #include <QByteArray>
 #include <QJsonObject>
 #include <QObject>
+#include <QPointer>
+#include <QTcpSocket>
 #include <QSet>
 #include <QTimer>
 #include <QtGlobal>
@@ -27,8 +29,15 @@ private:
     explicit ZoomControlServer(QObject *parent = nullptr);
 
     void on_new_connection();
-    void handle_line(QTcpSocket *socket, const QByteArray &line);
-    void write_response(QTcpSocket *socket, const QJsonObject &response);
+    // QPointer, not a raw socket: command handlers can block (the join path
+    // fetches a ZAK over HTTPS with a nested event loop), and a client that
+    // disconnects meanwhile has its socket deleteLater'd INSIDE that nested
+    // loop. A raw pointer then dangles and the response write is a
+    // use-after-free (live SIGSEGV, 2026-08-20, driven by one-shot nc
+    // clients). QPointer nulls itself on destruction; write_response checks.
+    void handle_line(QPointer<QTcpSocket> socket, const QByteArray &line);
+    void write_response(const QPointer<QTcpSocket> &socket,
+                        const QJsonObject &response);
     void remove_subscriber(QTcpSocket *socket);
     void poll_and_push();
 

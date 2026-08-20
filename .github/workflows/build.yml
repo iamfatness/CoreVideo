@@ -20,6 +20,322 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Windows
+  build-windows:
+    name: Windows x64
+    runs-on: windows-2022
+    # contents: write so GITHUB_TOKEN can see the draft release that stores the
+    # license-restricted Zoom SDK (drafts are invisible to a read-only token).
+    permissions:
+      contents: write
+    outputs:
+      has_zoom_runtime: ${{ steps.zoom_sdk.outputs.has_zoom_runtime }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Set up MSVC tools
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # Download the OBS portable zip for the DLLs (needed to generate import
+      # libs via dumpbin).  Always use sparse-checkout for headers and always
+      # write our own cmake config files; the portable zip's bundled configs
+      # do not set INTERFACE_INCLUDE_DIRECTORIES so headers would never be found.
+      - name: Get OBS SDK (headers + import libs)
+        shell: powershell
+        run: |
+          $ver = "32.2.2"
+          $obs = "C:\obs-runtime"
+          $sdk = "C:\obs-sdk"
+
+          # OBS portable zip (needed for obs.dll / obs-frontend-api.dll)
+          Invoke-WebRequest `
+              "https://github.com/obsproject/obs-studio/releases/download/$ver/OBS-Studio-$ver-Windows-x64.zip" `
+              -OutFile obs.zip
+          Expand-Archive obs.zip $obs -Force
+
+          # Headers via sparse checkout
+          git clone --depth 1 --branch $ver --filter=blob:none --sparse `
+              https://github.com/obsproject/obs-studio.git C:\obs-source
+          Push-Location C:\obs-source
+          git sparse-checkout set libobs frontend/api
+          Pop-Location
+
+          New-Item -Force -ItemType Directory "$sdk\include\obs" | Out-Null
+          Copy-Item "C:\obs-source\libobs\*"                               "$sdk\include\obs\" -Recurse -Force
+          Copy-Item "C:\obs-source\frontend\api\obs-frontend-api.h" "$sdk\include\obs\"
+
+          # OBS 32.x obs-config.h includes the build-generated obsconfig.h
+          # unconditionally; synthesize a minimal one (values irrelevant to a
+          # plugin - they only have to resolve).
+          @(
+            "#pragma once",
+            "#define OBS_VERSION `"32.2.2`"",
+            "#define OBS_VERSION_CANONICAL `"32.2.2`"",
+            "#define OBS_DATA_PATH `"data`"",
+            "#define OBS_INSTALL_PREFIX `"/usr/local`"",
+            "#define OBS_PLUGIN_DESTINATION `"obs-plugins`"",
+            "#define OBS_QT_VERSION 6",
+            "#define OBS_RELEASE_CANDIDATE 0",
+            "#define OBS_BETA 0"
+          ) | Set-Content -Path "$sdk\include\obs\obsconfig.h" -Encoding ASCII
+
+
+          # Import libs from DLL export tables. Read the PE export directory
+          # with pefile instead of scraping dumpbin text: a runner-image
+          # update changed the output enough that the old regex matched
+          # nothing, and lib.exe happily built EMPTY import libraries (~1.5KB)
+          # that made every obs_* symbol come up unresolved at link.
+          python -m pip install --quiet pefile
+          $py = @'
+          import sys, pefile
+          pe = pefile.PE(sys.argv[1], fast_load=True)
+          pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_EXPORT']])
+          print('\n'.join(e.name.decode() for e in pe.DIRECTORY_ENTRY_EXPORT.symbols if e.name))
+          '@
+          # The here-string keeps the YAML block's indentation; python cares.
+          $py = ($py -split "`n" | ForEach-Object { $_.TrimStart() }) -join "`n"
+          Set-Content -Path "$sdk\export-names.py" -Value $py -Encoding ASCII
+
+          New-Item -Force -ItemType Directory "$sdk\lib" | Out-Null
+          foreach ($name in @("obs", "obs-frontend-api")) {
+              $dll = "$obs\bin\64bit\$name.dll"
+              if (-not (Test-Path $dll)) { Write-Warning "$dll not found - skipping"; continue }
+
+              $def = "$sdk\lib\$name.def"
+              $lib = "$sdk\lib\$name.lib"
+
+              $names = @(python "$sdk\export-names.py" $dll)
+              if ($LASTEXITCODE -ne 0) { throw "pefile export parse failed for $dll" }
+              Write-Host "$name.dll exports: $($names.Count)"
+              if ($names.Count -lt 10) {
+                  throw "Only $($names.Count) exports parsed from $dll - refusing to build an empty import library."
+              }
+              @("EXPORTS") + ($names | ForEach-Object { "  $_" }) | Set-Content $def -Encoding ASCII
+              lib /nologo /def:$def /out:$lib /machine:x64
+              if ($LASTEXITCODE -ne 0) { throw "lib.exe failed for $def" }
+          }
+
+          # CMake config files (always generated; never use the zip's copies)
+          $sdkFwd = $sdk -replace '\\', '/'
+          $obsFwd = $obs -replace '\\', '/'
+          foreach ($pkg in @(
+              @{ name = "LibObs";           target = "OBS::libobs";           dll = "obs"              },
+              @{ name = "obs-frontend-api"; target = "OBS::obs-frontend-api"; dll = "obs-frontend-api" }
+          )) {
+              $dir = "$sdk\cmake\$($pkg.name)"
+              New-Item -Force -ItemType Directory $dir | Out-Null
+
+              @(
+                  "add_library($($pkg.target) SHARED IMPORTED GLOBAL)",
+                  "set_target_properties($($pkg.target) PROPERTIES",
+                  "  IMPORTED_IMPLIB `"$sdkFwd/lib/$($pkg.dll).lib`"",
+                  "  IMPORTED_LOCATION `"$obsFwd/bin/64bit/$($pkg.dll).dll`"",
+                  "  INTERFACE_INCLUDE_DIRECTORIES `"$sdkFwd/include/obs`"",
+                  ")",
+                  "set($($pkg.name)_FOUND TRUE)"
+              ) | Set-Content -Path "$dir\$($pkg.name)Config.cmake" -Encoding UTF8
+          }
+
+          "OBS_SDK_DIR=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install Qt6
+        shell: powershell
+        run: |
+          pip install aqtinstall
+          aqt install-qt windows desktop 6.7.3 win64_msvc2019_64 --outputdir C:\Qt
+          "QT_ROOT_DIR=C:\Qt\6.7.3\msvc2019_64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # The Zoom SDK is license-restricted: it lives as an asset on a DRAFT
+      # release in this repo (never publish that release). curl.exe strips the
+      # Authorization header on the S3 redirect hop for us and is binary-safe,
+      # unlike PowerShell 5.1 stdout redirection. Never commit the SDK.
+      - name: Download Zoom Windows SDK (private draft-release asset)
+        id: zoom_sdk
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $assetName = "zoom-sdk-windows-7.1.5.43953.zip"
+          # Filter in PowerShell, not --jq: embedded \" quoting broke when the
+          # runner image changed native-argument tokenization, and the lookup
+          # failed as "accepts 1 arg(s), received 3" - which this step then
+          # treated as "no SDK", making the whole job green while never
+          # compiling the plugin at all.
+          $releases = gh api "repos/$env:GITHUB_REPOSITORY/releases" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "gh api releases failed" }
+          $assetId = $releases | Where-Object { $_.draft } |
+              ForEach-Object { $_.assets } |
+              Where-Object { $_.name -eq $assetName } |
+              Select-Object -First 1 -ExpandProperty id
+          if (-not $assetId) {
+              "COREVIDEO_HAS_ZOOM_RUNTIME=false" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+              "has_zoom_runtime=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+              Write-Warning "$assetName not found on any draft release (or token lacks access). Building Windows validation artifact without ZoomObsEngine runtime."
+              exit 0
+          }
+          Write-Host "Fetching $assetName (asset id $assetId)"
+          curl.exe -sSfL -H "Authorization: Bearer $env:GH_TOKEN" -H "Accept: application/octet-stream" "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$assetId" -o zoom-sdk.zip
+          if ((Get-Item zoom-sdk.zip).Length -lt 100MB) { throw "Downloaded SDK archive is implausibly small." }
+          Expand-Archive zoom-sdk.zip third_party/zoom-sdk-extracted
+          # Find the directory that actually holds the x64 SDK. The archive
+          # has shifted nesting before and carries x86 and x64 trees that both
+          # contain h/zoom_sdk.h - and an x86 sdk.lib links like it is absent
+          # (every SDK symbol unresolved). Require header AND import lib,
+          # prefer the x64 tree, and print what was considered so the next
+          # layout change diagnoses itself from the log.
+          $candidates = @(Get-ChildItem third_party/zoom-sdk-extracted -Directory -Recurse -Depth 3 |
+              Where-Object { (Test-Path (Join-Path $_.FullName "h\zoom_sdk.h")) -and (Test-Path (Join-Path $_.FullName "lib\sdk.lib")) })
+          Write-Host "SDK candidate roots:"
+          $candidates | ForEach-Object { Write-Host "  $($_.FullName)" }
+          $sdkRoot = $candidates | Where-Object { $_.FullName -match "x64" } | Select-Object -First 1
+          if (-not $sdkRoot) { $sdkRoot = $candidates | Select-Object -First 1 }
+          if (-not $sdkRoot) {
+              Write-Host "Archive layout (2 levels):"
+              Get-ChildItem third_party/zoom-sdk-extracted -Directory -Recurse -Depth 2 | ForEach-Object { Write-Host "  $($_.FullName)" }
+              throw "No directory with h/zoom_sdk.h + lib/sdk.lib found in $assetName"
+          }
+          Write-Host "Using SDK root: $($sdkRoot.FullName)"
+          # third_party/zoom-sdk holds a TRACKED partial header set (31 files,
+          # enough for compile-validation without the SDK). Move-Item into an
+          # existing directory NESTS the download inside it and the partial
+          # set keeps winning the include path - setting_service_interface.h
+          # then fails on the untracked zoom_sdk_util_define.h. Replace the
+          # directory wholesale, as release-windows.yml always has.
+          if (Test-Path third_party/zoom-sdk) {
+            Remove-Item third_party/zoom-sdk -Recurse -Force
+          }
+          Move-Item $sdkRoot.FullName third_party/zoom-sdk
+          "COREVIDEO_HAS_ZOOM_RUNTIME=true" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "has_zoom_runtime=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Download FFmpeg (LGPL shared) for HW acceleration
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          # BtbN publishes LGPL shared builds at a "latest" tag that's
+          # refreshed regularly. LGPL is required for binary redistribution;
+          # if that asset is temporarily unavailable, keep CI validating the
+          # plugin without FFmpeg HW acceleration instead of failing before
+          # configure/build/test.
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl-shared.zip"
+          try {
+              Invoke-WebRequest $url -OutFile ffmpeg.zip
+          } catch {
+              Write-Warning "Could not download LGPL shared FFmpeg from $url. Building with ENABLE_FFMPEG_HW_ACCEL=OFF."
+              "COREVIDEO_FFMPEG_HW_ACCEL=OFF" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+              exit 0
+          }
+          Expand-Archive ffmpeg.zip C:\ffmpeg-extract -Force
+          # Zip contains a single nested directory; promote it to C:\ffmpeg
+          $inner = Get-ChildItem C:\ffmpeg-extract -Directory | Select-Object -First 1
+          Move-Item $inner.FullName C:\ffmpeg
+          "COREVIDEO_FFMPEG_HW_ACCEL=ON" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "FFmpeg installed at C:\ffmpeg"
+          Get-ChildItem C:\ffmpeg\bin -Filter "*.dll" | Select-Object Name,Length |
+              Format-Table -AutoSize
+
+      - name: Diagnose OBS SDK layout
+        if: always()
+        shell: powershell
+        run: |
+          Write-Host "=== OBS_SDK_DIR=$env:OBS_SDK_DIR ==="
+          Get-ChildItem -Recurse "$env:OBS_SDK_DIR\cmake" -ErrorAction SilentlyContinue |
+              Select-Object FullName | Format-Table -AutoSize
+          Get-ChildItem "$env:OBS_SDK_DIR\lib" -ErrorAction SilentlyContinue |
+              Select-Object Name,Length | Format-Table -AutoSize
+          Get-Item "$env:OBS_SDK_DIR\cmake\LibObs\LibObsConfig.cmake" -ErrorAction SilentlyContinue |
+              Select-Object FullName | Format-Table -AutoSize
+
+      - name: Configure
+        shell: powershell
+        run: |
+          $obsDir  = "$env:OBS_SDK_DIR"
+          $obsLibs = "$obsDir\cmake\LibObs"
+          $obsFe   = "$obsDir\cmake\obs-frontend-api"
+
+          # Fallback: if cmake configs are in the portable zip root, use that.
+          if (-not (Test-Path $obsLibs)) {
+              $obsLibs = "C:\obs-runtime\cmake\LibObs"
+              $obsFe   = "C:\obs-runtime\cmake\obs-frontend-api"
+          }
+
+          $fullPackage = if ($env:COREVIDEO_HAS_ZOOM_RUNTIME -eq "true") { "ON" } else { "OFF" }
+          $ffmpegHwAccel = if ($env:COREVIDEO_FFMPEG_HW_ACCEL -eq "ON") { "ON" } else { "OFF" }
+          $ffmpegArgs = @("-DENABLE_FFMPEG_HW_ACCEL=$ffmpegHwAccel")
+          if ($ffmpegHwAccel -eq "ON") {
+              $ffmpegArgs += "-DFFMPEG_ROOT=C:/ffmpeg"
+          }
+
+          cmake -B build `
+              -G "Visual Studio 17 2022" -A x64 `
+              -DCMAKE_BUILD_TYPE=Release `
+              "-DCOREVIDEO_BUILD_PLUGIN=$fullPackage" `
+              "-DCOREVIDEO_BUILD_ENGINE=$fullPackage" `
+              -DZOOM_SDK_DIR=third_party/zoom-sdk `
+              $ffmpegArgs `
+              "-DCMAKE_PREFIX_PATH=$obsDir;$env:QT_ROOT_DIR" `
+              "-DLibObs_DIR=$obsLibs" `
+              "-Dobs-frontend-api_DIR=$obsFe" `
+              "-DZOOM_EMBED_SDK_KEY=${{ secrets.ZOOM_EMBED_SDK_KEY }}" `
+              "-DZOOM_EMBED_SDK_SECRET=${{ secrets.ZOOM_EMBED_SDK_SECRET }}" `
+              "-DZOOM_EMBED_JWT_TOKEN=${{ secrets.ZOOM_EMBED_JWT_TOKEN }}" `
+              "-DZOOM_EMBED_OAUTH_CLIENT_ID=y6sIWSwiTZe1JygMx4C9EQ" `
+              "-DZOOM_EMBED_OAUTH_AUTHORIZATION_URL=${{ secrets.ZOOM_EMBED_OAUTH_AUTHORIZATION_URL }}" `
+              "-DZOOM_EMBED_MEETING_SDK_PUBLIC_APP_KEY=y6sIWSwiTZe1JygMx4C9EQ"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package as ZIP
+        shell: powershell
+        run: |
+          cmake --install build --config Release --prefix install
+          if ($env:COREVIDEO_HAS_ZOOM_RUNTIME -eq "true") {
+              .\scripts\Test-CoreVideoPackage.ps1 `
+                -PackageRoot install `
+                -FullRuntime `
+                -ExpectedOAuthClientId y6sIWSwiTZe1JygMx4C9EQ `
+                -ExpectedMeetingSdkPublicAppKey y6sIWSwiTZe1JygMx4C9EQ
+          } else {
+              # Without the Zoom SDK secret the plugin is configured
+              # COREVIDEO_BUILD_PLUGIN=OFF (its sources include the Zoom SDK
+              # headers and cannot compile without them), so obs-zoom-plugin.dll
+              # and the OAuth helper are not built. Package validation requires
+              # those artifacts, so skip it here — this no-SDK job validates
+              # compilation and unit tests only. Full package validation runs
+              # on the SDK-present (FullRuntime) build path above.
+              Write-Warning "Skipping package validation: no Zoom SDK, so the plugin is not built. This job validates compilation and unit tests only."
+          }
+          Compress-Archive -Path install\* -DestinationPath CoreVideo-Windows-x64.zip
+          $hash = (Get-FileHash -LiteralPath CoreVideo-Windows-x64.zip -Algorithm SHA256).Hash
+          Set-Content -LiteralPath CoreVideo-Windows-x64.zip.sha256 -Encoding ASCII -Value ("{0}  CoreVideo-Windows-x64.zip" -f $hash)
+          Write-Host "CoreVideo-Windows-x64.zip SHA256: $hash"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: CoreVideo-Windows
+          path: |
+            CoreVideo-Windows-x64.zip
+            CoreVideo-Windows-x64.zip.sha256
+          if-no-files-found: warn
+
+      - name: Upload build logs on failure
+        uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: CoreVideo-Windows-build-logs
+          path: build/
+          if-no-files-found: ignore
+
   # macOS (arm64) - real plugin bundle + engine scaffold
   build-macos:
     # Builds the ACTUAL obs-zoom-plugin bundle (COREVIDEO_BUILD_PLUGIN=ON) plus

@@ -1,0 +1,20 @@
+{
+  "name": "corevideo-site",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Build and deploy tooling for the corevideo.io static site Worker. Not part of the C++ build.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build-site.mjs",
+    "dev": "npm run build && wrangler dev",
+    "check": "npm run build && wrangler deploy --dry-run",
+    "deploy": "npm run build && wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^4.118.0"
+  }
+}

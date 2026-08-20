@@ -548,6 +548,25 @@ video source's picture. No code connects them.
   in the engine log and support bundle.
 - Zoom Marketplace share-link visitors hitting the OAuth broker are now
   greeted with guidance instead of a "Missing OAuth state" error.
+## [0.1.32-beta.1] - 2026-08-01
+
+### Added
+- **macOS (Apple Silicon) beta.** First distributable macOS build of the OBS
+  plugin, live-verified against real meetings: OAuth sign-in, join, roster,
+  active speaker, participant video (1080p) and audio into OBS sources, and
+  remote screen share (up to 1440p verified). Return video reaches the
+  meeting through the OBS Virtual Camera selected in the Zoom SDK window.
+  Known limitations: the bundle is not yet notarized (testers must clear the
+  quarantine attribute once — see INSTALL.txt in the zip), it is arm64-only,
+  and capturing your own screen should use OBS's native macOS Screen Capture
+  source — the CoreVideo share source carries *other participants'* shares.
+
+### Fixed
+- A video subscription failure no longer flips a healthy session to
+  "Connection failed", and a source bound to a participant who has not
+  (re)joined waits quietly instead of raising repeated error dialogs.
+- The dock no longer shows a previous attempt's failure banner after a
+  successful join.
 
 ## [0.1.31] - 2026-08-01
 

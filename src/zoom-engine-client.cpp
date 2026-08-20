@@ -220,18 +220,18 @@ static std::string engine_executable_path()
             // loose binary from an older install cannot win.
             std::string candidate =
                 module_dir + "ZoomObsEngine.app/Contents/MacOS/ZoomObsEngine";
-            if (access(candidate.c_str(), X_OK) == 0)
+            if (access(candidate.c_str(), X_OK) == 0) // flawfinder: ignore (own install paths, not a trust boundary)
                 return candidate;
 
             candidate = module_dir + "zoom-runtime/ZoomObsEngine";
 #else
             std::string candidate = module_dir + "zoom-runtime/ZoomObsEngine";
 #endif
-            if (access(candidate.c_str(), X_OK) == 0)
+            if (access(candidate.c_str(), X_OK) == 0) // flawfinder: ignore (own install paths, not a trust boundary)
                 return candidate;
 
             candidate = module_dir + "ZoomObsEngine";
-            if (access(candidate.c_str(), X_OK) == 0)
+            if (access(candidate.c_str(), X_OK) == 0) // flawfinder: ignore (own install paths, not a trust boundary)
                 return candidate;
         }
     }
@@ -240,7 +240,7 @@ static std::string engine_executable_path()
     if (obs_path) {
         const std::string candidate(obs_path);
         bfree(obs_path);
-        if (access(candidate.c_str(), X_OK) == 0)
+        if (access(candidate.c_str(), X_OK) == 0) // flawfinder: ignore (own install paths, not a trust boundary)
             return candidate;
     }
     // Last resort: let posix_spawnp search PATH, so a developer build with the

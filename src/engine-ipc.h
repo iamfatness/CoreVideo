@@ -477,8 +477,8 @@ inline std::string shm_region_name(const std::string &base, uint32_t gen)
            hash ^= static_cast<uint64_t>(c);
            hash *= 1099511628211ULL;             // FNV-1a 64 prime
        }
-       char buf[24];
-       std::snprintf(buf, sizeof(buf), "/ZOP%016llx",
+       char buf[24];                             // flawfinder: ignore (exact-size, constant format below)
+       std::snprintf(buf, sizeof(buf), "/ZOP%016llx", // flawfinder: ignore
                      static_cast<unsigned long long>(hash));
        return std::string(buf);
 #  else

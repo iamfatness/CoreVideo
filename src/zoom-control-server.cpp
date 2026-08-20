@@ -181,8 +181,22 @@ void ZoomControlServer::on_new_connection()
         connect(socket, &QTcpSocket::readyRead, this, [this, guard]() {
             if (!m_running)
                 return;
-            while (guard && guard->canReadLine())
-                handle_line(guard, guard->readLine(4096).trimmed());
+            // handle_line must NOT run inside this signal-emission frame:
+            // several commands block in a nested event loop (join's ZAK
+            // fetch, engine start), and a deleteLater issued at nested depth
+            // executes INSIDE that nested loop -- deleting the socket while
+            // Qt's own canReadNotification() emission frame underneath us is
+            // still live. The QPointer guards protected plugin code but not
+            // Qt's unwinding frame (third SIGSEGV of 2026-08-20, no plugin
+            // frames on the stack). Queue each line instead: the handler
+            // then runs from the event loop proper, where a mid-handler
+            // socket deletion is safe and the guards make writes no-ops.
+            while (guard && guard->canReadLine()) {
+                const QByteArray line = guard->readLine(4096).trimmed();
+                QTimer::singleShot(0, this, [this, guard, line]() {
+                    handle_line(guard, line);
+                });
+            }
         });
         connect(socket, &QTcpSocket::disconnected, socket, &QTcpSocket::deleteLater);
     }

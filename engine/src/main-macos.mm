@@ -57,7 +57,9 @@
 #import <Cocoa/Cocoa.h>
 
 #include "../../src/engine-ipc.h"
+#include "../../src/shm-generation.h"
 #include "engine-writer.h"
+#include "tile-clock-log.h"
 
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -973,9 +975,20 @@ static bool video_ensure_shm(VideoTarget &target, const std::string &source_uuid
     if (total < y_len) return false;
     if (target.shm.ptr && target.shm.size >= total) return true;
 
-    const std::string region_name = IPC_SHM_PREFIX + source_uuid;
-    if (!shm_region_create(target.shm, region_name, total)) return false;
-    ++target.shm_gen; // new region — any plugin-side mapping is now stale
+    // Generation-suffixed name from the shared per-base-name table: the
+    // plugin derives the object name from the event's shm_gen via
+    // shm_region_name(), so the writer must allocate through the same
+    // machinery or reader and writer diverge on the name (see
+    // src/shm-generation.h for why the counter cannot live in this struct).
+    const ShmRegionAllocation region =
+        shm_next_region(shm_generations(), IPC_SHM_PREFIX + source_uuid);
+    if (!shm_region_create(target.shm, region.name, total)) return false;
+    target.shm_gen = region.gen; // any plugin-side mapping is now stale
+    if (target.shm.already_existed) {
+        EngineIpc::write(
+            R"({"cmd":"error","msg":"shm_name_collision","source_uuid":")" +
+            source_uuid + "\"}");
+    }
     return true;
 }
 
@@ -1303,9 +1316,15 @@ static bool share_ensure_shm(ShareTarget &target, const std::string &source_uuid
     if (total < y_len) return false;
     if (target.shm.ptr && target.shm.size >= total) return true;
 
-    const std::string region_name = IPC_SHM_PREFIX + source_uuid;
-    if (!shm_region_create(target.shm, region_name, total)) return false;
-    ++target.shm_gen;
+    const ShmRegionAllocation region =
+        shm_next_region(shm_generations(), IPC_SHM_PREFIX + source_uuid);
+    if (!shm_region_create(target.shm, region.name, total)) return false;
+    target.shm_gen = region.gen;
+    if (target.shm.already_existed) {
+        EngineIpc::write(
+            R"({"cmd":"error","msg":"shm_name_collision","source_uuid":")" +
+            source_uuid + "\"}");
+    }
     return true;
 }
 
@@ -1660,6 +1679,9 @@ struct AudioTarget {
     ShmRegion shm;
     uint64_t frame_count = 0;
     bool     shm_fail_reported = false;
+    uint32_t shm_gen = 0;
+    uint32_t notify_suppressed = 0;
+    bool     slot_too_small_reported = false;
 };
 
 static std::mutex g_audio_mtx;
@@ -1669,10 +1691,35 @@ static bool g_audio_subscribed = false;
 static bool audio_ensure_shm(AudioTarget &target, const std::string &source_uuid,
                              uint32_t byte_len)
 {
-    const size_t total = sizeof(ShmAudioHeader) + byte_len;
+    // Ring region, mirroring EngineAudio::ensure_shm() in engine-audio.cpp:
+    // the plugin reader drains a slot ring and expects the header initialised
+    // before the first publish. Same generation-suffixed naming as video.
+    const size_t total = shm_audio_region_bytes(byte_len);
     if (target.shm.ptr && target.shm.size >= total) return true;
-    const std::string region_name = IPC_SHM_PREFIX + source_uuid + "_audio";
-    return shm_region_create(target.shm, region_name, total);
+
+    const ShmRegionAllocation region =
+        shm_next_region(shm_generations(),
+                        IPC_SHM_PREFIX + source_uuid + "_audio");
+    if (!shm_region_create(target.shm, region.name, total)) return false;
+    target.shm_gen = region.gen;
+
+    if (target.shm.already_existed) {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"audio_shm_name_collision","source_uuid":")" +
+            source_uuid + R"(","shm_gen":)" + std::to_string(region.gen) + "}");
+        EngineIpc::write(
+            R"({"cmd":"error","msg":"shm_name_collision","source_uuid":")" +
+            source_uuid + "\"}");
+    }
+
+    auto *ring = static_cast<ShmAudioHeader *>(target.shm.ptr);
+    ring->write_index = 0;
+    ring->slot_count  = kAudioRingSlots;
+    ring->slot_bytes  = byte_len;
+    ring->sample_rate = 0;
+    ring->channels    = 0;
+    ring->notify      = 0;   // clear: the first buffer always sends its event
+    return true;
 }
 
 // Caller must hold g_audio_mtx.
@@ -1701,18 +1748,43 @@ static void audio_output_frame(AudioTarget &target, const std::string &source_uu
             source_uuid + "\"}");
     }
 
-    auto *hdr = static_cast<ShmAudioHeader *>(target.shm.ptr);
-    const uint32_t seq = shm_seq_begin(hdr->sequence);
-    hdr->sequence = seq;
+    auto *ring = static_cast<ShmAudioHeader *>(target.shm.ptr);
+    // Unreachable given audio_ensure_shm()'s invariant; latched debug only
+    // (see the proof in engine-audio.cpp -- an impossible check must not vote
+    // against the meeting from a 100 Hz path).
+    if (byte_len > ring->slot_bytes) {
+        if (!target.slot_too_small_reported) {
+            target.slot_too_small_reported = true;
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"audio_slot_too_small","source_uuid":")" +
+                source_uuid + R"(","byte_len":)" + std::to_string(byte_len) +
+                R"(,"slot_bytes":)" + std::to_string(ring->slot_bytes) + "}");
+        }
+        return;
+    }
+
+    const uint32_t index = ring->write_index % ring->slot_count;
+    auto *slot = reinterpret_cast<ShmAudioSlot *>(
+        static_cast<char *>(target.shm.ptr) +
+        shm_audio_slot_offset(*ring, index));
+
+    uint32_t seq = slot->sequence + 1;
+    if ((seq & 1u) == 0) ++seq;
+    slot->sequence = seq;                       // odd: write in progress
     std::atomic_thread_fence(std::memory_order_release);
-    hdr->sample_rate = [data getSampleRate];
-    hdr->channels    = static_cast<uint16_t>([data getChannelNum]);
-    hdr->reserved    = 0;
-    hdr->byte_len    = byte_len;
-    std::memcpy(static_cast<char *>(target.shm.ptr) + sizeof(ShmAudioHeader),
+    slot->capture_ns     = tile_clock_now_ns();
+    slot->byte_len       = byte_len;
+    slot->participant_id = target.participant_id;
+    std::memcpy(reinterpret_cast<char *>(slot) + sizeof(ShmAudioSlot),
                 [data getBuffer], byte_len);
     std::atomic_thread_fence(std::memory_order_release);
-    hdr->sequence = seq + 1;
+    slot->sequence = seq + 1;                   // even: readable
+
+    ring->sample_rate = [data getSampleRate];
+    ring->channels    = static_cast<uint16_t>([data getChannelNum]);
+    std::atomic_thread_fence(std::memory_order_release);
+    // Published last; FREE-RUNNING, never % slot_count (see engine-ipc.h).
+    ring->write_index = ring->write_index + 1;
 
     ++target.frame_count;
     if (target.frame_count == 1 || target.frame_count % 250 == 0) {
@@ -1726,10 +1798,23 @@ static void audio_output_frame(AudioTarget &target, const std::string &source_uu
             std::to_string(target.participant_id) + "}");
     }
 
-    EngineIpc::write(
-        R"({"cmd":"audio","source_uuid":")" + source_uuid +
-        R"(","participant_id":)" + std::to_string(target.participant_id) +
-        R"(,"byte_len":)" + std::to_string(byte_len) + "}");
+    // Edge-triggered wakeup + 2.5s keepalive, mirroring engine-audio.cpp
+    // (protocol and lost-wakeup proof: ShmAudioHeader::notify in engine-ipc.h).
+    if (audio_ring_notify_after_publish(ring)) {
+        target.notify_suppressed = 0;
+        EngineIpc::write(
+            R"({"cmd":"audio","source_uuid":")" + source_uuid +
+            R"(","participant_id":)" + std::to_string(target.participant_id) +
+            R"(,"byte_len":)" + std::to_string(byte_len) +
+            R"(,"shm_gen":)" + std::to_string(target.shm_gen) + "}");
+    } else if (++target.notify_suppressed >= 250) {
+        target.notify_suppressed = 0;
+        EngineIpc::write(
+            R"({"cmd":"audio","source_uuid":")" + source_uuid +
+            R"(","participant_id":)" + std::to_string(target.participant_id) +
+            R"(,"byte_len":)" + std::to_string(byte_len) +
+            R"(,"shm_gen":)" + std::to_string(target.shm_gen) + "}");
+    }
 }
 
 @interface CVAudioDelegate : NSObject <ZoomSDKAudioRawDataDelegate>

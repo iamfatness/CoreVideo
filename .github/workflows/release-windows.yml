@@ -1,0 +1,345 @@
+name: Release Windows
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag to publish, for example v0.1.5"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows x64 package
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          ref: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref }}"
+
+      - name: Set up MSVC tools
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          arch: x64
+
+      - name: Install Qt 6
+        shell: powershell
+        run: |
+          python -m pip install --upgrade pip
+          pip install aqtinstall
+          aqt install-qt windows desktop 6.7.3 win64_msvc2019_64 --outputdir C:\Qt
+          "QT_ROOT_DIR=C:\Qt\6.7.3\msvc2019_64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Prepare OBS SDK
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ver = "32.2.2"
+          $obs = "C:\obs-runtime"
+          $sdk = "C:\obs-sdk"
+
+          Invoke-WebRequest `
+            "https://github.com/obsproject/obs-studio/releases/download/$ver/OBS-Studio-$ver-Windows-x64.zip" `
+            -OutFile obs.zip
+          Expand-Archive obs.zip $obs -Force
+
+          git clone --depth 1 --branch $ver --filter=blob:none --sparse `
+            https://github.com/obsproject/obs-studio.git C:\obs-source
+          Push-Location C:\obs-source
+          git sparse-checkout set libobs frontend/api
+          Pop-Location
+
+          New-Item -Force -ItemType Directory "$sdk\include\obs" | Out-Null
+          Copy-Item "C:\obs-source\libobs\*" "$sdk\include\obs\" -Recurse -Force
+          Copy-Item "C:\obs-source\frontend\api\obs-frontend-api.h" "$sdk\include\obs\"
+
+          # OBS 32.x obs-config.h includes the build-generated obsconfig.h
+          # unconditionally; synthesize a minimal one.
+          @(
+            "#pragma once",
+            "#define OBS_VERSION `"32.2.2`"",
+            "#define OBS_VERSION_CANONICAL `"32.2.2`"",
+            "#define OBS_DATA_PATH `"data`"",
+            "#define OBS_INSTALL_PREFIX `"/usr/local`"",
+            "#define OBS_PLUGIN_DESTINATION `"obs-plugins`"",
+            "#define OBS_QT_VERSION 6",
+            "#define OBS_RELEASE_CANDIDATE 0",
+            "#define OBS_BETA 0"
+          ) | Set-Content -Path "$sdk\include\obs\obsconfig.h" -Encoding ASCII
+
+
+          # Import libs from the PE export directory via pefile, not dumpbin
+          # text scraping - a runner-image update changed dumpbin's output
+          # enough that the regex matched nothing and lib.exe built EMPTY
+          # import libraries; every obs_* symbol then failed to resolve.
+          python -m pip install --quiet pefile
+          $py = @'
+          import sys, pefile
+          pe = pefile.PE(sys.argv[1], fast_load=True)
+          pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_EXPORT']])
+          print('\n'.join(e.name.decode() for e in pe.DIRECTORY_ENTRY_EXPORT.symbols if e.name))
+          '@
+          $py = ($py -split "`n" | ForEach-Object { $_.TrimStart() }) -join "`n"
+          Set-Content -Path "$sdk\export-names.py" -Value $py -Encoding ASCII
+
+          New-Item -Force -ItemType Directory "$sdk\lib" | Out-Null
+          foreach ($name in @("obs", "obs-frontend-api")) {
+            $dll = "$obs\bin\64bit\$name.dll"
+            if (-not (Test-Path $dll)) {
+              throw "Missing OBS runtime DLL: $dll"
+            }
+
+            $def = "$sdk\lib\$name.def"
+            $lib = "$sdk\lib\$name.lib"
+            $names = @(python "$sdk\export-names.py" $dll)
+            if ($LASTEXITCODE -ne 0) { throw "pefile export parse failed for $dll" }
+            Write-Host "$name.dll exports: $($names.Count)"
+            if ($names.Count -lt 10) {
+              throw "Only $($names.Count) exports parsed from $dll - refusing to build an empty import library."
+            }
+            @("EXPORTS") + ($names | ForEach-Object { "  $_" }) | Set-Content $def -Encoding ASCII
+            lib /nologo /def:$def /out:$lib /machine:x64
+            if ($LASTEXITCODE -ne 0) { throw "lib.exe failed for $def" }
+          }
+
+          $sdkFwd = $sdk -replace '\\', '/'
+          $obsFwd = $obs -replace '\\', '/'
+          foreach ($pkg in @(
+            @{ name = "LibObs"; target = "OBS::libobs"; dll = "obs" },
+            @{ name = "obs-frontend-api"; target = "OBS::obs-frontend-api"; dll = "obs-frontend-api" }
+          )) {
+            $dir = "$sdk\cmake\$($pkg.name)"
+            New-Item -Force -ItemType Directory $dir | Out-Null
+            @(
+              "add_library($($pkg.target) SHARED IMPORTED GLOBAL)",
+              "set_target_properties($($pkg.target) PROPERTIES",
+              "  IMPORTED_IMPLIB `"$sdkFwd/lib/$($pkg.dll).lib`"",
+              "  IMPORTED_LOCATION `"$obsFwd/bin/64bit/$($pkg.dll).dll`"",
+              "  INTERFACE_INCLUDE_DIRECTORIES `"$sdkFwd/include/obs`"",
+              ")",
+              "set($($pkg.name)_FOUND TRUE)"
+            ) | Set-Content -Path "$dir\$($pkg.name)Config.cmake" -Encoding UTF8
+          }
+
+          "OBS_SDK_DIR=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # The Zoom SDK is license-restricted: it lives as an asset on a DRAFT
+      # release in this repo (never publish that release). curl.exe strips the
+      # Authorization header on the S3 redirect hop and is binary-safe, unlike
+      # PowerShell 5.1 stdout redirection. Never commit the SDK.
+      - name: Download Zoom Windows SDK (private draft-release asset)
+        id: zoom_sdk
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $assetName = "zoom-sdk-windows-7.1.5.43953.zip"
+          # Filter in PowerShell, not --jq: embedded \" quoting in a native-
+          # command argument tokenizes differently across PowerShell versions,
+          # and a runner-image update turned the jq expression into three args
+          # ("accepts 1 arg(s), received 3"), silently skipping the SDK.
+          $releases = gh api "repos/$env:GITHUB_REPOSITORY/releases" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "gh api releases failed" }
+          $assetId = $releases | Where-Object { $_.draft } |
+            ForEach-Object { $_.assets } |
+            Where-Object { $_.name -eq $assetName } |
+            Select-Object -First 1 -ExpandProperty id
+          if (-not $assetId) {
+            "COREVIDEO_HAS_ZOOM_RUNTIME=false" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "has_zoom_runtime=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Warning "$assetName not found on any draft release (or token lacks access). Building a validation-only package without ZoomObsEngine runtime."
+            exit 0
+          }
+          Write-Host "Fetching $assetName (asset id $assetId)"
+          curl.exe -sSfL -H "Authorization: Bearer $env:GH_TOKEN" -H "Accept: application/octet-stream" "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$assetId" -o zoom-sdk.zip
+          if ((Get-Item zoom-sdk.zip).Length -lt 100MB) { throw "Downloaded SDK archive is implausibly small." }
+          Expand-Archive zoom-sdk.zip third_party/zoom-sdk-extracted -Force
+          # Find the directory that actually holds the x64 SDK. The archive
+          # has shifted nesting before and carries x86 and x64 trees that both
+          # contain h/zoom_sdk.h - and an x86 sdk.lib links like it is absent
+          # (every SDK symbol unresolved). Require header AND import lib,
+          # prefer the x64 tree, and print what was considered so the next
+          # layout change diagnoses itself from the log.
+          $candidates = @(Get-ChildItem third_party/zoom-sdk-extracted -Directory -Recurse -Depth 3 |
+            Where-Object { (Test-Path (Join-Path $_.FullName "h\zoom_sdk.h")) -and (Test-Path (Join-Path $_.FullName "lib\sdk.lib")) })
+          Write-Host "SDK candidate roots:"
+          $candidates | ForEach-Object { Write-Host "  $($_.FullName)" }
+          $sdkRoot = $candidates | Where-Object { $_.FullName -match "x64" } | Select-Object -First 1
+          if (-not $sdkRoot) { $sdkRoot = $candidates | Select-Object -First 1 }
+          if (-not $sdkRoot) {
+            Write-Host "Archive layout (2 levels):"
+            Get-ChildItem third_party/zoom-sdk-extracted -Directory -Recurse -Depth 2 | ForEach-Object { Write-Host "  $($_.FullName)" }
+            throw "No directory with h/zoom_sdk.h + lib/sdk.lib found in $assetName"
+          }
+          Write-Host "Using SDK root: $($sdkRoot.FullName)"
+          if (Test-Path third_party/zoom-sdk) {
+            Remove-Item third_party/zoom-sdk -Recurse -Force
+          }
+          Move-Item $sdkRoot.FullName third_party/zoom-sdk
+          "COREVIDEO_HAS_ZOOM_RUNTIME=true" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "has_zoom_runtime=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Configure
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $fullPackage = if ($env:COREVIDEO_HAS_ZOOM_RUNTIME -eq "true") { "ON" } else { "OFF" }
+          $releaseVersion = "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}"
+          cmake -B build `
+            -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            "-DCOREVIDEO_RELEASE_VERSION=$releaseVersion" `
+            "-DCOREVIDEO_BUILD_PLUGIN=$fullPackage" `
+            "-DCOREVIDEO_BUILD_ENGINE=$fullPackage" `
+            -DZOOM_SDK_DIR=third_party/zoom-sdk `
+            "-DCMAKE_PREFIX_PATH=$env:OBS_SDK_DIR;$env:QT_ROOT_DIR" `
+            "-DLibObs_DIR=$env:OBS_SDK_DIR\cmake\LibObs" `
+            "-Dobs-frontend-api_DIR=$env:OBS_SDK_DIR\cmake\obs-frontend-api" `
+            "-DZOOM_EMBED_SDK_KEY=${{ secrets.ZOOM_EMBED_SDK_KEY }}" `
+            "-DZOOM_EMBED_SDK_SECRET=${{ secrets.ZOOM_EMBED_SDK_SECRET }}" `
+            "-DZOOM_EMBED_JWT_TOKEN=${{ secrets.ZOOM_EMBED_JWT_TOKEN }}" `
+            "-DZOOM_EMBED_OAUTH_CLIENT_ID=y6sIWSwiTZe1JygMx4C9EQ" `
+            "-DZOOM_EMBED_OAUTH_AUTHORIZATION_URL=${{ secrets.ZOOM_EMBED_OAUTH_AUTHORIZATION_URL }}" `
+            "-DZOOM_EMBED_MEETING_SDK_PUBLIC_APP_KEY=y6sIWSwiTZe1JygMx4C9EQ"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          cmake --install build --config Release --prefix install
+          if ($env:COREVIDEO_HAS_ZOOM_RUNTIME -eq "true") {
+            .\scripts\Test-CoreVideoPackage.ps1 `
+              -PackageRoot install `
+              -FullRuntime `
+              -ExpectedOAuthClientId y6sIWSwiTZe1JygMx4C9EQ `
+              -ExpectedMeetingSdkPublicAppKey y6sIWSwiTZe1JygMx4C9EQ `
+              -ManifestPath CoreVideo-Windows-x64.manifest.json
+          } else {
+            .\scripts\Test-CoreVideoPackage.ps1 `
+              -PackageRoot install `
+              -ExpectedOAuthClientId y6sIWSwiTZe1JygMx4C9EQ `
+              -ExpectedMeetingSdkPublicAppKey y6sIWSwiTZe1JygMx4C9EQ `
+              -ManifestPath CoreVideo-Windows-x64.manifest.json
+            Write-Warning "Package does not include ZoomObsEngine or sdk.dll because ZOOM_SDK_WINDOWS_URL is not configured."
+          }
+          Compress-Archive -Path install\* -DestinationPath CoreVideo-Windows-x64.zip -Force
+
+      - name: Install NSIS
+        if: env.COREVIDEO_HAS_ZOOM_RUNTIME == 'true'
+        shell: powershell
+        run: choco install nsis -y --no-progress
+
+      - name: Build installer
+        if: env.COREVIDEO_HAS_ZOOM_RUNTIME == 'true'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ github.event.inputs.version }}" } else { "${{ github.ref_name }}" }
+          $sourceDir = (Resolve-Path install).Path
+          $uninstallList = Join-Path (Get-Location) "corevideo-uninstall-files.nsh"
+          $installerPath = Join-Path (Get-Location) "CoreVideo-Setup-$version.exe"
+
+          function ConvertTo-NsisPath([string]$Path) {
+            return $Path.Replace('/', '\').Replace('$', '$$')
+          }
+
+          $sourceRoot = [System.IO.Path]::GetFullPath($sourceDir).TrimEnd("\") + "\"
+          $lines = New-Object System.Collections.Generic.List[string]
+          Get-ChildItem -LiteralPath $sourceDir -Recurse -File |
+            Sort-Object FullName -Descending |
+            ForEach-Object {
+              $relative = $_.FullName.Substring($sourceRoot.Length)
+              $lines.Add(('Delete "$INSTDIR\{0}"' -f (ConvertTo-NsisPath $relative)))
+            }
+          Get-ChildItem -LiteralPath $sourceDir -Recurse -Directory |
+            Sort-Object FullName -Descending |
+            ForEach-Object {
+              $relative = $_.FullName.Substring($sourceRoot.Length)
+              $lines.Add(('RMDir "$INSTDIR\{0}"' -f (ConvertTo-NsisPath $relative)))
+            }
+          Set-Content -LiteralPath $uninstallList -Value $lines -Encoding UTF8
+
+          makensis `
+            "/DVERSION=$version" `
+            "/DSOURCE_DIR=$sourceDir" `
+            "/DOUT_FILE=$installerPath" `
+            "/DFILE_LIST=$uninstallList" `
+            installer\corevideo.nsi
+
+      - name: Generate SHA256 checksums
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $files = @(Get-Item CoreVideo-Windows-x64.zip)
+          $files += @(Get-ChildItem CoreVideo-Setup-*.exe -ErrorAction SilentlyContinue)
+          foreach ($file in $files) {
+            $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+            $hashPath = "$($file.FullName).sha256"
+            Set-Content -LiteralPath $hashPath -Encoding ASCII -Value ("{0}  {1}" -f $hash, $file.Name)
+            Write-Host "$($file.Name) SHA256: $hash"
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: CoreVideo-Windows-x64
+          path: |
+            CoreVideo-Windows-x64.zip
+            CoreVideo-Windows-x64.zip.sha256
+            CoreVideo-Windows-x64.manifest.json
+            CoreVideo-Setup-*.exe
+            CoreVideo-Setup-*.exe.sha256
+
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ github.event.inputs.version }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "name=CoreVideo $tag" >> "$GITHUB_OUTPUT"
+          if [[ "$tag" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish GitHub Release
+        if: env.COREVIDEO_HAS_ZOOM_RUNTIME == 'true'
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
+        with:
+          tag_name: ${{ steps.release.outputs.tag }}
+          name: ${{ steps.release.outputs.name }}
+          draft: false
+          prerelease: ${{ steps.release.outputs.prerelease }}
+          generate_release_notes: true
+          files: |
+            CoreVideo-Windows-x64.zip
+            CoreVideo-Windows-x64.zip.sha256
+            CoreVideo-Windows-x64.manifest.json
+            CoreVideo-Setup-*.exe
+            CoreVideo-Setup-*.exe.sha256
+
+      - name: Skip GitHub Release
+        if: env.COREVIDEO_HAS_ZOOM_RUNTIME != 'true'
+        shell: powershell
+        run: |
+          Write-Warning "Skipping GitHub Release because ZOOM_SDK_WINDOWS_URL is not configured and the package is validation-only."

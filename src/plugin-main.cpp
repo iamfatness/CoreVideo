@@ -29,6 +29,9 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #if !defined(WIN32)
 #include <csignal>
 #endif
+#if defined(__APPLE__)
+#include <dlfcn.h> // dladdr: locate the loaded plugin bundle for Qt plugin paths
+#endif
 
 static QPointer<ZoomDock> g_dock;
 static QPointer<ZoomIsoPanel> g_iso_panel;
@@ -140,6 +143,32 @@ static void configure_qt_plugin_paths()
     for (const QString &path : candidates) {
         if (QFileInfo::exists(path))
             QCoreApplication::addLibraryPath(path);
+    }
+
+    blog(LOG_INFO, "[obs-zoom-plugin] Qt library paths: %s",
+         QCoreApplication::libraryPaths().join(";").toUtf8().constData());
+#elif defined(__APPLE__)
+    // OBS.app bundles Qt but ships NO Qt TLS backend plugin (there is no
+    // PlugIns/tls directory), so QtNetwork inside the OBS process has no TLS
+    // provider at all and every https request dies with "TLS initialization
+    // failed" -- which broke the OAuth broker redeem. The Windows package
+    // already ships qcertonlybackend/qschannelbackend for exactly this reason;
+    // this is the macOS half of that same fix, pointing Qt at the
+    // securetransport backend we ship inside the plugin bundle.
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<const void *>(&configure_qt_plugin_paths), &info) &&
+        info.dli_fname) {
+        const QFileInfo plugin_info(QString::fromUtf8(info.dli_fname));
+        const QDir plugin_dir = plugin_info.dir(); // <bundle>/Contents/MacOS
+        const QStringList candidates = {
+            plugin_dir.absoluteFilePath("plugins"),
+            plugin_dir.absoluteFilePath("../PlugIns"),
+            plugin_dir.absoluteFilePath("../Resources/qt/plugins"),
+        };
+        for (const QString &path : candidates) {
+            if (QFileInfo::exists(path))
+                QCoreApplication::addLibraryPath(path);
+        }
     }
 
     blog(LOG_INFO, "[obs-zoom-plugin] Qt library paths: %s",

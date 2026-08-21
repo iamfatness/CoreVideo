@@ -1020,11 +1020,31 @@ void ZoomIsoRecorder::record_audio_frame(const ZoomOutputInfo &info,
         // ensure_session_locked) is the right reference then, so a
         // participant who stays quiet after their video starts gets that
         // lead time as real silence instead of the file starting misaligned.
+        //
+        // session.last_audio_ns is a CONTENT-DRIVEN PLAYHEAD, not "the last
+        // call's arrival time" -- it advances by exactly how much audio was
+        // WRITTEN (silence + real), never snapped to timestamp_ns. Live
+        // bug (2026-08-21): an earlier version set it to timestamp_ns after
+        // every write, so ordinary per-call dispatch/IPC latency jitter --
+        // a 10ms buffer's callback landing, say, ~20ms after the previous
+        // one's arrival stamp even with zero real silence between them --
+        // read as a genuine 10ms gap on nearly every single buffer. Over a
+        // whole session that inserted almost as much bogus silence as real
+        // audio: measured live, a 152s video paired a 305s WAV, almost
+        // exactly 2x. Advancing by content duration instead (the same
+        // "never consult arrival except to anchor" doctrine
+        // src/audio-timeline.h already uses for the live OBS path) makes
+        // ordinary arrival jitter invisible: the playhead only falls behind
+        // real arrival time -- triggering a real backfill -- when audio
+        // actually stopped arriving, not merely when this call happened to
+        // land a few ms later than the last one.
         const uint64_t audio_reference_ns =
             session.last_audio_ns != 0 ? session.last_audio_ns
                                        : session.started_ns;
         const uint64_t silence_frames = iso_audio_silence_frames(
             audio_reference_ns, timestamp_ns, sample_rate);
+        uint64_t playhead_ns = audio_reference_ns +
+            (silence_frames * 1'000'000'000ULL) / sample_rate;
         if (silence_frames > 0) {
             const uint16_t effective_channels =
                 std::max<uint16_t>(channels, 1);
@@ -1047,6 +1067,10 @@ void ZoomIsoRecorder::record_audio_frame(const ZoomOutputInfo &info,
                 return;
             }
         }
+        const uint32_t real_frames =
+            byte_len / (sizeof(int16_t) * std::max<uint16_t>(channels, 1));
+        playhead_ns += (static_cast<uint64_t>(real_frames) *
+                        1'000'000'000ULL) / sample_rate;
 
         bool disk_full = false;
         if (!session.wav.write(pcm, byte_len, &disk_full)) {
@@ -1065,7 +1089,11 @@ void ZoomIsoRecorder::record_audio_frame(const ZoomOutputInfo &info,
             return;
         }
         ++session.audio_chunks;
-        session.last_audio_ns = timestamp_ns;
+        // Content-driven playhead (see the comment above) -- NOT
+        // timestamp_ns. session.last_video_ns and last_drop_ns stay
+        // arrival-stamped on purpose; only this field is a virtual position
+        // rather than a clock reading.
+        session.last_audio_ns = playhead_ns;
     }
 }
 

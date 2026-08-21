@@ -7,7 +7,38 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.43] - 2026-08-21
+
 ### Fixed
+- **The ISO audio fix below shipped with a bug of its own that doubled
+  every WAV's length.** Caught immediately in the same live verification
+  pass that confirmed the video fix: a 152s video paired a 305s WAV,
+  almost exactly double. The gap-fill reference point was snapped to each
+  call's raw arrival timestamp after every write, so ordinary per-call
+  dispatch/IPC latency — a delayed wakeup whose backlog then arrives in a
+  burst right after it, this plugin's own documented coalescing dispatch
+  behavior — got backfilled as silence on nearly every buffer, with no
+  real silence ever having occurred. Fixed by tracking a content-driven
+  playhead instead (advances by audio actually written, never snapped to
+  arrival time) plus a 50ms jitter-tolerance gate before any gap counts as
+  real silence at all, mirroring this codebase's own `audio-timeline.h`
+  precedent for the same distinction on the live path. Re-verified live
+  against the same meeting: two sources measured video/audio within
+  0.3–0.6% of each other, both tracking real elapsed time.
+
+- **A crash that didn't auto-recover left no trace of why.** Every way the
+  engine's crash-recovery path declines to reconnect — policy disabled,
+  auth failure, max attempts, no stored session — logs its own reason,
+  except one: if the plugin already believed the operator was leaving, it
+  gave up silently. Live, that meant a meeting which had already
+  self-healed from one earlier crash hit a second crash that produced only
+  the exit-code line and then nothing, with no way to tell afterward
+  whether a genuine Leave/Stop action, a stale flag, or the dock's 120s
+  join-timeout watchdog (which already shows a warning dialog but left no
+  log trace) was responsible. Added logging at the point recovery gives up
+  and at every site that can set the flag, so this is now answerable from
+  the log alone.
+
 - **ISO recording duration didn't match real elapsed time, and audio could
   drift out of sync with its own paired video.** Zoom's per-source video
   delivery fluctuates roughly 10-60fps with network/encoder conditions

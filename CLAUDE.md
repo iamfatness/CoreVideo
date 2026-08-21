@@ -94,6 +94,21 @@ Every one of these is documented at length where it lives; the list is the map.
   directly (2026-08-18/19). Applied in both `zoom-source.cpp`
   (`output_audio_from_shared_memory`, shared by the main and director-preview
   slots) and `zoom-participant-audio-source.cpp`.
+- **ISO recording timing** (`src/iso-video-pacer.h`, `src/iso-audio-gap-fill.h`):
+  raw video has no per-frame timestamps and ffmpeg cannot be trusted to
+  invent correct ones from a byte stream — `-use_wallclock_as_timestamps`
+  is confirmed (via `ffprobe -show_frames`, 2026-08-21) to have **no
+  effect** on this project's ffmpeg build's rawvideo demuxer, despite
+  looking like the textbook fix. `record_video_frame()` is called 1:1 with
+  Zoom's real, fluctuating (10-60fps) per-source delivery, so it must pace
+  itself to a fixed cadence (duplicate to backfill a stall, drop to shed a
+  burst) BEFORE the pipe — see `iso_video_frames_due()`. Audio has the
+  mirror-image problem for a different reason: Zoom only calls back audio
+  for someone currently talking, so `record_audio_frame()` must backfill
+  silence across every gap (`iso_audio_silence_frames()`) or the WAV
+  shrinks by every silent stretch. Both anchor to the same
+  `os_gettime_ns()` clock so video and audio stay in sync with each other,
+  not just individually correct.
 - **Speaker-director tick stays local to the cut** (`src/zoom-dock.cpp`'s
   100ms refresh timer): the Active Speaker cut is entirely self-contained
   in `zoom-source.cpp`'s director-handover machinery. Never call

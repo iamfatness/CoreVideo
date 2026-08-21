@@ -1,5 +1,7 @@
 #include "zoom-iso-recorder.h"
+#include "iso-audio-gap-fill.h"
 #include "iso-encoder-plan.h"
+#include "iso-video-pacer.h"
 #include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
@@ -487,6 +489,9 @@ ZoomIsoRecorder::ensure_session_locked(const ZoomOutputInfo &info,
     session.width = width;
     session.height = height;
     session.started_ns = timestamp_ns;
+    // Seeds the video pacer's schedule at the session's own start, the same
+    // instant started_ns records — see src/iso-video-pacer.h.
+    session.video_next_due_ns = timestamp_ns;
 
     QDir root(QString::fromStdString(m_config.output_dir));
     const QString stamp = QDateTime::currentDateTimeUtc()
@@ -536,7 +541,34 @@ ZoomIsoRecorder::ensure_session_locked(const ZoomOutputInfo &info,
         "-f", "rawvideo",
         "-pix_fmt", "yuv420p",
         "-s", std::to_string(width) + "x" + std::to_string(height),
-        "-r", "30",
+        // record_video_frame() paces every call to kIsoVideoTargetFps
+        // BEFORE it reaches this pipe (see the call site below and
+        // src/iso-video-pacer.h) -- what ffmpeg receives is genuinely CFR,
+        // so a plain declared -r here is correct and sufficient. It was
+        // NOT always sufficient: an earlier version of this fix tried
+        // -use_wallclock_as_timestamps to let ffmpeg itself derive PTS from
+        // real per-frame arrival time, on the theory that Zoom's actual
+        // delivery rate fluctuates 10-60fps with network/encoder conditions
+        // outside our control (CLAUDE.md's "media events are prompts, not
+        // payloads" applies to video here too) and record_video_frame() was
+        // called 1:1 with that, never padded, so a declared-CFR -r 30 was
+        // silently wrong whenever the source's real average differed from
+        // 30 (measured live 2026-08-19: observed_fps 16-18 on every
+        // participant, meaning every ISO file from that verification
+        // session played back at roughly 1.7-1.9x speed and finished in
+        // ~55-60% of the real meeting's duration). That was a correct
+        // diagnosis but the wrong mechanism: probed directly against this
+        // exact ffmpeg build (8.1.1) with ffprobe -show_frames, the
+        // rawvideo demuxer does not honor -use_wallclock_as_timestamps at
+        // all -- every frame's pts_time came back as a pure
+        // frame_index/30, identical to the unpatched behavior, even when
+        // fed a deliberate 1.5s real-time gap. Pacing before the pipe
+        // avoids depending on that (undocumented, apparently silently
+        // ignored) demuxer behavior entirely: duplicate the held frame to
+        // fill a stall, drop excess frames on a burst, so ffmpeg is never
+        // asked to infer timing it cannot actually derive from a raw byte
+        // stream.
+        "-r", std::to_string(kIsoVideoTargetFps),
         "-i", "pipe:0",
         "-an",
     };
@@ -905,30 +937,51 @@ void ZoomIsoRecorder::record_video_frame(const ZoomOutputInfo &info,
         dst += width / 2;
     }
 
-    if (!session.ffmpeg->try_queue(std::move(frame))) {
-        ++session.video_frames_dropped;
-        session.last_drop_ns = timestamp_ns;
-        if (!session.backlog_reported) {
-            session.backlog_reported = true;
-            blog(LOG_WARNING,
-                 "[obs-zoom-plugin] ISO encoder for %s is falling behind "
-                 "(queue %zu bytes) — dropping frames to protect memory "
-                 "and the meeting. Hardware encoder session limit?",
-                 session.source_name.c_str(),
-                 session.ffmpeg->queued_bytes());
+    // Pace to a fixed cadence before this reaches ffmpeg's raw pipe — see
+    // src/iso-video-pacer.h for why (ffmpeg cannot derive real timing from
+    // a raw byte stream on its own; a plain declared -r silently assumed
+    // every frame was exactly 1/30s apart while real Zoom delivery
+    // fluctuates 10-60fps, so a recording's duration tracked frame COUNT,
+    // not real elapsed time). due==0 means this frame arrived faster than
+    // the target rate (a 60fps source against a 30fps target, say): drop
+    // it, not toward video_frames_dropped -- that counter means "the
+    // encoder can't keep up", and downsampling a fast source is normal,
+    // not a problem to surface. due>1 backfills a stall by duplicating
+    // this frame; each duplicate still goes through the same backlog check
+    // as an ordinary frame.
+    const uint32_t due =
+        iso_video_frames_due(session.video_next_due_ns, timestamp_ns);
+    for (uint32_t i = 0; i < due; ++i) {
+        const bool queued = (i + 1 < due)
+            ? session.ffmpeg->try_queue(std::vector<uint8_t>(frame))
+            : session.ffmpeg->try_queue(std::move(frame));
+        if (!queued) {
+            ++session.video_frames_dropped;
+            session.last_drop_ns = timestamp_ns;
+            if (!session.backlog_reported) {
+                session.backlog_reported = true;
+                blog(LOG_WARNING,
+                     "[obs-zoom-plugin] ISO encoder for %s is falling "
+                     "behind (queue %zu bytes) — dropping frames to "
+                     "protect memory and the meeting. Hardware encoder "
+                     "session limit?",
+                     session.source_name.c_str(),
+                     session.ffmpeg->queued_bytes());
+            }
+            continue;
         }
-        return;
+        if (session.backlog_reported) {
+            session.backlog_reported = false;
+            blog(LOG_INFO,
+                 "[obs-zoom-plugin] ISO encoder for %s caught up after "
+                 "dropping %llu frames",
+                 session.source_name.c_str(),
+                 static_cast<unsigned long long>(
+                     session.video_frames_dropped));
+        }
+        ++session.video_frames;
+        session.last_video_ns = timestamp_ns;
     }
-    if (session.backlog_reported) {
-        session.backlog_reported = false;
-        blog(LOG_INFO,
-             "[obs-zoom-plugin] ISO encoder for %s caught up after dropping "
-             "%llu frames",
-             session.source_name.c_str(),
-             static_cast<unsigned long long>(session.video_frames_dropped));
-    }
-    ++session.video_frames;
-    session.last_video_ns = timestamp_ns;
 }
 
 void ZoomIsoRecorder::record_audio_frame(const ZoomOutputInfo &info,
@@ -957,6 +1010,44 @@ void ZoomIsoRecorder::record_audio_frame(const ZoomOutputInfo &info,
     }
     if (session.wav.sample_rate == sample_rate &&
         session.wav.channels == std::max<uint16_t>(channels, 1)) {
+        // Zoom only calls back audio for a participant currently producing
+        // sound, so gaps here are ordinary and expected -- not lost data.
+        // Backfill silence for the gap BEFORE the real buffer, so the WAV's
+        // byte position keeps tracking wall-clock position instead of
+        // shrinking by every silent stretch (see src/iso-audio-gap-fill.h).
+        // `session.last_audio_ns == 0` means nothing has been written yet;
+        // session.started_ns (stamped from the first VIDEO frame in
+        // ensure_session_locked) is the right reference then, so a
+        // participant who stays quiet after their video starts gets that
+        // lead time as real silence instead of the file starting misaligned.
+        const uint64_t audio_reference_ns =
+            session.last_audio_ns != 0 ? session.last_audio_ns
+                                       : session.started_ns;
+        const uint64_t silence_frames = iso_audio_silence_frames(
+            audio_reference_ns, timestamp_ns, sample_rate);
+        if (silence_frames > 0) {
+            const uint16_t effective_channels =
+                std::max<uint16_t>(channels, 1);
+            const std::vector<uint8_t> silence(
+                static_cast<size_t>(silence_frames) * effective_channels *
+                    sizeof(int16_t),
+                0);
+            bool disk_full = false;
+            if (!session.wav.write(silence.data(),
+                                   static_cast<uint32_t>(silence.size()),
+                                   &disk_full)) {
+                if (disk_full) {
+                    mark_disk_full_locked(session);
+                } else if (session.ffmpeg_error.isEmpty()) {
+                    mark_ffmpeg_failure_locked(
+                        session, QStringLiteral("WAV write failed."));
+                }
+                const std::string source_uuid = session.source_uuid;
+                close_session_locked(source_uuid);
+                return;
+            }
+        }
+
         bool disk_full = false;
         if (!session.wav.write(pcm, byte_len, &disk_full)) {
             if (disk_full) {

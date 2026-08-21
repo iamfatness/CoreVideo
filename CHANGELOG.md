@@ -7,6 +7,36 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+### Fixed
+- **ISO recording duration didn't match real elapsed time, and audio could
+  drift out of sync with its own paired video.** Zoom's per-source video
+  delivery fluctuates roughly 10-60fps with network/encoder conditions
+  outside our control, but the ISO video pipe declared a flat "-r 30" input
+  rate to ffmpeg with no other way to time each frame (raw video carries no
+  per-frame timestamps) — a source averaging 15fps recorded under that
+  declared 30fps played back at roughly 2x speed and finished in about half
+  the real meeting's duration; a sustained 60fps source would run at half
+  speed. Measured live 2026-08-19: every participant in a normal
+  verification meeting showed 16-18fps, meaning every ISO file from that
+  session was materially short. Fixed by pacing frames to a fixed cadence
+  ourselves before they reach ffmpeg — duplicating the held frame to
+  backfill a stall, dropping excess frames from a burst — rather than
+  asking ffmpeg to infer timing it cannot actually derive from a raw byte
+  stream (`-use_wallclock_as_timestamps`, the obvious first attempt, was
+  confirmed via `ffprobe -show_frames` to have no effect at all on this
+  project's ffmpeg build's rawvideo demuxer).
+
+  The paired WAV had an independent, unrelated duration bug with the same
+  symptom: Zoom only calls back audio for a participant currently
+  producing sound, so silent stretches wrote zero bytes and permanently
+  shortened the file by the total silent duration. Fixed by backfilling
+  silence across every gap, so the WAV's own byte position also tracks
+  wall-clock time. Both fixes anchor to the same `os_gettime_ns()` clock
+  the ISO recorder has always used, so video and audio — each now
+  individually accurate to real elapsed time — also stay in sync with each
+  other from the moment they enter the plugin (Zoom's own upstream A/V sync
+  is a separate concern, outside this fix's scope).
+
 ## [0.1.42] - 2026-08-19
 
 ### Fixed

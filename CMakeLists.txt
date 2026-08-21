@@ -914,6 +914,32 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoAudioSilenceFade
              COMMAND CoreVideoAudioSilenceFadeTest)
 
+    # Backfills silence into an ISO WAV across gaps so its own timeline
+    # tracks real elapsed time instead of shrinking by every silent
+    # stretch — 2026-08-21 design review ("does ZoomISO handle variable
+    # fps / stay in sync with audio").
+    add_executable(CoreVideoIsoAudioGapFillTest
+        tests/iso-audio-gap-fill-test.cpp
+    )
+    target_include_directories(CoreVideoIsoAudioGapFillTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoIsoAudioGapFill
+             COMMAND CoreVideoIsoAudioGapFillTest)
+
+    # Paces ISO video to a fixed cadence before ffmpeg's raw pipe, since
+    # -use_wallclock_as_timestamps was confirmed (ffprobe -show_frames,
+    # 2026-08-21) to have no effect on this project's ffmpeg build's
+    # rawvideo demuxer. See src/iso-video-pacer.h.
+    add_executable(CoreVideoIsoVideoPacerTest
+        tests/iso-video-pacer-test.cpp
+    )
+    target_include_directories(CoreVideoIsoVideoPacerTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoIsoVideoPacer
+             COMMAND CoreVideoIsoVideoPacerTest)
+
     # The master clock every audio buffer is stamped from. Wall-clock arrival
     # stamps let IPC jitter reach OBS, which resampled continuously — the
     # 2026-08-16 "audio is very bad" report.

@@ -1041,6 +1041,15 @@ void ZoomDock::update_state_indicator()
         !m_join_timeout_reported &&
         QDateTime::currentMSecsSinceEpoch() - m_join_started_ms > 120000) {
         m_join_timeout_reported = true;
+        // The warning dialog below is visible in the moment but leaves no
+        // trace in the log — a real gap when this fires (as opposed to a
+        // deliberate Leave click) is exactly what silently set
+        // m_user_leaving and suppressed the next crash's auto-recovery in
+        // a 2026-08-21 live incident that took real archaeology to explain
+        // after the fact. blog() first so the log alone tells the story.
+        blog(LOG_WARNING,
+             "[obs-zoom-plugin] Join watchdog: no join progress in 120s -- "
+             "auto-leaving and marking this attempt Failed");
         ZoomEngineClient::instance().leave();
         ZoomEngineClient::instance().set_state(MeetingState::Failed);
         QMessageBox::warning(this, "Zoom Join",
@@ -1827,6 +1836,7 @@ void ZoomDock::on_leave_clicked()
     m_join_started_ms = 0;
     m_join_timeout_reported = false;
     m_join_generation.fetch_add(1, std::memory_order_acq_rel);
+    blog(LOG_INFO, "[obs-zoom-plugin] Leave button clicked");
     ZoomEngineClient::instance().leave();
     update_state_indicator();
 }
@@ -1870,6 +1880,7 @@ void ZoomDock::on_launch_sidecar_clicked()
 
 void ZoomDock::on_cancel_recovery_clicked()
 {
+    blog(LOG_INFO, "[obs-zoom-plugin] Cancel Recovery button clicked");
     ZoomEngineClient::instance().stop();
     update_state_indicator();
 }

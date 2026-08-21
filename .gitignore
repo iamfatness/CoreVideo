@@ -43,3 +43,7 @@ fix-*.ps1
 
 # Subagent-driven-development scratch (ledger, briefs, review packages)
 .superpowers/
+
+# Sidecar logs CoreVideoIsoFfmpegPipeTest writes next to itself when run
+# manually from the repo root instead of the build directory.
+pipe-test-*.log

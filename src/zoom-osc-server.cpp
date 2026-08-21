@@ -401,6 +401,7 @@ void ZoomOscServer::dispatch(const QString &address,
 
     // /zoom/leave
     if (address == "/zoom/leave") {
+        blog(LOG_INFO, "[obs-zoom-plugin] OSC: /zoom/leave");
         ZoomEngineClient::instance().leave();
         return;
     }
@@ -565,6 +566,7 @@ void ZoomOscServer::dispatch(const QString &address,
 
     // /zoom/recovery/cancel
     if (address == "/zoom/recovery/cancel") {
+        blog(LOG_INFO, "[obs-zoom-plugin] OSC: /zoom/recovery/cancel");
         ZoomEngineClient::instance().stop();
         return;
     }

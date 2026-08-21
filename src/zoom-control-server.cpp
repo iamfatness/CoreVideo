@@ -768,6 +768,7 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
     }
 
     if (cmd == "leave") {
+        blog(LOG_INFO, "[obs-zoom-plugin] Control API: leave");
         ZoomEngineClient::instance().leave();
         write_response(socket, {{"ok", true}});
         return;
@@ -829,6 +830,7 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
     }
 
     if (cmd == "recovery_cancel") {
+        blog(LOG_INFO, "[obs-zoom-plugin] Control API: recovery_cancel");
         ZoomEngineClient::instance().stop();
         write_response(socket, {
             {"ok", true},

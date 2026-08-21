@@ -735,7 +735,25 @@ void ZoomEngineClient::monitor_loop()
 
         // If the user is in the middle of leaving / stopping, don't try to recover —
         // we lost a race against stop() but the user's intent is clear.
+        //
+        // THE DEFECT THIS LOG LINE EXISTS FOR (2026-08-21, live incident). A
+        // crash landing here is otherwise completely silent: the line above
+        // already logs the crash itself, but the decision to skip recovery
+        // produces nothing at all -- every other way trigger() declines to
+        // reconnect (policy disabled, auth failure, max attempts, no stored
+        // session) logs its own reason; this was the one silent exit. Live,
+        // that meant a meeting that had already self-healed from one earlier
+        // crash (full "Scheduling reconnect... succeeded" trail in the log)
+        // hit a second crash that produced only the exit-code line and then
+        // nothing -- no evidence for whether m_user_leaving was set by a
+        // genuine Leave/Stop, a stale flag from an earlier one, or the dock's
+        // 120s join-timeout watchdog (zoom-dock.cpp) auto-leaving a stuck
+        // reconnect, and no way to tell which after the fact.
         if (m_user_leaving.load(std::memory_order_acquire)) {
+            blog(LOG_INFO,
+                 "[obs-zoom-plugin] Engine exit not recovered: user_leaving "
+                 "was already set (an explicit Leave/Stop, or the dock's "
+                 "join-timeout watchdog, ran before or during this exit)");
             m_state.store(MeetingState::Idle, std::memory_order_release);
             return;
         }

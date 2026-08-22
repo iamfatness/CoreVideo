@@ -137,6 +137,19 @@ public:
     bool is_init_retry_pending() const {
         return m_init_retry_due_ms.load(std::memory_order_acquire) != 0;
     }
+    // True while Zoom has us in a waiting room, or the meeting has not started
+    // yet (MEETING_STATUS_IN_WAITING_ROOM / _WAITINGFORHOST, reported by the
+    // engine on every status change).
+    //
+    // Exposed for the same watchdog and for the same reason as
+    // is_init_retry_pending() above: this wait happens *inside* the Joining
+    // window and is open-ended, because it ends only when a host acts. Charged
+    // against the join deadline it auto-left a live meeting after 114s in a
+    // waiting room (2026-08-22); see src/join-watchdog.h. Point-in-time read,
+    // safe from any thread.
+    bool is_awaiting_admission() const {
+        return m_awaiting_admission.load(std::memory_order_acquire);
+    }
     bool is_media_active() const { return m_media_active.load(std::memory_order_acquire); }
     std::string last_error() const;
     void clear_last_error();
@@ -256,6 +269,7 @@ private:
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_authenticated{false};
     std::atomic<bool> m_media_active{false};
+    std::atomic<bool> m_awaiting_admission{false};
     std::atomic<MeetingState> m_state{MeetingState::Idle};
     // Wall-clock ms (os_gettime_ns()/1e6) of the last line received from the
     // engine. Used by monitor_loop() to detect a hung-but-alive engine.

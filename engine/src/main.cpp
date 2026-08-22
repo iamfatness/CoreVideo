@@ -921,6 +921,26 @@ public:
         EngineIpc::write(R"({"cmd":"debug","stage":"meeting_status","status":)" +
             std::to_string(static_cast<int>(status)) +
             R"(,"result":)" + std::to_string(iResult) + "}");
+
+        // A waiting room, or a meeting that has not started yet, is an
+        // open-ended wait on a human -- not a stalled join. Neither state
+        // produces any further status change until someone acts, so the
+        // plugin's join watchdog could not tell them apart from a wedge and
+        // auto-left a real meeting after two minutes in the waiting room
+        // (2026-08-22). Reported as its own event rather than left for the
+        // plugin to infer from the debug line above: debug output is for
+        // humans and is filtered by stage, and control flow must not depend
+        // on it. Sent on EVERY status change, including the ones that end the
+        // wait, so the flag needs no edge tracking on either side.
+        {
+            const bool awaiting =
+                status == ZOOMSDK::MEETING_STATUS_IN_WAITING_ROOM ||
+                status == ZOOMSDK::MEETING_STATUS_WAITINGFORHOST;
+            EngineIpc::write(
+                std::string(R"({"cmd":"awaiting_admission","active":)") +
+                (awaiting ? "true" : "false") + "}");
+        }
+
         switch (status) {
         case ZOOMSDK::MEETING_STATUS_INMEETING:
             EngineIpc::write( R"({"cmd":"joined"})");

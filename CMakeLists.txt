@@ -953,6 +953,18 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoI420RangeExpand
              COMMAND CoreVideoI420RangeExpandTest)
 
+    # A Zoom waiting room is an open-ended wait on a human, not a stalled join.
+    # Charged against the join deadline it auto-left a live meeting after 114s
+    # (2026-08-22). See src/join-watchdog.h.
+    add_executable(CoreVideoJoinWatchdogTest
+        tests/join-watchdog-test.cpp
+    )
+    target_include_directories(CoreVideoJoinWatchdogTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoJoinWatchdog
+             COMMAND CoreVideoJoinWatchdogTest)
+
     # The master clock every audio buffer is stamped from. Wall-clock arrival
     # stamps let IPC jitter reach OBS, which resampled continuously — the
     # 2026-08-16 "audio is very bad" report.

@@ -476,6 +476,7 @@ bool ZoomEngineClient::start(const std::string &jwt_token,
     m_user_leaving.store(false, std::memory_order_release);
     m_authenticated.store(false, std::memory_order_release);
     m_media_active.store(false, std::memory_order_release);
+    m_awaiting_admission.store(false, std::memory_order_release);
     // Join threads from any previous session (e.g. after a crash).
     if (m_reader.joinable())  m_reader.join();
     if (m_monitor.joinable()) m_monitor.join();
@@ -597,6 +598,7 @@ void ZoomEngineClient::stop_for_reconnect()
     }
     m_authenticated.store(false, std::memory_order_release);
     m_media_active.store(false, std::memory_order_release);
+    m_awaiting_admission.store(false, std::memory_order_release);
     m_state.store(MeetingState::Idle, std::memory_order_release);
 }
 
@@ -1043,6 +1045,7 @@ void ZoomEngineClient::fail_after_init_retries_exhausted()
 
     m_authenticated.store(false, std::memory_order_release);
     m_media_active.store(false, std::memory_order_release);
+    m_awaiting_admission.store(false, std::memory_order_release);
     m_init_retry_due_ms.store(0, std::memory_order_release);
     // m_init_retry_attempts / m_init_retry_waited_ms are deliberately NOT reset
     // here: disconnect_ipc() above may still let the reader thread run one more
@@ -1142,13 +1145,25 @@ void ZoomEngineClient::handle_event(const std::string &line)
             m_media_active.store(false, std::memory_order_release);
         return;
     }
+    if (cmd == "awaiting_admission") {
+        // Sent on every meeting-status change, so this is a plain assignment
+        // and never needs an edge to clear it. See is_awaiting_admission().
+        m_awaiting_admission.store(obj.value("active").toBool(),
+                                   std::memory_order_release);
+        return;
+    }
     if (cmd == "joined") {
+        m_awaiting_admission.store(false, std::memory_order_release);
         m_state.store(MeetingState::InMeeting, std::memory_order_release);
         ZoomReconnectManager::instance().on_join_success();
         return;
     }
     if (cmd == "left") {
         m_media_active.store(false, std::memory_order_release);
+        // Belt and braces with the engine's own report: if the engine dies
+        // while we are in a waiting room, no further status change is coming
+        // and a stale true here would hold the watchdog off for the next join.
+        m_awaiting_admission.store(false, std::memory_order_release);
         bool keep_failed = false;
         {
             std::lock_guard<std::mutex> lk(m_mtx);

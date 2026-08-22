@@ -100,6 +100,9 @@ private:
 
     qint64       m_join_started_ms      = 0;
     bool         m_join_timeout_reported = false;
+    // Log the "held for a waiting room" explanation once per join attempt, not
+    // on every 100ms refresh tick.
+    bool         m_join_wait_logged = false;
     std::thread  m_join_thread;
     std::atomic<bool>     m_join_in_progress{false};
     std::atomic<uint64_t> m_join_generation{0};

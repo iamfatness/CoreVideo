@@ -4,6 +4,7 @@
 #include "cv-widgets.h"
 #include "obs-utils.h"
 #include "speaker-director.h"
+#include "join-watchdog.h"
 #include "zoom-engine-client.h"
 #include "zoom-join-decision.h"
 #include "zoom-oauth.h"
@@ -1033,13 +1034,35 @@ void ZoomDock::update_state_indicator()
     // indefinitely: the retry schedule is capped at kSdkInitRetryMaxAttempts,
     // and exhausting it tears the engine down and moves the state to Failed,
     // which clears m_join_started_ms below.
-    if (s == MeetingState::Joining && m_join_started_ms > 0 &&
-        ZoomEngineClient::instance().is_init_retry_pending())
-        m_join_started_ms = QDateTime::currentMSecsSinceEpoch();
+    // The other open-ended wait inside the Joining window is Zoom holding us in
+    // a waiting room, or the meeting not having started yet. That one is not
+    // bounded by anything we control -- it ends when a host acts -- and on
+    // 2026-08-22 it auto-left a live meeting after 114s of waiting. Both
+    // suppressors and the deadline itself are decided by
+    // join_watchdog_action() so they can be tested without Qt; see
+    // src/join-watchdog.h.
+    const JoinWatchdogAction watchdog = join_watchdog_action(
+        s == MeetingState::Joining,
+        m_join_timeout_reported,
+        static_cast<uint64_t>(m_join_started_ms),
+        static_cast<uint64_t>(QDateTime::currentMSecsSinceEpoch()),
+        ZoomEngineClient::instance().is_init_retry_pending(),
+        ZoomEngineClient::instance().is_awaiting_admission(),
+        kJoinWatchdogTimeoutMs);
 
-    if (s == MeetingState::Joining && m_join_started_ms > 0 &&
-        !m_join_timeout_reported &&
-        QDateTime::currentMSecsSinceEpoch() - m_join_started_ms > 120000) {
+    if (watchdog == JoinWatchdogAction::HoldWindow) {
+        if (!m_join_wait_logged &&
+            ZoomEngineClient::instance().is_awaiting_admission()) {
+            m_join_wait_logged = true;
+            blog(LOG_INFO,
+                 "[obs-zoom-plugin] Join watchdog held: Zoom has us in a "
+                 "waiting room (or the meeting has not started yet). This is "
+                 "not a stalled join and will not be auto-cancelled");
+        }
+        m_join_started_ms = QDateTime::currentMSecsSinceEpoch();
+    }
+
+    if (watchdog == JoinWatchdogAction::Fire) {
         m_join_timeout_reported = true;
         // The warning dialog below is visible in the moment but leaves no
         // trace in the log — a real gap when this fires (as opposed to a
@@ -1060,6 +1083,7 @@ void ZoomDock::update_state_indicator()
     if (s != MeetingState::Joining) {
         m_join_started_ms = 0;
         m_join_timeout_reported = false;
+        m_join_wait_logged = false;
     }
 
     m_state_dot->setState(s);

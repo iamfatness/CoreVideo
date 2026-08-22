@@ -47,3 +47,10 @@ fix-*.ps1
 # Sidecar logs CoreVideoIsoFfmpegPipeTest writes next to itself when run
 # manually from the repo root instead of the build directory.
 pipe-test-*.log
+
+# Companion module build output — `npm run build` emits dist/, and
+# `companion-module-build` emits pkg/ plus a versioned .tgz for import
+# into Companion. All regenerable; none of it belongs in the repo.
+companion/companion-module-corevideo-obs/dist/
+companion/companion-module-corevideo-obs/pkg/
+companion/companion-module-corevideo-obs/*.tgz

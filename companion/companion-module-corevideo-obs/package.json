@@ -1,8 +1,15 @@
 {
   "name": "companion-module-corevideo-obs",
-  "version": "1.0.0",
-  "description": "Bitfocus Companion module for CoreVideo OBS plugin — Zoom participant routing and meeting control",
-  "keywords": ["companion-module", "obs", "zoom", "corevideo", "broadcast"],
+  "version": "1.0.1",
+  "description": "Bitfocus Companion module for CoreVideo OBS plugin \u2014 Zoom participant routing and meeting control",
+  "keywords": [
+    "companion-module",
+    "obs",
+    "zoom",
+    "corevideo",
+    "broadcast"
+  ],
+  "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -14,9 +21,9 @@
     "name": "CoreVideo OBS",
     "shortname": "CoreVideo",
     "id": "corevideo-obs",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "api_version": "0.6",
-    "description": "Unified control for CoreVideo: Zoom participant routing, OBS Studio, and Sidecar show phase management — all in one module.",
+    "description": "Unified control for CoreVideo: Zoom participant routing, OBS Studio, and Sidecar show phase management \u2014 all in one module.",
     "author": "CoreVideo",
     "help": "Connects to three services: CoreVideo plugin (port 19870, required), OBS WebSocket v5 (port 4455, optional), and CoreVideo Sidecar (port 19880, optional).",
     "category": "softwarecontrol"
@@ -26,6 +33,7 @@
     "ws": "^8.0.0"
   },
   "devDependencies": {
+    "@companion-module/tools": "^3.0.2",
     "@types/node": "^25.8.0",
     "@types/ws": "^8.0.0",
     "typescript": "^6.0.3",

@@ -940,6 +940,19 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoIsoVideoPacer
              COMMAND CoreVideoIsoVideoPacerTest)
 
+    # The SDK does not always honour the full-range colorspace the engine asks
+    # for: 16 of 15,203 frames from a live meeting arrived limited-range, on 5
+    # of 6 participants, and rendered unexpanded as a one-frame brightness pop
+    # (the "gamma flash"). See src/i420-range-expand.h.
+    add_executable(CoreVideoI420RangeExpandTest
+        tests/i420-range-expand-test.cpp
+    )
+    target_include_directories(CoreVideoI420RangeExpandTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoI420RangeExpand
+             COMMAND CoreVideoI420RangeExpandTest)
+
     # The master clock every audio buffer is stamped from. Wall-clock arrival
     # stamps let IPC jitter reach OBS, which resampled continuously — the
     # 2026-08-16 "audio is very bad" report.

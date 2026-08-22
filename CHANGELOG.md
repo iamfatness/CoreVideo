@@ -7,6 +7,32 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+### Fixed
+- **Participants flashed brighter for a single frame, at random, several
+  times a minute across the whole grid — the long-standing "gamma flash".**
+  The engine asks the Zoom SDK for full-range colour
+  (`VideoRawdataColorspace_BT709_F`) and the plugin declares
+  `VIDEO_RANGE_FULL` on every frame it hands OBS, but the SDK does not
+  always honour that request. Measured live by attaching to the video
+  shared memory read-only from a third process and histogramming luma:
+  16 frames out of 15,203 arrived limited-range (16–235) instead, spread
+  across 5 of 6 participants — floor lifted off 0, ceiling capped near
+  235, and the ~13,600 sub-16 samples the neighbouring frames carried
+  collapsing to single digits, for exactly one frame. Declared full but
+  actually limited, such a frame renders with lifted blacks and crushed
+  whites: a ~33 ms brightness pop, landing somewhere on an 8-tile grid
+  every 20–30 seconds. `YUVRawDataI420::IsLimitedI420()` reports this per
+  frame and had never been called anywhere in the codebase. The engine now
+  checks it and expands those frames to full range before they reach
+  shared memory, so the range declared downstream is true for every frame.
+  This is also the cause of program output measuring washed out against
+  mimoLive on 2026-08-11. Deliberately fixed by normalising pixels rather
+  than forwarding the flag to `obs_source_frame::full_range`: libobs keys
+  async texture allocation on that field and destroys and recreates every
+  texture whenever it changes, so per-frame flipping would trade a
+  one-frame pop for a texture-rebuild storm. The full-range path — the
+  overwhelming majority of frames — is unchanged and does no extra copy.
+
 ## [0.1.43] - 2026-08-21
 
 ### Fixed

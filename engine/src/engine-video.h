@@ -7,6 +7,7 @@
 #include <vector>
 #include "../../src/engine-ipc.h"
 #include "../../src/shm-generation.h"
+#include "../../src/i420-range-expand.h"
 #if __has_include(<zoom_sdk_raw_data_def.h>)
 #include <zoom_sdk_raw_data_def.h>
 #else
@@ -67,6 +68,14 @@ private:
 
     uint32_t    m_participant_id;
     uint32_t    m_resolution = 1;
+    // Scratch for the limited-range expansion. Only allocated if this
+    // participant ever delivers a limited-range frame (measured: ~0.1% of
+    // frames, but on most participants at least once a session), and reused
+    // thereafter so the correction does not allocate on the video path.
+    // Written before m_targets_mtx is taken and read only under it, on the
+    // single SDK renderer callback thread.
+    std::vector<uint8_t> m_range_buf;
+    uint64_t    m_limited_frames = 0;
     ZOOMSDK::IZoomSDKRenderer *m_renderer = nullptr;
     mutable std::mutex m_targets_mtx;
     std::unordered_map<std::string, std::unique_ptr<SourceTarget>> m_targets;

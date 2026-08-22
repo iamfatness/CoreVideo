@@ -227,6 +227,42 @@ void ParticipantSubscription::onRawDataFrameReceived(YUVRawDataI420 *data)
     }
     tile_clock_log(m_participant_id, data->GetTimeStamp(), tile_clock_now_ns(), "v");
 
+    const char *src_y = data->GetYBuffer();
+    const char *src_u = data->GetUBuffer();
+    const char *src_v = data->GetVBuffer();
+
+    // We ask for VideoRawdataColorspace_BT709_F (main.cpp) and the plugin
+    // declares VIDEO_RANGE_FULL on every frame it hands OBS, but the SDK does
+    // not always deliver full range: 16 frames out of 15,203 in one live
+    // meeting came back limited, across 5 of 6 participants, each rendering as
+    // a one-frame brightness pop. Normalise here, once per frame, so the
+    // declaration downstream is true for every frame -- and so the correction
+    // costs nothing on the overwhelmingly common full-range path, which does
+    // not copy at all. See src/i420-range-expand.h for why this expands pixels
+    // rather than forwarding the flag for obs_source_frame::full_range.
+    if (data->IsLimitedI420()) {
+        const size_t c_len = y_len / 4;
+        if (m_range_buf.size() < y_len + c_len * 2)
+            m_range_buf.resize(y_len + c_len * 2);
+        uint8_t *dst_y = m_range_buf.data();
+        uint8_t *dst_u = dst_y + y_len;
+        uint8_t *dst_v = dst_u + c_len;
+        i420_expand_limited_to_full(
+            reinterpret_cast<const uint8_t *>(src_y),
+            reinterpret_cast<const uint8_t *>(src_u),
+            reinterpret_cast<const uint8_t *>(src_v),
+            dst_y, dst_u, dst_v, y_len);
+        src_y = reinterpret_cast<const char *>(dst_y);
+        src_u = reinterpret_cast<const char *>(dst_u);
+        src_v = reinterpret_cast<const char *>(dst_v);
+        if (++m_limited_frames == 1 || m_limited_frames % 100 == 0) {
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"video_limited_range_expanded","participant_id":)" +
+                std::to_string(m_participant_id) + R"(,"count":)" +
+                std::to_string(m_limited_frames) + "}");
+        }
+    }
+
     std::lock_guard<std::mutex> lock(m_targets_mtx);
     for (auto &entry : m_targets) {
         const std::string &source_uuid = entry.first;
@@ -281,9 +317,11 @@ void ParticipantSubscription::onRawDataFrameReceived(YUVRawDataI420 *data)
         // the right clock here and what it lets the plugin measure.
         hdr->capture_ns = tile_clock_now_ns();
 
-        std::memcpy(pixels,                   data->GetYBuffer(), y_len);
-        std::memcpy(pixels + y_len,           data->GetUBuffer(), y_len / 4);
-        std::memcpy(pixels + y_len + y_len/4, data->GetVBuffer(), y_len / 4);
+        // src_* is the SDK's buffer directly on the common full-range path,
+        // or the expanded copy when this frame arrived limited-range.
+        std::memcpy(pixels,                   src_y, y_len);
+        std::memcpy(pixels + y_len,           src_u, y_len / 4);
+        std::memcpy(pixels + y_len + y_len/4, src_v, y_len / 4);
         std::atomic_thread_fence(std::memory_order_release);
         hdr->sequence = seq + 1;
 

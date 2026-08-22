@@ -109,6 +109,21 @@ Every one of these is documented at length where it lives; the list is the map.
   shrinks by every silent stretch. Both anchor to the same
   `os_gettime_ns()` clock so video and audio stay in sync with each other,
   not just individually correct.
+- **Colour range is normalised, never re-declared** (`src/i420-range-expand.h`,
+  applied in `engine/src/engine-video.cpp`'s `onRawDataFrameReceived`): the
+  engine requests `VideoRawdataColorspace_BT709_F` and the plugin declares
+  `VIDEO_RANGE_FULL` on every frame, but the SDK does **not** always deliver
+  full range — 16 of 15,203 frames in one live meeting arrived limited, on 5
+  of 6 participants (live-probed 2026-08-22). Unexpanded, each is a ~33 ms
+  brightness pop: the "gamma flash". `YUVRawDataI420::IsLimitedI420()` reports
+  this per frame and had never been called. Expand the PIXELS when it is set;
+  do not forward the flag to `obs_source_frame::full_range` — libobs keys async
+  texture allocation on that field and `set_async_texture_size` destroys and
+  recreates every texture when it changes, so per-frame flipping trades a
+  one-frame pop for a rebuild storm. Diagnosed by attaching to the video SHM
+  read-only from a third process and histogramming luma; the signature is a
+  floor lifted off 0, a ceiling capped near 235, and the sub-16 population
+  collapsing to single digits for exactly one frame.
 - **Speaker-director tick stays local to the cut** (`src/zoom-dock.cpp`'s
   100ms refresh timer): the Active Speaker cut is entirely self-contained
   in `zoom-source.cpp`'s director-handover machinery. Never call

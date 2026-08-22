@@ -1,6 +1,6 @@
 {
   "name": "companion-module-corevideo-obs",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Bitfocus Companion module for CoreVideo OBS plugin \u2014 Zoom participant routing and meeting control",
   "keywords": [
     "companion-module",
@@ -21,7 +21,7 @@
     "name": "CoreVideo OBS",
     "shortname": "CoreVideo",
     "id": "corevideo-obs",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "api_version": "0.6",
     "description": "Unified control for CoreVideo: Zoom participant routing, OBS Studio, and Sidecar show phase management \u2014 all in one module.",
     "author": "CoreVideo",

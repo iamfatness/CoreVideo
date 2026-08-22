@@ -181,15 +181,26 @@ export class CoreVideoInstance extends InstanceBase<CoreVideoManifest> {
 				this.state.zoom.meetingState = msg['meeting_state'] as ModuleState['zoom']['meetingState']
 			if (typeof msg['active_speaker_id'] === 'number')
 				this.state.zoom.activeSpeakerId = msg['active_speaker_id']
-			if (Array.isArray(msg['participants']))
+			let rosterChanged = false
+			if (Array.isArray(msg['participants'])) {
 				this.state.zoom.participants = msg['participants'] as ModuleState['zoom']['participants']
+				rosterChanged = true
+			}
 			if (Array.isArray(msg['outputs'])) {
 				this.state.zoom.outputs = msg['outputs'] as ModuleState['zoom']['outputs']
+				rosterChanged = true
 				this.setVariableDefinitions({
 					...variableDefinitions,
 					...buildOutputVariableDefs(this.state.zoom.outputs.length),
 				})
 			}
+			// The assign actions offer the roster and the outputs as dropdowns,
+			// and those lists are built at buildActions() time. flushState()
+			// only pushes variables and feedbacks, so without this the pickers
+			// stay frozen at whatever the roster was when the module started --
+			// an empty list on a cold start, which is exactly when an operator
+			// goes looking for them.
+			if (rosterChanged) this.setActionDefinitions(buildActions(this))
 			this.flushState()
 		}
 	}

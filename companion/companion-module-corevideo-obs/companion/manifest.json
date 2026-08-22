@@ -5,7 +5,7 @@
   "name": "corevideo-obs",
   "shortname": "CoreVideo",
   "description": "Unified control for CoreVideo: Zoom participant routing, OBS Studio, and Sidecar show phase management \u2014 all in one module.",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "license": "MIT",
   "repository": "https://github.com/iamfatness/CoreVideo",
   "bugs": "https://github.com/iamfatness/CoreVideo/issues",

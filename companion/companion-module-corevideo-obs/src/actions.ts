@@ -8,6 +8,46 @@ import type { CoreVideoInstance } from './index.js'
 export function buildActions(
 	inst: CoreVideoInstance,
 ): CompanionActionDefinitions<Record<string, CompanionActionSchemaWithoutResult<CompanionOptionValues>>> {
+	// The outputs the plugin currently knows about, as OBS source names. These
+	// are stable across meetings (they are OBS sources), so storing one on a
+	// button is safe.
+	const outputChoices = inst.state.zoom.outputs.map((o) => ({
+		id: o.source,
+		label: o.display_name ? `${o.source} (${o.display_name})` : o.source,
+	}))
+
+	// Participants are offered BY NAME, not by id. Zoom user IDs are
+	// meeting-scoped: the same person rejoining, or the next run of a weekly
+	// show, gets a brand new id, so a button holding a raw id silently points
+	// at nobody -- or, once ids get reused, at the wrong face. Names survive
+	// that.
+	const participantChoices = inst.state.zoom.participants.map((p) => ({
+		id: p.name,
+		label: p.is_muted ? `${p.name} (muted)` : p.name,
+	}))
+
+	// Resolve whatever the button stored into a live participant id.
+	// Accepts, in order: a name from the dropdown, a raw numeric id typed in
+	// via allowCustom, or a legacy numeric participant_id from a button built
+	// before this action offered a dropdown.
+	const resolveParticipantId = (choice: unknown, legacyId: unknown): number => {
+		const raw = String(choice ?? '').trim()
+		if (raw) {
+			if (/^\d+$/.test(raw)) return Number(raw)
+			const hit = inst.state.zoom.participants.find(
+				(p) => p.name.toLowerCase() === raw.toLowerCase(),
+			)
+			if (hit) return hit.id
+			// Named someone who is not in the meeting right now. Return 0
+			// rather than a stale guess: the plugin treats 0 as "nobody",
+			// which shows the source as unassigned instead of putting the
+			// wrong person on air.
+			inst.log('warn', `Assign: no participant named "${raw}" in the current roster`)
+			return 0
+		}
+		return Number(legacyId ?? 0) || 0
+	}
+
 	return {
 
 		// ── Zoom: Meeting ───────────────────────────────────────────────────────
@@ -32,20 +72,35 @@ export function buildActions(
 		zoom_assign: {
 			name: 'Zoom: Assign Participant to Output',
 			options: [
-				{ type: 'textinput', id: 'source',         label: 'OBS Source Name',                 default: '' },
-				{ type: 'number',    id: 'participant_id', label: 'Participant ID (0 = active spkr)', default: 0, min: 0, max: 999999999 },
-				{ type: 'checkbox',  id: 'active_speaker', label: 'Track Active Speaker',             default: false },
-				{ type: 'checkbox',  id: 'isolate_audio',  label: 'Isolate Audio',                   default: false },
+				{
+					type: 'dropdown', id: 'source', label: 'Output (OBS source)',
+					default: '', allowCustom: true, choices: outputChoices,
+				},
+				{
+					type: 'dropdown', id: 'participant', label: 'Participant (by name)',
+					default: '', allowCustom: true, choices: participantChoices,
+				},
+				{ type: 'checkbox',  id: 'active_speaker', label: 'Track Active Speaker instead', default: false },
+				{ type: 'checkbox',  id: 'isolate_audio',  label: 'Isolate Audio',                default: false },
 			],
 			callback: (a) => inst.sendPlugin({ cmd: 'assign_output',
-				source: a.options.source, participant_id: a.options.participant_id,
-				active_speaker: a.options.active_speaker, isolate_audio: a.options.isolate_audio }),
+				source: a.options.source,
+				// Active-speaker tracking ignores the participant entirely, so
+				// don't resolve a name (and don't warn about one) in that case.
+				participant_id: a.options.active_speaker
+					? 0
+					: resolveParticipantId(a.options.participant, a.options.participant_id),
+				active_speaker: a.options.active_speaker,
+				isolate_audio: a.options.isolate_audio }),
 		},
 
 		zoom_assign_spotlight: {
 			name: 'Zoom: Assign Spotlight Slot to Output',
 			options: [
-				{ type: 'textinput', id: 'source', label: 'OBS Source Name',        default: '' },
+				{
+					type: 'dropdown', id: 'source', label: 'Output (OBS source)',
+					default: '', allowCustom: true, choices: outputChoices,
+				},
 				{ type: 'number',    id: 'slot',   label: 'Spotlight Slot (1-based)', default: 1, min: 1, max: 49 },
 			],
 			callback: (a) => inst.sendPlugin({ cmd: 'assign_output_ex', source: a.options.source,
@@ -55,7 +110,10 @@ export function buildActions(
 		zoom_assign_screen_share: {
 			name: 'Zoom: Assign Screen Share to Output',
 			options: [
-				{ type: 'textinput', id: 'source', label: 'OBS Source Name', default: '' },
+				{
+					type: 'dropdown', id: 'source', label: 'Output (OBS source)',
+					default: '', allowCustom: true, choices: outputChoices,
+				},
 			],
 			callback: (a) => inst.sendPlugin({ cmd: 'assign_output_ex',
 				source: a.options.source, mode: 'screen_share' }),

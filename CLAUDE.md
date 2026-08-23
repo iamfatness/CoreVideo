@@ -2,7 +2,7 @@
 
 Project notes for Claude Code sessions working in this repository: CoreVideo,
 the OBS Studio plugin that pulls Zoom meeting video and audio into OBS as
-native sources. Current release: **v0.1.43** (2026-08-21). Update this file in
+native sources. Current release: **v0.1.44** (2026-08-22). Update this file in
 the same change as any substantive work — docs-updated is part of done.
 
 ## Architecture in one paragraph
@@ -169,6 +169,38 @@ singleton collision, crash loop), and send `{"cmd":"leave"}` before closing
 OBS. Diagnostic technique: a ring can be probed read-only from a third
 process by name — watching `notify`/`write_index` from outside distinguishes
 "writer stalled" / "reader wedged" / "ghost writer" in seconds.
+
+One asymmetry to know before testing a join fix this way: the join watchdog
+(`src/join-watchdog.h`) is armed in `on_join_clicked()` only. A control-API
+`join` never sets `m_join_started_ms`, so the watchdog is inert on that path
+and a fix to it **cannot** be proven by driving the API — it needs the dock
+button.
+
+## The Companion module
+
+`companion/companion-module-corevideo-obs` is a Bitfocus Companion module
+speaking the same control API. It needs **Companion v5+**: builds before v5
+cap the module API at 1.12 and cannot load `@companion-module/base` 2.x at
+all. Three things bite every time:
+
+- `companion/manifest.json` is required (v3+); the legacy `companion` block
+  in `package.json` is not enough, and its `runtime.apiVersion` is validated
+  against the schema in `@companion-module/base/assets/manifest.schema.json`.
+- The build must emit **ESM** (`module`/`moduleResolution: Node16`, plus
+  `"type": "module"`). CommonJS output makes the bundler wrap the entrypoint
+  so its default export is the namespace object, and Companion's loader
+  rejects it with "Module entrypoint did not return a valid constructor
+  function". Verify by importing the built bundle the way the loader does.
+- Companion refuses to overwrite a module version already on disk, so
+  **bump the version on every rebuild you intend to install** or you will
+  keep testing the old bundle.
+
+Dropdown choices are baked in at `buildActions()` time, so anything that
+changes the roster, the outputs, or the OBS scene list must re-run
+`setActionDefinitions(buildActions(this))` — `flushState()` only pushes
+variables and feedbacks. Participants are stored **by name**, never by id:
+Zoom user ids are meeting-scoped, so a button holding an id points at nobody
+after a rejoin and at the wrong face once ids get recycled.
 
 ## Releases
 

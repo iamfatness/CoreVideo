@@ -7,6 +7,8 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.44] - 2026-08-22
+
 ### Fixed
 - **Participants flashed brighter for a single frame, at random, several
   times a minute across the whole grid — the long-standing "gamma flash".**
@@ -32,6 +34,66 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
   texture whenever it changes, so per-frame flipping would trade a
   one-frame pop for a texture-rebuild storm. The full-range path — the
   overwhelming majority of frames — is unchanged and does no extra copy.
+
+- **The join watchdog auto-left a Zoom waiting room while the host was
+  still admitting us.** Live 2026-08-22: the plugin sat in a waiting room
+  for 114 s, the two-minute watchdog counted that as "no join progress",
+  auto-left at 120 s and marked the attempt Failed — and the host admitted
+  the retry 49 s later. Joining early and waiting to be admitted is the
+  normal broadcast workflow, so the watchdog was most likely to fire
+  precisely when nothing was wrong, minutes before a show. Nothing in the
+  codebase handled `MEETING_STATUS_IN_WAITING_ROOM` or
+  `_WAITINGFORHOST`; the engine now reports both as their own
+  `awaiting_admission` event on every status change, rather than leaving
+  the plugin to infer them from a debug line (debug output is for humans,
+  is filtered by stage, and control flow must not depend on it). The
+  window is *held open* while a legitimate wait is in progress rather
+  than extended — no timeout is both safely longer than "a host taking
+  their time" (which has no upper bound) and short enough to catch a
+  wedge — so the full two minutes become available again the moment the
+  wait ends, and a join that wedges *after* admission is still caught.
+  The decision moved to `src/join-watchdog.h` so both failure directions
+  are pinned by tests without Qt. Note the watchdog is armed by the dock's
+  Join button only; joins issued through the TCP/OSC control API have
+  never armed it, and still don't.
+
+- **The Companion module could not be loaded by Companion at all.**
+  Installing it into a real Companion (v5.0.3) surfaced three blockers,
+  none visible from the source: no `companion/manifest.json` (required
+  since Companion v3 — the module carried only the legacy v2-style
+  `companion` block in `package.json`); CommonJS output from a source
+  tree already written for ESM, which made the bundler wrap the
+  entrypoint in an interop factory so its default export came back as the
+  namespace object and Companion's loader rejected it with "Module
+  entrypoint did not return a valid constructor function"; and a version
+  that had to be bumped because Companion refuses to overwrite a module
+  version already on disk, silently keeping the broken bundle. Now builds
+  as ESM (`Node16`, `"type": "module"`) and reports "Module initialized
+  successfully" with its variables resolving live on button faces.
+  Requires Companion v5+ — earlier builds cap the module API at 1.12 and
+  cannot run `@companion-module/base` 2.x.
+
+### Added
+- **Companion: pick the output and the participant by name.** Assigning
+  someone to an output was effectively unusable from a Stream Deck —
+  "OBS Source Name" was a free-text box and "Participant ID" a raw
+  number, so putting Sarah on Participant 3 meant typing the source name
+  exactly and knowing she was user 16788480. Operator feedback, live:
+  "I'd like to pick an output and select a name. I don't understand the
+  routing." Both fields are dropdowns now, populated from the module's
+  own live state, and `zoom_assign_spotlight` / `zoom_assign_screen_share`
+  get the same output picker. Participants are offered — and stored — **by
+  name**, because Zoom user ids are meeting-scoped: the same person
+  rejoining, or next week's run of the same show, gets a new id, so a
+  button holding a raw id silently points at nobody, and once ids get
+  recycled it points at the wrong face on air. The id is resolved from
+  the name against the live roster at press time; a name not in the
+  meeting resolves to 0 (source shows unassigned) and logs a warning
+  rather than guessing. Raw numeric ids still work via `allowCustom`, and
+  buttons built before this change still work through the legacy
+  `participant_id` option. Verified live: a button storing only "Sarah
+  Muller" moved Participant 3 from Luis Rodriguez (16784384) to Sarah
+  Muller (16788480), and still resolved correctly after a leave/rejoin.
 
 ## [0.1.43] - 2026-08-21
 
@@ -819,7 +881,12 @@ sign-in, per-participant and screen-share sources, the Active Speaker
 Director, auto-reconnect, TCP/OSC control APIs, ISO recording, the Output
 Manager, and the initial Windows release packaging and CI pipeline.
 
-[Unreleased]: https://github.com/iamfatness/CoreVideo/compare/v0.1.39...HEAD
+[Unreleased]: https://github.com/iamfatness/CoreVideo/compare/v0.1.44...HEAD
+[0.1.44]: https://github.com/iamfatness/CoreVideo/compare/v0.1.43...v0.1.44
+[0.1.43]: https://github.com/iamfatness/CoreVideo/compare/v0.1.42...v0.1.43
+[0.1.42]: https://github.com/iamfatness/CoreVideo/compare/v0.1.41...v0.1.42
+[0.1.41]: https://github.com/iamfatness/CoreVideo/compare/v0.1.40...v0.1.41
+[0.1.40]: https://github.com/iamfatness/CoreVideo/compare/v0.1.39...v0.1.40
 [0.1.39]: https://github.com/iamfatness/CoreVideo/compare/v0.1.38...v0.1.39
 [0.1.38]: https://github.com/iamfatness/CoreVideo/compare/v0.1.37...v0.1.38
 [0.1.37]: https://github.com/iamfatness/CoreVideo/compare/v0.1.36...v0.1.37

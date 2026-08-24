@@ -965,6 +965,18 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoJoinWatchdog
              COMMAND CoreVideoJoinWatchdogTest)
 
+    # The talkback probe's test tone. Phase must carry across buffers: a restart
+    # every buffer is an audible click that would be misread as a transport
+    # fault. See src/talkback-tone.h.
+    add_executable(CoreVideoTalkbackToneTest
+        tests/talkback-tone-test.cpp
+    )
+    target_include_directories(CoreVideoTalkbackToneTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTalkbackTone
+             COMMAND CoreVideoTalkbackToneTest)
+
     # The master clock every audio buffer is stamped from. Wall-clock arrival
     # stamps let IPC jitter reach OBS, which resampled continuously — the
     # 2026-08-16 "audio is very bad" report.

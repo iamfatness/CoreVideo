@@ -109,6 +109,19 @@ int main()
               R"({"cmd":"subscribe","source_uuid":"tile_1_0","participant_id":7,"resolution":1,"isolate_audio":false,"audience_audio":false,"video_only":true})"),
           "video_only:true is detected on a tiles subscribe");
 
+    // --- Talkback probe routes exactly, and does not collide ---
+    routes(R"({"cmd":"talkback_probe","participant":"Sarah Muller"})",
+           IpcCommand::TalkbackProbe,
+           "talkback_probe did not route to IpcCommand::TalkbackProbe");
+    // A display name or payload containing the token must not route.
+    routes(R"({"cmd":"join","display_name":"talkback_probe"})",
+           IpcCommand::Join,
+           "a payload containing 'talkback_probe' hijacked the join branch");
+    // Guard the substring family the same way the existing commands are guarded.
+    routes(R"({"cmd":"talkback_probe_extra"})",
+           IpcCommand::Unknown,
+           "a longer command starting with talkback_probe matched it");
+
     if (g_failures > 0) {
         std::cerr << "engine-command: " << g_failures << " failure(s)\n";
         return 1;

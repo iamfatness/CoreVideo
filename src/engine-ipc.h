@@ -17,6 +17,7 @@
 #define IPC_CMD_START_MEDIA "start_media"
 #define IPC_CMD_STOP_MEDIA  "stop_media"
 #define IPC_CMD_QUIT        "quit"
+#define IPC_CMD_TALKBACK_PROBE "talkback_probe"
 #define IPC_EVT_READY       "ready"
 #define IPC_EVT_AUTH_OK     "auth_ok"
 #define IPC_EVT_AUTH_FAIL   "auth_fail"

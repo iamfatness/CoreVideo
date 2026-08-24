@@ -4,6 +4,7 @@
 #include "engine-video.h"
 #include "engine-share.h"
 #include "engine-audio.h"
+#include "engine-json.h"
 #include <zoom_sdk.h>
 #include <auth_service_interface.h>
 #include <setting_service_interface.h>
@@ -264,25 +265,9 @@ static void ipc_teardown(IpcFd p2e, IpcFd e2p)
 #endif // platform
 
 // ── Minimal JSON field extraction (no external dependency) ───────────────────
-
-static std::string json_str(const std::string &json, const std::string &key)
-{
-    const std::string needle = "\"" + key + "\":\"";
-    auto pos = json.find(needle);
-    if (pos == std::string::npos) return {};
-    pos += needle.size();
-    std::string result;
-    while (pos < json.size()) {
-        char c = json[pos++];
-        if (c == '\\') {
-            if (pos < json.size()) pos++; // skip escaped character
-            continue;
-        }
-        if (c == '"') break;
-        result += c;
-    }
-    return result;
-}
+// json_str / json_escape / zchar_to_utf8 live in engine-json.h now, shared
+// with engine-talkback.cpp (they were `static` here, invisible outside this
+// translation unit).
 
 static uint32_t json_uint(const std::string &json, const std::string &key)
 {
@@ -295,23 +280,6 @@ static uint32_t json_uint(const std::string &json, const std::string &key)
     } catch (...) {
         return 0;
     }
-}
-
-static std::string json_escape(const std::string &in)
-{
-    std::string out;
-    out.reserve(in.size() + 8);
-    for (char c : in) {
-        switch (c) {
-        case '\\': out += "\\\\"; break;
-        case '"': out += "\\\""; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
-        default: out += c; break;
-        }
-    }
-    return out;
 }
 
 static const char *meeting_fail_name(int code)
@@ -387,24 +355,6 @@ struct ParticipantInfo {
     bool is_muted = false;
     bool is_sharing_screen = false;
 };
-
-static std::string zchar_to_utf8(const zchar_t *name)
-{
-    if (!name) return {};
-#if defined(WIN32)
-    int len = WideCharToMultiByte(CP_UTF8, 0, name, -1,
-                                  nullptr, 0, nullptr, nullptr);
-    if (len <= 0) return {};
-    std::string out(static_cast<size_t>(len - 1), '\0');
-    if (!out.empty()) {
-        WideCharToMultiByte(CP_UTF8, 0, name, -1, &out[0], len,
-                            nullptr, nullptr);
-    }
-    return out;
-#else
-    return name;
-#endif
-}
 
 class EngineParticipants : public ZOOMSDK::IMeetingParticipantsCtrlEvent,
                            public ZOOMSDK::IMeetingAudioCtrlEvent,

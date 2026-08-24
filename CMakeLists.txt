@@ -388,6 +388,7 @@ set(ENGINE_SOURCES
     engine/src/engine-video.cpp
     engine/src/engine-share.cpp
     engine/src/engine-audio.cpp
+    engine/src/engine-talkback.cpp
 )
 set(ENGINE_INCLUDES src engine/src ${ZOOM_SDK_INCLUDE_DIR})
 

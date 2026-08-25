@@ -100,6 +100,20 @@ public:
     // top of what every other dock readout already relies on.
     std::string talkback_probe_status() const;
 
+    // Milestone 5's live-talkback senders. All five follow talkback_probe's
+    // shape exactly: guarded by m_running, fire-and-forget, no result
+    // returned here -- the engine's dispatch/response, if any, arrives async
+    // like every other command on this pipe.
+    void talkback_start(const std::string &participant_name);
+    void talkback_stop();
+    // Must be sent only after the caller's ring header is fully laid out
+    // (talkback_ring_init has run): the engine validates slot_count/
+    // slot_bytes from the header when it maps the region, and would reject
+    // one it mapped before the header was written.
+    void talkback_open(const std::string &region, uint32_t rate, uint16_t channels);
+    void talkback_audio();
+    void talkback_close();
+
     // Subscribe a source to a "spotlight slot" (1-based) instead of a fixed
     // participant. The engine resolves which participant owns that slot.
     void subscribe_spotlight(const std::string &source_uuid, uint32_t slot);

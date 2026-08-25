@@ -2,6 +2,7 @@
 #include "talkback-pcm.h"
 #include "talkback-ring.h"
 #include "shm-generation.h"
+#include "zoom-engine-client.h"
 
 #include <obs-module.h>
 #include <util/platform.h>
@@ -118,6 +119,11 @@ bool TalkbackTap::open(const std::string &source_name, std::string &error_out)
     }
     talkback_ring_init(static_cast<ShmAudioHeader *>(m_region.ptr), rate, chans);
 
+    // MUST follow talkback_ring_init(), not precede it: the engine validates
+    // slot_count/slot_bytes from the ring header when it maps this region,
+    // and would reject a region it mapped before the header was laid out.
+    ZoomEngineClient::instance().talkback_open(m_region_name, rate, chans);
+
     m_source        = src;   // keep the strong ref; released in close()
     m_sample_rate   = rate;
     m_channels      = chans;
@@ -145,6 +151,10 @@ void TalkbackTap::close()
         obs_source_remove_audio_capture_callback(to_release, audio_cb, this);
         obs_source_release(to_release);
     }
+    // Tell the engine before the region goes away, mirroring open()'s
+    // ordering constraint in reverse: the engine must stop touching this
+    // name before shm_region_destroy() below invalidates it.
+    ZoomEngineClient::instance().talkback_close();
     std::lock_guard<std::mutex> lock(m_mtx);
     shm_region_destroy(m_region);
     m_region = ShmRegion{};
@@ -297,8 +307,15 @@ void TalkbackTap::on_audio(const struct audio_data *data, bool muted)
         m_last_audio_ms = now_ms;
     }
     (void)rate;
-    // Nothing sends the pipe event on this edge yet. Milestone 5 owns
-    // closing this wiring gap (see the whole-plan review's DO-NOT-FIX list);
-    // it is deliberately not implemented here.
-    (void)notify;
+    // THE EDGE, at last. talkback_ring_publish returns true exactly when this
+    // publish crossed empty -> non-empty and one event must be sent. Sending
+    // one per BUFFER instead would be ~100 pipe lines/sec -- the message-storm
+    // shape this codebase has a live incident about, and the reason the ring
+    // is edge-triggered at all.
+    //
+    // This runs on the OBS capture thread, so it must not block: write_json
+    // is a non-blocking pipe write that drops on a broken link, and a dropped
+    // edge is recovered by the dead-man switch closing the key rather than by
+    // retrying here.
+    if (notify) ZoomEngineClient::instance().talkback_audio();
 }

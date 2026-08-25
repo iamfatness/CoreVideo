@@ -855,6 +855,44 @@ void ZoomEngineClient::talkback_probe(const std::string &participant_name)
                json_escape(participant_name) + "\"}");
 }
 
+void ZoomEngineClient::talkback_start(const std::string &participant_name)
+{
+    if (!m_running.load(std::memory_order_acquire)) return;
+    write_json(R"({"cmd":"talkback_start","participant":")" +
+               json_escape(participant_name) + "\"}");
+}
+
+void ZoomEngineClient::talkback_stop()
+{
+    if (!m_running.load(std::memory_order_acquire)) return;
+    write_json(R"({"cmd":"talkback_stop"})");
+}
+
+void ZoomEngineClient::talkback_open(const std::string &region, uint32_t rate,
+                                     uint16_t channels)
+{
+    if (!m_running.load(std::memory_order_acquire)) return;
+    write_json(R"({"cmd":"talkback_open","region":")" + json_escape(region) +
+               R"(","rate":)" + std::to_string(rate) +
+               R"(,"channels":)" + std::to_string(channels) + "}");
+}
+
+void ZoomEngineClient::talkback_audio()
+{
+    // Fires once per empty->non-empty ring edge -- see the call site in
+    // talkback-tap.cpp's on_audio() for why sending on every buffer instead
+    // would recreate the message-storm shape this codebase already has a
+    // live incident about.
+    if (!m_running.load(std::memory_order_acquire)) return;
+    write_json(R"({"cmd":"talkback_audio"})");
+}
+
+void ZoomEngineClient::talkback_close()
+{
+    if (!m_running.load(std::memory_order_acquire)) return;
+    write_json(R"({"cmd":"talkback_close"})");
+}
+
 void ZoomEngineClient::subscribe(const std::string &source_uuid,
                                  uint32_t participant_id,
                                  bool isolate_audio,

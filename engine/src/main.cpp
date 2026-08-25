@@ -1499,6 +1499,19 @@ int main()
             talkback.close_audio();
 
         } else if (command == IpcCommand::TalkbackStart) {
+            // F3 review-round fix: session_stop()'s own comment used to
+            // claim R1's mutual exclusion (probe() refuses while
+            // m_session_live, session_start() refuses while
+            // has_pending_work()) alone guarantees the probe's driving
+            // thread can never be mid-tick() while the session runs -- but
+            // that gate is a single-instant check made when a probe or a
+            // session STARTS. It says nothing about a driving thread that
+            // already passed has_pending_work(), went to sleep_for(10ms),
+            // and wakes again after this branch has since started a
+            // session. Mirror the TalkbackProbe branch above: join the
+            // driving thread here too, BEFORE ever calling session_start(),
+            // so no probe ladder can still be ticking when a session starts.
+            if (talkback_thread.joinable()) talkback_thread.join();
             talkback.session_start(meeting_svc, json_str(line, "participant"));
 
         } else if (command == IpcCommand::TalkbackStop) {

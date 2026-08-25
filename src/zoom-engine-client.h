@@ -31,6 +31,26 @@ public:
         std::string message;
     };
 
+    // F2 review-round fix (CRITICAL): the engine's own CONFIRMED state for
+    // the persistent talkback session -- distinct from both the plugin's
+    // local intent (TalkbackKeyState::open) and the tap's local liveness
+    // signal (TalkbackTap::last_audio_ms(), which stays fresh even when the
+    // Zoom channel never opened at all, because the tap keeps publishing
+    // audio into the ring regardless of whether anything on the far end can
+    // hear it). Written by handle_event()'s talkback_session branch from the
+    // engine's {"cmd":"talkback_session","live":...,"reason":"..."} line
+    // (engine/src/engine-talkback.cpp's report_session_state()); read by
+    // TalkbackController::status_json()/evaluate(). live=false with a
+    // non-empty reason means an explicit failure; live=false with an empty
+    // reason means no session has ever reported in yet (the initial state,
+    // or right after talkback_start() resets it -- see talkback_start()
+    // below) -- the two must not be conflated, which is why evaluate()'s
+    // grace period keys off reason being non-empty, not off live alone.
+    struct TalkbackSessionStatus {
+        bool live = false;
+        std::string reason;
+    };
+
     struct SourceCallbacks {
         // shm_generation: engine-side generation of the SHM region backing the
         // frame (increments each time the region is (re)created). 0 when the
@@ -99,6 +119,11 @@ public:
     // signal/slot path, so this diagnostic doesn't need its own plumbing on
     // top of what every other dock readout already relies on.
     std::string talkback_probe_status() const;
+
+    // F2 review-round fix: the engine-confirmed session state -- see the
+    // TalkbackSessionStatus doc comment above. Same polled-not-signalled
+    // pattern as talkback_probe_status() above, for the same reason.
+    TalkbackSessionStatus talkback_session_status() const;
 
     // Milestone 5's live-talkback senders. All five follow talkback_probe's
     // shape exactly: guarded by m_running, fire-and-forget, no result
@@ -309,6 +334,10 @@ private:
     // Raw compact JSON of the most recent talkback_probe stage line; see
     // talkback_probe_status() above.
     std::string m_talkback_probe_status;
+    // F2 review-round fix: the engine-confirmed session state; see
+    // TalkbackSessionStatus and talkback_session_status() above. Guarded by
+    // m_mtx, same as m_talkback_probe_status.
+    TalkbackSessionStatus m_talkback_session_status;
     std::deque<DebugEvent> m_debug_events;
     // Tracks whether the user deliberately requested a leave/stop (suppresses recovery).
     std::atomic<bool> m_user_leaving{false};

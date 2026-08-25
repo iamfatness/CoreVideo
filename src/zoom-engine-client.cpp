@@ -858,6 +858,20 @@ void ZoomEngineClient::talkback_probe(const std::string &participant_name)
 void ZoomEngineClient::talkback_start(const std::string &participant_name)
 {
     if (!m_running.load(std::memory_order_acquire)) return;
+    // F2 review-round fix: reset the engine-confirmed session state at the
+    // moment a NEW session is requested, so TalkbackController::evaluate()'s
+    // grace period (see there) starts from a known "not yet answered"
+    // baseline (live=false, reason empty) instead of a stale live/reason
+    // left over from a PREVIOUS key's session -- without this, a key closed
+    // for cause and then immediately reopened would inherit the old
+    // session's failure reason and get closed again before the new
+    // session's own CreateChannel round-trip ever had a chance to answer.
+    // Scoped so the lock is released before write_json() re-acquires it
+    // (m_mtx is not recursive).
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        m_talkback_session_status = TalkbackSessionStatus{};
+    }
     write_json(R"({"cmd":"talkback_start","participant":")" +
                json_escape(participant_name) + "\"}");
 }
@@ -1060,6 +1074,12 @@ std::string ZoomEngineClient::talkback_probe_status() const
     return m_talkback_probe_status;
 }
 
+ZoomEngineClient::TalkbackSessionStatus ZoomEngineClient::talkback_session_status() const
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    return m_talkback_session_status;
+}
+
 void ZoomEngineClient::fail_after_init_retries_exhausted()
 {
     // Monitor thread only.
@@ -1210,6 +1230,34 @@ void ZoomEngineClient::handle_event(const std::string &line)
             std::lock_guard<std::mutex> lk(m_mtx);
             m_talkback_probe_status = line;
         }
+        return;
+    }
+    if (cmd == "talkback_session") {
+        // F6 review-round fix: the session-side counterpart to
+        // talkback_probe above -- engine/src/engine-talkback.cpp's
+        // report_session()/report_session_state() tag every session/audio-
+        // path line "cmd":"talkback_session" instead of "talkback_probe"
+        // precisely so it stops overwriting the probe's status label and
+        // logging as "talkback_probe: ..." when nothing to do with a probe
+        // is happening. Log it under its own tag here.
+        //
+        // F2 review-round fix (CRITICAL): two distinct shapes share this
+        // cmd -- report_session_state()'s confirmed-state line (has a
+        // top-level "live" key, no "stage") and report_session()'s stage
+        // trace lines (have "stage", never "live"). Tell them apart by the
+        // presence of "live" rather than by ordering.
+        if (obj.contains("live")) {
+            const bool live = obj.value("live").toBool();
+            const std::string reason = obj.value("reason").toString().toStdString();
+            blog(LOG_INFO,
+                 "[obs-zoom-plugin] talkback_session: live=%s reason=%s",
+                 live ? "true" : "false", reason.c_str());
+            std::lock_guard<std::mutex> lk(m_mtx);
+            m_talkback_session_status.live   = live;
+            m_talkback_session_status.reason = reason;
+            return;
+        }
+        blog(LOG_INFO, "[obs-zoom-plugin] talkback_session: %s", line.c_str());
         return;
     }
     if (cmd == "awaiting_admission") {

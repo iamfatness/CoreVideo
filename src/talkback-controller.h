@@ -62,4 +62,10 @@ private:
     std::string        m_participant;
     std::string        m_source;
     QTimer            *m_timer = nullptr;
+    // F2 review-round fix: monotonic ms when key_on() opened THIS key.
+    // evaluate()'s grace period (see there) measures from this, not from
+    // any timestamp the engine reports, so it is correct even for the
+    // very first evaluate() tick after key_on() -- before any engine
+    // response, confirmed or not, could possibly have arrived.
+    uint64_t           m_session_opened_at_ms = 0;
 };

@@ -155,7 +155,31 @@ private:
     // the pipe -- resolve_participant() (below, const) needs to call it to
     // report the per-user talkback gate (F2 review-round fix) without
     // losing its own const-ness.
+    //
+    // report() tags every line "cmd":"talkback_probe" -- correct for the
+    // Milestone 1 ladder, wrong for anything from the persistent session
+    // (Milestone 5) or its shared audio path. Before the whole-plan review
+    // round, session_start/session_live/session_invite/audio_send/
+    // session_stop all went through report() and arrived labelled as probe
+    // stages -- logged as "talkback_probe: ..." and overwriting the dock's
+    // probe status label even when no probe was running (F6 finding).
+    // report_session() is the same shape under "cmd":"talkback_session" for
+    // every call site that is session/audio-path-only, never reachable from
+    // probe().
     void report(const std::string &stage, const std::string &fields) const;
+    void report_session(const std::string &stage, const std::string &fields) const;
+
+    // F2 review-round fix (CRITICAL): the ONE engine->plugin line that
+    // carries the session's CONFIRMED state, distinct from every stage
+    // trace above. Emitted when the session goes live (after the invite is
+    // accepted) and on every failure path in session_start()/
+    // onCreateChannelResponse()/open_audio() that ends the session before
+    // that point. Shape: {"cmd":"talkback_session","live":true|false,
+    // "reason":"..."} -- see ZoomEngineClient::handle_event()'s
+    // talkback_session branch (distinguishes this from a stage line by the
+    // presence of "live") and TalkbackController::evaluate()/status_json()
+    // for the consumer side.
+    void report_session_state(bool live, const std::string &reason) const;
     unsigned int resolve_participant(const std::string &name) const;
 
     // Drains m_stray_channels and destroys each one. Called from tick() only
@@ -329,4 +353,24 @@ private:
     std::string                m_session_participant; // by NAME, re-resolved
     unsigned int               m_session_user_id = 0;
     bool                       m_session_live    = false;
+
+    // F1 review-round fix (CRITICAL): true when session_stop() ran while a
+    // Session-owned CreateChannel was still outstanding (m_pending_create ==
+    // Session at that moment). session_stop() used to clear m_pending_create
+    // in that situation and return -- but the CreateChannel had already gone
+    // to Zoom. When its response arrived, the arbiter saw None, the id
+    // matched neither m_channel_id_z nor m_session_channel_z, and it was
+    // queued onto m_stray_channels -- which nothing drains without a probe's
+    // driving thread running (drain_stray_channels() has exactly one caller,
+    // tick(), which has exactly one caller, the probe's driving thread).
+    // Reachable on ordinary paths: a push-to-talk tap released before the
+    // create round-trip returns, a dead-man close inside that window,
+    // key_on()'s tap-open failure path, Leave, quit. session_stop() now
+    // leaves m_pending_create as Session (so the eventual response is still
+    // routed to the Session branch in onCreateChannelResponse, not lost to
+    // "owner == None") and sets this flag instead; that branch destroys the
+    // channel immediately on arrival rather than adopting it as live or
+    // queuing it as a stray. Guarded by m_chan_mtx, same discipline as
+    // m_pending_create.
+    bool                       m_session_create_cancelled = false;
 };

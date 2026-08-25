@@ -15,6 +15,20 @@
 
 static uint64_t now_ms() { return os_gettime_ns() / 1000000ULL; }
 
+// F2 review-round fix: how long evaluate() waits for the engine's own
+// {"cmd":"talkback_session","live":...} confirmation before treating
+// "not yet live" as a failure. The engine's path from session_start() to
+// live=true is one Zoom CreateChannel round-trip plus a couple of
+// synchronous SDK calls (BeginBatchInviteUsers/AddUserToInvite/
+// ExecuteBatchInviteUsers) -- normally well under a second, but the spec
+// only commits to "a moment... the first second or so", and this value
+// gives that one network round-trip real room without also leaving a
+// genuinely dead key open for long: kTalkbackAudioGapMs (250ms) is what
+// closes a key whose audio path is dead, so 1500ms here bounds the OTHER
+// failure mode -- a key that never had a channel at all -- to firmly
+// inside "the operator notices, not the audience".
+constexpr uint64_t kTalkbackSessionGraceMs = 1500;
+
 TalkbackController &TalkbackController::instance()
 {
     static TalkbackController c;
@@ -78,6 +92,10 @@ bool TalkbackController::key_on(const std::string &participant,
     m_key.needs_renewal   = needs_renewal;
     m_key.last_audio_ms   = now_ms();
     m_key.last_renewal_ms = now_ms();
+    // F2 review-round fix: anchor for evaluate()'s grace period. Set here,
+    // under the same lock as m_key.open, so evaluate() can never observe
+    // m_key.open == true with a stale value left over from a previous key.
+    m_session_opened_at_ms = now_ms();
     blog(LOG_INFO, "[obs-zoom-plugin] talkback: key OPEN to \"%s\" via \"%s\"",
          participant.c_str(), source.c_str());
     return true;
@@ -126,6 +144,7 @@ void TalkbackController::renew()
 void TalkbackController::evaluate()
 {
     TalkbackKeyAction action = TalkbackKeyAction::None;
+    bool closed_by_session_state = false;
     {
         std::lock_guard<std::mutex> lock(m_mtx);
         if (!m_key.open) return;
@@ -137,15 +156,55 @@ void TalkbackController::evaluate()
             m_key, now_ms(),
             ZoomEngineClient::instance().is_running(),
             ZoomEngineClient::instance().state() == MeetingState::InMeeting);
+
+        // F2 review-round fix (CRITICAL): none of the checks above -- nor
+        // talkback_key_evaluate() itself -- know whether the engine's Zoom
+        // channel ever actually confirmed live. They only see local intent
+        // (m_key.open) and the tap's own liveness (last_audio_ms), which
+        // stays fresh even when create/invite failed outright, because the
+        // tap keeps publishing into the ring regardless of whether anything
+        // on the far end can hear it. Without this, "the tally reflects the
+        // engine's confirmed state, never the plugin's intent" (the spec's
+        // own requirement) does not hold: a key that failed to open stayed
+        // shown as live and the operator's audio went nowhere.
+        //
+        // Close on the engine's own confirmed state too, once given a fair
+        // chance to answer (kTalkbackSessionGraceMs -- see its comment):
+        // either an EXPLICIT failure (reason non-empty while not live), or
+        // still not live once the grace period has elapsed. A non-empty
+        // reason with live == false is unambiguous -- talkback_start()
+        // resets the engine-side status to (false, "") at the moment THIS
+        // session was requested (see ZoomEngineClient::talkback_start()),
+        // so a non-empty reason here can only be a report for this session,
+        // never a stale one from a key that was already closed.
+        if (action == TalkbackKeyAction::None) {
+            const auto session = ZoomEngineClient::instance().talkback_session_status();
+            if (!session.live) {
+                const bool explicit_failure = !session.reason.empty();
+                const bool grace_expired = talkback_elapsed_ms(
+                    now_ms(), m_session_opened_at_ms) > kTalkbackSessionGraceMs;
+                if (explicit_failure || grace_expired) {
+                    action = TalkbackKeyAction::Close;
+                    closed_by_session_state = true;
+                }
+            }
+        }
     }
     // The lock above is released before key_off() is called below. key_off()
     // takes m_mtx itself; holding it across the call would self-deadlock this
     // non-recursive mutex on the Qt main thread (the timer callback), freezing
     // the whole OBS UI. Do not fold this back into the block above.
     if (action == TalkbackKeyAction::Close) {
-        blog(LOG_WARNING, "[obs-zoom-plugin] talkback: key closed by the "
-                          "dead-man switch (audio stopped, engine gone, or the "
-                          "meeting ended)");
+        if (closed_by_session_state) {
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] talkback: key closed -- the engine never "
+                 "confirmed the Zoom channel opened (see the preceding "
+                 "talkback_session log line for the reason)");
+        } else {
+            blog(LOG_WARNING, "[obs-zoom-plugin] talkback: key closed by the "
+                              "dead-man switch (audio stopped, engine gone, or the "
+                              "meeting ended)");
+        }
         key_off();
     }
 }
@@ -154,9 +213,17 @@ std::string TalkbackController::status_json() const
 {
     std::lock_guard<std::mutex> lock(m_mtx);
     QJsonObject obj;
-    obj["open"]        = m_key.open;
+    obj["open"]        = m_key.open;      // local intent: the operator/API asked for this
     obj["participant"] = QString::fromStdString(m_participant);
     obj["source"]      = QString::fromStdString(m_source);
-    obj["tap_open"]    = m_tap.is_open();
+    obj["tap_open"]    = m_tap.is_open(); // local: the OBS capture path is attached
+    // F2 review-round fix: the engine's own CONFIRMED state, clearly
+    // distinguished from "open"/"tap_open" above -- both of those can be
+    // true while the Zoom channel never opened at all (create/invite
+    // failure, or the audio path being rejected after the channel WAS
+    // live). See ZoomEngineClient::TalkbackSessionStatus's doc comment.
+    const auto session = ZoomEngineClient::instance().talkback_session_status();
+    obj["engine_live"]   = session.live;
+    obj["engine_reason"] = QString::fromStdString(session.reason);
     return QJsonDocument(obj).toJson(QJsonDocument::Compact).toStdString();
 }

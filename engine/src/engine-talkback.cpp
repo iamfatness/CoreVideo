@@ -30,6 +30,34 @@ void EngineTalkback::report(const std::string &stage, const std::string &fields)
     EngineIpc::write(line);
 }
 
+// F6 review-round fix: same shape as report() above, tagged
+// "cmd":"talkback_session" instead of "talkback_probe" -- see the header
+// comment on report()/report_session() for why the two must not share a
+// cmd. Every call site of this function is reachable only from
+// session_start()/session_stop()/onCreateChannelResponse()'s Session branch
+// or the Milestone 2 audio path (open_audio/drain_audio/close_audio), which
+// the probe never calls.
+void EngineTalkback::report_session(const std::string &stage, const std::string &fields) const
+{
+    std::string line = R"({"cmd":"talkback_session","stage":")" + stage + "\"";
+    if (!fields.empty()) line += "," + fields;
+    line += "}";
+    EngineIpc::write(line);
+}
+
+// F2 review-round fix (CRITICAL): the confirmed-state line -- see the header
+// comment. Deliberately a different shape from report_session() above (no
+// "stage" key, a top-level "live" key instead) so
+// ZoomEngineClient::handle_event() can tell the two apart on the same cmd
+// without any ordering assumption between them.
+void EngineTalkback::report_session_state(bool live, const std::string &reason) const
+{
+    std::string line = R"({"cmd":"talkback_session","live":)" +
+                        std::string(live ? "true" : "false") +
+                        R"(,"reason":")" + json_escape(reason) + "\"}";
+    EngineIpc::write(line);
+}
+
 bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
                            const std::string &participant_name)
 {
@@ -442,9 +470,51 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
             m_pending_create = TalkbackChannelOwner::None;
     }
     if (owner == TalkbackChannelOwner::Session) {
+        // F1 review-round fix (CRITICAL): session_stop() may have run while
+        // THIS create was still outstanding -- see the m_session_create_
+        // cancelled comment in the header. Check-and-clear it before doing
+        // anything else with this response: a cancelled session must never
+        // be adopted as live, invited, or queued as a stray (nothing drains
+        // strays without a probe's driving thread running). Destroy the
+        // channel immediately instead, using the same Begin/Add/Execute
+        // sequence session_stop() itself uses, on this same thread -- this
+        // callback runs on the command-loop thread, per the THREADING
+        // comment above open_audio() below, exactly like session_stop().
+        bool cancelled;
+        {
+            std::lock_guard<std::mutex> lock(m_chan_mtx);
+            cancelled = m_session_create_cancelled;
+            m_session_create_cancelled = false;
+        }
+        if (cancelled) {
+            if (error != TALKBACK_ERROR_OK || channelID == nullptr) {
+                report_session("session_channel_cancelled",
+                               R"("ok":true,"reason":"no_channel_to_destroy","error":)" +
+                               std::to_string(static_cast<int>(error)));
+                return;
+            }
+            ZOOMSDK::SDKError e = ZOOMSDK::SDKERR_UNKNOWN;
+            uint32_t attempt = 0;
+            for (; attempt < kMaxDestroyAttempts; ++attempt) {
+                e = m_ctrl->BeginBatchDestroyChannels();
+                if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->AddChannelToDestroy(channelID);
+                if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->ExecuteBatchDestroyChannels();
+                if (e == ZOOMSDK::SDKERR_SUCCESS) break;
+            }
+            report_session("session_channel_cancelled",
+                           R"("channel":")" + json_escape(id) + R"(","code":)" +
+                           std::to_string(static_cast<int>(e)) + R"(,"attempts":)" +
+                           std::to_string(attempt + 1));
+            if (e != ZOOMSDK::SDKERR_SUCCESS) {
+                report_session("session_channel_cancelled_abandoned",
+                               R"("channel":")" + json_escape(id) + "\"");
+            }
+            return;
+        }
         if (error != TALKBACK_ERROR_OK || channelID == nullptr) {
-            report("session_channel", R"("ok":false,"error":)" +
-                   std::to_string(static_cast<int>(error)));
+            report_session("session_channel", R"("ok":false,"error":)" +
+                           std::to_string(static_cast<int>(error)));
+            report_session_state(false, "create_failed");
             return;
         }
         // Minor review-round fix: keep the value from THIS lock scope
@@ -463,20 +533,26 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         // once ids are recycled.
         m_session_user_id = resolve_participant(m_session_participant);
         if (m_session_user_id == 0) {
-            report("session_invite", R"("ok":false,"reason":"no_participant_named",)"
-                   R"("name":")" + json_escape(m_session_participant) + "\"");
+            report_session("session_invite", R"("ok":false,"reason":"no_participant_named",)"
+                           R"("name":")" + json_escape(m_session_participant) + "\"");
+            report_session_state(false, "no_participant_named");
             session_stop();
             return;
         }
         ZOOMSDK::SDKError e = m_ctrl->BeginBatchInviteUsers(channel_copy.c_str());
         if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->AddUserToInvite(m_session_user_id);
         if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->ExecuteBatchInviteUsers();
-        report("session_invite", R"("user_id":)" + std::to_string(m_session_user_id) +
-               R"(,"code":)" + std::to_string(static_cast<int>(e)));
-        if (e != ZOOMSDK::SDKERR_SUCCESS) { session_stop(); return; }
+        report_session("session_invite", R"("user_id":)" + std::to_string(m_session_user_id) +
+                       R"(,"code":)" + std::to_string(static_cast<int>(e)));
+        if (e != ZOOMSDK::SDKERR_SUCCESS) {
+            report_session_state(false, "invite_failed");
+            session_stop();
+            return;
+        }
         m_ctrl->SetChannelBackgroundVolume(channel_copy.c_str(), 0.3f);
         m_session_live = true;
-        report("session_live", R"("channel":")" + json_escape(m_session_channel) + "\"");
+        report_session("session_live", R"("channel":")" + json_escape(m_session_channel) + "\"");
+        report_session_state(true, "live");
         return;
     }
     // owner == Probe was already cleared above; owner == None means nothing
@@ -727,8 +803,9 @@ bool EngineTalkback::open_audio(const std::string &region_name,
     if (!shm_region_open_readwrite(
             m_audio_region, region_name,
             shm_audio_region_bytes(kTalkbackSlotBytes))) {
-        report("audio_open", R"("ok":false,"reason":"map_failed","region":")" +
-               json_escape(region_name) + "\"");
+        report_session("audio_open", R"("ok":false,"reason":"map_failed","region":")" +
+                       json_escape(region_name) + "\"");
+        report_session_state(false, "map_failed");
         return false;
     }
 
@@ -749,15 +826,32 @@ bool EngineTalkback::open_audio(const std::string &region_name,
     // would otherwise make every `% hdr->slot_count` in the drain path
     // (talkback-ring.h) a division by zero.
     if (hdr->slot_count != kAudioRingSlots || hdr->slot_bytes != kTalkbackSlotBytes) {
-        report("audio_open",
-               R"("ok":false,"reason":"layout_mismatch","slot_count":)" +
-               std::to_string(hdr->slot_count) + R"(,"expected_slot_count":)" +
-               std::to_string(kAudioRingSlots) + R"(,"slot_bytes":)" +
-               std::to_string(hdr->slot_bytes) + R"(,"expected_slot_bytes":)" +
-               std::to_string(kTalkbackSlotBytes) + R"(,"region":")" +
-               json_escape(region_name) + "\"");
-        shm_region_destroy(m_audio_region);
-        m_audio_region = ShmRegion{};
+        report_session("audio_open",
+                       R"("ok":false,"reason":"layout_mismatch","slot_count":)" +
+                       std::to_string(hdr->slot_count) + R"(,"expected_slot_count":)" +
+                       std::to_string(kAudioRingSlots) + R"(,"slot_bytes":)" +
+                       std::to_string(hdr->slot_bytes) + R"(,"expected_slot_bytes":)" +
+                       std::to_string(kTalkbackSlotBytes) + R"(,"region":")" +
+                       json_escape(region_name) + "\"");
+        report_session_state(false, "layout_mismatch");
+        // F5 review-round fix: this used to shm_region_destroy()/reset the
+        // mapping immediately on every rejection below. The writer
+        // (TalkbackTap) may already be publishing into this ring by the
+        // time a rejection is discovered -- the pipe round-trip guarantees
+        // talkback_open was sent, and the writer's capture callback
+        // attached, before this response is even processed -- and this ring
+        // has NO keepalive (see the F1 review-round comment above on
+        // audio_ring_reader_abandon(), and the comment in drain_audio()).
+        // Unmapping here nulls m_audio_region.ptr, which makes every
+        // subsequent drain_audio() call for this rejected session hit its
+        // FIRST bail (region not mapped at all) instead of its SECOND one
+        // (mapped but not open) -- and only the second one abandons the
+        // notify flag. Leaving the mapping open keeps that second bail
+        // reachable, so a buffer published in the race window still gets the
+        // flag handed back to the writer instead of orphaned forever.
+        // close_audio() (called at the top of the NEXT open_audio(), or by
+        // an explicit talkback_close) is what actually releases this
+        // mapping -- see its F5 review-round fix.
         return false;
     }
 
@@ -777,33 +871,36 @@ bool EngineTalkback::open_audio(const std::string &region_name,
     const uint16_t hdr_channels = static_cast<uint16_t>(hdr->channels);
 
     if (!talkback_pcm_rate_supported(hdr_rate)) {
-        report("audio_open",
-               R"("ok":false,"reason":"unsupported_rate","rate":)" +
-               std::to_string(hdr_rate) + R"(,"region":")" +
-               json_escape(region_name) + "\"");
-        shm_region_destroy(m_audio_region);
-        m_audio_region = ShmRegion{};
+        report_session("audio_open",
+                       R"("ok":false,"reason":"unsupported_rate","rate":)" +
+                       std::to_string(hdr_rate) + R"(,"region":")" +
+                       json_escape(region_name) + "\"");
+        report_session_state(false, "unsupported_rate");
+        // F5 review-round fix: leave the mapping open -- see the comment on
+        // the layout_mismatch rejection above.
         return false;
     }
     if (hdr_channels != 1 && hdr_channels != 2) {
-        report("audio_open",
-               R"("ok":false,"reason":"unsupported_channels","channels":)" +
-               std::to_string(hdr_channels) + R"(,"region":")" +
-               json_escape(region_name) + "\"");
-        shm_region_destroy(m_audio_region);
-        m_audio_region = ShmRegion{};
+        report_session("audio_open",
+                       R"("ok":false,"reason":"unsupported_channels","channels":)" +
+                       std::to_string(hdr_channels) + R"(,"region":")" +
+                       json_escape(region_name) + "\"");
+        report_session_state(false, "unsupported_channels");
+        // F5 review-round fix: leave the mapping open -- see the comment on
+        // the layout_mismatch rejection above.
         return false;
     }
     if (hdr_rate != sample_rate || hdr_channels != channels) {
-        report("audio_open",
-               R"("ok":false,"reason":"pipe_header_mismatch","pipe_rate":)" +
-               std::to_string(sample_rate) + R"(,"header_rate":)" +
-               std::to_string(hdr_rate) + R"(,"pipe_channels":)" +
-               std::to_string(channels) + R"(,"header_channels":)" +
-               std::to_string(hdr_channels) + R"(,"region":")" +
-               json_escape(region_name) + "\"");
-        shm_region_destroy(m_audio_region);
-        m_audio_region = ShmRegion{};
+        report_session("audio_open",
+                       R"("ok":false,"reason":"pipe_header_mismatch","pipe_rate":)" +
+                       std::to_string(sample_rate) + R"(,"header_rate":)" +
+                       std::to_string(hdr_rate) + R"(,"pipe_channels":)" +
+                       std::to_string(channels) + R"(,"header_channels":)" +
+                       std::to_string(hdr_channels) + R"(,"region":")" +
+                       json_escape(region_name) + "\"");
+        report_session_state(false, "pipe_header_mismatch");
+        // F5 review-round fix: leave the mapping open -- see the comment on
+        // the layout_mismatch rejection above.
         return false;
     }
 
@@ -837,8 +934,15 @@ bool EngineTalkback::open_audio(const std::string &region_name,
 
     m_audio_open = true;
     m_audio_send_fail_count = 0; // F8: fresh session, fresh report budget
-    report("audio_open", R"("ok":true,"rate":)" + std::to_string(m_audio_rate) +
-           R"(,"channels":)" + std::to_string(m_audio_channels));
+    report_session("audio_open", R"("ok":true,"rate":)" + std::to_string(m_audio_rate) +
+                   R"(,"channels":)" + std::to_string(m_audio_channels));
+    // Not a report_session_state(true, ...) call: "live" is the Zoom
+    // channel's confirmed state (set in onCreateChannelResponse once the
+    // invite is accepted), not the audio path's. This session can be fully
+    // open_audio()-ready while the channel itself never came up, and vice
+    // versa (channel live before the plugin ever calls talkback_open) --
+    // conflating the two would let a working audio pipe into a nonexistent
+    // channel read as "live".
     return true;
 }
 
@@ -894,6 +998,16 @@ void EngineTalkback::drain_audio()
     // this call silently eats the opportunity to clear it, and the writer's
     // edge-triggered protocol has no way to know a reader ever looked. Hand
     // the flag back explicitly instead of doing nothing.
+    //
+    // F5 review-round fix: this branch used to be effectively unreachable
+    // for open_audio()'s own rejection paths (layout mismatch, unsupported
+    // rate/channels, pipe/header mismatch), because open_audio() used to
+    // shm_region_destroy() the mapping immediately on every rejection --
+    // which nulled m_audio_region.ptr and made every later drain_audio()
+    // call hit the bail above instead of this one. open_audio() now leaves a
+    // rejected mapping open specifically so THIS bail is what runs for that
+    // case: this is the fix, not a defensive branch for a case that cannot
+    // happen. See the comment on open_audio()'s layout_mismatch rejection.
     if (!m_audio_open) {
         audio_ring_reader_abandon(static_cast<ShmAudioHeader *>(m_audio_region.ptr));
         return;
@@ -949,7 +1063,7 @@ void EngineTalkback::drain_audio()
         // reason). Report the first occurrence, then only periodically.
         ++m_audio_send_fail_count;
         if (m_audio_send_fail_count == 1 || (m_audio_send_fail_count % 100) == 0) {
-            report("audio_send", R"("code":)" + std::to_string(ctx.last_err) +
+            report_session("audio_send", R"("code":)" + std::to_string(ctx.last_err) +
                    R"(,"buffers":)" + std::to_string(ctx.sent) +
                    R"(,"lost":)" + std::to_string(lost) +
                    R"(,"no_channel_drops":)" + std::to_string(ctx.no_channel_drops) +
@@ -973,7 +1087,11 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
                                    const std::string &participant_name)
 {
     if (m_session_live) {
-        report("session_start", R"("ok":false,"reason":"already_live")");
+        // Refusing a redundant start does not end the existing live session
+        // -- no report_session_state() here, unlike every other early return
+        // in this function: they all report false because they mean the
+        // session never got anywhere.
+        report_session("session_start", R"("ok":false,"reason":"already_live")");
         return false;
     }
 
@@ -988,22 +1106,26 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
     // header for why phase-alone (is_idle()) is not the right check: a
     // queued-but-undrained stray still means tick() has work left to do.
     if (has_pending_work()) {
-        report("session_start", R"("ok":false,"reason":"probe_busy")");
+        report_session("session_start", R"("ok":false,"reason":"probe_busy")");
+        report_session_state(false, "probe_busy");
         return false;
     }
 
     if (!svc) {
-        report("session_start", R"("ok":false,"reason":"not_in_meeting")");
+        report_session("session_start", R"("ok":false,"reason":"not_in_meeting")");
+        report_session_state(false, "not_in_meeting");
         return false;
     }
     m_svc  = svc;
     m_ctrl = m_svc->GetMeetingTalkbackController();
     if (!m_ctrl) {
-        report("session_start", R"("ok":false,"reason":"no_controller")");
+        report_session("session_start", R"("ok":false,"reason":"no_controller")");
+        report_session_state(false, "no_controller");
         return false;
     }
     if (!m_ctrl->IsMeetingSupportTalkBack()) {
-        report("session_start", R"("ok":false,"reason":"not_supported")");
+        report_session("session_start", R"("ok":false,"reason":"not_supported")");
+        report_session_state(false, "not_supported");
         return false;
     }
     m_ctrl->SetEvent(this);
@@ -1019,15 +1141,19 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
         // The probe is mid-create. Refuse rather than queue: a queued create
         // would arrive with the other subsystem's response still in flight,
         // which is exactly the ambiguity the arbiter exists to remove.
-        report("session_start", R"("ok":false,"reason":"create_busy")");
+        report_session("session_start", R"("ok":false,"reason":"create_busy")");
+        report_session_state(false, "create_busy");
         return false;
     }
 
     m_session_participant = participant_name;
     const ZOOMSDK::SDKError e = m_ctrl->CreateChannel(1);
-    report("session_start", R"("code":)" + std::to_string(static_cast<int>(e)) +
-           R"(,"participant":")" + json_escape(participant_name) + "\"");
-    if (e != ZOOMSDK::SDKERR_SUCCESS) return false;
+    report_session("session_start", R"("code":)" + std::to_string(static_cast<int>(e)) +
+                   R"(,"participant":")" + json_escape(participant_name) + "\"");
+    if (e != ZOOMSDK::SDKERR_SUCCESS) {
+        report_session_state(false, "create_failed");
+        return false;
+    }
 
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
@@ -1039,12 +1165,35 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
 void EngineTalkback::session_stop()
 {
     if (!m_session_live && m_session_channel_z.empty()) {
-        // Nothing to tear down. Still clear the pending create so a refused
-        // start cannot wedge the arbiter. m_pending_create is guarded by
-        // m_chan_mtx -- see the header comment on it.
+        // F1 review-round fix (CRITICAL): this used to clear m_pending_create
+        // here unconditionally and return -- but if a Session-owned
+        // CreateChannel is still outstanding (this branch is exactly the one
+        // that runs when nothing local is live yet, e.g. a push-to-talk tap
+        // released before the create round-trip returns, a dead-man close in
+        // that same window, key_on()'s tap-open failure path, Leave, or
+        // quit), the CreateChannel already went out to Zoom. Clearing the
+        // arbiter's record of it here does not cancel that request: when
+        // onCreateChannelResponse eventually arrives, the arbiter would see
+        // owner == None, the id would match neither m_channel_id_z nor
+        // m_session_channel_z, and it would be queued onto m_stray_channels
+        // -- which nothing drains without a probe's driving thread running
+        // (drain_stray_channels() has exactly one caller, tick(), which has
+        // exactly one caller, the probe's driving thread). One of the
+        // meeting's 16 channels, gone for the meeting.
+        //
+        // Fix: record the cancellation and leave m_pending_create AS Session
+        // -- the eventual response is still routed to the Session branch in
+        // onCreateChannelResponse (not lost to "owner == None"), where the
+        // cancelled flag makes it destroy the channel immediately instead of
+        // adopting it as live or queuing it as a stray. This does mean
+        // m_pending_create stays "Session" (refusing every other create)
+        // until that response arrives or the process ends -- there is no
+        // deadline on a session create the way probe()'s AwaitingChannel has
+        // kAwaitTimeout -- but that is the cost of not leaking the channel
+        // it eventually reports, not a new failure mode this fix introduces.
         std::lock_guard<std::mutex> lock(m_chan_mtx);
         if (m_pending_create == TalkbackChannelOwner::Session)
-            m_pending_create = TalkbackChannelOwner::None;
+            m_session_create_cancelled = true;
         return;
     }
 
@@ -1063,7 +1212,7 @@ void EngineTalkback::session_stop()
     m_session_user_id = 0;
 
     if (channel_copy.empty() || !m_ctrl) {
-        report("session_stop", R"("ok":true,"reason":"no_channel")");
+        report_session("session_stop", R"("ok":true,"reason":"no_channel")");
         return;
     }
 
@@ -1071,13 +1220,23 @@ void EngineTalkback::session_stop()
     // This is NOT the batch-destroy path tick() owns for the probe's stray
     // queue -- keeping them separate is what keeps "tick() is the sole
     // caller of the batch-destroy API for the probe's stray queue" true.
-    // R1's mutual exclusion (see probe()/session_start()) guarantees tick()
-    // can never be mid-Destroying (or mid-drain_stray_channels) at the same
-    // time this runs, so there is no Begin/Add/Execute interleaving between
-    // the two despite both calling the batch-destroy API on the same
-    // controller object -- the hazard tick()'s own top-of-function comment
-    // warns about is about two THREADS doing that concurrently, and R1 rules
-    // that out here by construction.
+    //
+    // F3 review-round fix: this comment used to claim that R1's mutual
+    // exclusion (probe() refuses while m_session_live, session_start()
+    // refuses while has_pending_work()) by itself guarantees tick() can
+    // never be mid-Destroying (or mid-drain_stray_channels) while this runs.
+    // That is incomplete: R1 is a single-instant check made when a probe or
+    // a session STARTS, and says nothing about a driving thread that has
+    // already started, passed has_pending_work(), and gone to sleep_for(10ms)
+    // -- it can wake and call tick() again after a session has since started,
+    // which is a real window where tick()'s Destroying/drain_stray_channels
+    // and this function's own Begin/Add/Execute sequence could interleave on
+    // the same controller object. What actually rules that out is
+    // engine/src/main.cpp's TalkbackStart branch joining talkback_thread
+    // BEFORE calling session_start() at all -- exactly like the TalkbackProbe
+    // branch already joins it before calling probe() -- so by the time this
+    // function (or session_start()) ever runs, no probe driving thread can
+    // exist to race it.
     //
     // R4 review-round fix: this used to call Begin/Add/Execute exactly once
     // and report whatever code came back -- unlike every OTHER destroy path
@@ -1098,17 +1257,29 @@ void EngineTalkback::session_stop()
             e = m_ctrl->ExecuteBatchDestroyChannels();
         if (e == ZOOMSDK::SDKERR_SUCCESS) break;
     }
-    report("session_stop", R"("code":)" + std::to_string(static_cast<int>(e)) +
-           R"(,"attempts":)" + std::to_string(attempt + 1));
+    report_session("session_stop", R"("code":)" + std::to_string(static_cast<int>(e)) +
+                   R"(,"attempts":)" + std::to_string(attempt + 1));
     if (e != ZOOMSDK::SDKERR_SUCCESS) {
-        report("session_destroy_abandoned",
-               R"("channel":")" + json_escape(channel_copy_utf8) + "\"");
+        report_session("session_destroy_abandoned",
+                       R"("channel":")" + json_escape(channel_copy_utf8) + "\"");
     }
 }
 
 void EngineTalkback::close_audio()
 {
-    if (!m_audio_open) return;
+    // F5 review-round fix: this used to bail on !m_audio_open alone, which
+    // was equivalent to bailing on "nothing mapped" back when the only way
+    // to have a mapped region was m_audio_open == true. open_audio() now
+    // leaves a REJECTED region mapped (m_audio_open stays false) so
+    // drain_audio()'s not-open bail can still abandon the notify flag on it
+    // -- see open_audio()'s layout_mismatch rejection comment -- which makes
+    // "mapped but never opened" a real, reachable state. This function is
+    // the only thing (besides a later open_audio(), which calls this first)
+    // that ever releases that mapping, so bailing on !m_audio_open alone
+    // would leak it: every subsequent open_audio() would open a NEW region
+    // without the old one ever being unmapped. Bail only when there is
+    // truly nothing to release.
+    if (!m_audio_open && m_audio_region.ptr == nullptr) return;
     m_audio_open = false;
     if (m_audio_region.ptr) {
         // Hand the flag back so the writer re-notifies rather than assuming a
@@ -1118,5 +1289,5 @@ void EngineTalkback::close_audio()
     shm_region_destroy(m_audio_region);
     m_audio_region = ShmRegion{};
     m_audio_read_index = 0;
-    report("audio_close", R"("ok":true)");
+    report_session("audio_close", R"("ok":true)");
 }

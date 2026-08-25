@@ -23,6 +23,24 @@ bool TalkbackTap::open(const std::string &source_name, std::string &error_out)
         return false;
     }
 
+    // F4 review-round fix: a source that exists but is not ACTIVE (not in
+    // the current scene, or in a scene not currently showing) delivers no
+    // audio capture callbacks at all -- obs_source_add_audio_capture_
+    // callback() below attaches successfully regardless, so without this
+    // check the key opens, nothing ever calls on_audio(), last_audio_ms
+    // never advances, and the dead-man switch (src/talkback-key.h) closes
+    // the key ~250ms later with "audio stopped, engine gone, or the meeting
+    // ended" -- none of which is what happened. "Arms and instantly
+    // disarms, every time, no error anywhere" was exactly this failure mode
+    // before this check existed. Refuse up front with the real, actionable
+    // reason instead of letting the dead-man switch misdiagnose it.
+    if (!obs_source_active(src)) {
+        error_out = "OBS source \"" + source_name + "\" is not active -- "
+                    "add it to the current scene before opening talkback.";
+        obs_source_release(src);
+        return false;
+    }
+
     // OBS's audio format is global, so read it once here rather than
     // per-callback. We pass the rate through instead of resampling: a
     // resampler is a whole subsystem, and OBS runs at 48kHz by default,
@@ -323,10 +341,32 @@ void TalkbackTap::on_audio(const struct audio_data *data, bool muted)
     // and each message is ~26 bytes, so filling 64 KB needs thousands of
     // backed-up edges during an extended engine stall. If it ever did block,
     // the stall would hang OBS's capture thread for every source's audio,
-    // not just talkback's -- a dropped edge on a merely-broken pipe is what
-    // the dead-man switch recovers from by closing the key, not a blocked
-    // write on a stalled-but-alive one. If this is ever observed, the real
-    // fix is making the P2E handle overlapped, which touches every writer in
-    // the IPC layer and deserves its own change and review, not a fix here.
+    // not just talkback's.
+    //
+    // F5 review-round fix: this comment used to claim "a dropped edge on a
+    // merely-broken pipe is what the dead-man switch recovers from by
+    // closing the key" -- that is false, and was never true. This ring has
+    // NO keepalive, and talkback_ring_publish()/audio_ring_notify_after_
+    // publish() (engine-ipc.h) only signal on the empty->non-empty edge: a
+    // ring nobody drains never goes empty again, so a dropped edge is never
+    // retried on its own. The tap keeps calling this function on every
+    // buffer regardless of whether the edge's notify actually reached the
+    // engine, so last_audio_ms (the dead-man switch's only input) stays
+    // fresh either way -- the switch cannot see this failure at all. What
+    // the dead-man switch DOES recover from is the OBS-side half of the
+    // path going away (source removed/inactive, plugin unload, OBS exit) --
+    // buffers stop, the gap check in talkback-key.h fires. What actually
+    // recovers a GENUINELY broken pipe (WriteFile failing outright, not
+    // merely full) is write_json() (zoom-engine-client.cpp) tearing the P2E
+    // link down on that failure, which the monitor/reconnect path then
+    // notices and which flips is_running()/state() -- closing the key via
+    // the structural check in talkback_key_evaluate(), not the audio-gap
+    // one. A dropped edge on a pipe that stays merely full-but-alive is
+    // recovered by neither path; see the audio_open rejection handling in
+    // engine-talkback.cpp (F5 review-round fix there) for the one case of
+    // this ring that WAS a genuine, previously-uncovered gap. If this
+    // stall is ever observed, the real fix is making the P2E handle
+    // overlapped, which touches every writer in the IPC layer and deserves
+    // its own change and review, not a fix here.
     if (notify) ZoomEngineClient::instance().talkback_audio();
 }

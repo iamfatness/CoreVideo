@@ -32,6 +32,8 @@
 #include "meeting_service_components/meeting_audio_interface.h"
 #include "meeting_service_components/meeting_participants_ctrl_interface.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <string>
 
@@ -64,7 +66,23 @@ private:
 
     ZOOMSDK::IMeetingService          *m_svc  = nullptr;
     ZOOMSDK::IMeetingTalkbackController *m_ctrl = nullptr;
-    Phase        m_phase = Phase::Idle;
+
+    // m_phase is written from SDK callback threads (onCreateChannelResponse,
+    // onChannelUserJoinResponse) and, once Task 5 wires tick() to the engine
+    // main loop, read/written from the engine thread too -- atomic with
+    // explicit acquire/release is the cheap fix, done now while this file is
+    // in front of us rather than left as a landmine for that task.
+    //
+    // No mutex needed for m_channel_id_z either: it is always fully written
+    // in onCreateChannelResponse BEFORE m_phase is released to AwaitingInvite
+    // (and later Sending), and every reader of m_channel_id_z first acquires
+    // m_phase and checks it is at least AwaitingInvite/Sending. The
+    // release-store of m_phase after the write, paired with the acquire-load
+    // before every read, is the synchronizes-with edge that makes the plain
+    // std::string write visible -- that ordering, not a lock, is what makes
+    // this safe.
+    std::atomic<Phase> m_phase{Phase::Idle};
+
     std::string  m_channel_id;      // UTF-8, REPORTING ONLY -- never pass to
                                      // the SDK, see m_channel_id_z below.
     // zchar_t is wchar_t on Windows (zoom_sdk_def.h) but char elsewhere, so
@@ -77,4 +95,18 @@ private:
     unsigned int m_participant_id = 0;
     uint64_t     m_tone_index = 0;
     uint32_t     m_buffers_sent = 0;
+
+    // Deadline for whichever of AwaitingChannel / AwaitingInvite is
+    // currently active (only one is ever active at a time, so one field
+    // suffices). An SDK call that returns SDKERR_SUCCESS is only a promise
+    // that the call was accepted, not that the matching callback will ever
+    // fire; without a deadline a swallowed callback hangs the probe forever
+    // and reports nothing, which is silence -- the exact failure mode this
+    // class exists to make visible instead of enduring.
+    std::chrono::steady_clock::time_point m_phase_deadline{};
+
+    // How many times BeginBatchDestroyChannels/AddChannelToDestroy/
+    // ExecuteBatchDestroyChannels has been attempted for the current
+    // channel. Reset to 0 at the start of every probe().
+    uint32_t m_destroy_attempts = 0;
 };

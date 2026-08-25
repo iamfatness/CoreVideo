@@ -313,9 +313,20 @@ void TalkbackTap::on_audio(const struct audio_data *data, bool muted)
     // shape this codebase has a live incident about, and the reason the ring
     // is edge-triggered at all.
     //
-    // This runs on the OBS capture thread, so it must not block: write_json
-    // is a non-blocking pipe write that drops on a broken link, and a dropped
-    // edge is recovered by the dead-man switch closing the key rather than by
-    // retrying here.
+    // This runs on the OBS capture thread. The P2E handle is opened with
+    // dwFlagsAndAttributes=0 (src/zoom-engine-client.cpp:993) -- a
+    // SYNCHRONOUS handle, not overlapped -- so WriteFile inside write_json()
+    // CAN block if the engine stalls long enough to fill the pipe's 64 KB
+    // kernel buffer; it only fails outright when the pipe is genuinely
+    // broken, not merely full. That is acceptable here because this send is
+    // edge-triggered (once per empty->non-empty transition, not per buffer)
+    // and each message is ~26 bytes, so filling 64 KB needs thousands of
+    // backed-up edges during an extended engine stall. If it ever did block,
+    // the stall would hang OBS's capture thread for every source's audio,
+    // not just talkback's -- a dropped edge on a merely-broken pipe is what
+    // the dead-man switch recovers from by closing the key, not a blocked
+    // write on a stalled-but-alive one. If this is ever observed, the real
+    // fix is making the P2E handle overlapped, which touches every writer in
+    // the IPC layer and deserves its own change and review, not a fix here.
     if (notify) ZoomEngineClient::instance().talkback_audio();
 }

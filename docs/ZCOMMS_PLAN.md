@@ -1,9 +1,10 @@
-# CoreVideo Talkback — standalone intercom plan
+# ZComms — standalone intercom on the Zoom Meeting SDK
 
 Status: **design, pre-commit.** Nothing here is built yet. Written 2026-08-25
-against the v0.1.44 tree. The purpose of this document is to decide *whether*
-and *in what order* to build a standalone intercom on the Zoom Meeting SDK,
-and to name the four spikes that make that decision cheaply.
+against the v0.1.44 tree. ZComms is a **separate product** from the CoreVideo
+OBS plugin, sharing its engine. The purpose of this document is to decide
+*whether* and *in what order* to build it, and to name the four spikes that
+make that decision cheaply.
 
 ## 1. The strategic read
 
@@ -73,11 +74,54 @@ What the SDK does **not** give us, and which each cost real work:
   The plugin already learned this expensively: `join-watchdog.h`,
   `zoom-join-decision.h`, `awaiting_admission`. Reuse them; do not re-derive.
 
-## 3. Reference architecture
+## 3. ZComms as a separate product
+
+ZComms is its own app with its own name, not a CoreVideo feature. That is the
+right call for positioning — an intercom sold to production crews should not
+have to be explained as an OBS plugin add-on — but it has four concrete
+consequences that are cheaper to handle now than after Phase 1.
+
+**Separate brand, shared repo — at least through Phase 2.** The engine, the SHM
+transport, the audio clock, the fade helper and the OAuth path all live in this
+tree, and the single most important sequencing rule in this document is that
+there is exactly one TX implementation (§6.1). Splitting repos on day one means
+either vendoring the engine twice or paying for a shared-core extraction before
+either product has proven itself. Build ZComms as a sibling CMake target here,
+ship it as its own installer under its own branding, and revisit the split once
+Phase 2 has validated the architecture. If the split does happen later the
+extraction boundary is already visible: `engine/` plus the shared headers in
+`src/` that both products consume.
+
+**A second Zoom Marketplace identity.** CoreVideo's app identity is baked at
+CMake configure time from `src/zoom-credentials.h.in`
+(`ZOOM_EMBED_OAUTH_CLIENT_ID`, `ZOOM_EMBED_MEETING_SDK_PUBLIC_APP_KEY`) and
+brokered through the Cloudflare Worker at `corevideo.iamfatness.us`. ZComms
+needs its own Marketplace app, its own client id and public app key, its own
+redirect URI, and either its own broker route or its own worker. None of that
+is difficult, but it is a Marketplace review cycle with its own lead time, and
+it should start *before* Phase 1 code lands rather than after it.
+
+**The name needs a branding check at review.** A Z-prefixed name on an app
+built with the Meeting SDK invites the question of implied affiliation, and
+Zoom reviews app naming and branding as part of Marketplace approval. Ask about
+`ZComms` explicitly during that review rather than discovering the answer at
+the end — and fold it into the Spike D conversation (§9), which is already a
+scheduled conversation with Zoom about this product's licensing shape.
+
+**Region and pipe prefixes stop being CoreVideo's.** Every shared name in the
+tree is hardcoded to `ZoomObsPlugin_` today — pipes (`_P2E`/`_E2P`) and SHM
+regions (`_video`/`_audio`/`_share`). A second product writing regions under
+the plugin's prefix is precisely the ghost-writer condition that cost ~92% of
+audio on 2026-08-17. The owner-id namespacing in §6.5 is already required for
+engine-vs-engine coexistence; make the prefix itself part of that same change,
+so ZComms engines are visibly and provably distinct from plugin engines rather
+than having a second scheme bolted on later.
+
+## 4. Reference architecture
 
 ```
 ┌─────────────────────────────────────────────┐
-│  CoreVideo Talkback (Qt6 app, per operator) │
+│  ZComms (Qt6 app, one per operator)         │
 │  capture · PTT/latch · per-channel faders   │
 │  monitor mix · AEC · presence               │
 └───────┬──────────────────────┬──────────────┘
@@ -98,7 +142,7 @@ What the SDK does **not** give us, and which each cost real work:
 Phase 3 adds a native transport alongside the Zoom leg; the app's mixer does
 not care which leg a channel arrives on.
 
-## 4. What we reuse verbatim
+## 5. What we reuse verbatim
 
 This is the argument for building it here rather than greenfield. Every item
 below is production code that has already survived a live show:
@@ -118,14 +162,15 @@ below is production code that has already survived a live show:
   commands slot straight in, and the Companion module already speaks it, so a
   Stream Deck PTT button is nearly free.
 - **`sidecar/`** — an existing standalone Qt6 app with a sidebar shell, control
-  client, settings page and its own control server. The Talkback app should be
-  a sibling target with the same build and release machinery, not a new repo.
+  client, settings page and its own control server. ZComms is a separate
+  *product*, but it should start as a sibling build target in this repo (see
+  §3), reusing the sidecar's shell patterns and release machinery.
 - **`src/zoom-auth.*`, `src/zoom-oauth.*`, the Cloudflare OAuth broker** —
   sign-in already works with no user-entered credentials.
 
-## 5. New components
+## 6. New components
 
-### 5.1 Engine: `engine/src/engine-talkback.{h,cpp}`
+### 6.1 Engine: `engine/src/engine-talkback.{h,cpp}`
 
 `EngineTalkback : IZoomSDKVirtualAudioMicEvent`. Holds the sender pointer
 between `onMicInitialize` and `onMicUninitialized`, and a `can_send` flag
@@ -149,14 +194,14 @@ PCM into the mic ring at capture cadence; a dedicated engine thread wakes every
 PTT press and release ramp over `kAudioResumeFadeMs` using the existing fade
 helper. A hard gate would click, and we have already diagnosed that click once.
 
-### 5.2 Mic SHM ring (app → engine)
+### 6.2 Mic SHM ring (app → engine)
 
 Same `ShmAudioHeader`, same slot layout, opposite direction:
 `ZoomObsPlugin_<uuid>_mic`. The notify helpers are direction-agnostic, but per
 5.1 the mic ring does not use them — the engine pulls on a clock. 48 kHz, mono,
 16-bit, 20 ms slots.
 
-### 5.3 Local audio I/O
+### 6.3 Local audio I/O
 
 Recommend **miniaudio** (single header, WASAPI + CoreAudio, no new heavy
 dependency, matches the project's dependency posture) over Qt Multimedia, which
@@ -165,7 +210,7 @@ is convenient but adds latency we cannot afford on top of Zoom's.
 Needs: input device selection, gain + limiter, sidetone control, per-channel
 monitor mix, and AEC (see §2).
 
-### 5.4 Control API additions
+### 6.4 Control API additions
 
 `talkback_status`, `talkback_channels`, `talkback_talk {channel, on}`,
 `talkback_latch {channel, on}`, `talkback_listen {channel, level}`,
@@ -174,7 +219,7 @@ that dropdown choices are baked at build time, so a channel-list change must
 re-run `setActionDefinitions(buildActions(this))`, and channels must be keyed
 by stable id, not by Zoom user id (meeting-scoped, recycled).
 
-### 5.5 Process namespacing — **required before anything else ships**
+### 6.5 Process namespacing — **required before anything else ships**
 
 `terminate_stale_engine_processes()` in `src/zoom-engine-client.cpp` kills
 *every* `ZoomObsEngine.exe` on launch. That behaviour is correct today and was
@@ -189,11 +234,11 @@ command line, and the kill scan matching only its own tag. This is a change to
 shipping plugin code with a live-defect history attached, so it needs its own
 test pinning "engine A's launch does not kill engine B".
 
-## 6. Admin portal and the group model
+## 7. Admin portal and the group model
 
 The routing matrix is the product. Everything else is plumbing.
 
-### 6.1 Data model
+### 7.1 Data model
 
 | Entity | Key fields |
 | --- | --- |
@@ -211,7 +256,7 @@ The routing matrix is the product. Everything else is plumbing.
 group-rows-then-user-overrides, evaluated on the endpoint so a lost admin
 connection never mutes a live show.
 
-### 6.2 Admin UX
+### 7.2 Admin UX
 
 A grid: groups down the side, channels across the top, each cell cycling
 none → listen → talk → both. Plus per-user override rows, plus **presets pushed
@@ -229,21 +274,21 @@ Note the honest limit from §2: IFB to *one* guest inside a shared Zoom meeting
 is impossible. Per-guest IFB requires either a meeting per destination or the
 native fabric. Do not promise it on the Zoom-only phases.
 
-### 6.3 Backend
+### 7.3 Backend
 
 Supabase is the right fit and is already in the toolchain: Postgres for the
 model, RLS for org isolation, Realtime for presence and live preset pushes,
 Edge Functions for the admin API. The endpoint holds a cached copy of its
 resolved matrix and keeps working through a backend outage.
 
-## 7. Phasing
+## 8. Phasing
 
 Rough sizing, deliberately coarse.
 
-**Phase 0 — Spikes (see §8).** ~1 week. Decides everything below.
+**Phase 0 — Spikes (see §9).** ~1 week. Decides everything below.
 
 **Phase 1 — Single-channel talkback, Zoom transport.** ~4–6 weeks.
-Standalone Qt app, one engine, one meeting, PTT + latch, monitor mix, AEC,
+ZComms v1: one engine, one meeting, PTT + latch, monitor mix, AEC,
 device picker. Ships as "producer talks to remote guests", which is genuinely
 useful on its own. Critically, **the OBS plugin's in-progress talkback must be
 built on this same engine TX path** — one implementation, two front ends. If
@@ -262,7 +307,7 @@ Sell Phase 1 and 2 to the existing CoreVideo user base first — people already
 running Zoom-sourced shows in OBS are a warm list and exactly the customers for
 whom the Zoom leg is the differentiator.
 
-## 8. Spikes, with kill criteria
+## 9. Spikes, with kill criteria
 
 Run these before committing engineering to Phase 1. Each is cheap; together
 they decide the architecture.
@@ -284,7 +329,7 @@ audience?
 
 **Spike C — N engines on one box. 2 days.**
 Two engine processes, two meetings, simultaneously, with the owner-id
-namespacing from §5.5 in place. Measure RAM and CPU per channel — this sets the
+namespacing from §6.5 in place. Measure RAM and CPU per channel — this sets the
 per-machine channel ceiling and therefore the pricing model.
 
 **Spike D — Zoom ISV conversation. Calendar time, not engineering time.**
@@ -292,13 +337,15 @@ An intercom multiplies concurrent Meeting SDK sessions per customer by the
 channel count. Get Zoom's position on that licensing shape **before** Phase 2,
 not after. It can invalidate the per-channel-meeting architecture outright.
 
-## 9. Risks
+## 10. Risks
 
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
 | Zoom latency unfixable | Cannot serve live crew intercom | Spike A first; Phase 3 native fabric |
 | Zoom licensing blocks N sessions | Phase 2 architecture invalid | Spike D before Phase 2 |
-| Engine mutual-kill | Standalone app unusable next to OBS | §5.5, with a test |
+| Engine mutual-kill | Standalone app unusable next to OBS | §6.5, with a test |
 | No AEC on virtual mic | Echo into the client's meeting | Headset mandate + detection, or bundle an AEC |
 | Unity's moat is trust, not features | Slow enterprise adoption | Lead with the Zoom leg, sell to existing users |
 | Plugin talkback forks the TX path | Two implementations, divergent bugs | Land `engine-talkback` before the plugin's UI work |
+| ZComms Marketplace review slips | Phase 1 built, cannot ship | Start the second app identity before Phase 1 code |
+| `ZComms` name rejected at review | Rebrand after build | Raise the name in the Spike D conversation |

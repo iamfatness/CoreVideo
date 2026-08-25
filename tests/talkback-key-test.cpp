@@ -10,6 +10,16 @@
 // The design is a dead-man switch: audio arriving IS the liveness signal, so
 // no code path has to notice a failure for the key to close. These tests are
 // what keep that property true as the surrounding code changes.
+//
+// talkback_key_evaluate short-circuits: the audio-gap check runs before the
+// renewal check, and either can return Close for its own reason. When a
+// check sits behind an earlier one that can return the same verdict for a
+// different reason, the test must make every earlier check pass cleanly --
+// hold audio fresh at eval time unless the audio-gap check is the thing
+// under test -- or the test proves nothing about the check it claims to
+// isolate. Two blocks below (the reconnect latch and the second
+// backwards-clock case) exist specifically because an earlier version of
+// this file got that wrong.
 #include "talkback-key.h"
 
 #include <iostream>
@@ -103,10 +113,16 @@ int main()
 
     // ── A latch does NOT survive a reconnect ──────────────────────────────
     // Explicit spec requirement. Restoring a latch on reconnect is the risky
-    // moment, and the operator chose never to take it.
+    // moment, and the operator chose never to take it. BOTH last_audio_ms
+    // and last_renewal_ms are held fresh AT EVAL TIME (T + 5000, matching
+    // now) so this genuinely isolates the structural !engine_alive close --
+    // not the audio-gap check or the renewal check, either of which would
+    // independently return Close once its own timer had run out, masking a
+    // deleted structural check exactly like the bug this replaced.
     {
         TalkbackKeyState s = healthy(T, TalkbackKeyMode::Latch);
-        s.last_audio_ms = T;
+        s.last_audio_ms   = T + 5000;
+        s.last_renewal_ms = T + 5000;
         check(talkback_key_evaluate(s, T + 5000, false, true) ==
                   TalkbackKeyAction::Close,
               "a latch survived the engine going away");
@@ -130,6 +146,21 @@ int main()
         TalkbackKeyState s = healthy(T + 5000, TalkbackKeyMode::Latch);
         check(talkback_key_evaluate(s, T, true, true) == TalkbackKeyAction::None,
               "a backwards clock underflowed and closed a healthy key");
+    }
+
+    // ── A backwards clock must not close via the renewal check either ──────
+    // The case above never reaches the renewal check: its stale audio alone
+    // would return None from the audio-gap check regardless of the guard, so
+    // it cannot prove the renewal check's own use of the guard. Hold audio
+    // fresh at eval time and put ONLY last_renewal_ms in the future so
+    // evaluation actually reaches the renewal check with a backwards delta.
+    {
+        TalkbackKeyState s = healthy(T, TalkbackKeyMode::PushToTalk);
+        s.last_audio_ms   = T;
+        s.last_renewal_ms = T + 5000;
+        check(talkback_key_evaluate(s, T, true, true) == TalkbackKeyAction::None,
+              "a backwards clock underflowed the renewal check and closed a "
+              "healthy key");
     }
 
     if (failures == 0)

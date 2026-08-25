@@ -64,3 +64,24 @@ inline TalkbackCue talkback_cue_on_live_change(bool prev_live, bool live)
 // implementation guarantees this by never doing OS playback work on the
 // calling thread.
 void talkback_play_cue(TalkbackCue cue);
+
+// Shutdown-only. Signals the cue-playback worker to exit and JOINS it
+// (bounded -- see talkback-cue.cpp for what happens if the bound is hit).
+// Call exactly once, from TalkbackController::stop(), AFTER key_off() (so a
+// final CLOSE cue queued by that key_off() gets its chance to actually play
+// before the worker is told to stop) and before this plugin's DLL can be
+// unloaded. Unlike talkback_play_cue(), this IS allowed to block: stop() is
+// a shutdown path, not evaluate()'s Qt-timer path, and it already does
+// synchronous work of its own (m_timer->stop(), m_tap.close()).
+//
+// Why this exists at all: talkback_play_cue() used to spawn one DETACHED
+// thread per cue. Nothing then bounded that thread's lifetime below
+// TalkbackController::stop() -> shutdown_corevideo() -> obs_module_unload()
+// returning to OBS's module loader, which calls FreeLibrary. If the DLL
+// unmaps while that thread was still executing this file's code (WAV build,
+// PlaySoundA, the lifetime-guarding sleep, or the buffer's own destructor),
+// that is an access violation that takes down the WHOLE OBS PROCESS, not
+// just this plugin -- and "operator still keyed when OBS is closed" is a
+// normal end-of-show sequence, not a corner case. Joining a single
+// long-lived worker at a known shutdown point closes that hole.
+void talkback_cue_shutdown();

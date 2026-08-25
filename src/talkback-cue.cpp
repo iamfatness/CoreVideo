@@ -6,11 +6,10 @@
 // third-party mixer: it targets the system default output with no device
 // enumeration, needs no COM initialisation, and SND_ASYNC returns as soon as
 // playback starts. The no-COM property specifically matters here: this file
-// runs its playback on a throwaway std::thread (see talkback_play_cue()
-// below) that this plugin never calls CoInitialize on, and WASAPI requires
-// COM on whatever thread touches it. PlaySound needs neither, and pulls in
-// no new third-party dependency -- it's part of winmm, which ships with
-// Windows.
+// does its playback on a dedicated worker thread (see CueWorker below) that
+// this plugin never calls CoInitialize on, and WASAPI requires COM on
+// whatever thread touches it. PlaySound needs neither, and pulls in no new
+// third-party dependency -- it's part of winmm, which ships with Windows.
 //
 // WHY THIS FILE NEVER TOUCHES libobs AUDIO: see talkback-isolation-test.cpp
 // (the tap's version) and its sibling for this file, both enforced by a
@@ -19,28 +18,64 @@
 // not quietly put beeps on air.
 //
 // WHAT HAPPENS WHEN A CUE IS REQUESTED WHILE ONE IS PLAYING: REPLACE, not
-// drop or queue. PlaySound's own documented behaviour is that only one
-// async sound plays per process at a time -- a new SND_ASYNC call stops
-// whatever is currently sounding before starting the new one. That is not
-// something this file implements; it falls out of calling PlaySoundA a
-// second time. It is the right choice here regardless of which API had
-// implemented it: a CLOSE requested while OPEN is still sounding (a very
-// quick key tap) must still be audible -- silently dropping it would leave
-// the operator believing they're still keyed when they are not, which is
-// the exact failure this feature exists to prevent.
+// drop or queue -- see CueWorker below for the mechanism (a single worker
+// thread and a one-slot "latest wins" mailbox). REPLACE is the right choice
+// regardless of mechanism: a CLOSE requested while OPEN is still sounding (a
+// very quick key tap) must still be audible -- silently dropping it would
+// leave the operator believing they're still keyed when they are not, which
+// is the exact failure this feature exists to prevent.
+//
+// REVIEW-ROUND FIX -- ONE WORKER THREAD, NOT ONE THREAD PER CUE. The
+// original version of this file spawned an independent detached
+// std::thread per talkback_play_cue() call and relied on PlaySound's own
+// "a new async call stops the previous one" behaviour for REPLACE. That has
+// two real bugs, both from the SAME root cause (no ordering between
+// independent threads):
+//
+//   1. ORDERING is not actually guaranteed. Two unsynchronized threads
+//      racing PlaySoundA calls can have their OS calls land in either
+//      order regardless of which talkback_play_cue() call happened first
+//      in wall-clock time. A CLOSE requested right after an OPEN (a normal
+//      "keyed, then immediately released" sequence, and key_off() is
+//      reachable from both the Qt timer thread AND the control-server
+//      thread -- zoom-control-server.cpp -- which is exactly the kind of
+//      skew that breaks thread-start ordering) could have its PlaySoundA
+//      call reach the OS BEFORE the OPEN's, so OPEN plays last. The
+//      operator would hear "you're live" after they are in fact cut --
+//      precisely the failure the close cue exists to prevent.
+//   2. SHUTDOWN was unbounded. A detached thread's lifetime was bounded by
+//      nothing: TalkbackController::stop() -> key_off() -> a detached
+//      thread starts sleeping for up to ~230ms -> stop() returns
+//      immediately -> shutdown_corevideo() finishes -> obs_module_unload()
+//      returns to OBS's loader, which calls FreeLibrary. If the DLL
+//      unmapped while that thread was still executing code that lives in
+//      it, that's a crash that takes the whole OBS process down. See
+//      talkback_cue_shutdown()'s doc comment in talkback-cue.h.
+//
+// A single long-lived worker fixes both: cues are played in the order the
+// ONE worker thread picks them up (ordering becomes structural, not a race
+// between independent OS calls), and there is exactly one thread to join at
+// shutdown (talkback_cue_shutdown(), called from TalkbackController::stop()
+// after key_off() -- see that function's doc comment).
 #include "talkback-cue.h"
 #include "talkback-tone.h"
 
 #if defined(WIN32)
 
-#define WIN32_LEAN_AND_MEAN
+// WIN32_LEAN_AND_MEAN is already defined project-wide for this target (see
+// CMakeLists.txt's target_compile_definitions(obs-zoom-plugin ...)) --
+// redefining it here just produces a harmless-but-noisy macro-redefinition
+// warning under MSVC.
 #include <windows.h>
 #include <mmsystem.h>
 #pragma comment(lib, "winmm.lib")
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -126,44 +161,180 @@ std::vector<uint8_t> build_wav(TalkbackCue cue)
     return wav;
 }
 
+// One long-lived worker thread and a one-slot "latest wins" mailbox. See the
+// file-header comment for why this replaced one-detached-thread-per-cue.
+//
+// LIFECYCLE:
+//   START: lazily, on the first talkback_play_cue() call, via the
+//          function-local static in instance() (thread-safe init, same as
+//          TalkbackController::instance()'s own singleton pattern).
+//   WAKE:  the worker blocks on m_cv until either a cue is pending or
+//          shutdown has been requested; request() sets the pending slot
+//          (overwriting whatever was already there -- REPLACE) and notifies.
+//   EXIT:  only via shutdown(), which sets m_shutting_down, notifies, then
+//          waits (bounded) for the worker to drain any last-pending cue and
+//          return. See shutdown()'s own comment for the bound.
+class CueWorker {
+public:
+    static CueWorker &instance()
+    {
+        static CueWorker w;
+        return w;
+    }
+
+    // Non-blocking: store the latest-requested cue and wake the worker.
+    // Called from talkback_play_cue(), which evaluate() (Qt main thread,
+    // every 25ms) and key_off() (Qt timer thread OR the control-server
+    // thread) both call -- this function must never itself block.
+    void request(TalkbackCue cue)
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_mtx);
+            // Once shutdown has been requested, no new work is accepted --
+            // the worker is on its way out and nobody will pick this up.
+            if (m_shutting_down) return;
+            m_pending = cue; // latest wins: overwrites any still-unplayed cue
+        }
+        m_cv.notify_one();
+    }
+
+    // Shutdown-only -- see talkback-cue.h's doc comment on
+    // talkback_cue_shutdown() for the full rationale and the caller
+    // contract. Signals the worker to exit, waits (BOUNDED) for it to
+    // actually do so, then joins or detaches depending on which happened.
+    void shutdown()
+    {
+        std::unique_lock<std::mutex> lock(m_mtx);
+        if (!m_thread.joinable() || m_shutting_down)
+            return; // never started, or shutdown() already ran
+        m_shutting_down = true;
+        lock.unlock();
+        m_cv.notify_one();
+
+        // BOUND: a real cue is at most ~180ms of tone plus this file's
+        // ~50ms lifetime margin, so 2 seconds is generous headroom, not a
+        // tight budget -- it exists only to stop a genuinely wedged
+        // PlaySoundA (e.g. a hung audio driver) from hanging OBS shutdown
+        // forever. If the bound IS hit, do not join -- joining would be the
+        // same unbounded wait we're trying to avoid. Detach instead: this
+        // re-admits the original detached-thread hazard (a DLL-unload race)
+        // but ONLY in that pathological case, in exchange for bounded,
+        // predictable shutdown in the overwhelmingly common one. There is
+        // no third option that is both bounded and safe against a truly
+        // hung system call.
+        lock.lock();
+        const bool exited = m_cv.wait_for(lock, std::chrono::seconds(2),
+                                           [this] { return m_exited; });
+        lock.unlock();
+
+        if (exited)
+            m_thread.join();
+        else
+            m_thread.detach();
+    }
+
+private:
+    CueWorker() { m_thread = std::thread([this] { run(); }); }
+
+    // Not expected to run during normal operation -- shutdown() always
+    // leaves m_thread not-joinable (joined or detached) before returning,
+    // and TalkbackController::stop() always calls shutdown() before this
+    // singleton could be destroyed at static-deinit time. Guard it anyway:
+    // a joinable std::thread destructing calls std::terminate, and this
+    // guard is the difference between "extremely unlikely" and "crash the
+    // process" if some future caller forgets the shutdown() contract.
+    ~CueWorker()
+    {
+        if (m_thread.joinable()) {
+            {
+                std::lock_guard<std::mutex> lock(m_mtx);
+                m_shutting_down = true;
+            }
+            m_cv.notify_one();
+            m_thread.join();
+        }
+    }
+
+    void run()
+    {
+        std::unique_lock<std::mutex> lock(m_mtx);
+        for (;;) {
+            m_cv.wait(lock, [this] {
+                return m_pending != TalkbackCue::None || m_shutting_down;
+            });
+            // Exit only once there is truly nothing left to play -- a
+            // shutdown() that arrives while a cue is still pending (e.g.
+            // key_off()'s final CLOSE, requested just before
+            // TalkbackController::stop() calls talkback_cue_shutdown())
+            // must still get that cue played before the worker exits.
+            if (m_shutting_down && m_pending == TalkbackCue::None) break;
+
+            const TalkbackCue cue = m_pending;
+            m_pending = TalkbackCue::None;
+            lock.unlock();
+            play(cue); // blocks THIS worker thread only, never the caller
+            lock.lock();
+        }
+        m_exited = true;
+        lock.unlock();
+        m_cv.notify_one(); // wakes shutdown()'s bounded wait
+    }
+
+    // Builds the WAV and calls PlaySoundA, blocking this worker thread for
+    // the cue's duration so the buffer stays alive for exactly as long as
+    // playback can be reading it. This is the same buffer-lifetime
+    // discipline the original per-cue-thread version used; only the thread
+    // that does it changed.
+    static void play(TalkbackCue cue)
+    {
+        const uint32_t duration_ms = spec_for(cue).duration_ms;
+        const std::vector<uint8_t> wav = build_wav(cue);
+        if (wav.empty()) return;
+
+        // SND_MEMORY: `wav` IS the sound image, not a filename. SND_ASYNC:
+        // returns as soon as playback starts -- REPLACE-on-overlap now
+        // comes from this worker picking up the next mailbox entry in
+        // order (see the class comment), not from relying on PlaySound's
+        // own single-active-sound behaviour, but that behaviour is still
+        // harmlessly in effect underneath. SND_NODEFAULT: if playback
+        // can't start (e.g. no output device), stay silent rather than
+        // fall back to Windows' own system sound, which would be a more
+        // confusing signal than no cue.
+        PlaySoundA(reinterpret_cast<LPCSTR>(wav.data()), nullptr,
+                   SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(duration_ms + 50));
+    }
+
+    std::mutex              m_mtx;
+    std::condition_variable m_cv;
+    TalkbackCue             m_pending = TalkbackCue::None;
+    bool                    m_shutting_down = false;
+    bool                    m_exited = false;
+    std::thread             m_thread;
+};
+
+// Set once talkback_play_cue() has actually been called, so shutdown() can
+// skip touching CueWorker::instance() entirely (and therefore never spin up
+// a worker thread just to immediately tear it down) on the common path
+// where a session never used talkback at all.
+std::atomic<bool> g_cue_worker_used{false};
+
 } // namespace
 
 void talkback_play_cue(TalkbackCue cue)
 {
     if (cue == TalkbackCue::None) return;
+    g_cue_worker_used.store(true, std::memory_order_relaxed);
+    CueWorker::instance().request(cue);
+}
 
-    const uint32_t duration_ms = spec_for(cue).duration_ms;
-
-    // Fire-and-forget on a short-lived, DETACHED worker thread -- never the
-    // caller's thread. See talkback-cue.h's doc comment on talkback_play_cue
-    // for why: evaluate() runs on the Qt main thread every 25ms, and
-    // key_off() can run there too. A blocking sound call on either stalls
-    // the whole OBS UI for the cue's duration. The thread owns its own WAV
-    // buffer (built here, not passed in) so nothing about its lifetime
-    // depends on the caller's stack.
-    std::thread([cue, duration_ms] {
-        const std::vector<uint8_t> wav = build_wav(cue);
-        if (wav.empty()) return;
-
-        // SND_MEMORY: `wav` IS the sound image, not a filename. SND_ASYNC:
-        // returns as soon as playback starts -- see the file comment above
-        // for why this is also this file's whole REPLACE-on-overlap
-        // strategy. SND_NODEFAULT: if playback can't start (e.g. no output
-        // device), stay silent rather than fall back to Windows' own system
-        // sound, which would be a more confusing signal than no cue.
-        PlaySoundA(reinterpret_cast<LPCSTR>(wav.data()), nullptr,
-                   SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
-
-        // SND_MEMORY playback reads directly from `wav` -- winmm does not
-        // copy it. Keep the buffer alive (i.e. keep this thread alive) for
-        // the cue's duration plus a margin, so playback never reads freed
-        // memory. If a LATER call has already replaced this sound by the
-        // time this sleep ends, that replacement has already stopped this
-        // buffer being read (see the file comment above); freeing here is
-        // then just reclaiming memory nothing references any more.
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(duration_ms + 50));
-    }).detach();
+void talkback_cue_shutdown()
+{
+    if (!g_cue_worker_used.load(std::memory_order_relaxed))
+        return; // nothing was ever started -- nothing to join
+    CueWorker::instance().shutdown();
 }
 
 #else // !WIN32
@@ -174,6 +345,11 @@ void talkback_play_cue(TalkbackCue)
     // than failing to build) matches how the rest of this plugin treats
     // Windows-only pieces during the mac port -- see zoom-meeting.cpp's
     // `#if defined(WIN32)` guard for the same pattern.
+}
+
+void talkback_cue_shutdown()
+{
+    // Nothing to join -- no worker thread exists on this platform yet.
 }
 
 #endif

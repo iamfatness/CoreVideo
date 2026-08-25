@@ -152,6 +152,13 @@ void TalkbackController::stop()
     // source ref, SHM region) released, not just the Zoom channel severed.
     if (m_timer) m_timer->stop();
     key_off();
+    // AFTER key_off(), not before: key_off() may have just queued a final
+    // CLOSE cue (talkback-cue.h), and talkback_cue_shutdown() is what
+    // guarantees that cue actually gets to play before this plugin's DLL
+    // can be unloaded -- see its doc comment for the crash this closes.
+    // stop() is a shutdown path (not evaluate()'s Qt-timer path), so the
+    // bounded block inside talkback_cue_shutdown() is acceptable here.
+    talkback_cue_shutdown();
 }
 
 void TalkbackController::renew()

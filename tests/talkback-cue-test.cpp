@@ -43,23 +43,17 @@ int main()
           "a false->false tick yielded a cue");
 
     // ── A session that never goes live yields NO open cue ──────────────
-    // Simulate a run of ticks that all report not-live, exactly the shape
-    // evaluate() sees for a key that never got a confirmed channel: the
-    // grace-period close happens on a DIFFERENT path (talkback-key.h /
-    // key_off()'s unconditional close cue), never through this edge
-    // function reporting Open.
-    {
-        bool prev = false;
-        TalkbackCue seen = TalkbackCue::None;
-        for (int i = 0; i < 5; ++i) {
-            const TalkbackCue cue = talkback_cue_on_live_change(prev, false);
-            if (cue != TalkbackCue::None) seen = cue;
-            prev = false;
-        }
-        check(seen == TalkbackCue::None,
-              "a session that never went live produced an OPEN cue somewhere "
-              "in a run of not-live ticks");
-    }
+    // This is exactly the false->false case already checked above: the
+    // function is pure and stateless over a 2-boolean input, so "a run of N
+    // not-live ticks" and "one not-live tick" exercise the identical branch
+    // -- looping it added no coverage the check above didn't already give,
+    // which is worse than not having the loop (a test that LOOKS like a
+    // multi-tick simulation but isn't). The grace-period close for a key
+    // that never got a confirmed channel happens on a DIFFERENT path
+    // entirely (key_off()'s unconditional close cue in talkback-controller
+    // .cpp), never through this edge function reporting Open -- that
+    // integration is exercised by TalkbackController, not this pure-function
+    // test.
 
     // ── Repeated identical values yield nothing, whichever value repeats ─
     check(talkback_cue_on_live_change(true, true) == TalkbackCue::None,

@@ -1003,6 +1003,18 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoTalkbackRing
              COMMAND CoreVideoTalkbackRingTest)
 
+    # When a talkback key may stay open, and every way it must close. Talkback
+    # is the one feature where a bug is heard outside the control room, so the
+    # closing direction is pinned exhaustively. See src/talkback-key.h.
+    add_executable(CoreVideoTalkbackKeyTest
+        tests/talkback-key-test.cpp
+    )
+    target_include_directories(CoreVideoTalkbackKeyTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTalkbackKey
+             COMMAND CoreVideoTalkbackKeyTest)
+
     # The master clock every audio buffer is stamped from. Wall-clock arrival
     # stamps let IPC jitter reach OBS, which resampled continuously — the
     # 2026-08-16 "audio is very bad" report.

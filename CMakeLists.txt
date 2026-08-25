@@ -990,6 +990,19 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoTalkbackPcm
              COMMAND CoreVideoTalkbackPcmTest)
 
+    # The talkback ring, driven in reverse (plugin writes, engine reads).
+    # Uses real concurrency to prove the seqlock and the free-running indices
+    # hold with the roles swapped. See src/talkback-ring.h.
+    add_executable(CoreVideoTalkbackRingTest
+        tests/talkback-ring-test.cpp
+    )
+    target_include_directories(CoreVideoTalkbackRingTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    target_link_libraries(CoreVideoTalkbackRingTest PRIVATE Threads::Threads)
+    add_test(NAME CoreVideoTalkbackRing
+             COMMAND CoreVideoTalkbackRingTest)
+
     # The master clock every audio buffer is stamped from. Wall-clock arrival
     # stamps let IPC jitter reach OBS, which resampled continuously — the
     # 2026-08-16 "audio is very bad" report.

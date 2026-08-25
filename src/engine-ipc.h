@@ -131,6 +131,14 @@ struct ShmFrameHeader {
 // while absorbing a stall.
 static constexpr uint32_t kAudioRingSlots = 8;
 
+// Talkback's slot size. OBS delivers AUDIO_OUTPUT_FRAMES (1024) frames per
+// callback; 1024 frames of stereo int16 is 4096 bytes, so 8192 leaves headroom
+// for a larger buffer without a resize. Talkback deliberately never resizes:
+// a resize means a new _gN region name (a Windows section cannot grow while
+// mapped), and re-handshaking a live talk key mid-sentence is worse than
+// refusing one oversized buffer.
+static constexpr uint32_t kTalkbackSlotBytes = 8192;
+
 struct ShmAudioSlot {
     // Even and unchanged across a read = the payload was stable. Odd = a write
     // is in progress. Same seqlock discipline the single slot had, now per-slot.

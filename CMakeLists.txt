@@ -1069,6 +1069,18 @@ if(BUILD_TESTING)
              COMMAND CoreVideoTalkbackCueIsolationTest
                      "${CMAKE_CURRENT_SOURCE_DIR}/src/talkback-cue.cpp")
 
+    # How nominated talent maps onto Zoom's 16-channel / 10-user budget. Neither
+    # cap degrades gracefully, and a silently-dropped nominee is invisible from
+    # the control room. See src/talkback-plan.h.
+    add_executable(CoreVideoTalkbackPlanTest
+        tests/talkback-plan-test.cpp
+    )
+    target_include_directories(CoreVideoTalkbackPlanTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTalkbackPlan
+             COMMAND CoreVideoTalkbackPlanTest)
+
     # The master clock every audio buffer is stamped from. Wall-clock arrival
     # stamps let IPC jitter reach OBS, which resampled continuously — the
     # 2026-08-16 "audio is very bad" report.

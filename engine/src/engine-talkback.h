@@ -35,7 +35,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <mutex>
 #include <string>
+#include <vector>
 
 class EngineTalkback : public ZOOMSDK::IMeetingTalkbackCtrlEvent {
 public:
@@ -63,6 +65,10 @@ private:
 
     void report(const std::string &stage, const std::string &fields);
     unsigned int resolve_participant(const std::string &name) const;
+
+    // Drains m_stray_channels and destroys each one. Called from tick() only
+    // -- see the invariant comment at that call site.
+    void drain_stray_channels();
 
     ZOOMSDK::IMeetingService          *m_svc  = nullptr;
     ZOOMSDK::IMeetingTalkbackController *m_ctrl = nullptr;
@@ -109,4 +115,20 @@ private:
     // ExecuteBatchDestroyChannels has been attempted for the current
     // channel. Reset to 0 at the start of every probe().
     uint32_t m_destroy_attempts = 0;
+
+    // BeginBatchDestroyChannels/AddChannelToDestroy/ExecuteBatchDestroyChannels
+    // has exactly one caller: tick(), on whichever thread owns the engine
+    // main loop. The Begin/Add/Execute shape implies the controller holds
+    // implicit per-batch state, so a second caller on the SDK callback
+    // thread could interleave with tick()'s sequence and corrupt or merge
+    // batches -- a real defect found in review round 2, where
+    // onCreateChannelResponse's stray-channel cleanup had grown its own call
+    // site. Callbacks that discover a channel needing cleanup now push its
+    // id here instead of calling the SDK; tick() is the sole drainer. A real
+    // mutex, not atomics, guards this: unlike m_phase (a trivially-copyable
+    // enum, safe to publish with acquire/release alone), a
+    // std::basic_string's buffer pointer/length/capacity cannot be
+    // published as a unit without one.
+    std::mutex m_stray_mtx;
+    std::vector<std::basic_string<zchar_t>> m_stray_channels;
 };

@@ -98,8 +98,56 @@ void EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
     m_phase.store(Phase::AwaitingChannel, std::memory_order_release);   // continues in onCreateChannelResponse
 }
 
+void EngineTalkback::drain_stray_channels()
+{
+    // Only tick() calls this, and tick() is the sole caller of the
+    // batch-destroy API -- see the invariant comment at the top of the
+    // Destroying branch below. Swap the queue out under lock, then never
+    // touch the SDK while holding m_stray_mtx.
+    std::vector<std::basic_string<zchar_t>> strays;
+    {
+        std::lock_guard<std::mutex> lock(m_stray_mtx);
+        if (m_stray_channels.empty()) return;
+        strays.swap(m_stray_channels);
+    }
+
+    for (const auto &id : strays) {
+        // Bounded, local retry -- deliberately not tied to m_destroy_attempts
+        // (that counter is reserved for the main channel) and deliberately
+        // not spread across future tick() calls, so one stray can never
+        // grow into an unbounded retry loop.
+        ZOOMSDK::SDKError e = ZOOMSDK::SDKERR_UNKNOWN;
+        uint32_t attempt = 0;
+        for (; attempt < kMaxDestroyAttempts; ++attempt) {
+            e = m_ctrl->BeginBatchDestroyChannels();
+            if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->AddChannelToDestroy(id.c_str());
+            if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->ExecuteBatchDestroyChannels();
+            if (e == ZOOMSDK::SDKERR_SUCCESS) break;
+        }
+        report("stray_destroy",
+               R"("channel":")" + json_escape(zchar_to_utf8(id.c_str())) +
+               R"(","code":)" + std::to_string(static_cast<int>(e)) +
+               R"(,"attempts":)" + std::to_string(attempt + 1));
+        if (e != ZOOMSDK::SDKERR_SUCCESS) {
+            report("stray_destroy_abandoned",
+                   R"("channel":")" + json_escape(zchar_to_utf8(id.c_str())));
+        }
+    }
+}
+
 void EngineTalkback::tick()
 {
+    // tick() is the ONLY caller of the batch-destroy API
+    // (BeginBatchDestroyChannels / AddChannelToDestroy /
+    // ExecuteBatchDestroyChannels). Callbacks that discover a channel
+    // needing cleanup queue it via m_stray_channels; they never call the
+    // API themselves. Two owners on two threads could interleave
+    // Begin/Add/Execute against each other and corrupt or merge batches,
+    // since the API shape implies the controller holds implicit per-batch
+    // state -- that is the whole reason this design is safe, and it is not
+    // visible anywhere else in the code.
+    drain_stray_channels();
+
     const Phase phase = m_phase.load(std::memory_order_acquire);
 
     if (phase == Phase::AwaitingChannel || phase == Phase::AwaitingInvite) {
@@ -157,7 +205,10 @@ void EngineTalkback::tick()
         // is already called repeatedly, so retry a bounded number of times
         // rather than abandoning the channel on the first failure -- giving
         // up immediately was exactly the leak this comment claims to
-        // prevent.
+        // prevent. This call site and drain_stray_channels() above are the
+        // only two places in this file allowed to touch the batch-destroy
+        // API, and both run here, on tick()'s thread -- see the comment at
+        // the top of tick().
         ZOOMSDK::SDKError e = m_ctrl->BeginBatchDestroyChannels();
         if (e == ZOOMSDK::SDKERR_SUCCESS && !m_channel_id_z.empty())
             e = m_ctrl->AddChannelToDestroy(m_channel_id_z.c_str());
@@ -210,20 +261,33 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         // Not the callback we're waiting on -- either a stray/duplicate, or
         // (now that tick() times AwaitingChannel out) a genuinely late
         // response that arrived after we already gave up on this rung and
-        // moved on, in which case a real channel exists that our own
-        // ladder no longer tracks. Touching m_channel_id_z/m_phase here
-        // would corrupt whatever probe (if any) is running now, so leave
-        // all of that alone -- but a channel that error==OK just handed us
-        // must not simply rot for the rest of the meeting, so best-effort
-        // destroy it by the ID the callback gave us directly, and make the
-        // situation visible either way.
+        // moved on, in which case a real channel exists that our own ladder
+        // no longer tracks. tick() is the ONLY caller of the batch-destroy
+        // API (see the comment there) -- this callback runs on the SDK
+        // thread and must never call BeginBatchDestroyChannels/etc directly,
+        // even for cleanup, or it can interleave with tick()'s own
+        // Begin/Add/Execute sequence and corrupt or merge batches. So: queue,
+        // never call.
         if (error == TALKBACK_ERROR_OK) {
-            ZOOMSDK::SDKError de = m_ctrl->BeginBatchDestroyChannels();
-            if (de == ZOOMSDK::SDKERR_SUCCESS) de = m_ctrl->AddChannelToDestroy(channelID);
-            if (de == ZOOMSDK::SDKERR_SUCCESS) de = m_ctrl->ExecuteBatchDestroyChannels();
-            report("create_channel_response_stray",
-                   R"("channel":")" + json_escape(id) +
-                   R"(","destroy_code":)" + std::to_string(static_cast<int>(de)));
+            if (m_channel_id_z == channelID) {
+                // This id matches OUR live channel -- a duplicate/redelivered
+                // callback for the channel the ladder already moved past
+                // AwaitingChannel with (e.g. now mid-invite or mid-send).
+                // Queuing it for destroy would tear down a channel a running
+                // probe still depends on. Report and do NOTHING else.
+                report("create_channel_response_duplicate",
+                       R"("channel":")" + json_escape(id) + "\"");
+            } else {
+                // A genuinely different, untracked channel now exists.
+                // Queue it; drain_stray_channels() (called from tick()) owns
+                // actually destroying it.
+                {
+                    std::lock_guard<std::mutex> lock(m_stray_mtx);
+                    m_stray_channels.emplace_back(channelID);
+                }
+                report("create_channel_response_stray",
+                       R"("channel":")" + json_escape(id) + R"(","queued":true)");
+            }
         }
         return;
     }

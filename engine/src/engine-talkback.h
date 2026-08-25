@@ -32,6 +32,11 @@
 #include "meeting_service_components/meeting_audio_interface.h"
 #include "meeting_service_components/meeting_participants_ctrl_interface.h"
 
+// talkback_pcm_rate_supported() -- F7 review-round fix uses this to validate
+// the ring header's sample_rate engine-side, the same gate the plugin
+// already applies before it ever creates the region.
+#include "../../src/talkback-pcm.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -236,4 +241,14 @@ private:
     uint32_t    m_audio_rate       = 0;
     uint16_t    m_audio_channels   = 0;
     bool        m_audio_open       = false;
+
+    // F8 review-round fix: counts audio_send report emissions in
+    // drain_audio() so it can report the first occurrence and then only
+    // periodically, never once per drain. Without this, a stale
+    // m_channel_id_z (fixed elsewhere in this round -- see the destroy
+    // paths in tick()) made every buffer fail and every drain_audio() call
+    // report it: ~50-100 pipe lines/sec, the message-storm shape this
+    // codebase already has a live incident about. Reset whenever a fresh
+    // region is opened so each session gets its own "first occurrence".
+    uint32_t    m_audio_send_fail_count = 0;
 };

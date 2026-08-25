@@ -1513,6 +1513,17 @@ int main()
             // at most one ~10ms tick.
             talkback_stop.store(true, std::memory_order_release);
             if (talkback_thread.joinable()) talkback_thread.join();
+            // F4 review-round fix: only the explicit talkback_close branch
+            // used to call this. Leave() destroys the talkback channel
+            // meeting-side, but m_audio_open stayed true and the ring
+            // region stayed mapped -- a director who never sent
+            // talkback_close before leaving left the engine holding a
+            // mapping (and, once the destroy-path fix elsewhere in this
+            // round clears m_channel_id_z, a channel id that no longer
+            // exists) for as long as the process lives. close_audio() is
+            // idempotent (bails immediately if !m_audio_open), so calling
+            // it here is safe even when talkback was never opened.
+            talkback.close_audio();
             if (meeting_svc)
                 meeting_svc->Leave(ZOOMSDK::LEAVE_MEETING);
 
@@ -1592,6 +1603,12 @@ int main()
     // first so this does not wait out the full ~30s bound.
     talkback_stop.store(true, std::memory_order_release);
     if (talkback_thread.joinable()) talkback_thread.join();
+    // F4 review-round fix: same reasoning as the Leave branch above -- quit
+    // is another path that used to leave m_audio_open true and the ring
+    // region mapped. Close it before the SDK teardown calls below run, same
+    // ordering discipline as the driving-thread join right above (SDK
+    // callbacks must never race teardown).
+    talkback.close_audio();
 
     if (meeting_svc) meeting_svc->Leave(ZOOMSDK::LEAVE_MEETING);
     share_engine.detach();

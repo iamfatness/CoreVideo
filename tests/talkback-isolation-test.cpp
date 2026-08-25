@@ -60,6 +60,21 @@ int main(int argc, char **argv)
     check(src.find("obs_sceneitem_add") == std::string::npos,
           "talkback-tap.cpp adds a scene item -- talkback must never appear in "
           "a scene");
+    // F5 review-round fix: the original four symbols missed the most
+    // plausible route someone would actually add. "Let the director hear
+    // themselves" is a natural-sounding feature request, and
+    // OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT is exactly the enum value that
+    // routes a source's audio to program while implementing it.
+    check(src.find("obs_source_set_monitoring_type") == std::string::npos,
+          "talkback-tap.cpp calls obs_source_set_monitoring_type -- "
+          "OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT routes this source's audio "
+          "into program/output, exactly the leak the structural guarantee "
+          "exists to rule out");
+    check(src.find("obs_source_set_audio_active") == std::string::npos,
+          "talkback-tap.cpp calls obs_source_set_audio_active -- forcing a "
+          "source's audio path active independent of its own visibility/mix "
+          "state can pull it into outputs a merely-tapped source would "
+          "never reach");
 
     // The observing API we DO rely on must still be there: if a refactor
     // removes it, talkback silently stops working and this test should say so

@@ -260,6 +260,21 @@ void EngineTalkback::tick()
                R"(,"attempt":)" + std::to_string(m_destroy_attempts + 1));
 
         if (e == ZOOMSDK::SDKERR_SUCCESS) {
+            // F8 review-round fix: m_channel_id_z used to be cleared only at
+            // the start of the NEXT probe(), never here -- so the probe's
+            // throwaway channel id outlived the channel itself. If the audio
+            // path (open_audio/drain_audio) is live at the same time, every
+            // subsequent SendAudioDataToChannel targets a destroyed channel,
+            // fails every buffer, and (before the drain_audio rate-limit
+            // fixed elsewhere in this round) reported it on every drain --
+            // the same message-storm shape this codebase already has a live
+            // incident about. Clear both representations together, under the
+            // same lock discipline as every other m_channel_id_z access.
+            {
+                std::lock_guard<std::mutex> lock(m_chan_mtx);
+                m_channel_id.clear();
+                m_channel_id_z.clear();
+            }
             m_phase.store(Phase::Done, std::memory_order_release);
             return;
         }
@@ -271,6 +286,16 @@ void EngineTalkback::tick()
             report("destroy_abandoned",
                    R"("channel":")" + json_escape(channel_copy_utf8) +
                    R"(","attempts":)" + std::to_string(m_destroy_attempts));
+            // F8 review-round fix: same clearing as the success path above.
+            // "Abandoned" means WE stop tracking it -- Zoom's copy of the
+            // channel may or may not still exist, but this probe has given
+            // up on it either way, and a stale id here causes exactly the
+            // same audio_send failure storm as the success path.
+            {
+                std::lock_guard<std::mutex> lock(m_chan_mtx);
+                m_channel_id.clear();
+                m_channel_id_z.clear();
+            }
             m_phase.store(Phase::Done, std::memory_order_release);
         }
     }
@@ -537,17 +562,114 @@ bool EngineTalkback::open_audio(const std::string &region_name,
                json_escape(region_name) + "\"");
         return false;
     }
+
+    auto *hdr = static_cast<ShmAudioHeader *>(m_audio_region.ptr);
+
+    // F3 review-round fix: the ring's physical layout (slot_count,
+    // slot_bytes) is whatever the WRITER laid down when it created the
+    // region, but shm_audio_region_bytes() above sized OUR mapping from the
+    // READER's own kTalkbackSlotBytes constant. shm_audio_slot_offset(*hdr,
+    // index) multiplies by the WRITER's hdr->slot_bytes -- so a half-applied
+    // install (CLAUDE.md: "a DLL-only copy silently half-applies" is routine
+    // here) pairing an old engine against a plugin built with a larger
+    // kTalkbackSlotBytes would walk that offset past the end of a mapping
+    // sized for the smaller constant: an access violation, not a
+    // diagnosable error. The header carries no version field, so this check
+    // is the only thing standing between that version skew and a crash.
+    // Requiring the exact slot_count also rules out slot_count == 0, which
+    // would otherwise make every `% hdr->slot_count` in the drain path
+    // (talkback-ring.h) a division by zero.
+    if (hdr->slot_count != kAudioRingSlots || hdr->slot_bytes != kTalkbackSlotBytes) {
+        report("audio_open",
+               R"("ok":false,"reason":"layout_mismatch","slot_count":)" +
+               std::to_string(hdr->slot_count) + R"(,"expected_slot_count":)" +
+               std::to_string(kAudioRingSlots) + R"(,"slot_bytes":)" +
+               std::to_string(hdr->slot_bytes) + R"(,"expected_slot_bytes":)" +
+               std::to_string(kTalkbackSlotBytes) + R"(,"region":")" +
+               json_escape(region_name) + "\"");
+        shm_region_destroy(m_audio_region);
+        m_audio_region = ShmRegion{};
+        return false;
+    }
+
+    // F7 review-round fix: rate/channels used to come straight from the
+    // pipe's talkback_open JSON, unvalidated -- json_uint() returns 0 for a
+    // missing key, so a malformed talkback_open would send sampleRate = 0
+    // straight to Zoom. The ring header is the AUTHORITATIVE copy: it is
+    // written by talkback_ring_init() in the same call that lays out the
+    // region (src/talkback-tap.cpp's open()), which already validated rate
+    // and channel count before creating the region at all. Treat the pipe's
+    // values as a cross-check against that authority, not a second source of
+    // truth -- a mismatch means the plugin and the talkback_open command
+    // disagree about which region/session this is, which is exactly the
+    // kind of stale-handshake bug that must refuse loudly rather than send
+    // audio at a value nobody actually asked for.
+    const uint32_t hdr_rate = hdr->sample_rate;
+    const uint16_t hdr_channels = static_cast<uint16_t>(hdr->channels);
+
+    if (!talkback_pcm_rate_supported(hdr_rate)) {
+        report("audio_open",
+               R"("ok":false,"reason":"unsupported_rate","rate":)" +
+               std::to_string(hdr_rate) + R"(,"region":")" +
+               json_escape(region_name) + "\"");
+        shm_region_destroy(m_audio_region);
+        m_audio_region = ShmRegion{};
+        return false;
+    }
+    if (hdr_channels != 1 && hdr_channels != 2) {
+        report("audio_open",
+               R"("ok":false,"reason":"unsupported_channels","channels":)" +
+               std::to_string(hdr_channels) + R"(,"region":")" +
+               json_escape(region_name) + "\"");
+        shm_region_destroy(m_audio_region);
+        m_audio_region = ShmRegion{};
+        return false;
+    }
+    if (hdr_rate != sample_rate || hdr_channels != channels) {
+        report("audio_open",
+               R"("ok":false,"reason":"pipe_header_mismatch","pipe_rate":)" +
+               std::to_string(sample_rate) + R"(,"header_rate":)" +
+               std::to_string(hdr_rate) + R"(,"pipe_channels":)" +
+               std::to_string(channels) + R"(,"header_channels":)" +
+               std::to_string(hdr_channels) + R"(,"region":")" +
+               json_escape(region_name) + "\"");
+        shm_region_destroy(m_audio_region);
+        m_audio_region = ShmRegion{};
+        return false;
+    }
+
     m_audio_region_name = region_name;
-    m_audio_rate        = sample_rate;
-    m_audio_channels    = channels;
+    m_audio_rate        = hdr_rate;
+    m_audio_channels    = hdr_channels;
     // Start at the writer's CURRENT index, not 0: buffers published before we
     // mapped are stale by definition, and replaying them would put a burst of
     // old audio in the channel the moment a key opens.
-    m_audio_read_index =
-        static_cast<ShmAudioHeader *>(m_audio_region.ptr)->write_index;
+    m_audio_read_index = hdr->write_index;
+
+    // F1 review-round fix (CRITICAL): the tap's capture callback attaches
+    // and starts publishing as soon as TalkbackTap::open() runs on the
+    // plugin side, which is BEFORE this engine ever handles talkback_open --
+    // the pipe round-trip guarantees that ordering. audio_ring_notify_after_
+    // publish() (engine-ipc.h) only sends an event on the empty->non-empty
+    // edge, so by the time we map this region `notify` is very likely
+    // already 1 from a buffer published in that window. Unlike the MAIN
+    // audio ring, this ring has NO keepalive (no ~2.5s / 250-buffer
+    // self-heal) to fall back on: if we leave notify=1 here, the writer
+    // never re-notifies (it only notifies on an edge it never sees again
+    // while the ring keeps being non-empty), drain_audio() is never called,
+    // and the ring silently fills and laps for the rest of the region's
+    // life -- the director keys and nothing is heard, with no diagnostic
+    // anywhere. Abandon unconditionally, snapshot FIRST: a buffer published
+    // in the race window between the snapshot above and this call is still
+    // ahead of m_audio_read_index and will still be picked up by the next
+    // drain_audio(); abandoning only clears the flag so the NEXT publish
+    // after this point is guaranteed to (re-)cross the edge and notify.
+    audio_ring_reader_abandon(hdr);
+
     m_audio_open = true;
-    report("audio_open", R"("ok":true,"rate":)" + std::to_string(sample_rate) +
-           R"(,"channels":)" + std::to_string(channels));
+    m_audio_send_fail_count = 0; // F8: fresh session, fresh report budget
+    report("audio_open", R"("ok":true,"rate":)" + std::to_string(m_audio_rate) +
+           R"(,"channels":)" + std::to_string(m_audio_channels));
     return true;
 }
 
@@ -591,7 +713,22 @@ void EngineTalkback::drain_audio()
     // short of the writer recreating the region. That is exactly the
     // failure class the edge-triggered protocol's helpers exist to rule
     // out (see ShmAudioHeader::notify in src/engine-ipc.h).
-    if (!m_audio_open || m_audio_region.ptr == nullptr) return;
+    if (m_audio_region.ptr == nullptr) return;
+
+    // F1 review-round fix: !m_audio_open with a still-mapped region is a
+    // separate case from "nothing to touch" above, and it must not be
+    // handled the same bare-return way. A bare return here neither drains
+    // nor abandons -- it just does nothing, which per the comment above is
+    // exactly the "consumed a wakeup and left the flag set" shape: if
+    // `notify` happens to already be 1 (a plausible state, e.g. reached via
+    // any future path that maps the region before flipping m_audio_open),
+    // this call silently eats the opportunity to clear it, and the writer's
+    // edge-triggered protocol has no way to know a reader ever looked. Hand
+    // the flag back explicitly instead of doing nothing.
+    if (!m_audio_open) {
+        audio_ring_reader_abandon(static_cast<ShmAudioHeader *>(m_audio_region.ptr));
+        return;
+    }
 
     // The channel to talk on is the one this class already holds -- created
     // and invited through the existing probe/ladder path. Milestone 5 owns
@@ -628,11 +765,25 @@ void EngineTalkback::drain_audio()
         if (pass == 3) audio_ring_reader_abandon(hdr);
     }
 
-    if (ctx.last_err != 0 || lost != 0 || ctx.no_channel_drops != 0)
-        report("audio_send", R"("code":)" + std::to_string(ctx.last_err) +
-               R"(,"buffers":)" + std::to_string(ctx.sent) +
-               R"(,"lost":)" + std::to_string(lost) +
-               R"(,"no_channel_drops":)" + std::to_string(ctx.no_channel_drops));
+    if (ctx.last_err != 0 || lost != 0 || ctx.no_channel_drops != 0) {
+        // F8 review-round fix: this used to report on every drain_audio()
+        // call that saw any failure. drain_audio() runs on every
+        // talkback_audio pipe line -- with a stale channel id (the destroy-
+        // path bug fixed elsewhere in this round) or a channel that simply
+        // never got established, EVERY buffer fails and this fired
+        // unbounded: ~50-100 pipe lines/sec, the same message-storm shape
+        // this codebase already has a live incident about (the probe's own
+        // "send" report in tick() guards against exactly this, for the same
+        // reason). Report the first occurrence, then only periodically.
+        ++m_audio_send_fail_count;
+        if (m_audio_send_fail_count == 1 || (m_audio_send_fail_count % 100) == 0) {
+            report("audio_send", R"("code":)" + std::to_string(ctx.last_err) +
+                   R"(,"buffers":)" + std::to_string(ctx.sent) +
+                   R"(,"lost":)" + std::to_string(lost) +
+                   R"(,"no_channel_drops":)" + std::to_string(ctx.no_channel_drops) +
+                   R"(,"occurrence":)" + std::to_string(m_audio_send_fail_count));
+        }
+    }
 }
 
 void EngineTalkback::close_audio()

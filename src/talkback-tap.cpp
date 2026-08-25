@@ -6,6 +6,7 @@
 #include <obs-module.h>
 #include <util/platform.h>
 
+#include <atomic>
 #include <cstring>
 
 TalkbackTap::~TalkbackTap() { close(); }
@@ -27,6 +28,33 @@ bool TalkbackTap::open(const std::string &source_name, std::string &error_out)
     // which the SDK recommends. An unsupported rate is reported loudly --
     // sending at the wrong rate is heard as a chipmunk or a drawl, which an
     // operator would report as "talkback is broken", not "my rate is odd".
+    // F9 review-round fix: the spec's guarantee has two halves and only ONE
+    // is structural (a capture callback observes and cannot route -- see
+    // tests/talkback-isolation-test.cpp). The other half is the operator's:
+    // OBS enables ALL SIX mixer tracks by default on every new audio source,
+    // so an operator who points talkback at the mic already live on program
+    // gets a working demo AND puts the aside on air, at full level, for the
+    // audience. "Without the advisory half the guarantee is only half true.
+    // Both ship together." This is that advisory floor -- a log warning, not
+    // a refusal; the full dock UI is a later milestone.
+    const uint32_t mixers = obs_source_get_audio_mixers(src);
+    if (mixers != 0) {
+        std::string tracks;
+        for (int i = 0; i < 6; ++i) {
+            if (mixers & (1u << i)) {
+                if (!tracks.empty()) tracks += ", ";
+                tracks += std::to_string(i + 1);
+            }
+        }
+        blog(LOG_WARNING,
+             "[obs-zoom-plugin] talkback: source \"%s\" has program track(s) "
+             "%s enabled in Advanced Audio Properties. If any of those "
+             "tracks are live on air, the audience will hear this talkback "
+             "aside at full level. Uncheck its program tracks for a "
+             "talkback-only source.",
+             source_name.c_str(), tracks.c_str());
+    }
+
     const struct audio_output_info *aoi =
         audio_output_get_info(obs_get_audio());
     if (!aoi) {
@@ -176,7 +204,30 @@ void TalkbackTap::on_audio(const struct audio_data *data, bool muted)
     }
 
     const std::size_t bytes = talkback_pcm_bytes(data->frames, chans);
-    if (bytes == 0 || bytes > kTalkbackSlotBytes) return;
+    if (bytes == 0) return;
+    if (bytes > kTalkbackSlotBytes) {
+        // F6 review-round fix: this used to return bare here -- no counter,
+        // no log, no publish. Silence with no diagnostic means
+        // last_audio_ms never advances, so the dead-man switch (see
+        // src/talkback-key.h) closes the key ~250ms later with nothing in
+        // the log to explain why: "talkback arms and instantly disarms,
+        // every time, no error anywhere." The 8192-byte cap's rationale in
+        // engine-ipc.h ("OBS delivers AUDIO_OUTPUT_FRAMES (1024) frames")
+        // does not actually hold here -- a capture callback carries the
+        // SOURCE's buffer, whatever the device period produced, not a fixed
+        // OBS-internal frame count. Rate-limited: this can fire on every
+        // callback while it's happening, and that is exactly the pipe/log
+        // storm shape this codebase already has incidents about.
+        static std::atomic<uint32_t> s_oversize_drops{0};
+        const uint32_t n = ++s_oversize_drops;
+        if (n == 1 || (n % 100) == 0) {
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] talkback: dropped an oversized audio "
+                 "callback (%zu bytes > %u byte cap) -- %u drop(s) so far",
+                 bytes, static_cast<unsigned>(kTalkbackSlotBytes), n);
+        }
+        return;
+    }
 
     // FIXED STACK BUFFER, not a per-callback heap allocation. This runs on
     // OBS's audio-mixer thread, shared with every other source's capture
@@ -188,29 +239,66 @@ void TalkbackTap::on_audio(const struct audio_data *data, bool muted)
     // above already proves `bytes` fits before a single byte of this array
     // is touched, so the bound is established once, not re-derived here.
     int16_t pcm[kTalkbackSlotBytes / sizeof(int16_t)];
-    if (muted) {
-        // Silence must still be published at the correct length so the
-        // dead-man switch doesn't read a mute as a dead path (see the
-        // comment above). A stack array isn't value-initialized like the
-        // vector this replaced, so the silence has to be zeroed explicitly.
-        std::memset(pcm, 0, bytes);
-    } else {
+    // F2 review-round fix: this memset MUST be unconditional, before muted
+    // is even considered -- it used to live only in the `muted` branch (a
+    // regression from an earlier fix round: the std::vector it replaced was
+    // value-initialized, this stack array is not). talkback_pcm_interleave
+    // has a documented refusal for a null plane ("a tap can fire with a null
+    // plane during source teardown" -- see talkback-pcm.h), and that is
+    // reachable well beyond teardown: an operator changing Settings > Audio
+    // > Channels while a key is open rebuilds libobs's resampler, and
+    // m_channels (cached at open(), never revalidated) can now disagree with
+    // what data->data[] actually holds, handing back a null plane on a live
+    // callback. Without an unconditional zero here, that refusal published
+    // whatever 8KB of stack garbage happened to be sitting in `pcm` --
+    // full-scale noise straight into a director's ear, the exact sound
+    // talkback-pcm.h's clamp comment calls "the single worst sound to put in
+    // a director's ear."
+    std::memset(pcm, 0, bytes);
+    if (!muted) {
         const float *planes[2] = {
             reinterpret_cast<const float *>(data->data[0]),
             chans > 1 ? reinterpret_cast<const float *>(data->data[1]) : nullptr,
         };
-        talkback_pcm_interleave(planes, data->frames, chans, pcm);
+        if (!talkback_pcm_interleave(planes, data->frames, chans, pcm)) {
+            // Refused -- pcm is already silence from the memset above, so
+            // publishing it is safe, but a silent refusal is exactly what
+            // F2 exists to stop being invisible. Count and log rather than
+            // publish without a trace; rate-limited for the same reason as
+            // the oversize-drop log above.
+            static std::atomic<uint32_t> s_interleave_refusals{0};
+            const uint32_t n = ++s_interleave_refusals;
+            if (n == 1 || (n % 100) == 0) {
+                blog(LOG_WARNING,
+                     "[obs-zoom-plugin] talkback: interleave refused (null "
+                     "plane or degenerate input) -- publishing silence "
+                     "instead, %u refusal(s) so far",
+                     n);
+            }
+        }
     }
 
-    const uint64_t now_ms = os_gettime_ns() / 1000000ULL;
+    // F10 review-round fix: capture_ns is documented in engine-ipc.h as
+    // nanoseconds from os_gettime_ns() -- this used to pass now_ms
+    // (milliseconds) into it. Harmless today because nothing reads the
+    // field yet, but it is the one field whose comment explains its clock
+    // domain, and a unit that silently changes meaning across the
+    // plugin/engine boundary is exactly the kind of thing that stays
+    // harmless right up until something DOES read it. m_last_audio_ms (the
+    // dead-man switch's clock) still wants milliseconds, so both are kept.
+    const uint64_t now_ns = os_gettime_ns();
+    const uint64_t now_ms = now_ns / 1000000ULL;
     bool notify = false;
     {
         std::lock_guard<std::mutex> lock(m_mtx);
         if (!m_open || m_region.ptr == nullptr) return;
         notify = talkback_ring_publish(m_region.ptr, pcm,
-                                       static_cast<uint32_t>(bytes), now_ms);
+                                       static_cast<uint32_t>(bytes), now_ns);
         m_last_audio_ms = now_ms;
     }
     (void)rate;
-    (void)notify;   // Task 6 sends the pipe event on this edge.
+    // Nothing sends the pipe event on this edge yet. Milestone 5 owns
+    // closing this wiring gap (see the whole-plan review's DO-NOT-FIX list);
+    // it is deliberately not implemented here.
+    (void)notify;
 }

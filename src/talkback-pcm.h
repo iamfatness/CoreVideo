@@ -44,22 +44,33 @@ inline int16_t talkback_pcm_sample(float v)
 }
 
 // Interleave `channels` planes of `frames` floats into `out`.
-// `planes[c]` must hold at least `frames` samples. Degenerate input is a
-// no-op: a tap can fire with a null plane during source teardown, and a
-// crash on the audio thread would take OBS with it.
-inline void talkback_pcm_interleave(const float *const *planes,
+// `planes[c]` must hold at least `frames` samples. Degenerate input --
+// including a null plane, which a tap can see during source teardown -- is a
+// REFUSAL, not a silent no-op: `out` is left completely untouched, and the
+// caller must not treat it as valid audio on a false return.
+//
+// F2 review-round fix: this used to return void, and its "degenerate input
+// is a no-op" comment was read by an earlier round as "safe to publish `out`
+// afterward" -- it is not. A caller that publishes an untouched `out` on
+// refusal is publishing whatever was already there, which for a stack
+// buffer is garbage, not silence. Returning bool forces every call site to
+// notice a refusal and decide what to publish instead (the correct answer,
+// applied in talkback-tap.cpp, is silence written unconditionally BEFORE
+// this is ever called).
+inline bool talkback_pcm_interleave(const float *const *planes,
                                     std::size_t frames,
                                     uint32_t channels,
                                     int16_t *out)
 {
     if (planes == nullptr || out == nullptr || frames == 0 || channels == 0)
-        return;
+        return false;
     for (uint32_t c = 0; c < channels; ++c)
-        if (planes[c] == nullptr) return;
+        if (planes[c] == nullptr) return false;
 
     for (std::size_t f = 0; f < frames; ++f)
         for (uint32_t c = 0; c < channels; ++c)
             out[f * channels + c] = talkback_pcm_sample(planes[c][f]);
+    return true;
 }
 
 // Rates IZoomSDKAudioRawDataSender documents as accepted. We pass OBS's rate

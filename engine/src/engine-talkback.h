@@ -580,6 +580,21 @@ private:
     // "owner == None") and set this flag instead; that branch destroys the
     // channel immediately on arrival rather than adopting it or queuing it
     // as a stray. Guarded by m_chan_mtx, same discipline as m_pending_create.
+    //
+    // Fix round 2, N1 (Major, introduced by fix round 1): this flag has TWO
+    // clearers, not one. onCreateChannelResponse's Nomination branch clears
+    // it when the create it belongs to actually responds. But if that
+    // response is never delivered at all, expire_stale_pending_create_locked()
+    // eventually expires the owner instead -- and round 1 only cleared
+    // m_session_create_cancelled there, not this flag, so a cancelled-but-
+    // never-answered create left this true forever. The next nominate() then
+    // re-armed the owner with a brand-new CreateChannel, and when THAT
+    // create's real response arrived, it found this flag still set and
+    // destroyed the new channel instead of adopting it -- the operator's
+    // next nomination silently provisioned zero channels. Both clearers must
+    // stay in sync; see expire_stale_pending_create_locked()'s Nomination
+    // arm for the fix and nominate()'s comment for why the ordering with
+    // m_nomination_pending's assignment also had to change alongside this.
     bool m_nomination_create_cancelled = false;
 
     // One entry per Zoom channel nominate() has successfully created --

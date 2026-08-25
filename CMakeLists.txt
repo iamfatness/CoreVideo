@@ -1054,6 +1054,25 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoTalkbackChannelOwner
              COMMAND CoreVideoTalkbackChannelOwnerTest)
 
+    # The cancellation/ownership decisions layered on top of the arbiter
+    # above: what session_stop()'s early branch and nomination_reset() do
+    # when they must tear down while a create is still outstanding
+    # (talkback_cancel()), what a create that never gets a response does
+    # (talkback_expire()), and what a response's disposition is once its
+    # owner is known (talkback_create_disposition()). Added in Task 2 fix
+    # round 2 after N1: a Critical (C1) was found and fixed by review-trace
+    # with no test, and the very next round introduced a Major regression in
+    # the same state machine (a cancellation flag that outlived the create it
+    # was recorded for). See src/talkback-channel-owner.h.
+    add_executable(CoreVideoTalkbackCreateStateTest
+        tests/talkback-create-state-test.cpp
+    )
+    target_include_directories(CoreVideoTalkbackCreateStateTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTalkbackCreateState
+             COMMAND CoreVideoTalkbackCreateStateTest)
+
     # When the talkback open/close audio cue fires: a pure edge-detector over
     # the engine's own confirmed `live` state, so the cue marks the moment
     # the Zoom channel's create/invite round trip actually finishes rather

@@ -41,6 +41,9 @@ enum class IpcCommand {
     Subscribe,
     Unsubscribe,
     TalkbackProbe,
+    TalkbackOpen,
+    TalkbackAudio,
+    TalkbackClose,
 };
 
 // The value of the first top-level "cmd" string field, or "" when the line has
@@ -90,6 +93,9 @@ inline IpcCommand ipc_command_of(const std::string &line)
     if (cmd == IPC_CMD_SUBSCRIBE)       return IpcCommand::Subscribe;
     if (cmd == IPC_CMD_UNSUBSCRIBE)     return IpcCommand::Unsubscribe;
     if (cmd == IPC_CMD_TALKBACK_PROBE)  return IpcCommand::TalkbackProbe;
+    if (cmd == IPC_CMD_TALKBACK_OPEN)  return IpcCommand::TalkbackOpen;
+    if (cmd == IPC_CMD_TALKBACK_AUDIO) return IpcCommand::TalkbackAudio;
+    if (cmd == IPC_CMD_TALKBACK_CLOSE) return IpcCommand::TalkbackClose;
     return IpcCommand::Unknown;
 }
 

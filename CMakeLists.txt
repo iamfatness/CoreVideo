@@ -264,6 +264,7 @@ if(COREVIDEO_BUILD_PLUGIN)
     add_library(obs-zoom-plugin MODULE
         src/plugin-main.cpp
         src/zoom-source.cpp
+        src/talkback-tap.cpp
         src/zoom-participant-audio-source.cpp
         src/zoom-supersource.cpp
         src/zoom-tiles-background.cpp

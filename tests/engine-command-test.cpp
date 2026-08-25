@@ -122,6 +122,21 @@ int main()
            IpcCommand::Unknown,
            "a longer command starting with talkback_probe matched it");
 
+    // ── Talkback audio-path commands route exactly ──────────────────────────
+    check(ipc_command_of(R"({"cmd":"talkback_open","region":"X","rate":48000})") ==
+              IpcCommand::TalkbackOpen,
+          "talkback_open did not route to IpcCommand::TalkbackOpen");
+    check(ipc_command_of(R"({"cmd":"talkback_audio"})") == IpcCommand::TalkbackAudio,
+          "talkback_audio did not route to IpcCommand::TalkbackAudio");
+    check(ipc_command_of(R"({"cmd":"talkback_close"})") == IpcCommand::TalkbackClose,
+          "talkback_close did not route to IpcCommand::TalkbackClose");
+    // The family shares a prefix with talkback_probe; exact match must keep
+    // them apart, the way it keeps unsubscribe out of the subscribe branch.
+    check(ipc_command_of(R"({"cmd":"talkback_probe"})") == IpcCommand::TalkbackProbe,
+          "talkback_probe was hijacked by a sibling talkback_* command");
+    check(ipc_command_of(R"({"cmd":"talkback_open_extra"})") == IpcCommand::Unknown,
+          "a longer command starting with talkback_open matched it");
+
     if (g_failures > 0) {
         std::cerr << "engine-command: " << g_failures << " failure(s)\n";
         return 1;

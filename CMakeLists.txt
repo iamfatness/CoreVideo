@@ -1026,6 +1026,19 @@ if(BUILD_TESTING)
              COMMAND CoreVideoTalkbackIsolationTest
                      "${CMAKE_CURRENT_SOURCE_DIR}/src/talkback-tap.cpp")
 
+    # Which subsystem a CreateChannel response belongs to. Two now ask (the
+    # probe and the talkback session) and the response carries no clue; routing
+    # it wrong cuts the director off mid-sentence or hands the session a
+    # channel tick() is about to destroy. See src/talkback-channel-owner.h.
+    add_executable(CoreVideoTalkbackChannelOwnerTest
+        tests/talkback-channel-owner-test.cpp
+    )
+    target_include_directories(CoreVideoTalkbackChannelOwnerTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTalkbackChannelOwner
+             COMMAND CoreVideoTalkbackChannelOwnerTest)
+
     # The master clock every audio buffer is stamped from. Wall-clock arrival
     # stamps let IPC jitter reach OBS, which resampled continuously — the
     # 2026-08-16 "audio is very bad" report.

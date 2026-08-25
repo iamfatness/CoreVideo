@@ -889,16 +889,16 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
     }
 
     if (cmd == "talkback_status") {
-        // status_json() hand-builds its JSON by string concatenation (see
-        // talkback-controller.cpp) rather than going through QJsonObject, so
-        // it is not guaranteed well-formed -- e.g. a participant or source
-        // name containing an unescaped quote. QJsonDocument::fromJson()
+        // status_json() crosses this boundary as a raw std::string, so
+        // nothing here can rely on it being well-formed JSON no matter how
+        // the producer happens to build it today -- there is no compile-time
+        // guarantee tying the two sides together. QJsonDocument::fromJson()
         // returns a null document on malformed input, and .object() on a
         // null document silently returns an EMPTY QJsonObject with no error
         // signal. Without this guard that reads back as {"ok":true,
         // "talkback":{}} -- a false-positive success that hides whether a
         // key is open, which is the one thing an operator mid-show most
-        // needs from this command. Fail loud instead.
+        // needs from this command. Fail loud instead of trusting the string.
         QJsonParseError parse_error;
         const QJsonDocument doc = QJsonDocument::fromJson(
             QByteArray::fromStdString(TalkbackController::instance().status_json()),

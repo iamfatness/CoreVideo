@@ -1481,6 +1481,23 @@ int main()
                 }
             }
 
+        } else if (command == IpcCommand::TalkbackOpen) {
+            talkback.open_audio(json_str(line, "region"),
+                                static_cast<uint32_t>(json_uint(line, "rate")),
+                                static_cast<uint16_t>(json_uint(line, "channels")));
+
+        } else if (command == IpcCommand::TalkbackAudio) {
+            // Drained on THIS thread deliberately: on Windows this loop is
+            // also the SDK's message-pump thread (see
+            // ipc_read_line_with_message_pump above), so every SDK call stays
+            // on the thread the SDK already uses. The Milestone 1 probe's
+            // separate driving thread was the first in this engine to call SDK
+            // APIs off the pump; this path does not repeat that.
+            talkback.drain_audio();
+
+        } else if (command == IpcCommand::TalkbackClose) {
+            talkback.close_audio();
+
         } else if (command == IpcCommand::Leave) {
             // F4 review-round fix: mirror the quit path below (see the
             // "Join the talkback driving thread BEFORE any SDK teardown

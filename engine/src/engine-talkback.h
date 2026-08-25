@@ -55,6 +55,12 @@ public:
     // in progress, then destroys the channel.
     void tick();
 
+    // ── Talkback audio path (Milestone 2) ──────────────────────────────────
+    bool open_audio(const std::string &region_name, uint32_t sample_rate,
+                    uint16_t channels);
+    void drain_audio();
+    void close_audio();
+
     // True once the ladder is quiescent: Idle before the first probe() ever
     // runs, Done after one finishes (success, failure, or abandoned
     // destroy). Task 5's driving thread uses this to stop ticking as soon as
@@ -219,4 +225,15 @@ private:
     // ExecuteBatchDestroyChannels has been attempted for the current
     // channel. Reset to 0 at the start of every probe().
     uint32_t m_destroy_attempts = 0;
+
+    // ── Talkback audio path (Milestone 2) ──────────────────────────────────
+    // The plugin CREATES this region and writes it; we open it read-write
+    // because a reader must be able to clear the notify flag. See
+    // src/talkback-ring.h for why the roles are reversed here.
+    ShmRegion   m_audio_region{};
+    std::string m_audio_region_name;
+    uint32_t    m_audio_read_index = 0;
+    uint32_t    m_audio_rate       = 0;
+    uint16_t    m_audio_channels   = 0;
+    bool        m_audio_open       = false;
 };

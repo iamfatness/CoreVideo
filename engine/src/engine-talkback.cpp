@@ -3,6 +3,7 @@
                              // so it must be INCLUDED, never forward-declared
 #include "talkback-tone.h"
 #include "engine-json.h"     // zchar_to_utf8 / json_escape / json_str (Step 3a)
+#include "talkback-ring.h"   // talkback_ring_drain / TalkbackRingSlotFn (Milestone 2)
 
 #include <chrono>
 #include <string>
@@ -505,3 +506,146 @@ void EngineTalkback::onChannelUserLeaveResponse(const zchar_t *, unsigned int, T
 void EngineTalkback::onJoinTalkbackChannel(unsigned int) {}
 void EngineTalkback::onLeaveTalkbackChannel(unsigned int) {}
 void EngineTalkback::onInviterAudioLevel(unsigned int, unsigned int) {}
+
+// ── Talkback audio path (Milestone 2) ───────────────────────────────────────
+//
+// The probe above (Milestone 1) only asked "can this account open a channel
+// and put audio in it". This is the consuming half: the plugin's OBS tap
+// writes director audio into a ring (src/talkback-ring.h), and this class
+// maps that region, drains it, and forwards every buffer to Zoom via
+// SendAudioDataToChannel on whatever channel this class already holds.
+//
+// THREADING: open_audio/drain_audio/close_audio are called ONLY from
+// engine/src/main.cpp's command loop, which on Windows is ALSO the SDK's
+// message-pump thread (see ipc_read_line_with_message_pump there). That is
+// deliberate: every SDK call stays on the thread the SDK already uses. This
+// is a correction of the Milestone 1 probe, which introduced a separate
+// driving thread (still used by tick(), an accepted narrower exception) and
+// was the first code in this engine to call SDK APIs off the pump. There is
+// no need to repeat that here: the ring already decouples the OBS audio
+// thread (the writer) from us, so nothing on this path needs to run
+// off-thread to stay responsive -- it only needs to run on the thread the
+// SDK expects.
+bool EngineTalkback::open_audio(const std::string &region_name,
+                                uint32_t sample_rate, uint16_t channels)
+{
+    close_audio();
+    if (!shm_region_open_readwrite(
+            m_audio_region, region_name,
+            shm_audio_region_bytes(kTalkbackSlotBytes))) {
+        report("audio_open", R"("ok":false,"reason":"map_failed","region":")" +
+               json_escape(region_name) + "\"");
+        return false;
+    }
+    m_audio_region_name = region_name;
+    m_audio_rate        = sample_rate;
+    m_audio_channels    = channels;
+    // Start at the writer's CURRENT index, not 0: buffers published before we
+    // mapped are stale by definition, and replaying them would put a burst of
+    // old audio in the channel the moment a key opens.
+    m_audio_read_index =
+        static_cast<ShmAudioHeader *>(m_audio_region.ptr)->write_index;
+    m_audio_open = true;
+    report("audio_open", R"("ok":true,"rate":)" + std::to_string(sample_rate) +
+           R"(,"channels":)" + std::to_string(channels));
+    return true;
+}
+
+namespace {
+struct SendCtx {
+    ZOOMSDK::IMeetingTalkbackController *ctrl;
+    const zchar_t *channel;
+    uint32_t rate;
+    ZOOMSDK::ZoomSDKAudioChannel chan;
+    uint32_t sent;
+    uint32_t no_channel_drops;   // buffers seen while ctrl/channel is unset
+    int last_err;
+};
+
+void send_one(const void *pcm, uint32_t byte_len, uint64_t, void *ctx)
+{
+    auto *c = static_cast<SendCtx *>(ctx);
+    // No channel yet (no probe has established one in this session, or a
+    // future channel-selection milestone has not run) -- there is nowhere to
+    // send this buffer. That is a real choice, not a bug, but per this
+    // codebase's rule against silent audio loss it must still be counted,
+    // not just dropped -- see the no_channel_drops report below.
+    if (!c->ctrl || !c->channel) { ++c->no_channel_drops; return; }
+    const ZOOMSDK::SDKError e = c->ctrl->SendAudioDataToChannel(
+        c->channel, static_cast<const char *>(pcm), byte_len, c->rate, c->chan);
+    if (e != ZOOMSDK::SDKERR_SUCCESS) c->last_err = static_cast<int>(e);
+    ++c->sent;
+}
+} // namespace
+
+void EngineTalkback::drain_audio()
+{
+    // Only bail before touching the ring when there is no valid mapping to
+    // touch -- m_ctrl / an established channel being unset is NOT one of
+    // these reasons. See below: a missing channel still drains (and
+    // discards, loudly) rather than returning early, because returning
+    // early here would leave `notify` set on a ring that DOES have pending
+    // data -- the writer only re-notifies on the empty->non-empty edge, so
+    // an early return here would silence talkback the moment a key opens
+    // before the first channel is ever established, with no self-healing
+    // short of the writer recreating the region. That is exactly the
+    // failure class the edge-triggered protocol's helpers exist to rule
+    // out (see ShmAudioHeader::notify in src/engine-ipc.h).
+    if (!m_audio_open || m_audio_region.ptr == nullptr) return;
+
+    // The channel to talk on is the one this class already holds -- created
+    // and invited through the existing probe/ladder path. Milestone 5 owns
+    // channel SELECTION (targets, the 16/10 caps, pre-provisioned private
+    // channels); this milestone only moves audio into whichever channel is
+    // already open, so no channel id crosses the IPC boundary and nothing here
+    // needs a UTF-8 -> zchar_t conversion.
+    std::basic_string<zchar_t> channel_copy;
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        channel_copy = m_channel_id_z;
+    }
+
+    auto *hdr = static_cast<ShmAudioHeader *>(m_audio_region.ptr);
+
+    SendCtx ctx{m_ctrl, channel_copy.empty() ? nullptr : channel_copy.c_str(),
+                m_audio_rate,
+                m_audio_channels > 1 ? ZOOMSDK::ZoomSDKAudioChannel_Stereo
+                                     : ZOOMSDK::ZoomSDKAudioChannel_Mono,
+                0, 0, 0};
+
+    // EVENTS ARE PROMPTS, NOT PAYLOADS: drain everything available, then use
+    // the reader helpers to decide whether sleeping is safe. Any return path
+    // that consumes a wakeup and leaves notify set silences talkback until the
+    // writer's next edge -- the failure that silenced whole sources before the
+    // helpers existed. This loop runs unconditionally, whether or not a
+    // channel is currently held (see the comment above): draining is what
+    // resolves `notify`, sending audio through it is a separate concern.
+    uint32_t lost = 0;
+    for (int pass = 0; pass < 4; ++pass) {
+        talkback_ring_drain(m_audio_region.ptr, m_audio_read_index,
+                            send_one, &ctx, &lost);
+        if (audio_ring_reader_done(hdr, m_audio_read_index)) break;
+        if (pass == 3) audio_ring_reader_abandon(hdr);
+    }
+
+    if (ctx.last_err != 0 || lost != 0 || ctx.no_channel_drops != 0)
+        report("audio_send", R"("code":)" + std::to_string(ctx.last_err) +
+               R"(,"buffers":)" + std::to_string(ctx.sent) +
+               R"(,"lost":)" + std::to_string(lost) +
+               R"(,"no_channel_drops":)" + std::to_string(ctx.no_channel_drops));
+}
+
+void EngineTalkback::close_audio()
+{
+    if (!m_audio_open) return;
+    m_audio_open = false;
+    if (m_audio_region.ptr) {
+        // Hand the flag back so the writer re-notifies rather than assuming a
+        // reader is still listening.
+        audio_ring_reader_abandon(static_cast<ShmAudioHeader *>(m_audio_region.ptr));
+    }
+    shm_region_destroy(m_audio_region);
+    m_audio_region = ShmRegion{};
+    m_audio_read_index = 0;
+    report("audio_close", R"("ok":true)");
+}

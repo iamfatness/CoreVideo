@@ -978,6 +978,18 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoTalkbackTone
              COMMAND CoreVideoTalkbackToneTest)
 
+    # libobs planar float -> Zoom interleaved int16. Every failure mode here is
+    # silent (noise or silence, never an error), so both the clamp and the
+    # channel order are pinned. See src/talkback-pcm.h.
+    add_executable(CoreVideoTalkbackPcmTest
+        tests/talkback-pcm-test.cpp
+    )
+    target_include_directories(CoreVideoTalkbackPcmTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTalkbackPcm
+             COMMAND CoreVideoTalkbackPcmTest)
+
     # The master clock every audio buffer is stamped from. Wall-clock arrival
     # stamps let IPC jitter reach OBS, which resampled continuously — the
     # 2026-08-16 "audio is very bad" report.

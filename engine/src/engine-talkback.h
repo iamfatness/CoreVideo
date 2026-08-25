@@ -76,27 +76,58 @@ private:
     // m_phase is written from SDK callback threads (onCreateChannelResponse,
     // onChannelUserJoinResponse) and, once Task 5 wires tick() to the engine
     // main loop, read/written from the engine thread too -- atomic with
-    // explicit acquire/release is the cheap fix, done now while this file is
-    // in front of us rather than left as a landmine for that task.
-    //
-    // No mutex needed for m_channel_id_z either: it is always fully written
-    // in onCreateChannelResponse BEFORE m_phase is released to AwaitingInvite
-    // (and later Sending), and every reader of m_channel_id_z first acquires
-    // m_phase and checks it is at least AwaitingInvite/Sending. The
-    // release-store of m_phase after the write, paired with the acquire-load
-    // before every read, is the synchronizes-with edge that makes the plain
-    // std::string write visible -- that ordering, not a lock, is what makes
-    // this safe.
+    // explicit acquire/release is the cheap, correct fix for THIS field: a
+    // trivially-copyable enum can be published as a unit with no lock. It
+    // stays atomic rather than folding into m_chan_mtx below -- the two
+    // mechanisms are complementary, not competing: the atomic is the fast
+    // path every function checks first, the mutex is only for the string
+    // fields it is unsafe to reason about from phase ordering alone.
     std::atomic<Phase> m_phase{Phase::Idle};
 
+    // m_channel_id / m_channel_id_z / m_stray_channels are NOT safe under
+    // acquire/release on m_phase alone and must go through m_chan_mtx for
+    // EVERY access from here down, cross-thread or not -- no exceptions, so
+    // nobody has to re-derive which phases are "safe".
+    //
+    // The tempting argument -- "m_channel_id_z is fully written in
+    // onCreateChannelResponse before m_phase is released to AwaitingInvite,
+    // so an acquire-load of m_phase >= AwaitingInvite is a synchronizes-with
+    // edge" -- is real but incomplete: it only covers phases AT OR ABOVE
+    // AwaitingInvite. It says nothing about Idle or Done. probe()'s
+    // re-entrancy guard deliberately ALLOWS a fresh probe() to run whenever
+    // phase is Idle/Done, and that fresh call clears/reassigns these members
+    // from whatever thread called probe(). Meanwhile a late or duplicate
+    // onCreateChannelResponse for the PREVIOUS probe can observe phase as
+    // Idle/Done (via its own acquire-load) and read these same members on
+    // the SDK callback thread at the same moment -- a heap-buffer read
+    // racing a concurrent std::basic_string mutation: undefined behaviour,
+    // not merely a stale value. This is on the expected path (it is exactly
+    // the late-callback scenario the timeout machinery exists to handle),
+    // found live in review round 3 after round 2's stray-channel fix added
+    // the first cross-thread read of m_channel_id_z that could land in the
+    // Idle/Done window.
+    //
+    // Discipline: copy the needed value out under the lock, release, THEN
+    // call the SDK or build a report string with the copy. Never call the
+    // SDK while holding m_chan_mtx.
+    std::mutex m_chan_mtx;
     std::string  m_channel_id;      // UTF-8, REPORTING ONLY -- never pass to
                                      // the SDK, see m_channel_id_z below.
     // zchar_t is wchar_t on Windows (zoom_sdk_def.h) but char elsewhere, so
     // basic_string<zchar_t> is the only type that is simultaneously correct
     // on both platforms and round-trip-safe for an opaque SDK identifier
-    // (no UTF-8 re-encoding). Every SDK call that takes a channel ID must
-    // use m_channel_id_z.c_str(), never m_channel_id.c_str().
+    // (no UTF-8 re-encoding). Every SDK call that takes a channel ID copies
+    // this out under m_chan_mtx first; never call .c_str() on it directly.
     std::basic_string<zchar_t> m_channel_id_z;
+
+    // BeginBatchDestroyChannels/AddChannelToDestroy/ExecuteBatchDestroyChannels
+    // has exactly one caller: tick(), on whichever thread owns the engine
+    // main loop -- see the invariant comment at the top of tick(). Callbacks
+    // that discover a channel needing cleanup push its id here (under
+    // m_chan_mtx) instead of calling the SDK; drain_stray_channels(), called
+    // only from tick(), is the sole drainer.
+    std::vector<std::basic_string<zchar_t>> m_stray_channels;
+
     std::string  m_participant_name;
     unsigned int m_participant_id = 0;
     uint64_t     m_tone_index = 0;
@@ -115,20 +146,4 @@ private:
     // ExecuteBatchDestroyChannels has been attempted for the current
     // channel. Reset to 0 at the start of every probe().
     uint32_t m_destroy_attempts = 0;
-
-    // BeginBatchDestroyChannels/AddChannelToDestroy/ExecuteBatchDestroyChannels
-    // has exactly one caller: tick(), on whichever thread owns the engine
-    // main loop. The Begin/Add/Execute shape implies the controller holds
-    // implicit per-batch state, so a second caller on the SDK callback
-    // thread could interleave with tick()'s sequence and corrupt or merge
-    // batches -- a real defect found in review round 2, where
-    // onCreateChannelResponse's stray-channel cleanup had grown its own call
-    // site. Callbacks that discover a channel needing cleanup now push its
-    // id here instead of calling the SDK; tick() is the sole drainer. A real
-    // mutex, not atomics, guards this: unlike m_phase (a trivially-copyable
-    // enum, safe to publish with acquire/release alone), a
-    // std::basic_string's buffer pointer/length/capacity cannot be
-    // published as a unit without one.
-    std::mutex m_stray_mtx;
-    std::vector<std::basic_string<zchar_t>> m_stray_channels;
 };

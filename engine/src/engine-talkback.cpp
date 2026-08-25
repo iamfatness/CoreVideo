@@ -46,8 +46,14 @@ void EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
     m_svc = svc;
     m_participant_name = participant_name;
     m_phase.store(Phase::Idle, std::memory_order_release);
-    m_channel_id.clear();
-    m_channel_id_z.clear();
+    {
+        // Cross-thread: a late callback from the PREVIOUS probe can still be
+        // reading these on the SDK thread right now -- see the m_chan_mtx
+        // comment in the header.
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        m_channel_id.clear();
+        m_channel_id_z.clear();
+    }
     m_participant_id = 0;
     m_tone_index = 0;
     m_buffers_sent = 0;
@@ -103,10 +109,10 @@ void EngineTalkback::drain_stray_channels()
     // Only tick() calls this, and tick() is the sole caller of the
     // batch-destroy API -- see the invariant comment at the top of the
     // Destroying branch below. Swap the queue out under lock, then never
-    // touch the SDK while holding m_stray_mtx.
+    // touch the SDK while holding m_chan_mtx.
     std::vector<std::basic_string<zchar_t>> strays;
     {
-        std::lock_guard<std::mutex> lock(m_stray_mtx);
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
         if (m_stray_channels.empty()) return;
         strays.swap(m_stray_channels);
     }
@@ -174,8 +180,14 @@ void EngineTalkback::tick()
         int16_t pcm[kCount];
         m_tone_index = talkback_tone_fill(pcm, kCount, m_tone_index, kRate, 440.0, 0.5);
 
+        std::basic_string<zchar_t> channel_copy;
+        {
+            std::lock_guard<std::mutex> lock(m_chan_mtx);
+            channel_copy = m_channel_id_z;
+        }
+
         const ZOOMSDK::SDKError e = m_ctrl->SendAudioDataToChannel(
-            m_channel_id_z.c_str(), reinterpret_cast<const char *>(pcm),
+            channel_copy.c_str(), reinterpret_cast<const char *>(pcm),
             static_cast<unsigned int>(kCount * sizeof(int16_t)), kRate,
             ZOOMSDK::ZoomSDKAudioChannel_Mono);
 
@@ -209,9 +221,17 @@ void EngineTalkback::tick()
         // only two places in this file allowed to touch the batch-destroy
         // API, and both run here, on tick()'s thread -- see the comment at
         // the top of tick().
+        std::basic_string<zchar_t> channel_copy;
+        std::string channel_copy_utf8;
+        {
+            std::lock_guard<std::mutex> lock(m_chan_mtx);
+            channel_copy = m_channel_id_z;
+            channel_copy_utf8 = m_channel_id;
+        }
+
         ZOOMSDK::SDKError e = m_ctrl->BeginBatchDestroyChannels();
-        if (e == ZOOMSDK::SDKERR_SUCCESS && !m_channel_id_z.empty())
-            e = m_ctrl->AddChannelToDestroy(m_channel_id_z.c_str());
+        if (e == ZOOMSDK::SDKERR_SUCCESS && !channel_copy.empty())
+            e = m_ctrl->AddChannelToDestroy(channel_copy.c_str());
         if (e == ZOOMSDK::SDKERR_SUCCESS)
             e = m_ctrl->ExecuteBatchDestroyChannels();
         report("destroy", R"("code":)" + std::to_string(static_cast<int>(e)) +
@@ -227,7 +247,7 @@ void EngineTalkback::tick()
             // meeting (one of 16 gone for good) and nothing will self-heal
             // it. Make that visible rather than silently giving up.
             report("destroy_abandoned",
-                   R"("channel":")" + json_escape(m_channel_id) +
+                   R"("channel":")" + json_escape(channel_copy_utf8) +
                    R"(","attempts":)" + std::to_string(m_destroy_attempts));
             m_phase.store(Phase::Done, std::memory_order_release);
         }
@@ -267,9 +287,25 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         // thread and must never call BeginBatchDestroyChannels/etc directly,
         // even for cleanup, or it can interleave with tick()'s own
         // Begin/Add/Execute sequence and corrupt or merge batches. So: queue,
-        // never call.
+        // never call. The comparison against m_channel_id_z below is exactly
+        // the access that must go through m_chan_mtx -- reachable while
+        // phase is Idle/Done, i.e. while a fresh probe() is allowed to be
+        // clearing/reassigning that member on another thread right now; see
+        // the m_chan_mtx comment in the header.
         if (error == TALKBACK_ERROR_OK) {
-            if (m_channel_id_z == channelID) {
+            bool is_live_channel;
+            {
+                std::lock_guard<std::mutex> lock(m_chan_mtx);
+                is_live_channel = (m_channel_id_z == channelID);
+                if (!is_live_channel) {
+                    // A genuinely different, untracked channel now exists.
+                    // Queue it (still under the lock, so the check and the
+                    // push are one atomic decision); drain_stray_channels()
+                    // (called from tick()) owns actually destroying it.
+                    m_stray_channels.emplace_back(channelID);
+                }
+            }
+            if (is_live_channel) {
                 // This id matches OUR live channel -- a duplicate/redelivered
                 // callback for the channel the ladder already moved past
                 // AwaitingChannel with (e.g. now mid-invite or mid-send).
@@ -278,13 +314,6 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
                 report("create_channel_response_duplicate",
                        R"("channel":")" + json_escape(id) + "\"");
             } else {
-                // A genuinely different, untracked channel now exists.
-                // Queue it; drain_stray_channels() (called from tick()) owns
-                // actually destroying it.
-                {
-                    std::lock_guard<std::mutex> lock(m_stray_mtx);
-                    m_stray_channels.emplace_back(channelID);
-                }
                 report("create_channel_response_stray",
                        R"("channel":")" + json_escape(id) + R"(","queued":true)");
             }
@@ -295,8 +324,11 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         m_phase.store(Phase::Done, std::memory_order_release);
         return;
     }
-    m_channel_id = id;              // UTF-8, reporting only
-    m_channel_id_z.assign(channelID); // SDK identifier, verbatim -- see header
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        m_channel_id = id;              // UTF-8, reporting only
+        m_channel_id_z.assign(channelID); // SDK identifier, verbatim -- see header
+    }
 
     // RUNG 4: invite one participant, resolved from a NAME. A raw id would
     // point at nobody after a rejoin and at the wrong person once ids are
@@ -309,7 +341,12 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         return;
     }
 
-    ZOOMSDK::SDKError e = m_ctrl->BeginBatchInviteUsers(m_channel_id_z.c_str());
+    std::basic_string<zchar_t> channel_copy;
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        channel_copy = m_channel_id_z;
+    }
+    ZOOMSDK::SDKError e = m_ctrl->BeginBatchInviteUsers(channel_copy.c_str());
     if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->AddUserToInvite(m_participant_id);
     if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->ExecuteBatchInviteUsers();
     report("invite", R"("user_id":)" + std::to_string(m_participant_id) +
@@ -338,12 +375,23 @@ void EngineTalkback::onChannelUserJoinResponse(const zchar_t *channelID,
            R"(,"error":)" + std::to_string(static_cast<int>(error)));
     if (m_phase.load(std::memory_order_acquire) != Phase::AwaitingInvite) return;
 
+    // Copy both channel-id representations out under the lock before using
+    // either -- same discipline as everywhere else m_channel_id_z is
+    // touched, see the m_chan_mtx comment in the header.
+    std::basic_string<zchar_t> channel_copy;
+    std::string channel_copy_utf8;
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        channel_copy = m_channel_id_z;
+        channel_copy_utf8 = m_channel_id;
+    }
+
     // Phase alone can't tell "our invite landed" from "some other invite
     // response landed while we happened to be in this phase" -- correlate
     // the callback to the exact channel and user we are waiting on.
-    if (m_channel_id_z != channelID || userID != m_participant_id) {
+    if (channel_copy != channelID || userID != m_participant_id) {
         report("invite_response_mismatch",
-               R"("expected_channel":")" + json_escape(m_channel_id) +
+               R"("expected_channel":")" + json_escape(channel_copy_utf8) +
                R"(","expected_user":)" + std::to_string(m_participant_id));
         return;
     }
@@ -355,16 +403,16 @@ void EngineTalkback::onChannelUserJoinResponse(const zchar_t *channelID,
     // Duck the main meeting for the person being spoken to, so the tone is
     // unambiguous rather than competing with meeting audio.
     const ZOOMSDK::SDKError vol =
-        m_ctrl->SetChannelBackgroundVolume(m_channel_id_z.c_str(), 0.3f);
+        m_ctrl->SetChannelBackgroundVolume(channel_copy.c_str(), 0.3f);
     report("background_volume", R"("code":)" +
            std::to_string(static_cast<int>(vol)));
 
     m_tone_index = 0;
     m_buffers_sent = 0;
-    // m_channel_id_z was fully written in onCreateChannelResponse before
-    // m_phase ever reached AwaitingInvite; this release-store is what makes
-    // that write visible to tick() on whatever thread reads Sending next --
-    // see the ordering comment on m_phase in the header.
+    // Unlike m_phase, m_channel_id_z needs no ordering argument here: tick()
+    // will re-read it through m_chan_mtx itself once it observes Sending
+    // (see the m_chan_mtx comment in the header), so this store only needs
+    // to publish the phase transition, not the string.
     m_phase.store(Phase::Sending, std::memory_order_release);   // tick() takes it from here
 }
 

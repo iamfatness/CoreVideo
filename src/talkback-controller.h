@@ -39,6 +39,15 @@ public:
     // still wanted. See src/talkback-key.h.
     void renew();
 
+    // Explicit teardown for plugin unload. Call this from shutdown_corevideo()
+    // / obs_module_unload(), the same place the sibling singletons (
+    // ZoomControlServer, ZoomOscServer, ZoomIsoRecorder, ZoomEngineClient) are
+    // stopped -- while Qt's event loop is still guaranteed alive. Left to
+    // static destruction at process exit instead, a QObject held by a
+    // function-local static can be torn down after QCoreApplication is gone,
+    // a known Qt hazard for anything owning a live QTimer.
+    void stop();
+
     std::string status_json() const;
 
 private slots:

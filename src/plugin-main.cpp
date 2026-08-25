@@ -70,6 +70,10 @@ static void shutdown_corevideo()
     ZoomControlServer::instance().stop();
     ZoomOscServer::instance().stop();
     ZoomIsoRecorder::instance().stop();
+    // Before the engine goes down: stops the dead-man timer and, if a key is
+    // still open, releases the OBS tap (capture callback, source ref, SHM
+    // region) explicitly rather than leaving it to static destruction order.
+    TalkbackController::instance().stop();
     ZoomEngineClient::instance().stop();
 }
 

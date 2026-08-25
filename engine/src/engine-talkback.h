@@ -36,6 +36,7 @@
 // the ring header's sample_rate engine-side, the same gate the plugin
 // already applies before it ever creates the region.
 #include "../../src/talkback-pcm.h"
+#include "../../src/talkback-channel-owner.h"
 
 #include <atomic>
 #include <chrono>
@@ -65,6 +66,18 @@ public:
                     uint16_t channels);
     void drain_audio();
     void close_audio();
+
+    // ── Persistent talkback session (Milestone 5) ──────────────────────────
+    // Deliberately NOT part of the probe's Phase machine: that machine exists
+    // to tear itself down after one tone, which is the opposite of what a key
+    // held down needs. The session owns its OWN channel, so tick() -- which
+    // destroys the PROBE's channel from a separate thread -- can never touch
+    // it. That separation is the fix for the probe-thread race, and it is
+    // structural rather than a lock.
+    bool session_start(ZOOMSDK::IMeetingService *svc,
+                       const std::string &participant_name);
+    void session_stop();
+    bool session_live() const;
 
     // True once the ladder is quiescent: Idle before the first probe() ever
     // runs, Done after one finishes (success, failure, or abandoned
@@ -251,4 +264,17 @@ private:
     // codebase already has a live incident about. Reset whenever a fresh
     // region is opened so each session gets its own "first occurrence".
     uint32_t    m_audio_send_fail_count = 0;
+
+    // ── Persistent talkback session (Milestone 5) ──────────────────────────
+    // Exactly one CreateChannel may be outstanding across the probe and the
+    // session; see src/talkback-channel-owner.h for why. Command-loop thread
+    // only -- both callers live there -- so it needs no synchronisation, and
+    // that is stated here so nobody "helpfully" makes it atomic and hides the
+    // threading contract.
+    TalkbackChannelOwner       m_pending_create = TalkbackChannelOwner::None;
+    std::basic_string<zchar_t> m_session_channel_z;   // guarded by m_chan_mtx
+    std::string                m_session_channel;     // UTF-8, reporting only
+    std::string                m_session_participant; // by NAME, re-resolved
+    unsigned int               m_session_user_id = 0;
+    bool                       m_session_live    = false;
 };

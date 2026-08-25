@@ -1498,6 +1498,12 @@ int main()
         } else if (command == IpcCommand::TalkbackClose) {
             talkback.close_audio();
 
+        } else if (command == IpcCommand::TalkbackStart) {
+            talkback.session_start(meeting_svc, json_str(line, "participant"));
+
+        } else if (command == IpcCommand::TalkbackStop) {
+            talkback.session_stop();
+
         } else if (command == IpcCommand::Leave) {
             // F4 review-round fix: mirror the quit path below (see the
             // "Join the talkback driving thread BEFORE any SDK teardown
@@ -1524,6 +1530,13 @@ int main()
             // idempotent (bails immediately if !m_audio_open), so calling
             // it here is safe even when talkback was never opened.
             talkback.close_audio();
+            // The persistent session is a separate channel from the probe's
+            // (see engine-talkback.h) and needs its own explicit teardown
+            // here for the same reason close_audio() does: Leave() destroys
+            // meeting-side state out from under it otherwise. session_stop()
+            // is idempotent (bails immediately if nothing is live), so this
+            // is safe even when no session was ever started.
+            talkback.session_stop();
             if (meeting_svc)
                 meeting_svc->Leave(ZOOMSDK::LEAVE_MEETING);
 
@@ -1609,6 +1622,9 @@ int main()
     // ordering discipline as the driving-thread join right above (SDK
     // callbacks must never race teardown).
     talkback.close_audio();
+    // Same reasoning as the Leave branch above: tear down the session's own
+    // channel before the SDK teardown calls below run.
+    talkback.session_stop();
 
     if (meeting_svc) meeting_svc->Leave(ZOOMSDK::LEAVE_MEETING);
     share_engine.detach();

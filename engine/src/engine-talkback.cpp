@@ -97,6 +97,17 @@ bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
     // RUNG 3: create exactly one channel. Max 16 exist; we make one and
     // destroy it, so a failed probe cannot leak channel budget into the
     // meeting.
+    //
+    // Gate behind the same arbiter session_start() uses: exactly one create
+    // may be outstanding across the probe and the session (see
+    // src/talkback-channel-owner.h). Refuse rather than queue -- there is
+    // nothing sensible to queue, and a queued create would arrive with the
+    // other subsystem's response still in flight.
+    if (!talkback_may_request_create(m_pending_create)) {
+        report("busy", R"("reason":"create_busy")");
+        m_phase.store(Phase::Done, std::memory_order_release);
+        return true;
+    }
     const ZOOMSDK::SDKError create_err = m_ctrl->CreateChannel(1);
     report("create_channel", R"("code":)" +
            std::to_string(static_cast<int>(create_err)));
@@ -104,6 +115,7 @@ bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
         m_phase.store(Phase::Done, std::memory_order_release);
         return true;
     }
+    m_pending_create = TalkbackChannelOwner::Probe;
     m_phase_deadline.store(
         (std::chrono::steady_clock::now() + kAwaitTimeout).time_since_epoch().count(),
         std::memory_order_release);
@@ -342,6 +354,52 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
     report("create_channel_response",
            R"("channel":")" + json_escape(id) + R"(","error":)" +
            std::to_string(static_cast<int>(error)));
+
+    // Route by who asked. See src/talkback-channel-owner.h: the response
+    // carries no indication of its requester, so the arbiter is the only
+    // thing standing between the probe and the session adopting each other's
+    // channels.
+    const TalkbackChannelOwner owner = talkback_claim_create(m_pending_create);
+    if (owner == TalkbackChannelOwner::Session) {
+        m_pending_create = TalkbackChannelOwner::None;
+        if (error != TALKBACK_ERROR_OK || channelID == nullptr) {
+            report("session_channel", R"("ok":false,"error":)" +
+                   std::to_string(static_cast<int>(error)));
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_chan_mtx);
+            m_session_channel_z.assign(channelID);
+            m_session_channel = zchar_to_utf8(channelID);
+        }
+        // Invite by NAME, resolved now: Zoom user ids are meeting-scoped, so
+        // a stored id points at nobody after a rejoin and at the wrong face
+        // once ids are recycled.
+        m_session_user_id = resolve_participant(m_session_participant);
+        if (m_session_user_id == 0) {
+            report("session_invite", R"("ok":false,"reason":"no_participant_named",)"
+                   R"("name":")" + json_escape(m_session_participant) + "\"");
+            session_stop();
+            return;
+        }
+        std::basic_string<zchar_t> channel_copy;
+        {
+            std::lock_guard<std::mutex> lock(m_chan_mtx);
+            channel_copy = m_session_channel_z;
+        }
+        ZOOMSDK::SDKError e = m_ctrl->BeginBatchInviteUsers(channel_copy.c_str());
+        if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->AddUserToInvite(m_session_user_id);
+        if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->ExecuteBatchInviteUsers();
+        report("session_invite", R"("user_id":)" + std::to_string(m_session_user_id) +
+               R"(,"code":)" + std::to_string(static_cast<int>(e)));
+        if (e != ZOOMSDK::SDKERR_SUCCESS) { session_stop(); return; }
+        m_ctrl->SetChannelBackgroundVolume(channel_copy.c_str(), 0.3f);
+        m_session_live = true;
+        report("session_live", R"("channel":")" + json_escape(m_session_channel) + "\"");
+        return;
+    }
+    if (owner == TalkbackChannelOwner::Probe)
+        m_pending_create = TalkbackChannelOwner::None;
 
     if (!channelID) {
         // F1 review-round fix: guard before ANY comparison or assignment
@@ -730,16 +788,19 @@ void EngineTalkback::drain_audio()
         return;
     }
 
-    // The channel to talk on is the one this class already holds -- created
-    // and invited through the existing probe/ladder path. Milestone 5 owns
-    // channel SELECTION (targets, the 16/10 caps, pre-provisioned private
-    // channels); this milestone only moves audio into whichever channel is
-    // already open, so no channel id crosses the IPC boundary and nothing here
-    // needs a UTF-8 -> zchar_t conversion.
+    // The channel to talk on is the SESSION's channel (Milestone 5), not the
+    // probe's: the probe's m_channel_id_z is destroyed by tick() from a
+    // separate thread three seconds after it opens, so sending on it here
+    // would race that destroy mid-SendAudioDataToChannel. The session owns
+    // its own channel for exactly this reason -- see the comment on
+    // session_start()/session_stop() -- so tick() can never touch what this
+    // function sends on; the race is now structurally impossible rather than
+    // merely unlikely. No channel id crosses the IPC boundary and nothing
+    // here needs a UTF-8 -> zchar_t conversion.
     std::basic_string<zchar_t> channel_copy;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
-        channel_copy = m_channel_id_z;
+        channel_copy = m_session_channel_z;
     }
 
     auto *hdr = static_cast<ShmAudioHeader *>(m_audio_region.ptr);
@@ -784,6 +845,97 @@ void EngineTalkback::drain_audio()
                    R"(,"occurrence":)" + std::to_string(m_audio_send_fail_count));
         }
     }
+}
+
+// ── Persistent talkback session (Milestone 5) ───────────────────────────────
+//
+// Deliberately NOT part of the probe's Phase machine above: that machine
+// exists to tear itself down after one tone, which is the opposite of what a
+// key held down needs. The session owns its OWN channel (m_session_channel_z,
+// distinct from the probe's m_channel_id_z), so tick() -- which destroys the
+// PROBE's channel from a separate thread -- can never touch it. That
+// separation is what makes the SendAudioDataToChannel/destroy race
+// structurally impossible rather than merely unlikely.
+bool EngineTalkback::session_live() const { return m_session_live; }
+
+bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
+                                   const std::string &participant_name)
+{
+    if (m_session_live) {
+        report("session_start", R"("ok":false,"reason":"already_live")");
+        return false;
+    }
+    if (!svc) {
+        report("session_start", R"("ok":false,"reason":"not_in_meeting")");
+        return false;
+    }
+    m_svc  = svc;
+    m_ctrl = m_svc->GetMeetingTalkbackController();
+    if (!m_ctrl) {
+        report("session_start", R"("ok":false,"reason":"no_controller")");
+        return false;
+    }
+    if (!m_ctrl->IsMeetingSupportTalkBack()) {
+        report("session_start", R"("ok":false,"reason":"not_supported")");
+        return false;
+    }
+    m_ctrl->SetEvent(this);
+
+    if (!talkback_may_request_create(m_pending_create)) {
+        // The probe is mid-create. Refuse rather than queue: a queued create
+        // would arrive with the other subsystem's response still in flight,
+        // which is exactly the ambiguity the arbiter exists to remove.
+        report("session_start", R"("ok":false,"reason":"create_busy")");
+        return false;
+    }
+
+    m_session_participant = participant_name;
+    const ZOOMSDK::SDKError e = m_ctrl->CreateChannel(1);
+    report("session_start", R"("code":)" + std::to_string(static_cast<int>(e)) +
+           R"(,"participant":")" + json_escape(participant_name) + "\"");
+    if (e != ZOOMSDK::SDKERR_SUCCESS) return false;
+
+    m_pending_create = TalkbackChannelOwner::Session;
+    return true;
+}
+
+void EngineTalkback::session_stop()
+{
+    if (!m_session_live && m_session_channel_z.empty()) {
+        // Nothing to tear down. Still clear the pending create so a refused
+        // start cannot wedge the arbiter.
+        if (m_pending_create == TalkbackChannelOwner::Session)
+            m_pending_create = TalkbackChannelOwner::None;
+        return;
+    }
+
+    std::basic_string<zchar_t> channel_copy;
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        channel_copy = m_session_channel_z;
+        m_session_channel_z.clear();
+        m_session_channel.clear();
+    }
+    m_session_live    = false;
+    m_session_user_id = 0;
+    if (m_pending_create == TalkbackChannelOwner::Session)
+        m_pending_create = TalkbackChannelOwner::None;
+
+    if (channel_copy.empty() || !m_ctrl) {
+        report("session_stop", R"("ok":true,"reason":"no_channel")");
+        return;
+    }
+
+    // The session destroys its OWN channel here, on the command-loop thread.
+    // This is NOT the batch-destroy path tick() owns for the probe's stray
+    // queue -- keeping them separate is what keeps "tick() is the sole caller
+    // of the batch-destroy API" true.
+    ZOOMSDK::SDKError e = m_ctrl->BeginBatchDestroyChannels();
+    if (e == ZOOMSDK::SDKERR_SUCCESS)
+        e = m_ctrl->AddChannelToDestroy(channel_copy.c_str());
+    if (e == ZOOMSDK::SDKERR_SUCCESS)
+        e = m_ctrl->ExecuteBatchDestroyChannels();
+    report("session_stop", R"("code":)" + std::to_string(static_cast<int>(e)));
 }
 
 void EngineTalkback::close_audio()

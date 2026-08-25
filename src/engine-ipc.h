@@ -21,6 +21,8 @@
 #define IPC_CMD_TALKBACK_OPEN  "talkback_open"
 #define IPC_CMD_TALKBACK_AUDIO "talkback_audio"
 #define IPC_CMD_TALKBACK_CLOSE "talkback_close"
+#define IPC_CMD_TALKBACK_START "talkback_start"
+#define IPC_CMD_TALKBACK_STOP  "talkback_stop"
 #define IPC_EVT_READY       "ready"
 #define IPC_EVT_AUTH_OK     "auth_ok"
 #define IPC_EVT_AUTH_FAIL   "auth_fail"

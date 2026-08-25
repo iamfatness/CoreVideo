@@ -44,6 +44,8 @@ enum class IpcCommand {
     TalkbackOpen,
     TalkbackAudio,
     TalkbackClose,
+    TalkbackStart,
+    TalkbackStop,
 };
 
 // The value of the first top-level "cmd" string field, or "" when the line has
@@ -96,6 +98,8 @@ inline IpcCommand ipc_command_of(const std::string &line)
     if (cmd == IPC_CMD_TALKBACK_OPEN)  return IpcCommand::TalkbackOpen;
     if (cmd == IPC_CMD_TALKBACK_AUDIO) return IpcCommand::TalkbackAudio;
     if (cmd == IPC_CMD_TALKBACK_CLOSE) return IpcCommand::TalkbackClose;
+    if (cmd == IPC_CMD_TALKBACK_START) return IpcCommand::TalkbackStart;
+    if (cmd == IPC_CMD_TALKBACK_STOP)  return IpcCommand::TalkbackStop;
     return IpcCommand::Unknown;
 }
 

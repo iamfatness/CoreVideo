@@ -137,6 +137,19 @@ int main()
     check(ipc_command_of(R"({"cmd":"talkback_open_extra"})") == IpcCommand::Unknown,
           "a longer command starting with talkback_open matched it");
 
+    // ── Talkback session commands route exactly ─────────────────────────────
+    check(ipc_command_of(R"({"cmd":"talkback_start","participant":"Sarah Muller"})") ==
+              IpcCommand::TalkbackStart,
+          "talkback_start did not route to IpcCommand::TalkbackStart");
+    check(ipc_command_of(R"({"cmd":"talkback_stop"})") == IpcCommand::TalkbackStop,
+          "talkback_stop did not route to IpcCommand::TalkbackStop");
+    // The talkback_* family now has six members sharing a prefix. Exact match
+    // must keep every one of them apart.
+    check(ipc_command_of(R"({"cmd":"talkback_start_extra"})") == IpcCommand::Unknown,
+          "a longer command starting with talkback_start matched it");
+    check(ipc_command_of(R"({"cmd":"talkback_stop_extra"})") == IpcCommand::Unknown,
+          "a longer command starting with talkback_stop matched it");
+
     if (g_failures > 0) {
         std::cerr << "engine-command: " << g_failures << " failure(s)\n";
         return 1;

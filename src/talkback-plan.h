@@ -18,7 +18,11 @@
 // than one who cannot take somebody aside. Private channels take what is
 // left, and everyone who does not get one is NAMED in uncovered_private --
 // never silently dropped, because that failure is invisible from the control
-// room.
+// room. Past 160 unique nominees even the all-talent fan-out no longer fits
+// 16 channels; those people are named again, separately, in `unreachable`,
+// because they hear nothing at all -- a strictly worse failure than losing
+// only the private aside, so it gets its own list rather than being buried
+// inside uncovered_private.
 //
 // Free of Qt / OBS / Zoom SDK dependencies so the whole decision can be
 // pinned by a test with no engine and no meeting.
@@ -45,9 +49,21 @@ struct TalkbackPlannedChannel {
 
 struct TalkbackPlan {
     std::vector<TalkbackPlannedChannel> channels;
-    // Nominees with no private channel of their own. They are still reachable
-    // via all-talent; they just cannot be taken aside.
+    // Nominees with no private channel of their own. Most are still reachable
+    // via all-talent -- but not all: when `all_talent_complete` is false, the
+    // ones ALSO in `unreachable` are on no channel whatsoever. This field
+    // alone cannot tell the two apart; cross-check `unreachable`.
     std::vector<std::string> uncovered_private;
+    // Nominees on no channel at all -- not in any all-talent slice AND not
+    // privately covered. Always a subset of uncovered_private (see above),
+    // and always empty when all_talent_complete is true: the all-talent
+    // fan-out is only short a member when it was clamped to the 16-channel
+    // cap below the count it actually needed. Named explicitly, like
+    // uncovered_private, rather than left for a caller to infer from the
+    // all_talent_complete bool alone -- a bare bool tells the operator
+    // *that* someone is unreachable, not *who*, and that is the exact
+    // failure this planner exists to name instead of hide.
+    std::vector<std::string> unreachable;
     // False when the panel is so large that even the all-talent fan-out does
     // not fit in 16 channels -- at which point some people cannot be reached
     // at all, and the operator has to know.
@@ -85,6 +101,20 @@ inline TalkbackPlan talkback_plan(const std::vector<std::string> &nominees)
         for (std::size_t m = first; m < last; ++m) c.members.push_back(unique[m]);
         plan.channels.push_back(std::move(c));
     }
+
+    // ── Anyone past the all-talent fan-out's reach is unreachable ──────────
+    // Only nonempty when all_talent_channels was clamped below `need` (i.e.
+    // !all_talent_complete): the fan-out then only covers the first
+    // all_talent_channels * 10 unique nominees, and everyone after that
+    // index is in no all-talent slice. The private loop below is about to
+    // push every one of these into uncovered_private too (its `remaining`
+    // budget is 16 - all_talent_channels, which is exactly 0 whenever this
+    // clamp fired), so `unreachable` stays the strict subset the struct
+    // comment promises without extra bookkeeping.
+    const std::size_t all_talent_covered =
+        std::min(all_talent_channels * kTalkbackMaxUsersPerChannel, unique.size());
+    for (std::size_t i = all_talent_covered; i < unique.size(); ++i)
+        plan.unreachable.push_back(unique[i]);
 
     // ── Private channels take whatever is left ────────────────────────────
     std::size_t remaining = kTalkbackMaxChannels - plan.channels.size();

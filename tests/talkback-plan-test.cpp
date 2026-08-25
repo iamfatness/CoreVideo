@@ -147,6 +147,47 @@ int main()
         check(p.channels.size() <= kTalkbackMaxChannels, "the cap was exceeded anyway");
     }
 
+    // ── `unreachable` names exactly who is on no channel at all ────────────
+    // At N=200 the all-talent fan-out (clamped to 16 channels x 10 = 160)
+    // only covers "Talent 1".."Talent 160". "Talent 161".."Talent 200" (40
+    // people) are in no all-talent slice AND, per the finding this pins,
+    // uncovered_private alone cannot tell them apart from the other 160 who
+    // are merely missing a private channel -- so unreachable must name them,
+    // by value, not just by count (a count-only check would pass even if the
+    // wrong 40 names were reported).
+    {
+        const TalkbackPlan p = talkback_plan(names(200));
+        const std::vector<std::string> all200 = names(200);
+        std::vector<std::string> expected_unreachable(all200.begin() + 160, all200.end());
+        check(p.unreachable.size() == 40,
+              "200 nominees did not yield exactly 40 unreachable people");
+        check(p.unreachable == expected_unreachable,
+              "unreachable did not name exactly Talent 161..Talent 200, in order");
+
+        // Subset relationship: everyone unreachable must also appear in
+        // uncovered_private (they still have no private channel either).
+        for (const auto &u : p.unreachable) {
+            bool also_in_uncovered_private = false;
+            for (const auto &c : p.uncovered_private)
+                if (c == u) { also_in_uncovered_private = true; break; }
+            check(also_in_uncovered_private,
+                  "an unreachable nominee was missing from uncovered_private -- not a subset");
+        }
+    }
+
+    // ── `unreachable` is empty whenever all-talent fits the budget ─────────
+    // N=160 is an exact fit (16 channels x 10) and N=24 is comfortably under
+    // it; in both, all_talent_complete is true, so nobody should be reported
+    // unreachable even though uncovered_private is large for N=160.
+    {
+        const TalkbackPlan p160 = talkback_plan(names(160));
+        check(p160.unreachable.empty(),
+              "160 nominees fit the all-talent fan-out but reported someone unreachable");
+        const TalkbackPlan p24 = talkback_plan(names(24));
+        check(p24.unreachable.empty(),
+              "24 nominees fit the all-talent fan-out but reported someone unreachable");
+    }
+
     // ── Duplicate names collapse, they do not consume two channels ─────────
     {
         const TalkbackPlan p = talkback_plan({"Sarah", "Sarah", "Luis"});

@@ -50,6 +50,18 @@ void EngineTalkback::report_session(const std::string &stage, const std::string 
 // "stage" key, a top-level "live" key instead) so
 // ZoomEngineClient::handle_event() can tell the two apart on the same cmd
 // without any ordering assumption between them.
+// Task 2: nominate()'s progress line, tagged "cmd":"talkback_nominate" --
+// same string as the P2E command that triggers it, mirroring report()'s
+// convention above rather than report_session()'s (see the header comment
+// on report_nomination() for why the two families differ here).
+void EngineTalkback::report_nomination(const std::string &stage, const std::string &fields) const
+{
+    std::string line = R"({"cmd":"talkback_nominate","stage":")" + stage + "\"";
+    if (!fields.empty()) line += "," + fields;
+    line += "}";
+    EngineIpc::write(line);
+}
+
 void EngineTalkback::report_session_state(bool live, const std::string &reason) const
 {
     std::string line = R"({"cmd":"talkback_session","live":)" +
@@ -151,19 +163,22 @@ bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
     // decision out under the lock, release, THEN call the SDK, same
     // discipline as every other m_chan_mtx access in this file.
     bool create_gate_ok;
-    bool expired_session_create;
+    TalkbackChannelOwner expired_owner;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
-        // Follow-up to the F1 review-round fix: lazily unwedge a stale
-        // Session-owned pending create before evaluating the gate -- see
-        // expire_stale_session_create_locked()'s and
-        // m_session_create_deadline's doc comments.
-        expired_session_create = expire_stale_session_create_locked();
+        // Follow-up to the F1 review-round fix, extended for Task 2: lazily
+        // unwedge a stale Session- or Nomination-owned pending create before
+        // evaluating the gate -- see expire_stale_pending_create_locked()'s
+        // doc comment.
+        expired_owner = expire_stale_pending_create_locked();
         create_gate_ok = talkback_may_request_create(m_pending_create);
     }
-    if (expired_session_create) {
+    if (expired_owner == TalkbackChannelOwner::Session) {
         report_session("session_create_expired",
                        R"("reason":"swallowed_create_response")");
+    } else if (expired_owner == TalkbackChannelOwner::Nomination) {
+        report_nomination("create_expired",
+                          R"("reason":"swallowed_create_response")");
     }
     if (!create_gate_ok) {
         report("busy", R"("reason":"create_busy")");
@@ -261,41 +276,61 @@ void EngineTalkback::drain_stray_channels()
     }
 }
 
-bool EngineTalkback::expire_stale_session_create_locked()
+TalkbackChannelOwner EngineTalkback::expire_stale_pending_create_locked()
 {
     // Caller holds m_chan_mtx -- see the header comment on this function and
-    // on m_session_create_deadline. Only Session ever needs this: Probe's
-    // pending create already has a clearer of its own (tick()'s
-    // AwaitingChannel timeout, running on the driving thread), so a stale
-    // Probe entry here would be a bug in that machinery, not something this
-    // function should paper over.
-    if (m_pending_create != TalkbackChannelOwner::Session) return false;
+    // on m_session_create_deadline / m_nomination_create_deadline. Only
+    // Session and Nomination ever need this: Probe's pending create already
+    // has a clearer of its own (tick()'s AwaitingChannel timeout, running on
+    // the driving thread), so a stale Probe entry here would be a bug in
+    // that machinery, not something this function should paper over.
+    std::atomic<std::chrono::steady_clock::rep> *deadline_field = nullptr;
+    if (m_pending_create == TalkbackChannelOwner::Session)
+        deadline_field = &m_session_create_deadline;
+    else if (m_pending_create == TalkbackChannelOwner::Nomination)
+        deadline_field = &m_nomination_create_deadline;
+    else
+        return TalkbackChannelOwner::None;
+
     const auto deadline = std::chrono::steady_clock::time_point(
         std::chrono::steady_clock::duration(
-            m_session_create_deadline.load(std::memory_order_acquire)));
-    if (std::chrono::steady_clock::now() < deadline) return false;
+            deadline_field->load(std::memory_order_acquire)));
+    if (std::chrono::steady_clock::now() < deadline) return TalkbackChannelOwner::None;
 
     // The response never arrived (or arrived and was somehow lost before
     // reaching onCreateChannelResponse -- either way, indistinguishable from
     // here). Forget the pending create so talkback_may_request_create()
-    // unwedges for both probe() and session_start(). m_session_create_
-    // cancelled is reset too: whatever cancellation state applied to the
-    // create we're now forgetting no longer means anything once
-    // m_pending_create itself no longer names it.
-    //
-    // Consequence, stated explicitly rather than left implicit: if that
-    // CreateChannel response arrives AFTER this point, onCreateChannelResponse
-    // will see owner == None (m_pending_create no longer says Session) and
-    // this callback's id-comparison fallback will not match m_channel_id_z
-    // or m_session_channel_z either -- so it is queued onto m_stray_channels
-    // and handled by the ordinary stray path instead of the Session/
-    // cancelled path above. That is correct, not an oversight: by the time
-    // this expires, nobody is tracking that create as "ours" anymore, so a
-    // stray is the right disposition -- the same one an untracked channel
-    // from any other source gets.
+    // unwedges for probe(), session_start(), AND nominate(). Whichever owner
+    // this was gets reported by the caller -- see the header comment on this
+    // function for why the report happens outside m_chan_mtx.
+    const TalkbackChannelOwner expired = m_pending_create;
     m_pending_create = TalkbackChannelOwner::None;
-    m_session_create_cancelled = false;
-    return true;
+    if (expired == TalkbackChannelOwner::Session) {
+        // m_session_create_cancelled is reset too: whatever cancellation
+        // state applied to the create we're now forgetting no longer means
+        // anything once m_pending_create itself no longer names it.
+        //
+        // Consequence, stated explicitly rather than left implicit: if that
+        // CreateChannel response arrives AFTER this point,
+        // onCreateChannelResponse will see owner == None (m_pending_create
+        // no longer says Session) and this callback's id-comparison
+        // fallback will not match m_channel_id_z or m_session_channel_z
+        // either -- so it is queued onto m_stray_channels and handled by
+        // the ordinary stray path instead of the Session/cancelled path
+        // above. That is correct, not an oversight: by the time this
+        // expires, nobody is tracking that create as "ours" anymore, so a
+        // stray is the right disposition -- the same one an untracked
+        // channel from any other source gets.
+        m_session_create_cancelled = false;
+    } else {
+        // A swallowed Nomination create response means the rest of the
+        // queued plan can never be provisioned by THIS ladder (there is
+        // nothing to resume from -- we don't know if the channel exists).
+        // Forget the queue so a later nominate() starts clean instead of
+        // silently continuing to believe channels are still coming.
+        m_nomination_pending.clear();
+    }
+    return expired;
 }
 
 void EngineTalkback::tick()
@@ -602,6 +637,79 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         report_session_state(true, "live");
         return;
     }
+    if (owner == TalkbackChannelOwner::Nomination) {
+        if (error != TALKBACK_ERROR_OK || channelID == nullptr) {
+            report_nomination("channel_failed",
+                              R"("error":)" + std::to_string(static_cast<int>(error)));
+            // The rest of the queued plan can never be provisioned by THIS
+            // ladder -- there is nothing to resume from, and issuing the
+            // next queued CreateChannel now would be indistinguishable from
+            // a fresh attempt that happens to reuse a stale queue. Forget
+            // it; a later nominate() call starts clean.
+            std::lock_guard<std::mutex> lock(m_chan_mtx);
+            m_nomination_pending.clear();
+            return;
+        }
+
+        TalkbackPlannedChannel planned;
+        bool have_planned;
+        {
+            std::lock_guard<std::mutex> lock(m_chan_mtx);
+            have_planned = !m_nomination_pending.empty();
+            if (have_planned) {
+                planned = m_nomination_pending.front();
+                m_nomination_pending.erase(m_nomination_pending.begin());
+                TalkbackProvisionedChannel pc;
+                pc.channel_id_z.assign(channelID);
+                pc.channel_id = id;
+                pc.members = planned.members;
+                pc.is_all_talent = planned.is_all_talent;
+                m_provisioned_channels.push_back(std::move(pc));
+            }
+        }
+        if (!have_planned) {
+            // Defensive, believed unreachable: this class's invariant is
+            // that m_pending_create == Nomination implies exactly one entry
+            // is still queued for the create currently in flight, so the
+            // arbiter routing this response here should guarantee
+            // have_planned is true. If that invariant is ever violated, the
+            // channel Zoom just created is real and now genuinely
+            // untracked -- queue it as a stray (drain_stray_channels(),
+            // called from tick(), destroys it) rather than leak one of the
+            // meeting's 16 or silently drop it.
+            std::lock_guard<std::mutex> lock(m_chan_mtx);
+            m_stray_channels.emplace_back(channelID);
+            report_nomination("channel_untracked", R"("channel":")" + json_escape(id) + "\"");
+            return;
+        }
+
+        report_nomination("channel_created",
+                          R"("channel":")" + json_escape(id) + R"(","is_all_talent":)" +
+                          (planned.is_all_talent ? "true" : "false") + R"(,"members":)" +
+                          std::to_string(planned.members.size()));
+
+        // Invite by NAME, resolved now: Zoom user ids are meeting-scoped, so
+        // a stored id would point at nobody after a rejoin and at the wrong
+        // face once ids are recycled -- same rule the probe and the session
+        // already follow.
+        const std::basic_string<zchar_t> channel_copy(channelID);
+        for (const auto &name : planned.members)
+            invite_nominee(channel_copy, id, name);
+
+        bool more;
+        std::size_t provisioned_count = 0;
+        {
+            std::lock_guard<std::mutex> lock(m_chan_mtx);
+            more = !m_nomination_pending.empty();
+            if (!more) provisioned_count = m_provisioned_channels.size();
+        }
+        if (more)
+            nomination_create_next();
+        else
+            report_nomination("nominate_done",
+                              R"("channels":)" + std::to_string(provisioned_count));
+        return;
+    }
     // owner == Probe was already cleared above; owner == None means nothing
     // was outstanding (a stray/duplicate, handled by id-comparison below --
     // never by m_pending_create, which by definition has no opinion here).
@@ -823,6 +931,179 @@ void EngineTalkback::onChannelUserLeaveResponse(const zchar_t *, unsigned int, T
 void EngineTalkback::onJoinTalkbackChannel(unsigned int) {}
 void EngineTalkback::onLeaveTalkbackChannel(unsigned int) {}
 void EngineTalkback::onInviterAudioLevel(unsigned int, unsigned int) {}
+
+// ── Pre-provisioned channels (Task 2, 2026-08-25) ───────────────────────────
+//
+// Moves channel creation from key time to nomination time -- see nominate()'s
+// header declaration comment for the live-measured reason (buffers discarded
+// on every key press while the create+invite round trip was in flight).
+bool EngineTalkback::nominate(ZOOMSDK::IMeetingService *svc,
+                              const std::vector<std::string> &nominees)
+{
+    // R1-style mutual exclusion, same reasoning as probe()'s and
+    // session_start()'s matching guards: nominate() is about to reassign
+    // m_svc/m_ctrl, the exact fields the probe's driving thread dereferences
+    // for as long as has_pending_work() is true, and a live session already
+    // holds its own channel through those same fields. This is the
+    // plan-level ruling that "nomination must not break [probe/session
+    // mutual exclusion]" -- refusing is correct here for the same reason it
+    // is correct in the other two: there is nothing sensible to queue, and
+    // queuing would let nomination's CreateChannel arrive while the OTHER
+    // subsystem's response is still in flight, the exact ambiguity the
+    // arbiter exists to remove.
+    if (m_session_live) {
+        report_nomination("nominate", R"("ok":false,"reason":"session_live")");
+        return false;
+    }
+    if (has_pending_work()) {
+        report_nomination("nominate", R"("ok":false,"reason":"probe_busy")");
+        return false;
+    }
+    {
+        // No un-nominate in this task: a second nominate() call while an
+        // earlier one's channels are still standing would leak the earlier
+        // set (nothing here destroys them) rather than reconfigure
+        // anything. Refuse loudly instead of silently orphaning live Zoom
+        // channels -- Task 3, which reworks the session path against this
+        // table, owns deciding what a re-nomination should do.
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        if (!m_provisioned_channels.empty() || !m_nomination_pending.empty()) {
+            report_nomination("nominate", R"("ok":false,"reason":"already_provisioned")");
+            return false;
+        }
+    }
+    if (!svc) {
+        report_nomination("nominate", R"("ok":false,"reason":"not_in_meeting")");
+        return false;
+    }
+    m_svc  = svc;
+    m_ctrl = m_svc->GetMeetingTalkbackController();
+    if (!m_ctrl) {
+        report_nomination("nominate", R"("ok":false,"reason":"no_controller")");
+        return false;
+    }
+    if (!m_ctrl->IsMeetingSupportTalkBack()) {
+        report_nomination("nominate", R"("ok":false,"reason":"not_supported")");
+        return false;
+    }
+    m_ctrl->SetEvent(this);
+
+    const TalkbackPlan plan = talkback_plan(nominees);
+
+    // Gates are surfaced, never swallowed: name every nominee the planner
+    // could not fully reach BEFORE creating a single channel, not only if
+    // something later fails. See src/talkback-plan.h for what each list
+    // means.
+    for (const auto &name : plan.uncovered_private)
+        report_nomination("uncovered_private", R"("name":")" + json_escape(name) + "\"");
+    for (const auto &name : plan.unreachable)
+        report_nomination("unreachable", R"("name":")" + json_escape(name) + "\"");
+    report_nomination("plan", R"("channels":)" + std::to_string(plan.channels.size()) +
+                      R"(,"all_talent_complete":)" +
+                      (plan.all_talent_complete ? "true" : "false"));
+
+    if (plan.channels.empty()) {
+        // Nothing to provision (e.g. an empty nominee list) -- not a
+        // failure, just a plan with no channels. Report completion so a
+        // caller waiting on "nominate_done" doesn't wait forever.
+        report_nomination("nominate_done", R"("channels":0)");
+        return true;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        m_nomination_pending.assign(plan.channels.begin(), plan.channels.end());
+    }
+    return nomination_create_next();
+}
+
+bool EngineTalkback::nomination_create_next()
+{
+    // Gate through the same arbiter probe()/session_start() use -- copy the
+    // decision out under the lock, release, THEN call the SDK, same
+    // discipline as every other m_chan_mtx access in this file.
+    bool create_gate_ok;
+    TalkbackChannelOwner expired_owner;
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        expired_owner = expire_stale_pending_create_locked();
+        create_gate_ok = talkback_may_request_create(m_pending_create);
+    }
+    if (expired_owner == TalkbackChannelOwner::Session) {
+        report_session("session_create_expired",
+                       R"("reason":"swallowed_create_response")");
+    } else if (expired_owner == TalkbackChannelOwner::Nomination) {
+        report_nomination("create_expired",
+                          R"("reason":"swallowed_create_response")");
+    }
+    if (!create_gate_ok) {
+        // The probe or the session is mid-create. Refuse rather than wait:
+        // there is no sensible way to hold this queue open across an
+        // unrelated create's whole round trip, and the plan-level ruling
+        // already says nomination must not block on the arbiter. The
+        // channels already provisioned before this point (if any) stay
+        // provisioned; only the not-yet-created remainder is lost.
+        report_nomination("nominate", R"("ok":false,"reason":"create_busy")");
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        m_nomination_pending.clear();
+        return false;
+    }
+
+    const ZOOMSDK::SDKError e = m_ctrl->CreateChannel(1);
+    report_nomination("create_channel", R"("code":)" + std::to_string(static_cast<int>(e)));
+    if (e != ZOOMSDK::SDKERR_SUCCESS) {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        m_nomination_pending.clear();
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        m_pending_create = TalkbackChannelOwner::Nomination;
+        m_nomination_create_deadline.store(
+            (std::chrono::steady_clock::now() + kAwaitTimeout).time_since_epoch().count(),
+            std::memory_order_release);
+    }
+    return true;
+}
+
+void EngineTalkback::invite_nominee(const std::basic_string<zchar_t> &channel_id_z,
+                                    const std::string &channel_id_utf8,
+                                    const std::string &name)
+{
+    // resolve_participant() reports IsSupportTalkback() itself (the
+    // per-user gate) whenever it finds a match -- see its own comment. A
+    // nominee not currently in the meeting resolves to 0: reported and
+    // skipped here, not an error -- a future roster-driven re-resolution
+    // (Task 4) is what is expected to pick them up once they join.
+    const unsigned int uid = resolve_participant(name);
+    if (uid == 0) {
+        report_nomination("member_not_in_meeting",
+                          R"("name":")" + json_escape(name) + R"(","channel":")" +
+                          json_escape(channel_id_utf8) + "\"");
+        return;
+    }
+    ZOOMSDK::SDKError e = m_ctrl->BeginBatchInviteUsers(channel_id_z.c_str());
+    if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->AddUserToInvite(uid);
+    if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->ExecuteBatchInviteUsers();
+    report_nomination("invite",
+                      R"("name":")" + json_escape(name) + R"(","user_id":)" +
+                      std::to_string(uid) + R"(,"channel":")" +
+                      json_escape(channel_id_utf8) + R"(","code":)" +
+                      std::to_string(static_cast<int>(e)));
+}
+
+void EngineTalkback::nomination_reset()
+{
+    // Bookkeeping only -- never touches the SDK. See the header comment on
+    // why: provisioned channels and their membership are meeting-scoped, so
+    // once the meeting is gone (Leave/quit) there is nothing left on Zoom's
+    // side to select or destroy.
+    std::lock_guard<std::mutex> lock(m_chan_mtx);
+    m_nomination_pending.clear();
+    m_provisioned_channels.clear();
+    if (m_pending_create == TalkbackChannelOwner::Nomination)
+        m_pending_create = TalkbackChannelOwner::None;
+}
 
 // ── Talkback audio path (Milestone 2) ───────────────────────────────────────
 //
@@ -1180,20 +1461,23 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
     // m_pending_create is guarded by m_chan_mtx -- see the header comment on
     // it. Copy the decision out under the lock, release, THEN call the SDK.
     bool create_gate_ok;
-    bool expired_session_create;
+    TalkbackChannelOwner expired_owner;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
-        // Follow-up to the F1 review-round fix: lazily unwedge a stale
-        // Session-owned pending create (possibly from a PREVIOUS session
-        // whose response never arrived) before evaluating the gate -- see
-        // expire_stale_session_create_locked()'s and
-        // m_session_create_deadline's doc comments.
-        expired_session_create = expire_stale_session_create_locked();
+        // Follow-up to the F1 review-round fix, extended for Task 2: lazily
+        // unwedge a stale Session-owned pending create (possibly from a
+        // PREVIOUS session whose response never arrived) or a stale
+        // Nomination-owned one before evaluating the gate -- see
+        // expire_stale_pending_create_locked()'s doc comment.
+        expired_owner = expire_stale_pending_create_locked();
         create_gate_ok = talkback_may_request_create(m_pending_create);
     }
-    if (expired_session_create) {
+    if (expired_owner == TalkbackChannelOwner::Session) {
         report_session("session_create_expired",
                        R"("reason":"swallowed_create_response")");
+    } else if (expired_owner == TalkbackChannelOwner::Nomination) {
+        report_nomination("create_expired",
+                          R"("reason":"swallowed_create_response")");
     }
     if (!create_gate_ok) {
         // The probe is mid-create. Refuse rather than queue: a queued create

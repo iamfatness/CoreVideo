@@ -46,6 +46,7 @@ enum class IpcCommand {
     TalkbackClose,
     TalkbackStart,
     TalkbackStop,
+    TalkbackNominate,
 };
 
 // The value of the first top-level "cmd" string field, or "" when the line has
@@ -100,6 +101,7 @@ inline IpcCommand ipc_command_of(const std::string &line)
     if (cmd == IPC_CMD_TALKBACK_CLOSE) return IpcCommand::TalkbackClose;
     if (cmd == IPC_CMD_TALKBACK_START) return IpcCommand::TalkbackStart;
     if (cmd == IPC_CMD_TALKBACK_STOP)  return IpcCommand::TalkbackStop;
+    if (cmd == IPC_CMD_TALKBACK_NOMINATE) return IpcCommand::TalkbackNominate;
     return IpcCommand::Unknown;
 }
 

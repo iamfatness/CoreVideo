@@ -2,18 +2,23 @@
 //
 // talkback-channel-owner.h — who a CreateChannel response belongs to.
 //
-// Two subsystems ask the Zoom SDK for talkback channels:
+// Three subsystems ask the Zoom SDK for talkback channels:
 //
 //   * the Milestone 1 PROBE, which creates one, sends a 3s tone, and destroys
 //     it from tick() on its own driving thread;
 //   * the talkback SESSION, which creates one and holds it open for as long
-//     as a key is down.
+//     as a key is down;
+//   * NOMINATION (Task 2, 2026-08-25), which creates every channel
+//     talkback_plan() decides on for a nominated talent list, one at a time,
+//     at nomination time rather than at key time -- see src/talkback-plan.h
+//     and engine-talkback.h's nominate().
 //
 // CreateChannel(1) does not return the channel id. It arrives later in
 // onCreateChannelResponse, which says nothing about who asked. Route it wrong
-// and either the probe adopts the session's channel (and destroys it three
-// seconds later, mid-sentence) or the session adopts the probe's (which tick()
-// then destroys underneath it). Both are silent on a live show.
+// and the probe can adopt the session's or nomination's channel (and destroy
+// it three seconds later, mid-sentence or mid-provisioning), or the session
+// or nomination can adopt the probe's (which tick() then destroys underneath
+// it). All three misroutings are silent on a live show.
 //
 // THE RULE: exactly one create may be outstanding at a time, tracked in
 // EngineTalkback::m_pending_create (engine-talkback.h).
@@ -22,13 +27,15 @@
 // An earlier version of this comment claimed both CreateChannel callers run
 // on the engine's single command-loop thread, so the field "costs nothing"
 // and needs none. That was true until review-round R3 added a driving-thread
-// writer, and is no longer true as written -- do not restore it. As of R3,
-// m_pending_create has FOUR write sites, on TWO different threads:
-//   * probe() and session_start() (engine-talkback.cpp) CLAIM it (None ->
-//     Probe / None -> Session). Both run on the engine's command-loop
-//     thread, which on Windows is also the SDK's message-pump thread. The
-//     GATE (talkback_may_request_create) is checked BEFORE their
-//     CreateChannel call; the CLAIM (the actual store of Probe/Session) only
+// writer, and is no longer true as written -- do not restore it. As of Task 2
+// (2026-08-25), m_pending_create has SIX write sites, on TWO different
+// threads:
+//   * probe(), session_start(), and nominate()/nomination_create_next()
+//     (engine-talkback.cpp) CLAIM it (None -> Probe / None -> Session / None
+//     -> Nomination). All run on the engine's command-loop thread, which on
+//     Windows is also the SDK's message-pump thread. The GATE
+//     (talkback_may_request_create) is checked BEFORE their CreateChannel
+//     call; the CLAIM (the actual store of Probe/Session/Nomination) only
 //     happens AFTER that call returns SDKERR_SUCCESS. Do not conflate the
 //     two: the field reads None for the whole span between the gate check
 //     and the store, which is precisely the window this arbiter exists to
@@ -46,9 +53,15 @@
 //     swallowed CreateChannel response from wedging the arbiter forever.
 //     This one runs on the PROBE'S OWN separate driving thread (see tick()'s
 //     own top-of-function comment) -- genuinely concurrent with the other
-//     three, not merely a different call site on the same thread. It is the
+//     five, not merely a different call site on the same thread. It is the
 //     ONLY write site not on the command-loop thread, and is therefore the
 //     entire reason this field needs synchronization at all.
+//   * expire_stale_pending_create_locked() (same file, extended for Task 2)
+//     ALSO clears it (-> None, for a stale Session OR a stale Nomination),
+//     lazily, from inside the gate check every claimer above already takes
+//     under m_chan_mtx -- the same self-healing tick()'s timeout gives
+//     Probe, given to Session and Nomination without a second thread or
+//     timer. Command-loop thread, same as its callers.
 // Because of that one driving-thread writer, m_pending_create is guarded by
 // EngineTalkback's m_chan_mtx everywhere it is read or written -- copy the
 // decision out under the lock, release, THEN call the SDK, same discipline
@@ -59,8 +72,8 @@
 // comment's old claim; verify the thread each writer runs on first, and
 // recount the write sites -- this paragraph has already been caught stale
 // once by undercounting them. A queue instead of a single outstanding slot
-// would buy nothing here and would add a way for the probe and the session
-// to interleave.
+// would buy nothing here and would add a way for the probe, the session, and
+// nomination to interleave.
 //
 // Free of Qt / OBS / Zoom SDK dependencies so the routing can be pinned by a
 // test with no engine and no meeting.
@@ -72,6 +85,8 @@ enum class TalkbackChannelOwner {
     Probe,
     // The persistent talkback session.
     Session,
+    // Pre-provisioning a nominated talent list's channels (Task 2).
+    Nomination,
 };
 
 // May a subsystem issue CreateChannel right now?

@@ -1,21 +1,22 @@
 // tests/talkback-channel-owner-test.cpp
 // Who a CreateChannel response belongs to.
 //
-// Two subsystems now ask the Zoom SDK for talkback channels: the Milestone 1
-// probe (creates one, sends a 3s tone, destroys it) and the talkback session
-// (creates one and holds it open while a key is down). CreateChannel(1) does
-// not return the id -- it arrives later in onCreateChannelResponse, which
-// carries no indication of who asked.
+// Three subsystems now ask the Zoom SDK for talkback channels: the Milestone 1
+// probe (creates one, sends a 3s tone, destroys it), the talkback session
+// (creates one and holds it open while a key is down), and nomination (Task 2,
+// creates every channel a nominated talent list needs, one at a time, at
+// nomination time). CreateChannel(1) does not return the id -- it arrives
+// later in onCreateChannelResponse, which carries no indication of who asked.
 //
-// Get this wrong in one direction and the probe adopts the session's channel
-// and destroys it three seconds later, cutting the director off mid-sentence.
-// Get it wrong in the other and the session adopts the probe's channel, which
-// tick() then destroys underneath it. Both are silent failures on a live show,
-// so the decision is a pure function pinned here.
+// Get this wrong and one subsystem adopts another's channel -- destroying it
+// out from under a live tone, a live session, or a still-provisioning plan.
+// All three misroutings are silent failures on a live show, so the decision
+// is a pure function pinned here.
 //
-// The rule is deliberately strict: exactly ONE create may be outstanding. Both
-// callers run on the engine's single command-loop thread, so serialising is
-// free -- and a queue would only add a way for the two to interleave.
+// The rule is deliberately strict: exactly ONE create may be outstanding. All
+// three callers run on the engine's single command-loop thread, so
+// serialising is free -- and a queue would only add a way for them to
+// interleave.
 #include "talkback-channel-owner.h"
 
 #include <iostream>
@@ -41,6 +42,8 @@ int main()
           "a second create was allowed while the probe's was outstanding");
     check(!talkback_may_request_create(TalkbackChannelOwner::Session),
           "a second create was allowed while the session's was outstanding");
+    check(!talkback_may_request_create(TalkbackChannelOwner::Nomination),
+          "a second create was allowed while nomination's was outstanding");
 
     // ── The response goes to whoever is outstanding, and clears it ─────────
     check(talkback_claim_create(TalkbackChannelOwner::Probe) ==
@@ -49,6 +52,9 @@ int main()
     check(talkback_claim_create(TalkbackChannelOwner::Session) ==
               TalkbackChannelOwner::Session,
           "the session's create response was not routed to the session");
+    check(talkback_claim_create(TalkbackChannelOwner::Nomination) ==
+              TalkbackChannelOwner::Nomination,
+          "nomination's create response was not routed to nomination");
 
     // ── An UNEXPECTED response belongs to nobody ───────────────────────────
     // A late or duplicate response with nothing outstanding must NOT be

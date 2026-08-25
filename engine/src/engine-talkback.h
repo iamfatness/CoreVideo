@@ -1,6 +1,9 @@
 #pragma once
 //
-// engine-talkback.h — the Zoom talkback probe (Milestone 1).
+// engine-talkback.h — the Zoom talkback probe (Milestone 1), plus everything
+// built on top of it since: the persistent session (Milestone 5) and, as of
+// Task 2 (2026-08-25), pre-provisioning a nominated talent list's channels
+// at nomination time rather than at key time.
 //
 // Talkback is the first path in this codebase that SENDS audio to Zoom. Every
 // other media path runs engine -> plugin. This class exists to answer one
@@ -37,6 +40,9 @@
 // already applies before it ever creates the region.
 #include "../../src/talkback-pcm.h"
 #include "../../src/talkback-channel-owner.h"
+// talkback_plan() / TalkbackPlan / TalkbackPlannedChannel -- Task 1's pure
+// budget planner that nominate() (below) consumes. No SDK dependency itself.
+#include "../../src/talkback-plan.h"
 
 #include <atomic>
 #include <chrono>
@@ -78,6 +84,50 @@ public:
                        const std::string &participant_name);
     void session_stop();
     bool session_live() const;
+
+    // ── Pre-provisioned channels (Task 2, 2026-08-25) ───────────────────────
+    // Computes talkback_plan(nominees) (src/talkback-plan.h) and provisions
+    // every channel it decides on, so a later key press only SELECTS an
+    // already-live channel instead of creating one on the spot -- the
+    // create-then-invite round trip that clipped the director's first words
+    // on every press, measured live 2026-08-25 as discarded buffers on every
+    // key (no_channel_drops).
+    //
+    // CreateChannel may be called only from the engine's command-loop
+    // thread, and the arbiter (src/talkback-channel-owner.h) allows exactly
+    // one outstanding create at a time -- so provisioning is SEQUENTIAL:
+    // this issues ONE CreateChannel and returns without blocking; each
+    // onCreateChannelResponse routed to TalkbackChannelOwner::Nomination
+    // invites that channel's members and issues the next, until the plan's
+    // queue is empty. Every gate the plan or the SDK surfaces
+    // (uncovered_private, unreachable, a nominee not currently in the
+    // meeting, IsSupportTalkback() == false) is reported, never swallowed --
+    // see report_nomination()'s call sites in the .cpp.
+    //
+    // Returns false when nothing was queued at all: no meeting service, no
+    // controller, the meeting does not support talkback, the probe's driving
+    // thread or a live session already hold the arbiter (same R1 mutual
+    // exclusion session_start() enforces -- nomination must not break it),
+    // or an earlier nominate() call's channels are still provisioned (this
+    // task adds no un-nominate; a second call while the first is still
+    // standing is refused rather than silently leaking the first set).
+    // Returns true once the first CreateChannel of the plan is in flight (or
+    // immediately, if the plan needed zero channels) -- true is not a
+    // promise every channel will finish provisioning, only that a queue
+    // started; report_nomination()'s "nominate_done" line is what confirms
+    // completion.
+    bool nominate(ZOOMSDK::IMeetingService *svc,
+                  const std::vector<std::string> &nominees);
+
+    // Bookkeeping-only reset for the nomination table/queue -- never calls
+    // the SDK. Called from Leave/quit in engine/src/main.cpp because
+    // provisioned channels and their membership are meeting-scoped (see the
+    // design doc's "Meeting rejoin" row in the failure table): once the
+    // meeting is gone there is nothing left on Zoom's side to select or
+    // destroy, so clearing our own record of it is all that is needed. Does
+    // NOT destroy anything meeting-side -- there is no un-nominate SDK call
+    // in this task, and none is needed here for the same reason.
+    void nomination_reset();
 
     // True once the ladder is quiescent: Idle before the first probe() ever
     // runs, Done after one finishes (success, failure, or abandoned
@@ -169,6 +219,14 @@ private:
     void report(const std::string &stage, const std::string &fields) const;
     void report_session(const std::string &stage, const std::string &fields) const;
 
+    // Task 2 counterpart of report()/report_session() above: tagged
+    // "cmd":"talkback_nominate", the same string as the P2E command that
+    // triggers nominate() -- mirroring the probe's convention (report()
+    // reuses "talkback_probe" both ways) rather than the session's (which
+    // funnels several P2E commands into one "talkback_session" E2P tag),
+    // since nominate() has exactly one entry point to funnel.
+    void report_nomination(const std::string &stage, const std::string &fields) const;
+
     // F2 review-round fix (CRITICAL): the ONE engine->plugin line that
     // carries the session's CONFIRMED state, distinct from every stage
     // trace above. Emitted when the session goes live (after the invite is
@@ -186,15 +244,48 @@ private:
     // -- see the invariant comment at that call site.
     void drain_stray_channels();
 
-    // Follow-up to the F1 review-round fix: lazily expires a stale
-    // Session-owned m_pending_create -- see m_session_create_deadline's doc
-    // comment below for why this exists. MUST be called with m_chan_mtx
-    // already held (both call sites -- probe()'s and session_start()'s gate
-    // checks -- already lock it to read m_pending_create, so this adds no
-    // new critical section). Returns true if it expired something, so the
-    // caller can report it AFTER releasing the lock, same discipline as
-    // every other report() call in this file.
-    bool expire_stale_session_create_locked();
+    // Follow-up to the F1 review-round fix, extended for Task 2: lazily
+    // expires a stale Session- or Nomination-owned m_pending_create -- see
+    // m_session_create_deadline's and m_nomination_create_deadline's doc
+    // comments below for why this exists. MUST be called with m_chan_mtx
+    // already held (every call site -- probe()'s, session_start()'s, and
+    // nomination_create_next()'s gate checks -- already locks it to read
+    // m_pending_create, so this adds no new critical section). Returns which
+    // owner it expired (TalkbackChannelOwner::None if nothing was stale), so
+    // the caller can report it AFTER releasing the lock, same discipline as
+    // every other report() call in this file, and report it under the right
+    // cmd tag (report_session() for Session, report_nomination() for
+    // Nomination). Probe needs no branch here: its pending create already
+    // has a clearer of its own (tick()'s AwaitingChannel timeout, running on
+    // the driving thread) -- a stale Probe entry would be a bug in that
+    // machinery, not something this function should paper over.
+    TalkbackChannelOwner expire_stale_pending_create_locked();
+
+    // Issues the CreateChannel for the front of m_nomination_pending and, on
+    // synchronous success, claims the arbiter as Nomination. Called once
+    // from nominate() (for the plan's first channel) and once more from
+    // onCreateChannelResponse's Nomination branch for every channel still
+    // queued after that -- see nominate()'s declaration comment on why this
+    // is sequential rather than issuing the whole plan at once. Must run on
+    // the command-loop thread, same as every other CreateChannel call in
+    // this file. Returns false (and empties m_nomination_pending) when the
+    // gate refuses or the SDK call itself fails synchronously -- there is no
+    // retry queue for this in Task 2; a stalled ladder is reported, not
+    // silently abandoned.
+    bool nomination_create_next();
+
+    // Resolves `name` to a live user id and, if found, invites it into the
+    // already-created channel `channel_id_z`. Deliberately independent of
+    // the create-queue machinery above -- it takes a channel id and a name,
+    // nothing about m_nomination_pending or the arbiter -- so a future
+    // roster-driven re-invite (Task 4, ruled to run on the SDK callback
+    // thread and to NEVER call CreateChannel there) can call this same
+    // primitive without touching create-side state at all. A name not
+    // currently in the meeting is reported and skipped, not an error --
+    // that is the expected shape for someone who has not joined yet.
+    void invite_nominee(const std::basic_string<zchar_t> &channel_id_z,
+                        const std::string &channel_id_utf8,
+                        const std::string &name);
 
     ZOOMSDK::IMeetingService          *m_svc  = nullptr;
     ZOOMSDK::IMeetingTalkbackController *m_ctrl = nullptr;
@@ -339,24 +430,26 @@ private:
     uint32_t    m_audio_send_fail_count = 0;
 
     // ── Persistent talkback session (Milestone 5) ──────────────────────────
-    // Exactly one CreateChannel may be outstanding across the probe and the
-    // session; see src/talkback-channel-owner.h for why.
+    // Exactly one CreateChannel may be outstanding across the probe, the
+    // session, and nomination (Task 2); see src/talkback-channel-owner.h for
+    // why.
     //
     // Guarded by m_chan_mtx -- NOT command-loop-thread-only, despite an
     // earlier version of this comment claiming otherwise. Every WRITER but
-    // one is the command-loop thread: probe() and session_start() (both
-    // claim it before CreateChannel), and onCreateChannelResponse (which
-    // clears it) -- that callback is safe on the command-loop thread for the
-    // same reason open_audio/drain_audio/close_audio are (see the THREADING
-    // comment above the audio path below): on Windows this engine's main
-    // loop is ALSO the SDK's message-pump thread, so every SDK callback,
-    // this one included, runs there, not on some SDK-internal thread. The
-    // exception is tick()'s AwaitingChannel-timeout clear (review-round R3
-    // fix, see tick()): that one genuinely runs on the probe's OWN separate
-    // driving thread, so this field needs the same cross-thread protection
-    // as the channel-id strings below rather than being lock-free. Never
-    // call the SDK while holding m_chan_mtx for this field either -- same
-    // discipline as everywhere else in this class.
+    // one is the command-loop thread: probe(), session_start(), and
+    // nominate()/nomination_create_next() (all claim it before
+    // CreateChannel), and onCreateChannelResponse (which clears it) -- that
+    // callback is safe on the command-loop thread for the same reason
+    // open_audio/drain_audio/close_audio are (see the THREADING comment
+    // above the audio path below): on Windows this engine's main loop is
+    // ALSO the SDK's message-pump thread, so every SDK callback, this one
+    // included, runs there, not on some SDK-internal thread. The exception
+    // is tick()'s AwaitingChannel-timeout clear (review-round R3 fix, see
+    // tick()): that one genuinely runs on the probe's OWN separate driving
+    // thread, so this field needs the same cross-thread protection as the
+    // channel-id strings below rather than being lock-free. Never call the
+    // SDK while holding m_chan_mtx for this field either -- same discipline
+    // as everywhere else in this class.
     TalkbackChannelOwner       m_pending_create = TalkbackChannelOwner::None;
     std::basic_string<zchar_t> m_session_channel_z;   // guarded by m_chan_mtx
     std::string                m_session_channel;     // UTF-8, reporting only
@@ -399,12 +492,57 @@ private:
     // Same representation and memory-ordering pattern as m_phase_deadline
     // below (steady_clock rep, not the time_point itself, for the same
     // trivial-atomicity reason). Deliberately NOT a new thread or timer --
-    // see probe()/session_start()'s gate checks, which are the only two
-    // places this is read: both already lock m_chan_mtx to evaluate
-    // talkback_may_request_create(m_pending_create), so checking-and-
-    // clearing an expired deadline there is free. The existing entry
+    // see probe()/session_start()/nomination_create_next()'s gate checks,
+    // the only places this is read: each already locks m_chan_mtx to
+    // evaluate talkback_may_request_create(m_pending_create), so checking-
+    // and-clearing an expired deadline there is free. The existing entry
     // points self-heal on the next attempt; that is what makes this cheap
     // and is why it mirrors tick()'s AwaitingChannel timeout instead of
     // inventing a new mechanism.
     std::atomic<std::chrono::steady_clock::rep> m_session_create_deadline{0};
+
+    // ── Pre-provisioned channels (Task 2, 2026-08-25) ───────────────────────
+    // Same wedge risk as m_session_create_deadline above, same fix: a
+    // swallowed CreateChannel response for a Nomination-owned create would
+    // otherwise leave m_pending_create stuck at Nomination forever, refusing
+    // every later probe()/session_start()/nominate() for the life of the
+    // process. Read and lazily cleared by expire_stale_pending_create_locked(),
+    // called from the same three gate checks as m_session_create_deadline.
+    // Reuses kAwaitTimeout, same reasoning as the session's copy: both bound
+    // the same underlying wait (a Zoom CreateChannel response), so there is
+    // no reason for a third constant.
+    std::atomic<std::chrono::steady_clock::rep> m_nomination_create_deadline{0};
+
+    // One entry per Zoom channel nominate() has successfully created --
+    // populated by onCreateChannelResponse's Nomination branch, one at a
+    // time, as create responses arrive. Members are the plan's stored
+    // NAMES (see src/talkback-plan.h's TalkbackPlannedChannel), never ids:
+    // ids are meeting-scoped, so a stored id would point at nobody after a
+    // rejoin and at the wrong person once ids are recycled -- resolved to a
+    // live id only at invite time, same rule as m_session_participant.
+    //
+    // Guarded by m_chan_mtx like every other channel-id state in this class.
+    // Every writer today is the command-loop thread (nominate(),
+    // onCreateChannelResponse's Nomination branch, nomination_reset()) --
+    // nomination never spawns a driving thread the way the probe does, so
+    // nothing here has m_channel_id_z's cross-thread Idle/Done hazard. It is
+    // guarded anyway per this task's own instruction ("guard it with
+    // m_chan_mtx like every other channel-id state") so a future reader that
+    // is NOT the command loop -- a talkback_status query, say -- does not
+    // have to re-derive whether this table is safe to read from elsewhere.
+    struct TalkbackProvisionedChannel {
+        std::basic_string<zchar_t> channel_id_z;
+        std::string channel_id;              // UTF-8, reporting only
+        std::vector<std::string> members;    // by NAME, see above
+        bool is_all_talent = false;
+    };
+    std::vector<TalkbackProvisionedChannel> m_provisioned_channels;
+
+    // Channels talkback_plan() decided on that have not been created yet,
+    // in plan order; the front entry is whichever CreateChannel is either
+    // about to be issued or currently outstanding. nomination_create_next()
+    // pops the front once its response arrives (moving it into
+    // m_provisioned_channels above) and issues the next. Same guarding
+    // rationale as m_provisioned_channels above.
+    std::vector<TalkbackPlannedChannel> m_nomination_pending;
 };

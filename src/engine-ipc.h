@@ -23,6 +23,7 @@
 #define IPC_CMD_TALKBACK_CLOSE "talkback_close"
 #define IPC_CMD_TALKBACK_START "talkback_start"
 #define IPC_CMD_TALKBACK_STOP  "talkback_stop"
+#define IPC_CMD_TALKBACK_NOMINATE "talkback_nominate"
 #define IPC_EVT_READY       "ready"
 #define IPC_EVT_AUTH_OK     "auth_ok"
 #define IPC_EVT_AUTH_FAIL   "auth_fail"

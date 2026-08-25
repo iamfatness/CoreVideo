@@ -143,12 +143,22 @@ int main()
           "talkback_start did not route to IpcCommand::TalkbackStart");
     check(ipc_command_of(R"({"cmd":"talkback_stop"})") == IpcCommand::TalkbackStop,
           "talkback_stop did not route to IpcCommand::TalkbackStop");
-    // The talkback_* family now has six members sharing a prefix. Exact match
-    // must keep every one of them apart.
+    // The talkback_* family now has seven members sharing a prefix. Exact
+    // match must keep every one of them apart.
     check(ipc_command_of(R"({"cmd":"talkback_start_extra"})") == IpcCommand::Unknown,
           "a longer command starting with talkback_start matched it");
     check(ipc_command_of(R"({"cmd":"talkback_stop_extra"})") == IpcCommand::Unknown,
           "a longer command starting with talkback_stop matched it");
+
+    // ── Talkback nominate (pre-provisioning) routes exactly ─────────────────
+    check(ipc_command_of(
+              R"({"cmd":"talkback_nominate","nominees":["Sarah Muller","Luis Ortiz"]})") ==
+              IpcCommand::TalkbackNominate,
+          "talkback_nominate did not route to IpcCommand::TalkbackNominate");
+    // Shares the talkback_ prefix with all six siblings above; exact match
+    // must keep it apart the same way it keeps every one of them apart.
+    check(ipc_command_of(R"({"cmd":"talkback_nominate_extra"})") == IpcCommand::Unknown,
+          "a longer command starting with talkback_nominate matched it");
 
     if (g_failures > 0) {
         std::cerr << "engine-command: " << g_failures << " failure(s)\n";

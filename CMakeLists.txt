@@ -401,6 +401,16 @@ if(BUILD_ZOOM_ENGINE)
     if(WIN32)
         add_executable(ZoomObsEngine ${ENGINE_SOURCES})
         target_include_directories(ZoomObsEngine PRIVATE ${ENGINE_INCLUDES})
+        # NOMINMAX: engine-talkback.cpp/main.cpp now pull in
+        # src/talkback-plan.h (Task 2, provisioning at nomination), which
+        # calls std::min/std::max. Without this, windows.h's min/max macros
+        # (pulled in transitively via zoom_sdk_def.h's HWND usage) rewrite
+        # `std::min(a, b)` into `std::(((a) < (b)) ? (a) : (b))` and the
+        # engine fails to compile with "illegal token on right side of
+        # '::'" -- discovered building this target for the first time with
+        # talkback-plan.h included. Mirrors the same definition already
+        # applied to obs-zoom-plugin above, for the same reason.
+        target_compile_definitions(ZoomObsEngine PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
         target_link_libraries(ZoomObsEngine PRIVATE
             ws2_32 crypt32 winhttp shlwapi
             ${ZOOM_SDK_LIBRARY}

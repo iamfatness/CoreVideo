@@ -283,6 +283,43 @@ static uint32_t json_uint(const std::string &json, const std::string &key)
     }
 }
 
+// Extracts a JSON array of strings, e.g. "nominees":["Sarah Muller","Luis
+// Ortiz"]. Only talkback_nominate uses this today, so it lives here rather
+// than in engine-json.h (json_str/json_escape/zchar_to_utf8 moved there
+// because engine-talkback.cpp needed them too; this one is main.cpp-only,
+// same as json_uint above). Escape handling mirrors json_str(): a backslash
+// consumes the next character verbatim rather than decoding it, so a forged
+// value cannot collapse into something that matches another string by
+// accident. Malformed input (missing key, missing closing bracket, a
+// non-string element) yields whatever prefix parsed cleanly rather than
+// looping or throwing -- a hostile or buggy peer gets a short/empty list,
+// not a hung engine.
+static std::vector<std::string> json_str_array(const std::string &json, const std::string &key)
+{
+    std::vector<std::string> out;
+    const std::string needle = "\"" + key + "\":[";
+    auto pos = json.find(needle);
+    if (pos == std::string::npos) return out;
+    pos += needle.size();
+    while (pos < json.size() && json[pos] != ']') {
+        if (json[pos] == ',' || json[pos] == ' ') { ++pos; continue; }
+        if (json[pos] != '"') break;
+        ++pos;
+        std::string s;
+        while (pos < json.size()) {
+            char c = json[pos++];
+            if (c == '\\') {
+                if (pos < json.size()) s += json[pos++];
+                continue;
+            }
+            if (c == '"') break;
+            s += c;
+        }
+        out.push_back(std::move(s));
+    }
+    return out;
+}
+
 static const char *meeting_fail_name(int code)
 {
     switch (code) {
@@ -1517,6 +1554,14 @@ int main()
         } else if (command == IpcCommand::TalkbackStop) {
             talkback.session_stop();
 
+        } else if (command == IpcCommand::TalkbackNominate) {
+            // Mirror the TalkbackStart branch above: join the probe's
+            // driving thread first so nominate() (which reassigns
+            // m_svc/m_ctrl, same as session_start()) can never race it --
+            // see the comment there.
+            if (talkback_thread.joinable()) talkback_thread.join();
+            talkback.nominate(meeting_svc, json_str_array(line, "nominees"));
+
         } else if (command == IpcCommand::Leave) {
             // F4 review-round fix: mirror the quit path below (see the
             // "Join the talkback driving thread BEFORE any SDK teardown
@@ -1550,6 +1595,12 @@ int main()
             // is idempotent (bails immediately if nothing is live), so this
             // is safe even when no session was ever started.
             talkback.session_stop();
+            // Provisioned channels and their membership are meeting-scoped
+            // (design doc's "Meeting rejoin" row) -- once Leave() below
+            // runs there is nothing left on Zoom's side for the nomination
+            // table to reference. Bookkeeping only, no SDK call; see
+            // nomination_reset()'s own comment.
+            talkback.nomination_reset();
             if (meeting_svc)
                 meeting_svc->Leave(ZOOMSDK::LEAVE_MEETING);
 
@@ -1638,6 +1689,10 @@ int main()
     // Same reasoning as the Leave branch above: tear down the session's own
     // channel before the SDK teardown calls below run.
     talkback.session_stop();
+    // Same reasoning as the Leave branch above: the nomination table only
+    // holds bookkeeping for meeting-scoped state, so clear it before the SDK
+    // teardown calls below run. No SDK call in nomination_reset() itself.
+    talkback.nomination_reset();
 
     if (meeting_svc) meeting_svc->Leave(ZOOMSDK::LEAVE_MEETING);
     share_engine.detach();

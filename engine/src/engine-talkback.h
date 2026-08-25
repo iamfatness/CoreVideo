@@ -267,10 +267,23 @@ private:
 
     // ── Persistent talkback session (Milestone 5) ──────────────────────────
     // Exactly one CreateChannel may be outstanding across the probe and the
-    // session; see src/talkback-channel-owner.h for why. Command-loop thread
-    // only -- both callers live there -- so it needs no synchronisation, and
-    // that is stated here so nobody "helpfully" makes it atomic and hides the
-    // threading contract.
+    // session; see src/talkback-channel-owner.h for why.
+    //
+    // Guarded by m_chan_mtx -- NOT command-loop-thread-only, despite an
+    // earlier version of this comment claiming otherwise. Every WRITER but
+    // one is the command-loop thread: probe() and session_start() (both
+    // claim it before CreateChannel), and onCreateChannelResponse (which
+    // clears it) -- that callback is safe on the command-loop thread for the
+    // same reason open_audio/drain_audio/close_audio are (see the THREADING
+    // comment above the audio path below): on Windows this engine's main
+    // loop is ALSO the SDK's message-pump thread, so every SDK callback,
+    // this one included, runs there, not on some SDK-internal thread. The
+    // exception is tick()'s AwaitingChannel-timeout clear (review-round R3
+    // fix, see tick()): that one genuinely runs on the probe's OWN separate
+    // driving thread, so this field needs the same cross-thread protection
+    // as the channel-id strings below rather than being lock-free. Never
+    // call the SDK while holding m_chan_mtx for this field either -- same
+    // discipline as everywhere else in this class.
     TalkbackChannelOwner       m_pending_create = TalkbackChannelOwner::None;
     std::basic_string<zchar_t> m_session_channel_z;   // guarded by m_chan_mtx
     std::string                m_session_channel;     // UTF-8, reporting only

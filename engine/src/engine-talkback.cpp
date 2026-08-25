@@ -47,6 +47,22 @@ bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
         return false;
     }
 
+    // R1 review-round fix (mutual exclusion): the probe and the persistent
+    // session must never run concurrently. Before this, session_start()
+    // reassigned m_svc/m_ctrl -- the exact same fields tick() dereferences on
+    // its OWN driving thread while a probe is in flight -- with no gate at
+    // all: a genuine cross-thread pointer race (Critical 2). Refusing here
+    // rather than queueing also means tick()'s batch-destroy (for the
+    // probe's channel) and session_stop()'s batch-destroy (for the session's
+    // channel) can never overlap on the same controller object (Important
+    // 4). A probe is a ~3s diagnostic; refusing it for the life of an active
+    // talkback session costs nothing real -- do not "relax" this to allow
+    // concurrent use. See the matching guard in session_start().
+    if (m_session_live) {
+        report("busy", R"("reason":"session_live")");
+        return false;
+    }
+
     m_svc = svc;
     m_participant_name = participant_name;
     m_phase.store(Phase::Idle, std::memory_order_release);
@@ -102,8 +118,16 @@ bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
     // may be outstanding across the probe and the session (see
     // src/talkback-channel-owner.h). Refuse rather than queue -- there is
     // nothing sensible to queue, and a queued create would arrive with the
-    // other subsystem's response still in flight.
-    if (!talkback_may_request_create(m_pending_create)) {
+    // other subsystem's response still in flight. m_pending_create is
+    // guarded by m_chan_mtx (see the header comment on it) -- copy the
+    // decision out under the lock, release, THEN call the SDK, same
+    // discipline as every other m_chan_mtx access in this file.
+    bool create_gate_ok;
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        create_gate_ok = talkback_may_request_create(m_pending_create);
+    }
+    if (!create_gate_ok) {
         report("busy", R"("reason":"create_busy")");
         m_phase.store(Phase::Done, std::memory_order_release);
         return true;
@@ -115,7 +139,10 @@ bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
         m_phase.store(Phase::Done, std::memory_order_release);
         return true;
     }
-    m_pending_create = TalkbackChannelOwner::Probe;
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        m_pending_create = TalkbackChannelOwner::Probe;
+    }
     m_phase_deadline.store(
         (std::chrono::steady_clock::now() + kAwaitTimeout).time_since_epoch().count(),
         std::memory_order_release);
@@ -199,6 +226,27 @@ void EngineTalkback::tick()
                 m_phase_deadline.load(std::memory_order_acquire)));
         if (std::chrono::steady_clock::now() >= deadline) {
             report("timeout", R"("phase":)" + std::to_string(static_cast<int>(phase)));
+            // R3 review-round fix: an AwaitingChannel timeout means the
+            // CreateChannel THIS probe issued was accepted but its response
+            // never arrived -- that response is what would normally clear
+            // m_pending_create (via the arbiter in onCreateChannelResponse).
+            // Left set, it wedges every future CreateChannel from EITHER
+            // subsystem for the rest of the process's life, and it wedges
+            // at exactly the moment the SDK is already misbehaving -- the
+            // one time this diagnostic most needs to stay usable. Only
+            // AwaitingChannel, never AwaitingInvite: by AwaitingInvite the
+            // create already succeeded and onCreateChannelResponse already
+            // cleared this. This is a completion of the existing timeout,
+            // not a change to its Phase transitions or the re-entrancy
+            // guard -- both are untouched. Runs on the probe's OWN driving
+            // thread (this function's caller), unlike every other writer of
+            // m_pending_create, so it goes through m_chan_mtx like the
+            // channel-id strings do -- see the header comment on the field.
+            if (phase == Phase::AwaitingChannel) {
+                std::lock_guard<std::mutex> lock(m_chan_mtx);
+                if (m_pending_create == TalkbackChannelOwner::Probe)
+                    m_pending_create = TalkbackChannelOwner::None;
+            }
             m_phase.store(Phase::Destroying, std::memory_order_release);
         }
         return;
@@ -358,19 +406,33 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
     // Route by who asked. See src/talkback-channel-owner.h: the response
     // carries no indication of its requester, so the arbiter is the only
     // thing standing between the probe and the session adopting each other's
-    // channels.
-    const TalkbackChannelOwner owner = talkback_claim_create(m_pending_create);
+    // channels. Claim and clear happen in the SAME lock scope -- once this
+    // response has been attributed to an owner, m_pending_create must not be
+    // observable as still "theirs" by anyone else, even for the instant
+    // between a separate claim and a separate clear.
+    TalkbackChannelOwner owner;
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        owner = talkback_claim_create(m_pending_create);
+        if (owner != TalkbackChannelOwner::None)
+            m_pending_create = TalkbackChannelOwner::None;
+    }
     if (owner == TalkbackChannelOwner::Session) {
-        m_pending_create = TalkbackChannelOwner::None;
         if (error != TALKBACK_ERROR_OK || channelID == nullptr) {
             report("session_channel", R"("ok":false,"error":)" +
                    std::to_string(static_cast<int>(error)));
             return;
         }
+        // Minor review-round fix: keep the value from THIS lock scope
+        // instead of re-locking immediately after just to read back what was
+        // just written -- channel_copy is exactly m_session_channel_z at
+        // this point, so a second lock/unlock pair bought nothing.
+        std::basic_string<zchar_t> channel_copy;
         {
             std::lock_guard<std::mutex> lock(m_chan_mtx);
             m_session_channel_z.assign(channelID);
             m_session_channel = zchar_to_utf8(channelID);
+            channel_copy = m_session_channel_z;
         }
         // Invite by NAME, resolved now: Zoom user ids are meeting-scoped, so
         // a stored id points at nobody after a rejoin and at the wrong face
@@ -381,11 +443,6 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
                    R"("name":")" + json_escape(m_session_participant) + "\"");
             session_stop();
             return;
-        }
-        std::basic_string<zchar_t> channel_copy;
-        {
-            std::lock_guard<std::mutex> lock(m_chan_mtx);
-            channel_copy = m_session_channel_z;
         }
         ZOOMSDK::SDKError e = m_ctrl->BeginBatchInviteUsers(channel_copy.c_str());
         if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->AddUserToInvite(m_session_user_id);
@@ -398,8 +455,9 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         report("session_live", R"("channel":")" + json_escape(m_session_channel) + "\"");
         return;
     }
-    if (owner == TalkbackChannelOwner::Probe)
-        m_pending_create = TalkbackChannelOwner::None;
+    // owner == Probe was already cleared above; owner == None means nothing
+    // was outstanding (a stray/duplicate, handled by id-comparison below --
+    // never by m_pending_create, which by definition has no opinion here).
 
     if (!channelID) {
         // F1 review-round fix: guard before ANY comparison or assignment
@@ -440,12 +498,33 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         // phase is Idle/Done, i.e. while a fresh probe() is allowed to be
         // clearing/reassigning that member on another thread right now; see
         // the m_chan_mtx comment in the header.
+        //
+        // R2 review-round fix: a channel we OWN -- the probe's live one OR
+        // the session's -- is never a stray, no matter what m_pending_create
+        // said at routing time above. This is the fix for a redelivered
+        // response: the SDK can and does redeliver onCreateChannelResponse
+        // (that's what the *_duplicate / *_stray handling in this whole
+        // block is for), and a redelivery can arrive long after the request
+        // that caused it was already resolved -- at which point
+        // m_pending_create has moved on to None or to the OTHER subsystem,
+        // so the arbiter above no longer has an opinion about it. Comparing
+        // ONLY against m_channel_id_z (as this branch used to) meant a
+        // redelivered SESSION response landed here, failed that comparison,
+        // and got queued as a stray -- so tick() destroyed the LIVE session
+        // channel out from under drain_audio() on the probe's own thread.
+        // That was the exact race this whole task exists to make
+        // structurally impossible; this id check is what actually closes it
+        // for the redelivery case (R1's mutual exclusion above closes the
+        // DIFFERENT hazard of a concurrent request, not this one).
         if (error == TALKBACK_ERROR_OK) {
-            bool is_live_channel;
+            bool is_probe_channel;
+            bool is_session_channel;
             {
                 std::lock_guard<std::mutex> lock(m_chan_mtx);
-                is_live_channel = (m_channel_id_z == channelID);
-                if (!is_live_channel) {
+                is_probe_channel   = (m_channel_id_z == channelID);
+                is_session_channel = !is_probe_channel &&
+                                     (m_session_channel_z == channelID);
+                if (!is_probe_channel && !is_session_channel) {
                     // A genuinely different, untracked channel now exists.
                     // Queue it (still under the lock, so the check and the
                     // push are one atomic decision); drain_stray_channels()
@@ -453,7 +532,15 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
                     m_stray_channels.emplace_back(channelID);
                 }
             }
-            if (is_live_channel) {
+            if (is_session_channel) {
+                // Matches the session's live channel -- a duplicate/
+                // redelivered callback for the create the session already
+                // finished handling. Queuing it for destroy would tear down
+                // the channel drain_audio() is actively sending on. Report
+                // and do NOTHING else.
+                report("create_channel_response_session_duplicate",
+                       R"("channel":")" + json_escape(id) + "\"");
+            } else if (is_probe_channel) {
                 // This id matches OUR live channel -- a duplicate/redelivered
                 // callback for the channel the ladder already moved past
                 // AwaitingChannel with (e.g. now mid-invite or mid-send).
@@ -865,6 +952,22 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
         report("session_start", R"("ok":false,"reason":"already_live")");
         return false;
     }
+
+    // R1 review-round fix (mutual exclusion): refuse while the probe's
+    // driving thread might still be running -- see the matching guard at the
+    // top of probe(), which explains why. This check MUST come before
+    // m_svc/m_ctrl are touched below: those are the exact fields tick()
+    // dereferences on its own thread for as long as has_pending_work() is
+    // true, and reassigning them here while that thread is mid-call was
+    // Critical 2 -- a genuine cross-thread pointer race, not merely a
+    // logical ordering nit. See has_pending_work()'s doc comment in the
+    // header for why phase-alone (is_idle()) is not the right check: a
+    // queued-but-undrained stray still means tick() has work left to do.
+    if (has_pending_work()) {
+        report("session_start", R"("ok":false,"reason":"probe_busy")");
+        return false;
+    }
+
     if (!svc) {
         report("session_start", R"("ok":false,"reason":"not_in_meeting")");
         return false;
@@ -881,7 +984,14 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
     }
     m_ctrl->SetEvent(this);
 
-    if (!talkback_may_request_create(m_pending_create)) {
+    // m_pending_create is guarded by m_chan_mtx -- see the header comment on
+    // it. Copy the decision out under the lock, release, THEN call the SDK.
+    bool create_gate_ok;
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        create_gate_ok = talkback_may_request_create(m_pending_create);
+    }
+    if (!create_gate_ok) {
         // The probe is mid-create. Refuse rather than queue: a queued create
         // would arrive with the other subsystem's response still in flight,
         // which is exactly the ambiguity the arbiter exists to remove.
@@ -895,7 +1005,10 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
            R"(,"participant":")" + json_escape(participant_name) + "\"");
     if (e != ZOOMSDK::SDKERR_SUCCESS) return false;
 
-    m_pending_create = TalkbackChannelOwner::Session;
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        m_pending_create = TalkbackChannelOwner::Session;
+    }
     return true;
 }
 
@@ -903,23 +1016,27 @@ void EngineTalkback::session_stop()
 {
     if (!m_session_live && m_session_channel_z.empty()) {
         // Nothing to tear down. Still clear the pending create so a refused
-        // start cannot wedge the arbiter.
+        // start cannot wedge the arbiter. m_pending_create is guarded by
+        // m_chan_mtx -- see the header comment on it.
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
         if (m_pending_create == TalkbackChannelOwner::Session)
             m_pending_create = TalkbackChannelOwner::None;
         return;
     }
 
     std::basic_string<zchar_t> channel_copy;
+    std::string channel_copy_utf8;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
-        channel_copy = m_session_channel_z;
+        channel_copy      = m_session_channel_z;
+        channel_copy_utf8 = m_session_channel;
         m_session_channel_z.clear();
         m_session_channel.clear();
+        if (m_pending_create == TalkbackChannelOwner::Session)
+            m_pending_create = TalkbackChannelOwner::None;
     }
     m_session_live    = false;
     m_session_user_id = 0;
-    if (m_pending_create == TalkbackChannelOwner::Session)
-        m_pending_create = TalkbackChannelOwner::None;
 
     if (channel_copy.empty() || !m_ctrl) {
         report("session_stop", R"("ok":true,"reason":"no_channel")");
@@ -928,14 +1045,41 @@ void EngineTalkback::session_stop()
 
     // The session destroys its OWN channel here, on the command-loop thread.
     // This is NOT the batch-destroy path tick() owns for the probe's stray
-    // queue -- keeping them separate is what keeps "tick() is the sole caller
-    // of the batch-destroy API" true.
-    ZOOMSDK::SDKError e = m_ctrl->BeginBatchDestroyChannels();
-    if (e == ZOOMSDK::SDKERR_SUCCESS)
-        e = m_ctrl->AddChannelToDestroy(channel_copy.c_str());
-    if (e == ZOOMSDK::SDKERR_SUCCESS)
-        e = m_ctrl->ExecuteBatchDestroyChannels();
-    report("session_stop", R"("code":)" + std::to_string(static_cast<int>(e)));
+    // queue -- keeping them separate is what keeps "tick() is the sole
+    // caller of the batch-destroy API for the probe's stray queue" true.
+    // R1's mutual exclusion (see probe()/session_start()) guarantees tick()
+    // can never be mid-Destroying (or mid-drain_stray_channels) at the same
+    // time this runs, so there is no Begin/Add/Execute interleaving between
+    // the two despite both calling the batch-destroy API on the same
+    // controller object -- the hazard tick()'s own top-of-function comment
+    // warns about is about two THREADS doing that concurrently, and R1 rules
+    // that out here by construction.
+    //
+    // R4 review-round fix: this used to call Begin/Add/Execute exactly once
+    // and report whatever code came back -- unlike every OTHER destroy path
+    // in this file (tick()'s Destroying phase, drain_stray_channels()), both
+    // of which retry up to kMaxDestroyAttempts times before giving up. This
+    // file's own doctrine (stated at both of those call sites) is that a
+    // leaked channel consumes one of the meeting's 16 for the rest of the
+    // meeting; a single transient failure here silently leaked the
+    // session's channel the same way. Match the existing retry pattern
+    // instead of inventing a third variant.
+    ZOOMSDK::SDKError e = ZOOMSDK::SDKERR_UNKNOWN;
+    uint32_t attempt = 0;
+    for (; attempt < kMaxDestroyAttempts; ++attempt) {
+        e = m_ctrl->BeginBatchDestroyChannels();
+        if (e == ZOOMSDK::SDKERR_SUCCESS)
+            e = m_ctrl->AddChannelToDestroy(channel_copy.c_str());
+        if (e == ZOOMSDK::SDKERR_SUCCESS)
+            e = m_ctrl->ExecuteBatchDestroyChannels();
+        if (e == ZOOMSDK::SDKERR_SUCCESS) break;
+    }
+    report("session_stop", R"("code":)" + std::to_string(static_cast<int>(e)) +
+           R"(,"attempts":)" + std::to_string(attempt + 1));
+    if (e != ZOOMSDK::SDKERR_SUCCESS) {
+        report("session_destroy_abandoned",
+               R"("channel":")" + json_escape(channel_copy_utf8) + "\"");
+    }
 }
 
 void EngineTalkback::close_audio()

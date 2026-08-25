@@ -96,8 +96,15 @@ inline TalkbackPlan talkback_plan(const std::vector<std::string> &nominees)
         TalkbackPlannedChannel c;
         c.is_all_talent = true;
         const std::size_t first = i * kTalkbackMaxUsersPerChannel;
+        // Fix round 1, m5: parenthesizing the call defeats windows.h's
+        // min/max macros for any future TU that includes this header after
+        // <windows.h> without NOMINMAX -- CMakeLists.txt's NOMINMAX fix for
+        // ZoomObsEngine (Task 2) covers the two targets that exist today,
+        // but this header itself stays a trap for the next one otherwise;
+        // src/shm-generation.h has the same precedent (UINT32_MAX instead of
+        // std::numeric_limits) for the same reason.
         const std::size_t last  =
-            std::min(first + kTalkbackMaxUsersPerChannel, unique.size());
+            (std::min)(first + kTalkbackMaxUsersPerChannel, unique.size());
         for (std::size_t m = first; m < last; ++m) c.members.push_back(unique[m]);
         plan.channels.push_back(std::move(c));
     }
@@ -112,7 +119,7 @@ inline TalkbackPlan talkback_plan(const std::vector<std::string> &nominees)
     // clamp fired), so `unreachable` stays the strict subset the struct
     // comment promises without extra bookkeeping.
     const std::size_t all_talent_covered =
-        std::min(all_talent_channels * kTalkbackMaxUsersPerChannel, unique.size());
+        (std::min)(all_talent_channels * kTalkbackMaxUsersPerChannel, unique.size());
     for (std::size_t i = all_talent_covered; i < unique.size(); ++i)
         plan.unreachable.push_back(unique[i]);
 

@@ -1040,10 +1040,11 @@ if(BUILD_TESTING)
              COMMAND CoreVideoTalkbackIsolationTest
                      "${CMAKE_CURRENT_SOURCE_DIR}/src/talkback-tap.cpp")
 
-    # Which subsystem a CreateChannel response belongs to. Two now ask (the
-    # probe and the talkback session) and the response carries no clue; routing
-    # it wrong cuts the director off mid-sentence or hands the session a
-    # channel tick() is about to destroy. See src/talkback-channel-owner.h.
+    # Which subsystem a CreateChannel response belongs to. Three now ask (the
+    # probe, the talkback session, and nomination) and the response carries no
+    # clue; routing it wrong cuts the director off mid-sentence, hands the
+    # session a channel tick() is about to destroy, or corrupts a still-
+    # provisioning plan. See src/talkback-channel-owner.h.
     add_executable(CoreVideoTalkbackChannelOwnerTest
         tests/talkback-channel-owner-test.cpp
     )

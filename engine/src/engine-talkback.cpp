@@ -7,6 +7,7 @@
 
 #include <chrono>
 #include <string>
+#include <thread>
 
 namespace {
 // A hung AwaitingChannel/AwaitingInvite rung and a genuine permission denial
@@ -495,7 +496,8 @@ void EngineTalkback::tick()
     }
 }
 
-unsigned int EngineTalkback::resolve_participant(const std::string &name) const
+unsigned int EngineTalkback::resolve_participant(const std::string &name,
+                                                 ReportSink sink) const
 {
     if (!m_svc) return 0;
     auto *part = m_svc->GetMeetingParticipantsController();
@@ -520,10 +522,23 @@ unsigned int EngineTalkback::resolve_participant(const std::string &name) const
             // the send is what makes the contrast between this value and
             // what the human actually hears into data.
             const bool supported = u->IsSupportTalkback();
-            report("participant_talkback_support",
-                   R"("name":")" + json_escape(name) + R"(","user_id":)" +
-                   std::to_string(uid) + R"(,"supported":)" +
-                   (supported ? "true" : "false"));
+            const std::string fields =
+                R"("name":")" + json_escape(name) + R"(","user_id":)" +
+                std::to_string(uid) + R"(,"supported":)" +
+                (supported ? "true" : "false");
+            // Fix round 1, M3: this line used to always go through report()
+            // ("cmd":"talkback_probe"), which meant a nomination's per-user
+            // gate -- the exact one Step 3 of the brief and invariant 5
+            // require to be surfaced -- fired into the dock's PROBE status
+            // label instead of the nomination stream, up to once per member
+            // per channel (30-40x for a 24-nominee plan), and never reached
+            // anything actually listening for nomination progress. Route by
+            // sink instead of hardcoding report() -- see ReportSink's doc
+            // comment in the header for why Probe stays the default.
+            if (sink == ReportSink::Nomination)
+                report_nomination("participant_talkback_support", fields);
+            else
+                report("participant_talkback_support", fields);
             return uid;
         }
     }
@@ -638,6 +653,49 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         return;
     }
     if (owner == TalkbackChannelOwner::Nomination) {
+        // Fix round 1, C1 (CRITICAL): check-and-clear the cancellation flag
+        // BEFORE doing anything else with this response -- see
+        // nomination_reset()'s and m_nomination_create_cancelled's comments.
+        // A cancelled create must never be adopted (pushed into
+        // m_provisioned_channels), invited, or queued as a stray (nothing
+        // drains m_stray_channels without a probe's driving thread running,
+        // and queuing here would reproduce the exact wedge this fix exists
+        // to close) -- destroy it immediately instead, same Begin/Add/
+        // Execute sequence and retry bound as every other command-loop-
+        // thread destroy in this file (session_stop(), the Session-cancelled
+        // branch above, nomination_destroy_provisioned() below).
+        bool cancelled;
+        {
+            std::lock_guard<std::mutex> lock(m_chan_mtx);
+            cancelled = m_nomination_create_cancelled;
+            m_nomination_create_cancelled = false;
+        }
+        if (cancelled) {
+            if (error != TALKBACK_ERROR_OK || channelID == nullptr) {
+                report_nomination("channel_cancelled",
+                                  R"("ok":true,"reason":"no_channel_to_destroy","error":)" +
+                                  std::to_string(static_cast<int>(error)));
+                return;
+            }
+            ZOOMSDK::SDKError e = ZOOMSDK::SDKERR_UNKNOWN;
+            uint32_t attempt = 0;
+            for (; attempt < kMaxDestroyAttempts; ++attempt) {
+                e = m_ctrl->BeginBatchDestroyChannels();
+                if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->AddChannelToDestroy(channelID);
+                if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->ExecuteBatchDestroyChannels();
+                if (e == ZOOMSDK::SDKERR_SUCCESS) break;
+            }
+            report_nomination("channel_cancelled",
+                              R"("channel":")" + json_escape(id) + R"(","code":)" +
+                              std::to_string(static_cast<int>(e)) + R"(,"attempts":)" +
+                              std::to_string(attempt + 1));
+            if (e != ZOOMSDK::SDKERR_SUCCESS) {
+                report_nomination("channel_cancelled_abandoned",
+                                  R"("channel":")" + json_escape(id) + "\"");
+            }
+            return;
+        }
+
         if (error != TALKBACK_ERROR_OK || channelID == nullptr) {
             report_nomination("channel_failed",
                               R"("error":)" + std::to_string(static_cast<int>(error)));
@@ -646,8 +704,17 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
             // next queued CreateChannel now would be indistinguishable from
             // a fresh attempt that happens to reuse a stale queue. Forget
             // it; a later nominate() call starts clean.
-            std::lock_guard<std::mutex> lock(m_chan_mtx);
-            m_nomination_pending.clear();
+            {
+                std::lock_guard<std::mutex> lock(m_chan_mtx);
+                m_nomination_pending.clear();
+            }
+            // Fix round 1, M2: destroy whatever this ladder already
+            // provisioned before this failure -- without this, channel k
+            // failing left channels 1..k-1 standing forever (consuming
+            // budget, unreachable by any key) and nominate()'s
+            // "already_provisioned" gate refused every retry for the rest
+            // of the meeting.
+            nomination_destroy_provisioned();
             return;
         }
 
@@ -668,18 +735,39 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
             }
         }
         if (!have_planned) {
-            // Defensive, believed unreachable: this class's invariant is
-            // that m_pending_create == Nomination implies exactly one entry
-            // is still queued for the create currently in flight, so the
-            // arbiter routing this response here should guarantee
-            // have_planned is true. If that invariant is ever violated, the
-            // channel Zoom just created is real and now genuinely
-            // untracked -- queue it as a stray (drain_stray_channels(),
-            // called from tick(), destroys it) rather than leak one of the
-            // meeting's 16 or silently drop it.
-            std::lock_guard<std::mutex> lock(m_chan_mtx);
-            m_stray_channels.emplace_back(channelID);
+            // Fix round 1, M5: this branch is reachable, not "believed
+            // unreachable" as the previous comment claimed -- e.g. a stale
+            // response claimed by a LATER nomination once the arbiter has
+            // been re-armed, or expire_stale_pending_create_locked() clearing
+            // m_nomination_pending while a create is genuinely still in
+            // flight and a subsequent nominate() re-arms the owner before
+            // that create's response lands. Either way the channel Zoom just
+            // created is real and now genuinely untracked. Queuing it onto
+            // m_stray_channels (the previous behaviour) would reproduce the
+            // exact has_pending_work() wedge C1 was fixed for -- nothing
+            // drains that queue without a probe's driving thread running --
+            // so destroy it directly here instead, same bounded-retry
+            // sequence as every other command-loop-thread destroy in this
+            // file. report_nomination() is called only AFTER the lock above
+            // is released, matching this file's "report outside m_chan_mtx"
+            // discipline (this branch used to violate it).
             report_nomination("channel_untracked", R"("channel":")" + json_escape(id) + "\"");
+            ZOOMSDK::SDKError e = ZOOMSDK::SDKERR_UNKNOWN;
+            uint32_t attempt = 0;
+            for (; attempt < kMaxDestroyAttempts; ++attempt) {
+                e = m_ctrl->BeginBatchDestroyChannels();
+                if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->AddChannelToDestroy(channelID);
+                if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->ExecuteBatchDestroyChannels();
+                if (e == ZOOMSDK::SDKERR_SUCCESS) break;
+            }
+            report_nomination("channel_untracked_destroy",
+                              R"("channel":")" + json_escape(id) + R"(","code":)" +
+                              std::to_string(static_cast<int>(e)) + R"(,"attempts":)" +
+                              std::to_string(attempt + 1));
+            if (e != ZOOMSDK::SDKERR_SUCCESS) {
+                report_nomination("channel_untracked_destroy_abandoned",
+                                  R"("channel":")" + json_escape(id) + "\"");
+            }
             return;
         }
 
@@ -959,6 +1047,7 @@ bool EngineTalkback::nominate(ZOOMSDK::IMeetingService *svc,
         report_nomination("nominate", R"("ok":false,"reason":"probe_busy")");
         return false;
     }
+    bool already_provisioned;
     {
         // No un-nominate in this task: a second nominate() call while an
         // earlier one's channels are still standing would leak the earlier
@@ -967,10 +1056,18 @@ bool EngineTalkback::nominate(ZOOMSDK::IMeetingService *svc,
         // channels -- Task 3, which reworks the session path against this
         // table, owns deciding what a re-nomination should do.
         std::lock_guard<std::mutex> lock(m_chan_mtx);
-        if (!m_provisioned_channels.empty() || !m_nomination_pending.empty()) {
-            report_nomination("nominate", R"("ok":false,"reason":"already_provisioned")");
-            return false;
-        }
+        already_provisioned = !m_provisioned_channels.empty() || !m_nomination_pending.empty();
+    }
+    if (already_provisioned) {
+        // Fix round 1: found alongside m1 while re-checking the file for the
+        // same "report while holding m_chan_mtx" violation the review's m1
+        // finding cited at the (now rewritten) channel_untracked branch --
+        // this call site had the identical shape and was not called out by
+        // name, but the discipline it breaks is the same one, so it gets
+        // the same fix: read the decision out under the lock, release,
+        // THEN report.
+        report_nomination("nominate", R"("ok":false,"reason":"already_provisioned")");
+        return false;
     }
     if (!svc) {
         report_nomination("nominate", R"("ok":false,"reason":"not_in_meeting")");
@@ -1019,6 +1116,13 @@ bool EngineTalkback::nominate(ZOOMSDK::IMeetingService *svc,
 
 bool EngineTalkback::nomination_create_next()
 {
+    // Fix round 1, m6: converts the "onCreateChannelResponse runs on the
+    // command-loop thread" premise -- newly load-bearing here, since this
+    // is the first CreateChannel call site reached from inside a callback
+    // dispatch rather than only from a top-level pipe-command handler --
+    // from an assumption into evidence. See the header comment.
+    assert_command_loop_thread("nomination_create_next");
+
     // Gate through the same arbiter probe()/session_start() use -- copy the
     // decision out under the lock, release, THEN call the SDK, same
     // discipline as every other m_chan_mtx access in this file.
@@ -1040,20 +1144,28 @@ bool EngineTalkback::nomination_create_next()
         // The probe or the session is mid-create. Refuse rather than wait:
         // there is no sensible way to hold this queue open across an
         // unrelated create's whole round trip, and the plan-level ruling
-        // already says nomination must not block on the arbiter. The
-        // channels already provisioned before this point (if any) stay
-        // provisioned; only the not-yet-created remainder is lost.
+        // already says nomination must not block on the arbiter.
         report_nomination("nominate", R"("ok":false,"reason":"create_busy")");
-        std::lock_guard<std::mutex> lock(m_chan_mtx);
-        m_nomination_pending.clear();
+        {
+            std::lock_guard<std::mutex> lock(m_chan_mtx);
+            m_nomination_pending.clear();
+        }
+        // Fix round 1, M2: destroy whatever was already provisioned before
+        // this refusal -- see nomination_destroy_provisioned()'s comment.
+        // Without this a plan that got as far as channel k before hitting a
+        // busy arbiter left 1..k-1 standing forever with no way to retry.
+        nomination_destroy_provisioned();
         return false;
     }
 
     const ZOOMSDK::SDKError e = m_ctrl->CreateChannel(1);
     report_nomination("create_channel", R"("code":)" + std::to_string(static_cast<int>(e)));
     if (e != ZOOMSDK::SDKERR_SUCCESS) {
-        std::lock_guard<std::mutex> lock(m_chan_mtx);
-        m_nomination_pending.clear();
+        {
+            std::lock_guard<std::mutex> lock(m_chan_mtx);
+            m_nomination_pending.clear();
+        }
+        nomination_destroy_provisioned();
         return false;
     }
     {
@@ -1066,6 +1178,66 @@ bool EngineTalkback::nomination_create_next()
     return true;
 }
 
+void EngineTalkback::assert_command_loop_thread(const char *where) const
+{
+    // Fix round 1, m6: records the thread id of the FIRST call (which is
+    // always genuinely the command loop -- nomination_create_next()'s only
+    // entry points are nominate(), called directly from main.cpp's command
+    // dispatch, and onCreateChannelResponse, which this file already argues
+    // runs there too) and reports every later call from a different thread.
+    // Does not gate or refuse anything: a wrong assumption here is a race to
+    // diagnose, not one this function can safely correct by itself, and the
+    // arbiter's own correctness does not depend on this check -- it depends
+    // on the premise actually being true, which is exactly what this makes
+    // verifiable instead of merely stated.
+    static const std::thread::id command_loop_id = std::this_thread::get_id();
+    if (std::this_thread::get_id() != command_loop_id) {
+        report_nomination("thread_assert_failed", R"("where":")" + std::string(where) + "\"");
+    }
+}
+
+void EngineTalkback::nomination_destroy_provisioned()
+{
+    // Fix round 1, M2. Copy the ids out and clear the table under the lock,
+    // release, THEN call the SDK -- same discipline as every other
+    // m_chan_mtx access in this file. m_ctrl should never be null here: it
+    // is set once in nominate() before any channel is created and nothing
+    // in this class nulls it mid-ladder. Guarded anyway (report and leave
+    // the table alone, rather than clear it and then have nothing to
+    // destroy with) so a future change that violates that invariant fails
+    // loudly instead of silently dropping the record of live channels.
+    if (!m_ctrl) {
+        report_nomination("channels_destroy_skipped", R"("reason":"no_controller")");
+        return;
+    }
+    std::vector<std::basic_string<zchar_t>> ids;
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        ids.reserve(m_provisioned_channels.size());
+        for (auto &pc : m_provisioned_channels) ids.push_back(std::move(pc.channel_id_z));
+        m_provisioned_channels.clear();
+    }
+    for (const auto &channel_id_z : ids) {
+        const std::string channel_id_utf8 = zchar_to_utf8(channel_id_z.c_str());
+        ZOOMSDK::SDKError e = ZOOMSDK::SDKERR_UNKNOWN;
+        uint32_t attempt = 0;
+        for (; attempt < kMaxDestroyAttempts; ++attempt) {
+            e = m_ctrl->BeginBatchDestroyChannels();
+            if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->AddChannelToDestroy(channel_id_z.c_str());
+            if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->ExecuteBatchDestroyChannels();
+            if (e == ZOOMSDK::SDKERR_SUCCESS) break;
+        }
+        report_nomination("channel_destroyed",
+                          R"("channel":")" + json_escape(channel_id_utf8) + R"(","code":)" +
+                          std::to_string(static_cast<int>(e)) + R"(,"attempts":)" +
+                          std::to_string(attempt + 1));
+        if (e != ZOOMSDK::SDKERR_SUCCESS) {
+            report_nomination("channel_destroy_abandoned",
+                              R"("channel":")" + json_escape(channel_id_utf8) + "\"");
+        }
+    }
+}
+
 void EngineTalkback::invite_nominee(const std::basic_string<zchar_t> &channel_id_z,
                                     const std::string &channel_id_utf8,
                                     const std::string &name)
@@ -1075,7 +1247,7 @@ void EngineTalkback::invite_nominee(const std::basic_string<zchar_t> &channel_id
     // nominee not currently in the meeting resolves to 0: reported and
     // skipped here, not an error -- a future roster-driven re-resolution
     // (Task 4) is what is expected to pick them up once they join.
-    const unsigned int uid = resolve_participant(name);
+    const unsigned int uid = resolve_participant(name, ReportSink::Nomination);
     if (uid == 0) {
         report_nomination("member_not_in_meeting",
                           R"("name":")" + json_escape(name) + R"(","channel":")" +
@@ -1094,15 +1266,42 @@ void EngineTalkback::invite_nominee(const std::basic_string<zchar_t> &channel_id
 
 void EngineTalkback::nomination_reset()
 {
-    // Bookkeeping only -- never touches the SDK. See the header comment on
-    // why: provisioned channels and their membership are meeting-scoped, so
-    // once the meeting is gone (Leave/quit) there is nothing left on Zoom's
-    // side to select or destroy.
+    // Fix round 1, C1 (CRITICAL, previously mis-diagnosed as this
+    // implementer's own "concern 2" and rated Minor): this used to clear
+    // m_pending_create unconditionally when it was Nomination and return --
+    // but if a Nomination-owned CreateChannel was still outstanding (this is
+    // exactly the branch that runs then: main.cpp's Leave path calls this
+    // BEFORE meeting_svc->Leave(), and a nominate() issued moments earlier
+    // may not have its response pumped yet), the CreateChannel had already
+    // gone to Zoom. Clearing the arbiter's record of it here does not cancel
+    // that request: when the response eventually arrives,
+    // talkback_claim_create(None) returns None, the id matches no tracked
+    // channel, and it is queued onto m_stray_channels -- which nothing
+    // drains without a probe's driving thread running
+    // (drain_stray_channels() has exactly one caller, tick(), which has
+    // exactly one caller, that thread). has_pending_work() then reads true
+    // forever, and it gates the top of BOTH nominate() and session_start()
+    // -- so this one sequence (nominate, then leave before the create
+    // response is pumped) permanently disabled the whole talkback feature,
+    // citing a probe that never ran. This is precisely the bug F1 already
+    // fixed for Session (see m_session_create_cancelled's header comment);
+    // Nomination had reintroduced the unfixed version.
+    //
+    // Fix: leave m_pending_create AS Nomination (so the eventual response is
+    // still routed to the Nomination branch in onCreateChannelResponse, not
+    // lost to "owner == None") and set m_nomination_create_cancelled
+    // instead; that branch destroys the channel immediately on arrival
+    // rather than adopting it or queuing it as a stray. The nomination
+    // table/queue are still cleared unconditionally here -- that part is
+    // genuinely bookkeeping-only (provisioned channels and their membership
+    // are meeting-scoped, so once the meeting is gone there is nothing left
+    // on Zoom's side to select) and does not depend on whether a create was
+    // outstanding.
     std::lock_guard<std::mutex> lock(m_chan_mtx);
+    if (m_pending_create == TalkbackChannelOwner::Nomination)
+        m_nomination_create_cancelled = true;
     m_nomination_pending.clear();
     m_provisioned_channels.clear();
-    if (m_pending_create == TalkbackChannelOwner::Nomination)
-        m_pending_create = TalkbackChannelOwner::None;
 }
 
 // ── Talkback audio path (Milestone 2) ───────────────────────────────────────

@@ -238,7 +238,18 @@ private:
     // presence of "live") and TalkbackController::evaluate()/status_json()
     // for the consumer side.
     void report_session_state(bool live, const std::string &reason) const;
-    unsigned int resolve_participant(const std::string &name) const;
+
+    // Fix round 1, M3: resolve_participant()'s one report call
+    // ("participant_talkback_support", the per-user IsSupportTalkback()
+    // gate) used to always go through report() -- correct for the probe,
+    // wrong for the session (pre-existing wart, left alone) and wrong for
+    // nomination, where the brief requires this exact gate to be surfaced
+    // in the nomination stream, not the probe's. Callers pass which sink
+    // they need; defaults to Probe so probe()'s own call site (unchanged)
+    // needs no edit.
+    enum class ReportSink { Probe, Nomination };
+    unsigned int resolve_participant(const std::string &name,
+                                     ReportSink sink = ReportSink::Probe) const;
 
     // Drains m_stray_channels and destroys each one. Called from tick() only
     // -- see the invariant comment at that call site.
@@ -273,6 +284,37 @@ private:
     // retry queue for this in Task 2; a stalled ladder is reported, not
     // silently abandoned.
     bool nomination_create_next();
+
+    // Fix round 1, m6: nomination_create_next() is the first call in this
+    // file to issue CreateChannel from inside a callback dispatch
+    // (onCreateChannelResponse's Nomination branch calls it again for the
+    // next queued channel) rather than only from a top-level pipe-command
+    // handler -- the arbiter's whole design assumes CreateChannel is
+    // command-loop-thread-only, and nothing before this task ever checked
+    // that assumption at a CreateChannel call site itself. Records the
+    // thread id of its first caller and reports a mismatch on every later
+    // call from a different thread -- converts an assumption this file's
+    // own comments already flag as newly load-bearing (and contradicted in
+    // general by engine-writer.h's "SDK fires callbacks on its own internal
+    // threads" statement) into evidence instead of leaving it silently
+    // trusted. Does not gate or refuse anything -- a wrong assumption here
+    // is a race to diagnose, not one this function can safely correct by
+    // itself.
+    void assert_command_loop_thread(const char *where) const;
+
+    // Fix round 1, M2: destroys every channel currently in
+    // m_provisioned_channels and forgets them. Called whenever provisioning
+    // cannot continue -- a synchronous CreateChannel failure, an error
+    // response, or the arbiter refusing the next create -- so a transient
+    // failure on channel k of a plan does not strand the first k-1
+    // already-created channels for the rest of the meeting: consuming
+    // budget, unreachable by any key, and (before this fix) making every
+    // later nominate() refuse with "already_provisioned" forever, since
+    // nothing destroyed them to make room for a retry. Must run on the
+    // command-loop thread, same as create -- every call site is (nominate()/
+    // nomination_create_next() from a pipe command, onCreateChannelResponse
+    // from the SDK message pump on that same thread).
+    void nomination_destroy_provisioned();
 
     // Resolves `name` to a live user id and, if found, invites it into the
     // already-created channel `channel_id_z`. Deliberately independent of
@@ -502,8 +544,11 @@ private:
     std::atomic<std::chrono::steady_clock::rep> m_session_create_deadline{0};
 
     // ── Pre-provisioned channels (Task 2, 2026-08-25) ───────────────────────
-    // Same wedge risk as m_session_create_deadline above, same fix: a
-    // swallowed CreateChannel response for a Nomination-owned create would
+    // Fix round 1, C1: this is now a SECONDARY backstop, not the fix for a
+    // create outstanding across Leave/quit -- m_nomination_create_cancelled
+    // below is. This still matters for the case that flag does not cover: a
+    // CreateChannel response that is genuinely never delivered at all (no
+    // Leave, no cancellation, the SDK simply never calls back), which would
     // otherwise leave m_pending_create stuck at Nomination forever, refusing
     // every later probe()/session_start()/nominate() for the life of the
     // process. Read and lazily cleared by expire_stale_pending_create_locked(),
@@ -512,6 +557,30 @@ private:
     // the same underlying wait (a Zoom CreateChannel response), so there is
     // no reason for a third constant.
     std::atomic<std::chrono::steady_clock::rep> m_nomination_create_deadline{0};
+
+    // Fix round 1, C1 (CRITICAL): true when nomination_reset() (called from
+    // Leave/quit) ran while a Nomination-owned CreateChannel was still
+    // outstanding (m_pending_create == Nomination at that moment). Mirrors
+    // m_session_create_cancelled exactly, because this is the same bug F1
+    // already fixed for Session, reintroduced here: the original
+    // nomination_reset() cleared m_pending_create unconditionally and
+    // returned, but the CreateChannel had already gone to Zoom. When its
+    // response arrived, the arbiter saw None (owner == None), the id matched
+    // no tracked channel, and it was queued onto m_stray_channels -- which
+    // nothing drains without a probe's driving thread running
+    // (drain_stray_channels() has exactly one caller, tick(), which has
+    // exactly one caller, the probe's driving thread). has_pending_work()
+    // then reads true forever (m_stray_channels non-empty), and
+    // has_pending_work() gates the top of BOTH nominate() and
+    // session_start() -- so one ordinary "nominate, then leave before the
+    // create response is pumped" sequence permanently disabled the whole
+    // talkback feature, citing a probe that never ran. Fix: leave
+    // m_pending_create AS Nomination (so the eventual response still routes
+    // to the Nomination branch in onCreateChannelResponse, not lost to
+    // "owner == None") and set this flag instead; that branch destroys the
+    // channel immediately on arrival rather than adopting it or queuing it
+    // as a stray. Guarded by m_chan_mtx, same discipline as m_pending_create.
+    bool m_nomination_create_cancelled = false;
 
     // One entry per Zoom channel nominate() has successfully created --
     // populated by onCreateChannelResponse's Nomination branch, one at a
@@ -522,14 +591,17 @@ private:
     // live id only at invite time, same rule as m_session_participant.
     //
     // Guarded by m_chan_mtx like every other channel-id state in this class.
-    // Every writer today is the command-loop thread (nominate(),
-    // onCreateChannelResponse's Nomination branch, nomination_reset()) --
-    // nomination never spawns a driving thread the way the probe does, so
-    // nothing here has m_channel_id_z's cross-thread Idle/Done hazard. It is
-    // guarded anyway per this task's own instruction ("guard it with
-    // m_chan_mtx like every other channel-id state") so a future reader that
-    // is NOT the command loop -- a talkback_status query, say -- does not
-    // have to re-derive whether this table is safe to read from elsewhere.
+    // Every writer today is the command-loop thread: onCreateChannelResponse's
+    // Nomination branch (pushes an entry per successful create),
+    // nomination_destroy_provisioned() (fix round 1, M2 -- drains and clears
+    // the whole table before destroying each channel), and nomination_reset()
+    // (clears on Leave/quit, bookkeeping only). Nomination never spawns a
+    // driving thread the way the probe does, so nothing here has
+    // m_channel_id_z's cross-thread Idle/Done hazard. It is guarded anyway
+    // per this task's own instruction ("guard it with m_chan_mtx like every
+    // other channel-id state") so a future reader that is NOT the command
+    // loop -- a talkback_status query, say -- does not have to re-derive
+    // whether this table is safe to read from elsewhere.
     struct TalkbackProvisionedChannel {
         std::basic_string<zchar_t> channel_id_z;
         std::string channel_id;              // UTF-8, reporting only
@@ -540,9 +612,20 @@ private:
 
     // Channels talkback_plan() decided on that have not been created yet,
     // in plan order; the front entry is whichever CreateChannel is either
-    // about to be issued or currently outstanding. nomination_create_next()
-    // pops the front once its response arrives (moving it into
-    // m_provisioned_channels above) and issues the next. Same guarding
-    // rationale as m_provisioned_channels above.
+    // about to be issued or currently outstanding.
+    //
+    // Fix round 1, m3: the previous version of this comment named only
+    // nominate(), onCreateChannelResponse's Nomination branch, and
+    // nomination_reset() -- undercounting in exactly the way
+    // src/talkback-channel-owner.h's sibling inventory was just caught doing
+    // (M4). The full writer list, all command-loop thread: nominate()
+    // (assigns the whole plan), nomination_create_next() (clears on a gate
+    // refusal or a synchronous CreateChannel failure -- there is no retry
+    // queue for those), onCreateChannelResponse's Nomination branch (pops
+    // the front on a successful create, moving it into
+    // m_provisioned_channels above; clears the rest on an error response),
+    // expire_stale_pending_create_locked() (clears on a stale-Nomination
+    // timeout), and nomination_reset() (clears unconditionally on
+    // Leave/quit).
     std::vector<TalkbackPlannedChannel> m_nomination_pending;
 };

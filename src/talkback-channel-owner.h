@@ -27,9 +27,18 @@
 // An earlier version of this comment claimed both CreateChannel callers run
 // on the engine's single command-loop thread, so the field "costs nothing"
 // and needs none. That was true until review-round R3 added a driving-thread
-// writer, and is no longer true as written -- do not restore it. As of Task 2
-// (2026-08-25), m_pending_create has SIX write sites, on TWO different
-// threads:
+// writer, and is no longer true as written -- do not restore it. This
+// paragraph has ALREADY been caught stale twice by undercounting write sites
+// (once pre-Task-2, once in Task 2's own first pass, which also asserted a
+// write site -- session_stop()'s early branch clearing the field -- that the
+// F1 fix had removed). Do not trust the count below either without
+// re-deriving it from the actual code; the discipline that matters is
+// "verify the thread each writer runs on, from the code, every time this
+// paragraph is touched," not the specific number that follows.
+//
+// As of Task 2 fix round 1 (2026-08-25), five call sites WRITE
+// m_pending_create, on TWO different threads, plus two call sites that
+// deliberately do NOT write it despite looking like they should:
 //   * probe(), session_start(), and nominate()/nomination_create_next()
 //     (engine-talkback.cpp) CLAIM it (None -> Probe / None -> Session / None
 //     -> Nomination). All run on the engine's command-loop thread, which on
@@ -41,19 +50,23 @@
 //     and the store, which is precisely the window this arbiter exists to
 //     reason about -- a maintainer who assumes the claim happens before the
 //     call will misjudge when m_pending_create actually becomes non-None.
-//   * onCreateChannelResponse (same file) CLEARS it (-> None) when it
-//     attributes a response to its owner. Also the command-loop thread --
-//     SDK callbacks run there for the same message-pump reason as above.
-//   * session_stop() (same file) also CLEARS it (-> None, only when the
-//     pending owner is Session), in two places: the "nothing to tear down"
-//     early branch and the main teardown path. Same command-loop thread as
-//     every write site above.
+//   * onCreateChannelResponse (same file) CLAIMS-then-CLEARS it (-> None) in
+//     the same lock scope, for whichever owner is currently pending,
+//     regardless of what that owner's branch then does with the response
+//     (adopts it, destroys it as cancelled, or reports a failure) -- the
+//     clear happens before any of those branches run. Also the command-loop
+//     thread -- SDK callbacks run there for the same message-pump reason as
+//     above.
+//   * session_stop()'s MAIN teardown path (same file) CLEARS it (-> None,
+//     only when the pending owner is Session and there is a channel/session
+//     to actually tear down). Command-loop thread, same as every write site
+//     above.
 //   * tick()'s AwaitingChannel-timeout handling (same file, R3 fix) ALSO
 //     clears it (-> None, only when the pending owner is Probe), to stop a
 //     swallowed CreateChannel response from wedging the arbiter forever.
 //     This one runs on the PROBE'S OWN separate driving thread (see tick()'s
 //     own top-of-function comment) -- genuinely concurrent with the other
-//     five, not merely a different call site on the same thread. It is the
+//     four, not merely a different call site on the same thread. It is the
 //     ONLY write site not on the command-loop thread, and is therefore the
 //     entire reason this field needs synchronization at all.
 //   * expire_stale_pending_create_locked() (same file, extended for Task 2)
@@ -62,7 +75,24 @@
 //     under m_chan_mtx -- the same self-healing tick()'s timeout gives
 //     Probe, given to Session and Nomination without a second thread or
 //     timer. Command-loop thread, same as its callers.
-// Because of that one driving-thread writer, m_pending_create is guarded by
+//
+// The two call sites that deliberately do NOT write m_pending_create, even
+// though a naive read of "this is the teardown path" would expect them to:
+//   * session_stop()'s "nothing to tear down" early branch, when the pending
+//     owner is Session. Writing None here was the F1 CRITICAL bug: the
+//     CreateChannel had already gone to Zoom, and clearing the arbiter's
+//     record of it did not cancel that request -- the eventual response
+//     would be claimed by nobody, match no tracked channel, and wedge onto
+//     m_stray_channels forever. The fix sets m_session_create_cancelled
+//     instead and leaves the owner AS Session, so onCreateChannelResponse
+//     still routes the response to the Session branch, which destroys it.
+//   * nomination_reset() (same file, Task 2 fix round 1 -- the ORIGINAL
+//     version of this function DID write None here unconditionally, which
+//     was the Critical finding of fix round 1: the unfixed F1 bug,
+//     reintroduced for Nomination). Now mirrors session_stop()'s early
+//     branch exactly: sets m_nomination_create_cancelled instead of writing
+//     m_pending_create, for the same reason.
+// Because of the one driving-thread writer, m_pending_create is guarded by
 // EngineTalkback's m_chan_mtx everywhere it is read or written -- copy the
 // decision out under the lock, release, THEN call the SDK, same discipline
 // as every other m_chan_mtx access in that class. If a future change moves
@@ -70,8 +100,7 @@
 // driving-thread writer, this paragraph -- and the mutex requirement -- can
 // be revisited, but do not strip the guarding on the strength of THIS
 // comment's old claim; verify the thread each writer runs on first, and
-// recount the write sites -- this paragraph has already been caught stale
-// once by undercounting them. A queue instead of a single outstanding slot
+// recount the write sites. A queue instead of a single outstanding slot
 // would buy nothing here and would add a way for the probe, the session, and
 // nomination to interleave.
 //

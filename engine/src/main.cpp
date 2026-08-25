@@ -1378,8 +1378,7 @@ int main()
                     R"({"cmd":"talkback_probe","stage":"controller","ok":false,)"
                     R"("reason":"not_in_meeting"})");
             } else if (!talkback.is_idle()) {
-                // A ladder is live. Refuse immediately -- no join, no block,
-                // no probe() call that would touch the driving thread.
+                // A ladder is live. Refuse immediately -- no join, no block.
                 // Joining first (an earlier round of this change did exactly
                 // that) blocks THIS command -- the single ipc_read_line
                 // thread -- for up to the full ~30s driving-thread bound,
@@ -1387,11 +1386,30 @@ int main()
                 // this same loop must come back around to see) all stall.
                 // Refusing is correct for a probe; blocking the one reader
                 // thread to wait one out is not (review round 3 finding).
-                // talkback.probe() itself is non-blocking and contains this
-                // exact guard, so delegate to it: it reports "busy" with the
-                // live phase value and returns false without touching
-                // talkback_thread.
-                talkback.probe(meeting_svc, who);
+                //
+                // INVARIANT: this branch must touch NOTHING but the pipe --
+                // no talkback.probe() call, no talkback_thread, no
+                // talkback_stop. "Not idle" is exactly the state that can
+                // change out from under this branch: a callback thread can
+                // flip phase to Done between the is_idle() check above and
+                // any further action here (the same onCreateChannelResponse
+                // early-failure path the idle branch below cites). A
+                // talkback.probe() call made from here would then see
+                // Idle/Done, pass ITS OWN guard, and silently start a real
+                // ladder -- CreateChannel goes out to Zoom -- with no driving
+                // thread ever spawned for it (we're in the refusal branch).
+                // That ladder can never time out or self-destroy (tick() is
+                // what runs kAwaitTimeout and the Destroying retries), so it
+                // leaks a live Zoom channel for the rest of the meeting and
+                // wedges every later talkback_probe in this same branch
+                // forever -- and the operator sees no "busy", so nothing
+                // even hints a probe was silently dropped (review round 4
+                // finding). A bare pipe write has no guard for a callback
+                // thread to race, so it's the only action here that's safe
+                // regardless of what phase does after the check above.
+                EngineIpc::write(
+                    R"({"cmd":"talkback_probe","stage":"busy",)"
+                    R"("reason":"a talkback probe is already in progress"})");
             } else {
                 // is_idle() is a plain, non-atomic-compound check-then-act
                 // here, and that is safe ONLY because of two facts specific

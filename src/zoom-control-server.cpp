@@ -848,8 +848,24 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
         }
         const std::string participant = req.value("participant").toString().toStdString();
         const std::string source = req.value("source").toString().toStdString();
-        const TalkbackKeyMode mode = req.value("mode").toString() == "latch"
-            ? TalkbackKeyMode::Latch : TalkbackKeyMode::PushToTalk;
+        // Fail closed on an unrecognised mode rather than silently guessing
+        // push-to-talk -- an operator who mistypes "Latch" or sends "toggle"
+        // needs to know their key opened in a different mode than they asked
+        // for, not discover it later on air. Omitted mode defaults to PTT.
+        const QString mode_str = req.value("mode").toString("push_to_talk");
+        TalkbackKeyMode mode;
+        if (mode_str == "latch") {
+            mode = TalkbackKeyMode::Latch;
+        } else if (mode_str == "push_to_talk" || mode_str == "ptt") {
+            mode = TalkbackKeyMode::PushToTalk;
+        } else {
+            write_response(socket, {
+                {"ok", false},
+                {"error", "invalid_talkback_mode"},
+                {"message", "mode must be \"latch\", \"push_to_talk\", or \"ptt\""},
+            });
+            return;
+        }
         std::string error;
         const bool ok = TalkbackController::instance().key_on(
             participant, source, mode, /*needs_renewal=*/true, error);
@@ -873,8 +889,28 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
     }
 
     if (cmd == "talkback_status") {
+        // status_json() hand-builds its JSON by string concatenation (see
+        // talkback-controller.cpp) rather than going through QJsonObject, so
+        // it is not guaranteed well-formed -- e.g. a participant or source
+        // name containing an unescaped quote. QJsonDocument::fromJson()
+        // returns a null document on malformed input, and .object() on a
+        // null document silently returns an EMPTY QJsonObject with no error
+        // signal. Without this guard that reads back as {"ok":true,
+        // "talkback":{}} -- a false-positive success that hides whether a
+        // key is open, which is the one thing an operator mid-show most
+        // needs from this command. Fail loud instead.
+        QJsonParseError parse_error;
         const QJsonDocument doc = QJsonDocument::fromJson(
-            QByteArray::fromStdString(TalkbackController::instance().status_json()));
+            QByteArray::fromStdString(TalkbackController::instance().status_json()),
+            &parse_error);
+        if (parse_error.error != QJsonParseError::NoError || !doc.isObject()) {
+            write_response(socket, {
+                {"ok", false},
+                {"error", "talkback_status_unavailable"},
+                {"message", "Could not parse talkback status."},
+            });
+            return;
+        }
         write_response(socket, {{"ok", true}, {"talkback", doc.object()}});
         return;
     }

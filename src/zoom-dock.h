@@ -91,6 +91,17 @@ private:
     QLineEdit   *m_participant_filter = nullptr;
     QListWidget *m_participant_list   = nullptr;
 
+    // Talkback probe (Milestone 1 diagnostic, not the talkback feature -- see
+    // zoom-dock.cpp where the group box is built). m_talkback_participant_combo
+    // is a dedicated, roster-driven selector rather than the legacy
+    // m_participant_list above: that list is only ever populated inside
+    // refresh_outputs(), which returns immediately whenever m_output_table is
+    // null (it always is now that routing lives in the Output Manager
+    // dialog), so it never actually runs.
+    QComboBox   *m_talkback_participant_combo = nullptr;
+    QPushButton *m_talkback_probe_btn         = nullptr;
+    QLabel      *m_talkback_status_label      = nullptr;
+
     // Recovery status panel (shown only while Recovering)
     QFrame      *m_recovery_frame  = nullptr;
     QLabel      *m_recovery_label  = nullptr;

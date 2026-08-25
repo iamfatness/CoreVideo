@@ -1016,6 +1016,12 @@ void ZoomEngineClient::set_last_error(const std::string &message)
     m_last_error = message;
 }
 
+std::string ZoomEngineClient::talkback_probe_status() const
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    return m_talkback_probe_status;
+}
+
 void ZoomEngineClient::fail_after_init_retries_exhausted()
 {
     // Monitor thread only.
@@ -1158,6 +1164,14 @@ void ZoomEngineClient::handle_event(const std::string &line)
         // because a stage that doesn't reach the log may as well not have
         // been reported.
         blog(LOG_INFO, "[obs-zoom-plugin] talkback_probe: %s", line.c_str());
+        // Also stash the raw line for the dock's status label so the operator
+        // isn't required to tail the log to use the probe button. Lock scope
+        // is kept to the copy alone -- never held across the blog() above or
+        // any Qt call the dock might make when it later reads this back.
+        {
+            std::lock_guard<std::mutex> lk(m_mtx);
+            m_talkback_probe_status = line;
+        }
         return;
     }
     if (cmd == "awaiting_admission") {

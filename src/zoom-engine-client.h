@@ -92,6 +92,13 @@ public:
     // lines and are logged verbatim in handle_event(); this call itself does
     // not block or return a result.
     void talkback_probe(const std::string &participant_name);
+    // Latest talkback_probe stage line (raw compact JSON), for the dock's
+    // status label. Written by handle_event()'s talkback_probe branch and
+    // polled by the dock's existing 100ms refresh timer -- the same pattern
+    // last_error() and roster() already use -- rather than a dedicated
+    // signal/slot path, so this diagnostic doesn't need its own plumbing on
+    // top of what every other dock readout already relies on.
+    std::string talkback_probe_status() const;
 
     // Subscribe a source to a "spotlight slot" (1-based) instead of a fixed
     // participant. The engine resolves which participant owns that slot.
@@ -285,6 +292,9 @@ private:
     std::unordered_map<void *, RosterCallback> m_roster_callbacks;
     std::unordered_map<void *, ErrorCallback> m_error_callbacks;
     std::string m_last_error;
+    // Raw compact JSON of the most recent talkback_probe stage line; see
+    // talkback_probe_status() above.
+    std::string m_talkback_probe_status;
     std::deque<DebugEvent> m_debug_events;
     // Tracks whether the user deliberately requested a leave/stop (suppresses recovery).
     std::atomic<bool> m_user_leaving{false};

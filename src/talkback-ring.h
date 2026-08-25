@@ -91,12 +91,16 @@ inline bool talkback_ring_publish(void *region_base, const void *pcm,
 
 // Drain everything published since `read_index`, calling `fn` per buffer in
 // order. Advances `read_index`. Returns the number of buffers delivered.
+// `lost`, when non-null, is incremented once per slot that failed every
+// seqlock attempt -- see the retry loop below for why that must never be
+// silent.
 //
 // EVENTS ARE PROMPTS, NOT PAYLOADS: one notify can cover many slots, so the
 // reader must drain fully on any wakeup rather than consuming one buffer per
 // event.
 inline uint32_t talkback_ring_drain(void *region_base, uint32_t &read_index,
-                                    TalkbackRingSlotFn fn, void *ctx)
+                                    TalkbackRingSlotFn fn, void *ctx,
+                                    uint32_t *lost = nullptr)
 {
     if (region_base == nullptr || fn == nullptr) return 0;
     auto *hdr = static_cast<ShmAudioHeader *>(region_base);
@@ -120,25 +124,49 @@ inline uint32_t talkback_ring_drain(void *region_base, uint32_t &read_index,
             static_cast<const char *>(region_base) +
             shm_audio_slot_offset(*hdr, index));
 
-        // Per-slot seqlock: even and unchanged across the copy means the
-        // payload was stable. Three attempts, then give up on this slot
-        // rather than spinning on the audio path.
+        // Per-slot seqlock, mirroring the read in src/zoom-source.cpp
+        // (~line 1965-1990): the payload COPY happens INSIDE the
+        // [s1, s2] window, and `fn` is only ever handed the COPY, never a
+        // pointer into shared memory. A recheck that only re-validates
+        // already-copied locals (byte_len/capture_ns) and then lets the
+        // caller read the payload afterward protects nothing -- the actual
+        // shared-memory read (fn's access) still happens outside the
+        // validated window and can race a concurrent write, handing back a
+        // torn buffer. `scratch` is sized for the largest possible slot;
+        // `len` is clamped against both `hdr->slot_bytes` and
+        // `kTalkbackSlotBytes` before the copy so a corrupted header can
+        // never drive a stack overflow here.
+        alignas(alignof(std::max_align_t)) uint8_t scratch[kTalkbackSlotBytes];
+        uint32_t len = 0;
+        uint64_t ns  = 0;
         bool copied = false;
         for (int attempt = 0; attempt < 3 && !copied; ++attempt) {
             const uint32_t s1 = slot->sequence;
+            std::atomic_thread_fence(std::memory_order_acquire);
             if (s1 & 1u) continue;
+            len = slot->byte_len;
+            ns  = slot->capture_ns;
+            if (len == 0 || len > hdr->slot_bytes || len > kTalkbackSlotBytes)
+                break;
+            std::memcpy(scratch,
+                        reinterpret_cast<const char *>(slot) + sizeof(ShmAudioSlot),
+                        len);
             std::atomic_thread_fence(std::memory_order_acquire);
-            const uint32_t len = slot->byte_len;
-            const uint64_t ns  = slot->capture_ns;
-            if (len == 0 || len > hdr->slot_bytes) break;
-            std::atomic_thread_fence(std::memory_order_acquire);
-            if (slot->sequence != s1) continue;
-            fn(reinterpret_cast<const char *>(slot) + sizeof(ShmAudioSlot),
-               len, ns, ctx);
-            copied = true;
+            const uint32_t s2 = slot->sequence;
+            if (s1 == s2 && (s2 & 1u) == 0) copied = true;
+        }
+        if (copied) {
+            fn(scratch, len, ns, ctx);
+            ++delivered;
+        } else if (lost != nullptr) {
+            // Three attempts, then give up on this slot rather than
+            // spinning on the audio path -- but giving up is not silent:
+            // the caller must be able to account for every lost slot, the
+            // same discipline the free-running write_index exists to
+            // enforce (see ShmAudioHeader::write_index in engine-ipc.h).
+            ++*lost;
         }
         ++read_index;
-        if (copied) ++delivered;
     }
     return delivered;
 }

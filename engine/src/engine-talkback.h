@@ -24,6 +24,13 @@
 #include "zoom_sdk.h"
 #include "meeting_service_interface.h"
 #include "meeting_service_components/meeting_talkback_ctrl_interface.h"
+// meeting_service_interface.h only forward-declares IMeetingParticipantsController;
+// resolve_participant() needs the full definition (GetParticipantsList,
+// GetUserByUserID) and IUserInfo (GetUserName). meeting_participants_ctrl_interface.h
+// uses AudioType without including its home header, so meeting_audio_interface.h
+// must come first -- same order main.cpp already uses for this same pair.
+#include "meeting_service_components/meeting_audio_interface.h"
+#include "meeting_service_components/meeting_participants_ctrl_interface.h"
 
 #include <cstdint>
 #include <string>
@@ -58,7 +65,14 @@ private:
     ZOOMSDK::IMeetingService          *m_svc  = nullptr;
     ZOOMSDK::IMeetingTalkbackController *m_ctrl = nullptr;
     Phase        m_phase = Phase::Idle;
-    std::string  m_channel_id;
+    std::string  m_channel_id;      // UTF-8, REPORTING ONLY -- never pass to
+                                     // the SDK, see m_channel_id_z below.
+    // zchar_t is wchar_t on Windows (zoom_sdk_def.h) but char elsewhere, so
+    // basic_string<zchar_t> is the only type that is simultaneously correct
+    // on both platforms and round-trip-safe for an opaque SDK identifier
+    // (no UTF-8 re-encoding). Every SDK call that takes a channel ID must
+    // use m_channel_id_z.c_str(), never m_channel_id.c_str().
+    std::basic_string<zchar_t> m_channel_id_z;
     std::string  m_participant_name;
     unsigned int m_participant_id = 0;
     uint64_t     m_tone_index = 0;

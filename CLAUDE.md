@@ -170,6 +170,16 @@ OBS. Diagnostic technique: a ring can be probed read-only from a third
 process by name — watching `notify`/`write_index` from outside distinguishes
 "writer stalled" / "reader wedged" / "ghost writer" in seconds.
 
+`talkback_probe` (`{"cmd":"talkback_probe","participant":"<display name>"}`,
+requires an active meeting) fires the Milestone 1 Zoom-talkback probe
+(`engine/src/engine-talkback.h`/`.cpp`): can this account open a talkback
+channel and put audio in it. The control API response only confirms the
+trigger was accepted — every stage of the probe ladder (`controller`,
+`meeting_supported`, `create_channel`, `invite`, `send`, `destroy`, timeouts,
+stray-channel cleanup, etc.) arrives asynchronously as OBS log lines
+(`blog(LOG_INFO, "[obs-zoom-plugin] talkback_probe: ...")`), not over the
+control socket — watch the log, not the response.
+
 One asymmetry to know before testing a join fix this way: the join watchdog
 (`src/join-watchdog.h`) is armed in `on_join_clicked()` only. A control-API
 `join` never sets `m_join_started_ms`, so the watchdog is inert on that path

@@ -794,6 +794,39 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
         return;
     }
 
+    // Milestone 1: fires the talkback probe against one named participant.
+    // The probe itself is async and reports its stages as OBS log lines
+    // ("talkback_probe" events in ZoomEngineClient::handle_event), not over
+    // this connection -- this response only confirms the trigger was
+    // accepted.
+    if (cmd == "talkback_probe") {
+        const QString participant = req.value("participant").toString();
+        if (participant.isEmpty()) {
+            write_response(socket, {
+                {"ok", false},
+                {"error", "participant_required"},
+                {"message", "participant name required"},
+            });
+            return;
+        }
+        if (ZoomEngineClient::instance().state() != MeetingState::InMeeting) {
+            write_response(socket, {
+                {"ok", false},
+                {"error", "not_in_meeting"},
+                {"message", "Join the meeting before running the talkback probe."},
+            });
+            return;
+        }
+        blog(LOG_INFO, "[obs-zoom-plugin] Control API: talkback_probe participant=%s",
+             participant.toStdString().c_str());
+        ZoomEngineClient::instance().talkback_probe(participant.toStdString());
+        write_response(socket, {
+            {"ok", true},
+            {"note", "probe started; watch the OBS log for talkback_probe stages"},
+        });
+        return;
+    }
+
     // Extended output assignment — supports spotlight, screen_share, failover.
     // Fields: source (str), mode (str: participant|active_speaker|spotlight|screen_share),
     //         participant_id (uint), spotlight_slot (uint), failover_participant_id (uint),

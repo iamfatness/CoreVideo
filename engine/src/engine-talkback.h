@@ -49,6 +49,18 @@ public:
     // in progress, then destroys the channel.
     void tick();
 
+    // True once the ladder is quiescent: Idle before the first probe() ever
+    // runs, Done after one finishes (success, failure, or abandoned
+    // destroy). Task 5's driving thread uses this to stop ticking as soon as
+    // the probe settles instead of always spinning its full bound -- and
+    // deliberately exposes only this bool, not m_phase itself, so callers
+    // outside this file never take a dependency on the phase enum's shape.
+    bool is_idle() const
+    {
+        const Phase p = m_phase.load(std::memory_order_acquire);
+        return p == Phase::Idle || p == Phase::Done;
+    }
+
     // IMeetingTalkbackCtrlEvent
     void onCreateChannelResponse(const zchar_t *channelID, TalkbackError error) override;
     void onDestroyChannelResponse(const zchar_t *channelID, TalkbackError error) override;

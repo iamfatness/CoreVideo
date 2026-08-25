@@ -87,6 +87,11 @@ public:
     void leave();
     void start_media();
     void stop_media();
+    // Triggers the Milestone 1 talkback probe for one named participant. The
+    // probe's progress reports arrive asynchronously as "talkback_probe"
+    // lines and are logged verbatim in handle_event(); this call itself does
+    // not block or return a result.
+    void talkback_probe(const std::string &participant_name);
 
     // Subscribe a source to a "spotlight slot" (1-based) instead of a fixed
     // participant. The engine resolves which participant owns that slot.

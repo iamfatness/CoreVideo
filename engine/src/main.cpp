@@ -5,6 +5,7 @@
 #include "engine-share.h"
 #include "engine-audio.h"
 #include "engine-json.h"
+#include "engine-talkback.h"
 #include <zoom_sdk.h>
 #include <auth_service_interface.h>
 #include <setting_service_interface.h>
@@ -1168,6 +1169,13 @@ int main()
     EngineShare        share_engine(&participants);
     EngineMeetingEvent meeting_event(e2p, &meeting_svc, &participants,
                                      &video_engine, &share_engine);
+    // Static storage duration, not a plain local: the TalkbackProbe branch
+    // below detaches a thread that calls talkback.tick()/is_idle() for up to
+    // ~30s. A plain local's lifetime ends when main() returns, and a thread
+    // still running against it at that point is a use-after-free; static
+    // duration means the object outlives that, so the detached thread can
+    // never dangle a reference to it (Ruling B, task-5-brief).
+    static EngineTalkback talkback;
 
     // Persistent wide-string storage for async SDK calls (JoinParam / AuthContext
     // hold raw pointers — these must outlive the Join/SDKAuth call).
@@ -1350,6 +1358,36 @@ int main()
                 ZOOMSDK::SDKError err = meeting_svc->Join(jp);
                 EngineIpc::write(R"({"cmd":"debug","stage":"after_join","code":)" +
                     std::to_string(static_cast<int>(err)) + "}");
+            }
+
+        } else if (command == IpcCommand::TalkbackProbe) {
+            const std::string who = json_str(line, "participant");
+            if (!meeting_svc) {
+                EngineIpc::write(
+                    R"({"cmd":"talkback_probe","stage":"controller","ok":false,)"
+                    R"("reason":"not_in_meeting"})");
+            } else {
+                talkback.probe(meeting_svc, who);
+                // Drive tick() off the read loop's thread: ipc_read_line_with_
+                // message_pump() blocks, so tick() cannot live there. Bounded
+                // at 3000 x 10ms (~30s), not the ~12s a naive read of the
+                // probe's own "~3s of tone" comment suggests -- AwaitingChannel
+                // and AwaitingInvite each carry their own 10s timeout
+                // (kAwaitTimeout in engine-talkback.cpp) before falling through
+                // to Destroying, which itself retries up to kMaxDestroyAttempts
+                // times. Worst case is 10s timeout plus several destroy
+                // retries; 12s could expire the thread mid-destroy and strand
+                // a channel -- exactly what the destroy-retry machinery exists
+                // to prevent (Ruling A, task-5-brief). is_idle() breaks the
+                // loop as soon as the ladder settles so the happy path does
+                // not spin the full bound.
+                std::thread([]() {
+                    for (int i = 0; i < 3000; ++i) {
+                        talkback.tick();
+                        if (talkback.is_idle()) break;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    }
+                }).detach();
             }
 
         } else if (command == IpcCommand::Leave) {

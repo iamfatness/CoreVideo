@@ -848,6 +848,13 @@ void ZoomEngineClient::stop_media()
     m_media_active.store(false, std::memory_order_release);
 }
 
+void ZoomEngineClient::talkback_probe(const std::string &participant_name)
+{
+    if (!m_running.load(std::memory_order_acquire)) return;
+    write_json(R"({"cmd":"talkback_probe","participant":")" +
+               json_escape(participant_name) + "\"}");
+}
+
 void ZoomEngineClient::subscribe(const std::string &source_uuid,
                                  uint32_t participant_id,
                                  bool isolate_audio,
@@ -1143,6 +1150,14 @@ void ZoomEngineClient::handle_event(const std::string &line)
             m_media_active.store(true, std::memory_order_release);
         else if (stage == "raw_media_stopped")
             m_media_active.store(false, std::memory_order_release);
+        return;
+    }
+    if (cmd == "talkback_probe") {
+        // Milestone 1's entire deliverable is these stage reports reaching
+        // the operator -- verbatim, no filtering/summarising/pretty-printing,
+        // because a stage that doesn't reach the log may as well not have
+        // been reported.
+        blog(LOG_INFO, "[obs-zoom-plugin] talkback_probe: %s", line.c_str());
         return;
     }
     if (cmd == "awaiting_admission") {

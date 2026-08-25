@@ -266,6 +266,7 @@ if(COREVIDEO_BUILD_PLUGIN)
         src/zoom-source.cpp
         src/talkback-tap.cpp
         src/talkback-controller.cpp
+        src/talkback-cue.cpp
         src/zoom-participant-audio-source.cpp
         src/zoom-supersource.cpp
         src/zoom-tiles-background.cpp
@@ -311,7 +312,9 @@ if(COREVIDEO_BUILD_PLUGIN)
         Qt6::Widgets
     )
     if(WIN32)
-        target_link_libraries(obs-zoom-plugin PRIVATE crypt32)
+        # winmm: talkback-cue.cpp's PlaySound(SND_MEMORY | SND_ASYNC) call --
+        # see that file's header comment for why it was chosen over WASAPI.
+        target_link_libraries(obs-zoom-plugin PRIVATE crypt32 winmm)
         add_executable(CoreVideoOAuthCallback src/oauth-callback-helper.cpp)
         target_link_libraries(CoreVideoOAuthCallback PRIVATE ws2_32 shell32 ole32)
         install(TARGETS CoreVideoOAuthCallback
@@ -1039,6 +1042,32 @@ if(BUILD_TESTING)
     )
     add_test(NAME CoreVideoTalkbackChannelOwner
              COMMAND CoreVideoTalkbackChannelOwnerTest)
+
+    # When the talkback open/close audio cue fires: a pure edge-detector over
+    # the engine's own confirmed `live` state, so the cue marks the moment
+    # the Zoom channel's create/invite round trip actually finishes rather
+    # than the key press (which would clip the director's own first words
+    # underneath a cue claiming it's already safe to talk). See
+    # src/talkback-cue.h.
+    add_executable(CoreVideoTalkbackCueTest
+        tests/talkback-cue-test.cpp
+    )
+    target_include_directories(CoreVideoTalkbackCueTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTalkbackCue
+             COMMAND CoreVideoTalkbackCueTest)
+
+    # The talkback cue must never reach program or ISO, same guarantee as the
+    # tap (CoreVideoTalkbackIsolation above), enforced separately because
+    # talkback-cue.cpp is a second independent place audio-shaped code lives
+    # in this plugin. See tests/talkback-cue-isolation-test.cpp.
+    add_executable(CoreVideoTalkbackCueIsolationTest
+        tests/talkback-cue-isolation-test.cpp
+    )
+    add_test(NAME CoreVideoTalkbackCueIsolation
+             COMMAND CoreVideoTalkbackCueIsolationTest
+                     "${CMAKE_CURRENT_SOURCE_DIR}/src/talkback-cue.cpp")
 
     # The master clock every audio buffer is stamped from. Wall-clock arrival
     # stamps let IPC jitter reach OBS, which resampled continuously — the

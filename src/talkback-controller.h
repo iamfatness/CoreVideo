@@ -14,6 +14,7 @@
 // calls back whether or not anyone is talking), so a gap means the path is
 // gone and the key closes with nothing having to NOTICE the failure.
 //
+#include "talkback-cue.h"
 #include "talkback-key.h"
 #include "talkback-tap.h"
 
@@ -68,4 +69,11 @@ private:
     // very first evaluate() tick after key_on() -- before any engine
     // response, confirmed or not, could possibly have arrived.
     uint64_t           m_session_opened_at_ms = 0;
+    // Last engine-confirmed `live` value evaluate() has seen, so it can
+    // edge-detect the open/close audio cue (talkback-cue.h) instead of
+    // re-firing OPEN on every tick a session stays live. Reset to false in
+    // key_on(), so a NEW session's own live confirmation is always seen as
+    // a fresh false->true transition, never swallowed by a stale true left
+    // over from a previous key.
+    bool                m_last_live = false;
 };

@@ -96,6 +96,11 @@ bool TalkbackController::key_on(const std::string &participant,
     // under the same lock as m_key.open, so evaluate() can never observe
     // m_key.open == true with a stale value left over from a previous key.
     m_session_opened_at_ms = now_ms();
+    // This session hasn't been confirmed live yet -- reset here (not just
+    // relying on key_off()'s own reset) so key_on() is the single place a
+    // fresh session always starts "not live", regardless of how the
+    // previous key ended. See m_last_live's declaration.
+    m_last_live = false;
     blog(LOG_INFO, "[obs-zoom-plugin] talkback: key OPEN to \"%s\" via \"%s\"",
          participant.c_str(), source.c_str());
     return true;
@@ -111,7 +116,21 @@ void TalkbackController::key_off()
         // sees m_key.open already false and returns above instead of running
         // the close path twice.
         m_key.open = false;
+        // Reset so the NEXT key_on() starts from "not live" -- see
+        // m_last_live's declaration for why a stale true here would swallow
+        // that session's own OPEN cue.
+        m_last_live = false;
     }
+    // The CLOSE cue fires on every key_off() that actually closed something
+    // -- unconditionally, not only when evaluate()'s live-edge detection
+    // (talkback-cue.h) caught a true->false transition. A key that never
+    // got a confirmed channel (closed by the session-state grace period, or
+    // by the operator releasing before the engine ever answered) still
+    // needs an audible CLOSE: the operator must never be left believing
+    // they're still keyed. Requested outside the lock -- talkback_play_cue()
+    // only spawns a thread and returns, so this costs nothing measurable,
+    // but there's no reason to do it while holding m_mtx either.
+    talkback_play_cue(TalkbackCue::Close);
     // m_tap.close() and talkback_stop() run OUTSIDE m_mtx, mirroring
     // TalkbackTap::close()'s own discipline one layer up: close() synchronises
     // with libobs's audio mutex against an in-flight on_audio() callback,
@@ -145,6 +164,12 @@ void TalkbackController::evaluate()
 {
     TalkbackKeyAction action = TalkbackKeyAction::None;
     bool closed_by_session_state = false;
+    // Which open/close cue (if any) this tick decided to play -- computed
+    // under the lock below, PLAYED after it's released. talkback_play_cue()
+    // doesn't block (see talkback-cue.cpp), but there's no reason to do OS
+    // work while holding m_mtx, and it keeps this function's locking
+    // discipline uniform with the action/key_off() split just below.
+    TalkbackCue cue = TalkbackCue::None;
     {
         std::lock_guard<std::mutex> lock(m_mtx);
         if (!m_key.open) return;
@@ -179,6 +204,23 @@ void TalkbackController::evaluate()
         // never a stale one from a key that was already closed.
         if (action == TalkbackKeyAction::None) {
             const auto session = ZoomEngineClient::instance().talkback_session_status();
+
+            // Edge-detect the engine's own confirmed-live state for the
+            // open/close audio cue (talkback-cue.h). Deliberately reads the
+            // SAME session_status() call the close-by-session-state check
+            // just below already makes, rather than a second query: the
+            // cue fires on the engine's confirmation, never at key_on()
+            // (see talkback-cue.h's header comment) -- clipping the
+            // director's first words underneath a cue that falsely claims
+            // it's already safe to talk is the exact bug this feature
+            // exists to fix, not reintroduce a moment later. Only computed
+            // in the action==None branch: if a dead-man/structural close is
+            // ALREADY happening this tick, key_off() below plays its own
+            // CLOSE cue unconditionally, so there is nothing for this
+            // edge-detector to usefully add here.
+            cue = talkback_cue_on_live_change(m_last_live, session.live);
+            m_last_live = session.live;
+
             if (!session.live) {
                 const bool explicit_failure = !session.reason.empty();
                 const bool grace_expired = talkback_elapsed_ms(
@@ -190,6 +232,14 @@ void TalkbackController::evaluate()
             }
         }
     }
+    // Played after the lock is released -- talkback_play_cue() doesn't block
+    // (see talkback-cue.cpp), but nothing above needs it done under m_mtx.
+    // If action ALSO turns out to be Close below (the live->false edge and
+    // the session-state close it triggers can land in the same tick),
+    // key_off() plays its own CLOSE cue too; both requests are CLOSE and
+    // talkback-cue.cpp's REPLACE behaviour makes that harmless -- see its
+    // header comment.
+    if (cue != TalkbackCue::None) talkback_play_cue(cue);
     // The lock above is released before key_off() is called below. key_off()
     // takes m_mtx itself; holding it across the call would self-deadlock this
     // non-recursive mutex on the Qt main thread (the timer callback), freezing

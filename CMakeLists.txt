@@ -1016,6 +1016,16 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoTalkbackKey
              COMMAND CoreVideoTalkbackKeyTest)
 
+    # Talkback audio must never reach program or ISO. Source-level invariant:
+    # the tap may observe, never route. See tests/talkback-isolation-test.cpp
+    # for why this is a source scan rather than a runtime test.
+    add_executable(CoreVideoTalkbackIsolationTest
+        tests/talkback-isolation-test.cpp
+    )
+    add_test(NAME CoreVideoTalkbackIsolation
+             COMMAND CoreVideoTalkbackIsolationTest
+                     "${CMAKE_CURRENT_SOURCE_DIR}/src/talkback-tap.cpp")
+
     # The master clock every audio buffer is stamped from. Wall-clock arrival
     # stamps let IPC jitter reach OBS, which resampled continuously — the
     # 2026-08-16 "audio is very bad" report.

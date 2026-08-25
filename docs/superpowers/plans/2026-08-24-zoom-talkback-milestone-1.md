@@ -838,6 +838,30 @@ Both binaries, always — half the fixes in any release are engine-side and a DL
 - At least two other participants: one to be invited (the "talent"), one **not** invited (the control).
 - Ask the talent to report what they hear; ask the control participant the same.
 
+- [ ] **Step 2a: Safety notes -- read before running anything**
+
+- **Use a dedicated TEST meeting. Never a live show.** The driving thread
+  spawned to call `tick()` is the first thread in this engine that has ever
+  called Zoom SDK APIs off the message-pumping thread. If the SDK's
+  controller turns out to be thread-affine in some way that hasn't shown up
+  before, the failure mode is unknown and it lands in the same process
+  carrying the show. Milestone 1's whole purpose is finding out things like
+  this safely, which requires a meeting where finding them out safely is
+  possible.
+- **`SetChannelBackgroundVolume(channel, 0.3f)` ducks the INVITED
+  participant's main-meeting audio to 30%, and only destroying the channel
+  undoes it.** If `destroy` is abandoned (`destroy_abandoned`) or the engine
+  dies mid-probe, that person is stuck hearing the meeting at 30% volume
+  until they leave and rejoin. Warn the invitee before you start that this
+  will happen, and ask them to turn their own volume **down** first -- a 0.5
+  full-scale 440Hz tone for 3 seconds straight into headphones is loud.
+- **Use a participant display name with no double quotes or backslashes.**
+  The JSON parser (`json_str`) skips escape sequences rather than
+  unescaping them, so a name containing `"` or `\` will not resolve to the
+  person you meant. This fails diagnosably -- you'll see `invite` with
+  `error=no_participant_named` -- but there's no reason to spend a live
+  meeting finding that out; pick a plain name up front.
+
 - [ ] **Step 3: Run the probe**
 
 ```sh
@@ -846,28 +870,85 @@ printf '{"cmd":"talkback_probe","participant":"<exact display name>"}\n' | nc 12
 
 - [ ] **Step 4: Read every rung**
 
-Expected in the OBS log, in order:
+Expected in the OBS log on the happy path, in order:
 
 ```
-talkback_probe stage=controller          ok=true
-talkback_probe stage=meeting_supported   supported=true
-talkback_probe stage=set_event           code=0
-talkback_probe stage=create_channel      code=0
-talkback_probe stage=create_channel_response  channel=<id> error=0
-talkback_probe stage=invite              user_id=<n> code=0
-talkback_probe stage=invite_response     user_id=<n> error=0
-talkback_probe stage=background_volume   code=0
-talkback_probe stage=send                buffer=0 code=0
-talkback_probe stage=sent                buffers=300
-talkback_probe stage=destroy             code=0
-talkback_probe stage=destroyed           error=0
+talkback_probe stage=controller                    ok=true
+talkback_probe stage=meeting_supported              supported=true
+talkback_probe stage=set_event                      code=0
+talkback_probe stage=create_channel                 code=0
+talkback_probe stage=create_channel_response        channel=<id> error=0
+talkback_probe stage=participant_talkback_support   name=<name> user_id=<n> supported=<bool>
+talkback_probe stage=invite                         user_id=<n> code=0
+talkback_probe stage=invite_response                channel=<id> user_id=<n> error=0
+talkback_probe stage=background_volume              code=0
+talkback_probe stage=send                           buffer=0 code=0
+talkback_probe stage=sent                           buffers=300
+talkback_probe stage=destroy                        code=0 attempt=1
+talkback_probe stage=destroyed                      channel=<id> error=0
 ```
 
-`TalkbackError` values: `0` OK, `1` NOPERMISSION, `2` ALREADY_EXIST, `3` COUNT_OVERFLOW, `4` NOT_EXIST, `5` REJECTED, `6` TIMEOUT, `7` UNKNOWN.
+`participant_talkback_support` (added by the final-review F2 fix) fires from
+inside `resolve_participant()`, which `onCreateChannelResponse` calls right
+after it records the new channel id and before it builds the invite -- so it
+lands between `create_channel_response` and `invite`, as shown above. Its
+`supported` field is `IUserInfo::IsSupportTalkback()`, a PER-USER gate
+distinct from the meeting-level `meeting_supported` above. **We do not
+refuse to proceed when it is `false`** -- the send is attempted anyway, on
+purpose: the contrast between `supported=false` here and what the talent
+actually reports hearing in Step 5 is itself the data this milestone exists
+to produce. If you see `supported=false` and the talent still hears the
+tone, or `supported=true` and they hear nothing, both are meaningful
+results -- write them down, don't discard them as noise.
+
+That is the happy path only. The probe is a ladder with several ways to fall
+off it, and reading the wrong-outcome logs correctly matters as much as
+reading the green ones -- every stage the code can actually emit:
+
+| stage | when |
+|---|---|
+| `controller` | RUNG 1/RUNG 2 report from `probe()`. `ok=false` with `reason=not_in_meeting` or `reason=no_meeting_service` means the probe never started; `ok=true` means the controller exists. |
+| `meeting_supported` | RUNG 2, the meeting-level gate. `supported=false` is a hard stop -- Enhanced Media is not active for this meeting. |
+| `set_event` | Registering this object for callbacks. Non-zero `code` is a hard stop. |
+| `create_channel` | RUNG 3, `CreateChannel(1)` accepted (or not) synchronously. Non-zero `code` is a hard stop; zero only means the SDK accepted the request, not that a channel exists yet -- see `create_channel_response`. |
+| `create_channel_response` | The async confirmation. `error=0` continues the ladder; any other `error` (see the `TalkbackError` table below) ends it. |
+| `create_channel_response_null_channel` | **New in the final review (F1).** The SDK handed back a null `channelID` on this callback -- reachable on any `error` code. Terminal for the rung if we were waiting on it; otherwise a no-op (nothing to queue for cleanup with no id). |
+| `create_channel_response_duplicate` | A redelivered callback for the channel the ladder already moved past `AwaitingChannel` with (e.g. mid-invite or mid-send already). No action taken; the live channel is untouched. |
+| `create_channel_response_stray` | A genuinely different, untracked channel now exists (e.g. arrived after `timeout` already gave up on this rung). Queued for cleanup -- expect a later `stray_destroy` / `stray_destroy_abandoned` pair for the same channel id. |
+| `participant_talkback_support` | **New in the final review (F2).** See above. |
+| `invite` | RUNG 4. Either the success form (`user_id`, `code`) or the failure form `error=no_participant_named` when `resolve_participant()` found nobody by that exact display name -- see the display-name note below. |
+| `invite_response` | The async confirmation. Always logged first, before the correlation check below runs. |
+| `invite_response_null_channel` | **New in the final review (F1).** The SDK handed back a null `channelID` on this callback -- reachable on any `error` code, including `TALKBACK_ERROR_NOPERMISSION`. This is the exact failure this probe exists to be able to see rather than crash on. Terminal for the rung. |
+| `invite_response_mismatch` | The callback's channel/user pair doesn't match what we're waiting on (a stray/duplicate/late response). No action taken. |
+| `background_volume` | Ducking the invited participant's main-meeting audio to 30% once their invite is confirmed. See the safety note below -- this is not free to leave in place. |
+| `send` | First buffer only (buffer=0), and any buffer that fails. 300 identical success lines would be the same message-storm shape as a prior live incident in this codebase, so mid-stream successes are not logged individually. |
+| `sent` | All 300 buffers (~3s of tone) sent successfully. |
+| `destroy` | Each attempt (up to 5) of the synchronous Begin/Add/Execute destroy chain for the main channel. Carries `attempt`. |
+| `destroy_abandoned` | All 5 destroy attempts for the main channel failed. **The channel is now stranded for the rest of the meeting** -- one of the account's 16 gone for good, and the background-volume duck (if it was applied) is not undone. Treat this as a result to report, not something to retry manually mid-meeting. |
+| `destroyed` | `onDestroyChannelResponse` -- the async confirmation that a channel (main or a drained stray) was actually torn down. Can appear more than once if a stray channel also existed. |
+| `stray_destroy` | `drain_stray_channels()` (driven by `tick()`) attempting to destroy a queued stray. Carries `channel`, `code`, `attempts`. |
+| `stray_destroy_abandoned` | A stray channel's destroy chain also exhausted its retries. Same "stranded for the rest of the meeting" consequence as `destroy_abandoned`, for a channel this probe didn't even mean to create. |
+| `timeout` | `tick()` gave up waiting on `AwaitingChannel` or `AwaitingInvite` after 10s with no callback. Carries a numeric `phase`: **`1` = AwaitingChannel, `2` = AwaitingInvite** (verified against the `Phase` enum in `engine/src/engine-talkback.h`: `0` Idle, `1` AwaitingChannel, `2` AwaitingInvite, `3` Sending, `4` Destroying, `5` Done -- only 1 and 2 are reachable here, since those are the only phases `tick()` applies the deadline to). A hang IS silence and looks identical to a permission failure from the outside; this is what tells them apart. |
+| `busy` | A second `talkback_probe` command arrived while a ladder was already in flight and was refused outright -- no new channel, no new thread. `reason` explains why; this is the normal, expected response to sending the command twice, not a fault. |
+
+`TalkbackError` values (the `error`/`code` fields above): `0` OK, `1`
+NOPERMISSION, `2` ALREADY_EXIST, `3` COUNT_OVERFLOW, `4` NOT_EXIST, `5`
+REJECTED, `6` TIMEOUT, `7` UNKNOWN.
 
 - [ ] **Step 5: Confirm with humans — the part no log can answer**
 
-- The invited participant heard a steady ~3 s tone. **Steady**, not clicky: clicks would mean the phase continuity in Task 2 is broken.
+- The invited participant heard the ~3s tone **present**, as opposed to
+  **absent**. That is the judgment to ask for -- not "was it clean". The
+  driving thread sleeps 10ms per 10ms tone buffer, and Windows timer
+  granularity (~15.6ms) means those sleeps routinely overrun, so the tone is
+  delivered at roughly 64% of real time. **Choppiness or gappiness is
+  expected in Milestone 1 and is not evidence of a fault** -- it is a
+  consequence of the driving thread's plain `sleep_for`, not of the phase
+  continuity Task 2 pins (that continuity guarantees the *waveform* has no
+  discontinuity where two buffers join; it says nothing about how evenly
+  those buffers get handed to the SDK in wall-clock time). Deadline-anchored
+  pacing that would fix the choppiness is deferred to Milestone 2 -- do not
+  read a choppy tone as a rung failing.
 - The **non-invited** participant heard nothing at all. This is the privacy claim, and it is the single most important observation in the milestone.
 - Nobody reports the tone on program audio.
 

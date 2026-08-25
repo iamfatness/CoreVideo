@@ -21,7 +21,7 @@ constexpr std::chrono::milliseconds kAwaitTimeout{10000};
 constexpr uint32_t kMaxDestroyAttempts = 5;
 } // namespace
 
-void EngineTalkback::report(const std::string &stage, const std::string &fields)
+void EngineTalkback::report(const std::string &stage, const std::string &fields) const
 {
     std::string line = R"({"cmd":"talkback_probe","stage":")" + stage + "\"";
     if (!fields.empty()) line += "," + fields;
@@ -103,7 +103,9 @@ bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
         m_phase.store(Phase::Done, std::memory_order_release);
         return true;
     }
-    m_phase_deadline = std::chrono::steady_clock::now() + kAwaitTimeout;
+    m_phase_deadline.store(
+        (std::chrono::steady_clock::now() + kAwaitTimeout).time_since_epoch().count(),
+        std::memory_order_release);
     m_phase.store(Phase::AwaitingChannel, std::memory_order_release);   // continues in onCreateChannelResponse
     return true;
 }
@@ -114,6 +116,18 @@ void EngineTalkback::drain_stray_channels()
     // batch-destroy API -- see the invariant comment at the top of the
     // Destroying branch below. Swap the queue out under lock, then never
     // touch the SDK while holding m_chan_mtx.
+    //
+    // F6 review-round fix: m_ctrl can be null here. probe()'s RUNG 1
+    // reassigns m_ctrl on EVERY call (`m_ctrl = m_svc->GetMeetingTalkback
+    // Controller();`), so a LATER probe that fails to obtain a controller
+    // nulls it out while an EARLIER ladder's stray, queued by a successful
+    // probe, is still sitting in m_stray_channels waiting to be drained.
+    // Guard before touching the queue at all, so a null m_ctrl leaves the
+    // strays queued for a later tick() rather than swapping them out and
+    // losing them silently -- losing a leaked-channel record silently is
+    // exactly the failure mode this class exists to avoid.
+    if (!m_ctrl) return;
+
     std::vector<std::basic_string<zchar_t>> strays;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
@@ -167,7 +181,10 @@ void EngineTalkback::tick()
         // swallowed callback hangs here forever and reports nothing -- a
         // hang IS silence, and it is indistinguishable from a permission
         // failure at exactly the moment we need to tell the two apart.
-        if (std::chrono::steady_clock::now() >= m_phase_deadline) {
+        const auto deadline = std::chrono::steady_clock::time_point(
+            std::chrono::steady_clock::duration(
+                m_phase_deadline.load(std::memory_order_acquire)));
+        if (std::chrono::steady_clock::now() >= deadline) {
             report("timeout", R"("phase":)" + std::to_string(static_cast<int>(phase)));
             m_phase.store(Phase::Destroying, std::memory_order_release);
         }
@@ -269,7 +286,26 @@ unsigned int EngineTalkback::resolve_participant(const std::string &name) const
         const unsigned int uid = ids->GetItem(i);
         ZOOMSDK::IUserInfo *u = part->GetUserByUserID(uid);
         if (!u) continue;
-        if (zchar_to_utf8(u->GetUserName()) == name) return uid;
+        if (zchar_to_utf8(u->GetUserName()) == name) {
+            // F2 review-round fix: IsSupportTalkback() is a PER-USER gate,
+            // distinct from IsMeetingSupportTalkBack() (the meeting-level
+            // gate reported at RUNG 2 in probe()) -- a meeting can support
+            // talkback while this specific participant's client cannot
+            // receive it. We report it rather than refuse to proceed on
+            // false: refusing would collapse the exact distinction this
+            // probe exists to draw. Without this, "all rungs green, sent
+            // buffers=300, talent heard nothing" and "talent's client
+            // cannot receive talkback at all" are indistinguishable from
+            // the log -- reporting supported=false and still attempting
+            // the send is what makes the contrast between this value and
+            // what the human actually hears into data.
+            const bool supported = u->IsSupportTalkback();
+            report("participant_talkback_support",
+                   R"("name":")" + json_escape(name) + R"(","user_id":)" +
+                   std::to_string(uid) + R"(,"supported":)" +
+                   (supported ? "true" : "false"));
+            return uid;
+        }
     }
     return 0;
 }
@@ -280,6 +316,30 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
     report("create_channel_response",
            R"("channel":")" + json_escape(id) + R"(","error":)" +
            std::to_string(static_cast<int>(error)));
+
+    if (!channelID) {
+        // F1 review-round fix: guard before ANY comparison or assignment
+        // touches channelID as a raw pointer -- std::basic_string's
+        // operator== / assign() against a null zchar_t* is
+        // char_traits::length(nullptr), an access violation. zchar_to_utf8
+        // above already null-guards internally (that's the precedent this
+        // follows), but the `m_channel_id_z == channelID` comparison and
+        // the `m_stray_channels.emplace_back(channelID)` construction a few
+        // lines down do not, and a null id is reachable here on any error
+        // code, not only TALKBACK_ERROR_OK. Report it distinctly -- we want
+        // to KNOW the SDK did this -- rather than crash or silently no-op.
+        report("create_channel_response_null_channel",
+               R"("error":)" + std::to_string(static_cast<int>(error)));
+        if (m_phase.load(std::memory_order_acquire) == Phase::AwaitingChannel) {
+            // This was the rung we were waiting on and it came back with
+            // nothing usable -- same disposition as any other
+            // create_channel failure. If it was a stray/duplicate for a
+            // channel that isn't the live one, there is no id to queue for
+            // cleanup, so there is nothing else to do.
+            m_phase.store(Phase::Done, std::memory_order_release);
+        }
+        return;
+    }
 
     if (m_phase.load(std::memory_order_acquire) != Phase::AwaitingChannel) {
         // Not the callback we're waiting on -- either a stray/duplicate, or
@@ -359,7 +419,9 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         m_phase.store(Phase::Destroying, std::memory_order_release);
         return;
     }
-    m_phase_deadline = std::chrono::steady_clock::now() + kAwaitTimeout;
+    m_phase_deadline.store(
+        (std::chrono::steady_clock::now() + kAwaitTimeout).time_since_epoch().count(),
+        std::memory_order_release);
     m_phase.store(Phase::AwaitingInvite, std::memory_order_release);
 }
 
@@ -378,6 +440,25 @@ void EngineTalkback::onChannelUserJoinResponse(const zchar_t *channelID,
            R"(","user_id":)" + std::to_string(userID) +
            R"(,"error":)" + std::to_string(static_cast<int>(error)));
     if (m_phase.load(std::memory_order_acquire) != Phase::AwaitingInvite) return;
+
+    if (!channelID) {
+        // F1 review-round fix: this line is reached for EVERY error code,
+        // including TALKBACK_ERROR_NOPERMISSION -- exactly the error this
+        // probe exists to exercise -- and the SDK can hand back a null
+        // channelID on that path. Without this guard, `channel_copy !=
+        // channelID` below is std::basic_string comparing against a null
+        // zchar_t*, i.e. char_traits::length(nullptr): an access violation
+        // that replaces our diagnostic with a crash-recovery event at
+        // exactly the moment we're trying to learn something. Report it
+        // distinctly (we want to KNOW the SDK did that) and destroy the
+        // channel we know we created -- m_channel_id_z is still valid; only
+        // this callback's echo of it is null.
+        report("invite_response_null_channel",
+               R"("user_id":)" + std::to_string(userID) +
+               R"(,"error":)" + std::to_string(static_cast<int>(error)));
+        m_phase.store(Phase::Destroying, std::memory_order_release);
+        return;
+    }
 
     // Copy both channel-id representations out under the lock before using
     // either -- same discipline as everywhere else m_channel_id_z is

@@ -1458,7 +1458,23 @@ int main()
                         for (int i = 0; i < 3000; ++i) {
                             if (talkback_stop.load(std::memory_order_acquire)) break;
                             talkback.tick();
-                            if (talkback.is_idle()) break;
+                            // has_pending_work(), not is_idle(): a stray
+                            // channel queued by a late/duplicate
+                            // onCreateChannelResponse can leave the ladder
+                            // itself Idle/Done while drain_stray_channels()
+                            // (called only from tick(), which only this
+                            // thread drives) still has not run for it. If
+                            // this loop exited on is_idle() alone it could
+                            // stop right after AwaitingChannel's 10s timeout
+                            // -> Destroying -> Done settles, and then a
+                            // genuinely late create_channel_response arrives
+                            // at t+11s, queues a real Zoom channel, and
+                            // nothing ever destroys it (F3 review-round
+                            // finding). is_idle() is still exactly right for
+                            // the refusal gate above -- see the comment on
+                            // has_pending_work() in engine-talkback.h for why
+                            // the two must not be conflated.
+                            if (!talkback.has_pending_work()) break;
                             std::this_thread::sleep_for(std::chrono::milliseconds(10));
                         }
                     });
@@ -1466,6 +1482,20 @@ int main()
             }
 
         } else if (command == IpcCommand::Leave) {
+            // F4 review-round fix: mirror the quit path below (see the
+            // "Join the talkback driving thread BEFORE any SDK teardown
+            // call" comment near the bottom of main()) -- the same
+            // constraint applies here. tick() may be mid SDK-call on the
+            // driving thread via m_ctrl/m_svc (raw ZOOMSDK pointers
+            // captured at probe() time) at the moment this command-thread
+            // branch calls Leave() through meeting_svc; that is the same
+            // "SDK callbacks racing teardown" class the quit path already
+            // guards against. Signal stop first so this does not wait out
+            // the full ~30s bound -- in the common case is_idle() has
+            // already stopped the loop well before that, so the join costs
+            // at most one ~10ms tick.
+            talkback_stop.store(true, std::memory_order_release);
+            if (talkback_thread.joinable()) talkback_thread.join();
             if (meeting_svc)
                 meeting_svc->Leave(ZOOMSDK::LEAVE_MEETING);
 

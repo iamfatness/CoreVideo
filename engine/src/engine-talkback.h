@@ -67,6 +67,33 @@ public:
         return p == Phase::Idle || p == Phase::Done;
     }
 
+    // True while the driving loop in main.cpp must keep calling tick():
+    // either the ladder itself is not settled, OR a stray channel is queued
+    // and still needs drain_stray_channels() (called only from tick()) to
+    // run for it. is_idle() and has_pending_work() answer different
+    // questions and must not be conflated: is_idle() answers "may a new
+    // ladder start?" -- the refusal gate in main.cpp uses it, and a pending
+    // stray must NOT make that gate refuse new probes indefinitely, because
+    // a stray drain has nothing to do with whether a fresh ladder is safe to
+    // start. has_pending_work() answers "must the driver keep running?" --
+    // the driving loop uses it instead of is_idle() so it does not exit and
+    // orphan a queued-but-undrained stray channel between the ladder
+    // settling to Idle/Done and drain_stray_channels() next getting a
+    // chance to run (see the F3 review-round finding: AwaitingChannel times
+    // out at 10s -> Destroying -> Done -> driver exits -> a genuinely late
+    // onCreateChannelResponse arrives after that and queues a real Zoom
+    // channel that nothing then destroys).
+    bool has_pending_work() const
+    {
+        const Phase p = m_phase.load(std::memory_order_acquire);
+        if (p != Phase::Idle && p != Phase::Done) return true;
+        // Takes m_chan_mtx only for this queue check -- never call this
+        // function while already holding m_chan_mtx elsewhere, same
+        // discipline as every other access to m_stray_channels.
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        return !m_stray_channels.empty();
+    }
+
     // IMeetingTalkbackCtrlEvent
     void onCreateChannelResponse(const zchar_t *channelID, TalkbackError error) override;
     void onDestroyChannelResponse(const zchar_t *channelID, TalkbackError error) override;
@@ -81,7 +108,11 @@ public:
 private:
     enum class Phase { Idle, AwaitingChannel, AwaitingInvite, Sending, Destroying, Done };
 
-    void report(const std::string &stage, const std::string &fields);
+    // const: touches no member state, only formats a string and writes to
+    // the pipe -- resolve_participant() (below, const) needs to call it to
+    // report the per-user talkback gate (F2 review-round fix) without
+    // losing its own const-ness.
+    void report(const std::string &stage, const std::string &fields) const;
     unsigned int resolve_participant(const std::string &name) const;
 
     // Drains m_stray_channels and destroys each one. Called from tick() only
@@ -128,7 +159,12 @@ private:
     // Discipline: copy the needed value out under the lock, release, THEN
     // call the SDK or build a report string with the copy. Never call the
     // SDK while holding m_chan_mtx.
-    std::mutex m_chan_mtx;
+    //
+    // mutable: has_pending_work() (above, const) takes this lock purely to
+    // read whether m_stray_channels is empty -- a read-only query from the
+    // outside, so it is declared const like is_idle(), which requires the
+    // mutex itself be lockable from a const method.
+    mutable std::mutex m_chan_mtx;
     std::string  m_channel_id;      // UTF-8, REPORTING ONLY -- never pass to
                                      // the SDK, see m_channel_id_z below.
     // zchar_t is wchar_t on Windows (zoom_sdk_def.h) but char elsewhere, so
@@ -158,7 +194,26 @@ private:
     // fire; without a deadline a swallowed callback hangs the probe forever
     // and reports nothing, which is silence -- the exact failure mode this
     // class exists to make visible instead of enduring.
-    std::chrono::steady_clock::time_point m_phase_deadline{};
+    //
+    // atomic (F5 review-round fix): this is genuinely cross-thread, and not
+    // covered by m_phase's release/acquire the way it first looks. The
+    // write in onCreateChannelResponse happens while phase still reads
+    // AwaitingChannel -- BEFORE the release-store that advances it to
+    // AwaitingInvite -- and tick(), running concurrently on the driving
+    // thread, can read this same field for its AwaitingChannel timeout
+    // check at that exact moment. That is a plain, unsynchronized
+    // concurrent read/write of the same non-atomic memory from two threads:
+    // undefined behaviour, not merely a stale value, and it is on the
+    // expected path (a create_channel_response arriving while tick() is
+    // mid-timeout-check is ordinary timing, not a rare interleaving).
+    // Stored as the steady_clock rep (an integer) rather than the
+    // time_point itself, since time_point is not trivially atomic-friendly
+    // across implementations; reconstructed with
+    // steady_clock::time_point(steady_clock::duration(rep)) at each read.
+    // Deliberately not folded into m_chan_mtx: that mutex guards the
+    // channel-id/stray-queue string state specifically, and this field has
+    // nothing to do with it.
+    std::atomic<std::chrono::steady_clock::rep> m_phase_deadline{0};
 
     // How many times BeginBatchDestroyChannels/AddChannelToDestroy/
     // ExecuteBatchDestroyChannels has been attempted for the current

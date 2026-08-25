@@ -186,6 +186,16 @@ private:
     // -- see the invariant comment at that call site.
     void drain_stray_channels();
 
+    // Follow-up to the F1 review-round fix: lazily expires a stale
+    // Session-owned m_pending_create -- see m_session_create_deadline's doc
+    // comment below for why this exists. MUST be called with m_chan_mtx
+    // already held (both call sites -- probe()'s and session_start()'s gate
+    // checks -- already lock it to read m_pending_create, so this adds no
+    // new critical section). Returns true if it expired something, so the
+    // caller can report it AFTER releasing the lock, same discipline as
+    // every other report() call in this file.
+    bool expire_stale_session_create_locked();
+
     ZOOMSDK::IMeetingService          *m_svc  = nullptr;
     ZOOMSDK::IMeetingTalkbackController *m_ctrl = nullptr;
 
@@ -373,4 +383,28 @@ private:
     // queuing it as a stray. Guarded by m_chan_mtx, same discipline as
     // m_pending_create.
     bool                       m_session_create_cancelled = false;
+
+    // Follow-up to the F1 review-round fix above (CRITICAL): the ONLY
+    // clearer of m_pending_create == Session is the response landing in
+    // onCreateChannelResponse. Unlike Probe, which gets a timeout-based
+    // clearer too (tick()'s AwaitingChannel handling, see
+    // src/talkback-channel-owner.h's THREADING section: "to stop a
+    // swallowed CreateChannel response from wedging the arbiter forever"),
+    // Session had none -- so a swallowed response after a cancellation
+    // would wedge m_pending_create at Session forever, and
+    // talkback_may_request_create() would then refuse every future probe()
+    // and session_start() for the life of the process. Total talkback
+    // outage, recoverable only by restarting.
+    //
+    // Same representation and memory-ordering pattern as m_phase_deadline
+    // below (steady_clock rep, not the time_point itself, for the same
+    // trivial-atomicity reason). Deliberately NOT a new thread or timer --
+    // see probe()/session_start()'s gate checks, which are the only two
+    // places this is read: both already lock m_chan_mtx to evaluate
+    // talkback_may_request_create(m_pending_create), so checking-and-
+    // clearing an expired deadline there is free. The existing entry
+    // points self-heal on the next attempt; that is what makes this cheap
+    // and is why it mirrors tick()'s AwaitingChannel timeout instead of
+    // inventing a new mechanism.
+    std::atomic<std::chrono::steady_clock::rep> m_session_create_deadline{0};
 };

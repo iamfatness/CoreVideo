@@ -151,9 +151,19 @@ bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
     // decision out under the lock, release, THEN call the SDK, same
     // discipline as every other m_chan_mtx access in this file.
     bool create_gate_ok;
+    bool expired_session_create;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
+        // Follow-up to the F1 review-round fix: lazily unwedge a stale
+        // Session-owned pending create before evaluating the gate -- see
+        // expire_stale_session_create_locked()'s and
+        // m_session_create_deadline's doc comments.
+        expired_session_create = expire_stale_session_create_locked();
         create_gate_ok = talkback_may_request_create(m_pending_create);
+    }
+    if (expired_session_create) {
+        report_session("session_create_expired",
+                       R"("reason":"swallowed_create_response")");
     }
     if (!create_gate_ok) {
         report("busy", R"("reason":"create_busy")");
@@ -249,6 +259,43 @@ void EngineTalkback::drain_stray_channels()
                    R"("channel":")" + json_escape(zchar_to_utf8(id.c_str())));
         }
     }
+}
+
+bool EngineTalkback::expire_stale_session_create_locked()
+{
+    // Caller holds m_chan_mtx -- see the header comment on this function and
+    // on m_session_create_deadline. Only Session ever needs this: Probe's
+    // pending create already has a clearer of its own (tick()'s
+    // AwaitingChannel timeout, running on the driving thread), so a stale
+    // Probe entry here would be a bug in that machinery, not something this
+    // function should paper over.
+    if (m_pending_create != TalkbackChannelOwner::Session) return false;
+    const auto deadline = std::chrono::steady_clock::time_point(
+        std::chrono::steady_clock::duration(
+            m_session_create_deadline.load(std::memory_order_acquire)));
+    if (std::chrono::steady_clock::now() < deadline) return false;
+
+    // The response never arrived (or arrived and was somehow lost before
+    // reaching onCreateChannelResponse -- either way, indistinguishable from
+    // here). Forget the pending create so talkback_may_request_create()
+    // unwedges for both probe() and session_start(). m_session_create_
+    // cancelled is reset too: whatever cancellation state applied to the
+    // create we're now forgetting no longer means anything once
+    // m_pending_create itself no longer names it.
+    //
+    // Consequence, stated explicitly rather than left implicit: if that
+    // CreateChannel response arrives AFTER this point, onCreateChannelResponse
+    // will see owner == None (m_pending_create no longer says Session) and
+    // this callback's id-comparison fallback will not match m_channel_id_z
+    // or m_session_channel_z either -- so it is queued onto m_stray_channels
+    // and handled by the ordinary stray path instead of the Session/
+    // cancelled path above. That is correct, not an oversight: by the time
+    // this expires, nobody is tracking that create as "ours" anymore, so a
+    // stray is the right disposition -- the same one an untracked channel
+    // from any other source gets.
+    m_pending_create = TalkbackChannelOwner::None;
+    m_session_create_cancelled = false;
+    return true;
 }
 
 void EngineTalkback::tick()
@@ -1133,9 +1180,20 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
     // m_pending_create is guarded by m_chan_mtx -- see the header comment on
     // it. Copy the decision out under the lock, release, THEN call the SDK.
     bool create_gate_ok;
+    bool expired_session_create;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
+        // Follow-up to the F1 review-round fix: lazily unwedge a stale
+        // Session-owned pending create (possibly from a PREVIOUS session
+        // whose response never arrived) before evaluating the gate -- see
+        // expire_stale_session_create_locked()'s and
+        // m_session_create_deadline's doc comments.
+        expired_session_create = expire_stale_session_create_locked();
         create_gate_ok = talkback_may_request_create(m_pending_create);
+    }
+    if (expired_session_create) {
+        report_session("session_create_expired",
+                       R"("reason":"swallowed_create_response")");
     }
     if (!create_gate_ok) {
         // The probe is mid-create. Refuse rather than queue: a queued create
@@ -1158,6 +1216,18 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
         m_pending_create = TalkbackChannelOwner::Session;
+        // Follow-up to the F1 review-round fix: same value as the probe's
+        // kAwaitTimeout, reused deliberately rather than inventing a second
+        // constant -- both time out the SAME underlying wait (a Zoom
+        // CreateChannel response), so there is no reason for the session's
+        // bound to differ from the probe's already-proven-safe one. 10s is
+        // comfortably longer than a healthy CreateChannel round-trip (which
+        // this file's own probe path treats as normally sub-second) and
+        // short enough that a genuinely swallowed response does not wedge
+        // the arbiter for long. See expire_stale_session_create_locked().
+        m_session_create_deadline.store(
+            (std::chrono::steady_clock::now() + kAwaitTimeout).time_since_epoch().count(),
+            std::memory_order_release);
     }
     return true;
 }
@@ -1187,10 +1257,13 @@ void EngineTalkback::session_stop()
         // cancelled flag makes it destroy the channel immediately instead of
         // adopting it as live or queuing it as a stray. This does mean
         // m_pending_create stays "Session" (refusing every other create)
-        // until that response arrives or the process ends -- there is no
-        // deadline on a session create the way probe()'s AwaitingChannel has
-        // kAwaitTimeout -- but that is the cost of not leaking the channel
-        // it eventually reports, not a new failure mode this fix introduces.
+        // until that response arrives -- but unlike an earlier version of
+        // this fix, that is now BOUNDED: m_session_create_deadline (set in
+        // session_start(), same value as probe()'s kAwaitTimeout) gives a
+        // swallowed response the same self-healing treatment tick()'s
+        // AwaitingChannel timeout already gives Probe -- see
+        // expire_stale_session_create_locked(), checked lazily by probe()'s
+        // and session_start()'s own gate checks. No new thread or timer.
         std::lock_guard<std::mutex> lock(m_chan_mtx);
         if (m_pending_create == TalkbackChannelOwner::Session)
             m_session_create_cancelled = true;

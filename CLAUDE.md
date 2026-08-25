@@ -73,6 +73,21 @@ Every one of these is documented at length where it lives; the list is the map.
   poisons the notify flag (~92% audio loss, no error anywhere) — root-caused
   live 2026-08-17. `start()` is serialized (`m_start_mtx`); a name collision
   is surfaced as `shm_name_collision` (non-fatal, no reconnect vote).
+  **The sweep assumes one product owns the machine's engines**, and a second
+  product on the same engine (ZComms, the standalone intercom — see
+  `docs/ZCOMMS.md`) breaks that in both directions at once: the two launches
+  terminate each other, and their regions collide under the single hardcoded
+  `ZoomObsPlugin_` prefix, which is 2026-08-17 again by construction rather
+  than by accident. `src/engine-owner.h` holds the fix's testable core — one
+  owner id that both namespaces the names and decides what the sweep may kill,
+  pinned by CoreVideoEngineOwnerTest (which pins the Windows pipe-name shape
+  from the Linux job, since the builders are pure string joins). The default
+  owner reproduces every shipping name byte-for-byte; do not change
+  `kEngineOwnerObsPlugin`, as installed plugin/engine pairs are matched over
+  those strings and half-updated installs are routine. **The wiring is not
+  done**: `engine-ipc.h`'s name constants, the engine's `--owner` argument, and
+  replacing the sweep's image-name scan with a per-owner pid record are still
+  outstanding, so nothing in that header is reachable from production code yet.
 - **FFmpeg runtime preload** (`cv_ffmpeg_loader_init` in
   `src/cv-ffmpeg-loader.cpp`): the delay-loaded avfilter family must be
   resident before any media flows — pinned by CoreVideoFfmpegPreloadTest.

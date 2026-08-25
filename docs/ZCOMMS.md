@@ -55,13 +55,36 @@ It also makes ZComms impossible. The intercom runs alongside OBS by design, and
 one engine per channel means several engines at once; as written they terminate
 each other.
 
-The fix is to scope both the pipe names and the stale-process scan by an owner
-id — engines tagged on the command line, each launcher matching only its own
+`src/engine-owner.h` holds the testable core of the fix, pinned by
+`CoreVideoEngineOwnerTest`: one owner id that both namespaces the names and
+decides what the sweep may kill. Splitting those into two schemes is how they
+drift apart. The builders are pure string joins, so the Linux test job pins the
+Windows pipe-name shape too — the platform where getting it wrong costs a show.
+Two properties in there are load-bearing:
+
+- **The default owner reproduces every shipping name byte-for-byte.** An
+  installed plugin and engine are a matched pair over these strings, and a
+  half-updated install (new DLL, old engine still in `zoom-runtime\`) is the
+  routine case, so `kEngineOwnerObsPlugin` must not change.
+- **An untagged engine belongs to the plugin.** A binary predating `--owner` is
+  exactly what a half-updated install produces, so the plugin must still sweep
+  it — that is 2026-08-17's protection, kept where it was earned. ZComms
+  inherits no such history and must never claim one, or it terminates the
+  user's OBS session mid-show.
+
+**Still outstanding — the wiring.** Nothing in that header is reachable from
+production code yet. The remaining work is to scope both the pipe names and the
+stale-process scan by an owner id — engines tagged on the command line, each launcher matching only its own
 tag — and to make the region prefix part of the same change. Every shared name
 is hardcoded to `ZoomObsPlugin_` today (pipes `_P2E`/`_E2P`, regions `_video`
 /`_audio`/`_share`), and a second product writing under this plugin's prefix
 recreates the ghost-writer condition exactly. One change, one prefix scheme, and
-a test pinning "engine A's launch does not kill engine B."
+a test pinning "engine A's launch does not kill engine B" against the real
+process machinery rather than against the predicate alone. Note that the
+Windows sweep currently matches on image name; scoping it by owner means
+recording which pid belongs to which owner at launch, since reading another
+process's command line on Windows is not something to build a live-show
+guarantee on.
 
 **This lands in this repo, and it blocks ZComms shipping at all.**
 

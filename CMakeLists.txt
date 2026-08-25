@@ -691,6 +691,22 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoShmGeneration
              COMMAND CoreVideoShmGenerationTest)
 
+    # Owner-scoped IPC names (src/engine-owner.h): the same defect class as
+    # above, one product further on. The stale-engine sweep kills every
+    # ZoomObsEngine on the machine, which is only correct while one product
+    # owns them; a second product on the same engine (ZComms) makes the two
+    # launches terminate each other AND collides their regions under the one
+    # hardcoded "ZoomObsPlugin_" prefix. Pure string policy, so the Linux job
+    # pins the Windows pipe-name shape too.
+    add_executable(CoreVideoEngineOwnerTest
+        tests/engine-owner-test.cpp
+    )
+    target_include_directories(CoreVideoEngineOwnerTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoEngineOwner
+             COMMAND CoreVideoEngineOwnerTest)
+
     # The last residual of the same defect class: the generation table is
     # per engine PROCESS, so an engine restart puts the next create back on the
     # legacy unsuffixed name whatever the dead engine had climbed to. Pins why

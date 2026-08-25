@@ -1,0 +1,56 @@
+#pragma once
+//
+// talkback-controller.h — the plugin's talkback owner.
+//
+// Holds the three things that must agree for a key to be open: the OBS tap
+// (audio is flowing), the engine session (a channel exists and someone is
+// invited), and the keying state (the operator still wants it). Every surface
+// -- control API today, Companion and a hotkey later -- goes through here, so
+// there is exactly one place that can open or close a key.
+//
+// The dead-man switch lives in src/talkback-key.h and is evaluated on a timer
+// here. Audio arriving IS the liveness signal: while a key is open the tap
+// publishes continuously (including silence, because an active OBS source
+// calls back whether or not anyone is talking), so a gap means the path is
+// gone and the key closes with nothing having to NOTICE the failure.
+//
+#include "talkback-key.h"
+#include "talkback-tap.h"
+
+#include <QObject>
+#include <QTimer>
+
+#include <mutex>
+#include <string>
+
+class TalkbackController : public QObject {
+    Q_OBJECT
+public:
+    static TalkbackController &instance();
+
+    // Opens a key. Returns false with a human-readable reason -- an operator
+    // whose key did not open needs to know WHICH thing failed.
+    bool key_on(const std::string &participant, const std::string &source,
+                TalkbackKeyMode mode, bool needs_renewal,
+                std::string &error_out);
+    void key_off();
+    // Re-assert an open key. The lost-release backstop: a key opened over the
+    // control API stays open only while the controller keeps saying it is
+    // still wanted. See src/talkback-key.h.
+    void renew();
+
+    std::string status_json() const;
+
+private slots:
+    void evaluate();
+
+private:
+    TalkbackController();
+
+    mutable std::mutex m_mtx;
+    TalkbackTap        m_tap;
+    TalkbackKeyState   m_key{};
+    std::string        m_participant;
+    std::string        m_source;
+    QTimer            *m_timer = nullptr;
+};

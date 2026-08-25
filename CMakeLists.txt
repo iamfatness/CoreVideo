@@ -265,6 +265,7 @@ if(COREVIDEO_BUILD_PLUGIN)
         src/plugin-main.cpp
         src/zoom-source.cpp
         src/talkback-tap.cpp
+        src/talkback-controller.cpp
         src/zoom-participant-audio-source.cpp
         src/zoom-supersource.cpp
         src/zoom-tiles-background.cpp

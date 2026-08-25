@@ -107,8 +107,27 @@ public:
     // out at 10s -> Destroying -> Done -> driver exits -> a genuinely late
     // onCreateChannelResponse arrives after that and queues a real Zoom
     // channel that nothing then destroys).
+    //
+    // R1-round-3 review fix: session_start() gates on this function believing
+    // "false" means the driving thread will not touch m_ctrl. That was wrong
+    // for one specific window: drain_stray_channels() swaps m_stray_channels
+    // into a local UNDER m_chan_mtx, releases the lock, and only THEN runs
+    // its Begin/Add/ExecuteBatchDestroyChannels loop against m_ctrl. In that
+    // window the member m_stray_channels already reads empty and m_phase can
+    // independently already read Done, so the two checks below would both
+    // pass and this function would report "nothing to wait for" while the
+    // driving thread is still mid SDK-call. m_driving_thread_in_sdk_call is
+    // what actually closes that: set before drain_stray_channels() risks
+    // touching the SDK, cleared once it's done, checked here FIRST so it
+    // dominates the other two checks. (tick()'s Destroying-phase SDK
+    // sequence does not need the same treatment: unlike the stray path, it
+    // never stores Phase::Done until strictly after its own Begin/Add/
+    // Execute sequence finishes, so m_phase alone already reads "busy" for
+    // that entire window -- traced, not assumed.)
     bool has_pending_work() const
     {
+        if (m_driving_thread_in_sdk_call.load(std::memory_order_acquire))
+            return true;
         const Phase p = m_phase.load(std::memory_order_acquire);
         if (p != Phase::Idle && p != Phase::Done) return true;
         // Takes m_chan_mtx only for this queue check -- never call this
@@ -205,6 +224,26 @@ private:
     // m_chan_mtx) instead of calling the SDK; drain_stray_channels(), called
     // only from tick(), is the sole drainer.
     std::vector<std::basic_string<zchar_t>> m_stray_channels;
+
+    // R1-round-3 review fix: true for exactly the window in which
+    // drain_stray_channels() (driving thread) is between its m_chan_mtx-
+    // protected swap of m_stray_channels and the end of its subsequent
+    // Begin/Add/ExecuteBatchDestroyChannels loop against m_ctrl. Neither
+    // m_phase nor m_stray_channels alone can express "busy" for that window
+    // -- by the time the SDK loop runs, the swap has already emptied the
+    // member queue, and m_phase can independently already read Done -- so
+    // has_pending_work() needs this as a third, explicit signal. See its
+    // doc comment above for why session_start()'s R1 mutual-exclusion gate
+    // depends on has_pending_work() being right about this. atomic<bool>,
+    // not m_chan_mtx: this flag is read by has_pending_work() while
+    // m_chan_mtx may or may not be held by the caller (session_start() does
+    // not hold it), and it is set/cleared around SDK calls that must never
+    // run under that mutex -- folding this into m_chan_mtx would mean
+    // either holding the mutex across the SDK loop (forbidden) or leaving a
+    // gap between unlocking and setting/clearing this flag, which is the
+    // exact class of gap this flag exists to close. No `mutable` needed:
+    // std::atomic<bool>::load() is already const.
+    std::atomic<bool> m_driving_thread_in_sdk_call{false};
 
     std::string  m_participant_name;
     unsigned int m_participant_id = 0;

@@ -168,6 +168,30 @@ void EngineTalkback::drain_stray_channels()
     // exactly the failure mode this class exists to avoid.
     if (!m_ctrl) return;
 
+    // R1-round-3 review fix (the has_pending_work() gap): has_pending_work()
+    // used to infer "the driving thread might still touch the SDK" from
+    // m_phase and m_stray_channels alone. Both can read "nothing to see
+    // here" while THIS function is still live: the swap below empties the
+    // m_stray_channels member immediately, and m_phase can independently
+    // already be Done (a stray drained on the very tick() that settles the
+    // ladder, or on a later call after the ladder already settled) -- so for
+    // the entire window from here through the end of the SDK loop below,
+    // has_pending_work() would report "safe to proceed" to session_start()
+    // on the OTHER thread while this thread is still calling
+    // m_ctrl->BeginBatchDestroyChannels() and friends. session_start()'s R1
+    // mutual-exclusion gate depends on has_pending_work() being right about
+    // that, so set the flag BEFORE the swap (not after -- the swap itself,
+    // under m_chan_mtx, is part of the window a concurrent reader must see
+    // as busy) and clear it via RAII so every exit from here on -- today
+    // that's the empty-queue early return right below and falling off the
+    // end of the loop, but a future edit adding another early return does
+    // not have to remember to duplicate the clear.
+    m_driving_thread_in_sdk_call.store(true, std::memory_order_release);
+    struct ClearOnExit {
+        std::atomic<bool> &flag;
+        ~ClearOnExit() { flag.store(false, std::memory_order_release); }
+    } clear_on_exit{m_driving_thread_in_sdk_call};
+
     std::vector<std::basic_string<zchar_t>> strays;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);

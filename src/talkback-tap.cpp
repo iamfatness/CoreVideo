@@ -6,7 +6,7 @@
 #include <obs-module.h>
 #include <util/platform.h>
 
-#include <vector>
+#include <cstring>
 
 TalkbackTap::~TalkbackTap() { close(); }
 
@@ -59,9 +59,34 @@ bool TalkbackTap::open(const std::string &source_name, std::string &error_out)
     m_region_name = shm_next_region(shm_generations(), base_region_name()).name;
     if (!shm_region_create(m_region, m_region_name,
                            shm_audio_region_bytes(kTalkbackSlotBytes))) {
+        // Fold in the OS error code, not just "could not create": this is
+        // exactly the class of failure the 2026-08-17 incident (ghost writer
+        // sharing a ring, ~92% audio loss, no error anywhere) went unseen
+        // for -- an operator staring at a generic message can't tell a
+        // permissions problem from a name collision from disk pressure.
+        error_out = "Could not create the talkback shared-memory region \"" +
+                    m_region_name + "\" (error " +
+                    std::to_string(m_region.last_error) + ")";
         obs_source_release(src);
-        error_out = "Could not create the talkback shared-memory region";
         return false;
+    }
+    // shm_region_create() SUCCEEDS when it merely OPENED an existing section
+    // instead of creating a fresh one -- see ShmRegion::already_existed's
+    // comment in engine-ipc.h. That is precisely the shape of the
+    // 2026-08-17 incident: a stale section from an orphaned process was
+    // silently reopened and ghost-written, and nothing surfaced it until it
+    // was root-caused live. talkback_ring_init() below resets the header
+    // immediately, which limits the damage here, but "mitigated" is exactly
+    // what was believed last time -- so this is surfaced loudly rather than
+    // silently, even though open() still proceeds.
+    if (m_region.already_existed) {
+        blog(LOG_WARNING,
+             "[obs-zoom-plugin] talkback: region \"%s\" already existed -- "
+             "opened a section left by a previous process instead of "
+             "creating a fresh one. Reinitializing its header now; if audio "
+             "loss follows, an orphaned ZoomObsEngine or plugin instance may "
+             "still be mapping this name.",
+             m_region_name.c_str());
     }
     talkback_ring_init(static_cast<ShmAudioHeader *>(m_region.ptr), rate, chans);
 
@@ -153,13 +178,28 @@ void TalkbackTap::on_audio(const struct audio_data *data, bool muted)
     const std::size_t bytes = talkback_pcm_bytes(data->frames, chans);
     if (bytes == 0 || bytes > kTalkbackSlotBytes) return;
 
-    std::vector<int16_t> pcm(data->frames * chans, 0);
-    if (!muted) {
+    // FIXED STACK BUFFER, not a per-callback heap allocation. This runs on
+    // OBS's audio-mixer thread, shared with every other source's capture
+    // callback, ~100 times/sec while a key is open -- exactly the class of
+    // unbudgeted media-thread work this codebase has repeatedly root-caused
+    // to live audio glitches (the ~1.06s FFmpeg preload taken under a lock
+    // shared with the audio path; QProcess banned outright from media
+    // threads -- see CLAUDE.md). The `bytes > kTalkbackSlotBytes` check
+    // above already proves `bytes` fits before a single byte of this array
+    // is touched, so the bound is established once, not re-derived here.
+    int16_t pcm[kTalkbackSlotBytes / sizeof(int16_t)];
+    if (muted) {
+        // Silence must still be published at the correct length so the
+        // dead-man switch doesn't read a mute as a dead path (see the
+        // comment above). A stack array isn't value-initialized like the
+        // vector this replaced, so the silence has to be zeroed explicitly.
+        std::memset(pcm, 0, bytes);
+    } else {
         const float *planes[2] = {
             reinterpret_cast<const float *>(data->data[0]),
             chans > 1 ? reinterpret_cast<const float *>(data->data[1]) : nullptr,
         };
-        talkback_pcm_interleave(planes, data->frames, chans, pcm.data());
+        talkback_pcm_interleave(planes, data->frames, chans, pcm);
     }
 
     const uint64_t now_ms = os_gettime_ns() / 1000000ULL;
@@ -167,7 +207,7 @@ void TalkbackTap::on_audio(const struct audio_data *data, bool muted)
     {
         std::lock_guard<std::mutex> lock(m_mtx);
         if (!m_open || m_region.ptr == nullptr) return;
-        notify = talkback_ring_publish(m_region.ptr, pcm.data(),
+        notify = talkback_ring_publish(m_region.ptr, pcm,
                                        static_cast<uint32_t>(bytes), now_ms);
         m_last_audio_ms = now_ms;
     }

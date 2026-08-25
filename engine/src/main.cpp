@@ -1377,16 +1377,39 @@ int main()
                 EngineIpc::write(
                     R"({"cmd":"talkback_probe","stage":"controller","ok":false,)"
                     R"("reason":"not_in_meeting"})");
+            } else if (!talkback.is_idle()) {
+                // A ladder is live. Refuse immediately -- no join, no block,
+                // no probe() call that would touch the driving thread.
+                // Joining first (an earlier round of this change did exactly
+                // that) blocks THIS command -- the single ipc_read_line
+                // thread -- for up to the full ~30s driving-thread bound,
+                // during which leave/stop_engine/quit (quit only sets a flag
+                // this same loop must come back around to see) all stall.
+                // Refusing is correct for a probe; blocking the one reader
+                // thread to wait one out is not (review round 3 finding).
+                // talkback.probe() itself is non-blocking and contains this
+                // exact guard, so delegate to it: it reports "busy" with the
+                // live phase value and returns false without touching
+                // talkback_thread.
+                talkback.probe(meeting_svc, who);
             } else {
-                // A driving thread from a PRIOR probe can only still be
-                // joinable here if that probe already reached Idle/Done --
-                // probe() below refuses to start a new ladder otherwise, and
-                // this whole command loop is single-threaded (one
-                // ipc_read_line call at a time), so there is no concurrent
-                // second TalkbackProbe command to race against. Join it
-                // before reusing the std::thread handle: overwriting a
-                // joinable std::thread without joining/detaching first calls
-                // std::terminate.
+                // is_idle() is a plain, non-atomic-compound check-then-act
+                // here, and that is safe ONLY because of two facts specific
+                // to this call site: (1) this command loop is the sole
+                // caller of probe() -- no other thread can start a new
+                // ladder between the check above and the join/probe() below,
+                // so nothing can flip phase from Done back into "busy" out
+                // from under us; (2) every SDK-callback-thread path in
+                // engine-talkback.cpp only ever advances phase TOWARD Done
+                // (AwaitingChannel/Invite/Sending/Destroying -> Done), never
+                // away from it, so once Idle/Done is observed here it stays
+                // that way until THIS thread calls probe() again. That also
+                // means the driving thread from a PRIOR probe, if still
+                // joinable, has already tripped its own is_idle() exit (or
+                // will within one 10ms tick if a callback thread set Done
+                // directly, e.g. onCreateChannelResponse's early-failure
+                // path) -- so this join costs at most one tick interval, not
+                // the ~30s bound.
                 if (talkback_thread.joinable()) talkback_thread.join();
                 talkback_stop.store(false, std::memory_order_release);
 

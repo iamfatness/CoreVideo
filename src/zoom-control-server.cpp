@@ -1,6 +1,8 @@
 #include "zoom-control-server.h"
 #include "obs-utils.h"
 #include "speaker-director.h"
+#include "talkback-controller.h"
+#include "talkback-key.h"
 #include "zoom-control-parse.h"
 #include "zoom-engine-client.h"
 #include "zoom-iso-recorder.h"
@@ -824,6 +826,56 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
             {"ok", true},
             {"note", "probe started; watch the OBS log for talkback_probe stages"},
         });
+        return;
+    }
+
+    // Opens or closes a talkback key. TalkbackController (src/talkback-
+    // controller.h) owns every keying decision; this command only calls into
+    // it -- no keying logic lives here. needs_renewal is always true for this
+    // surface: a key opened over a socket must be re-asserted, because a lost
+    // release would otherwise leave audio flowing with nothing to notice (the
+    // lost-release backstop documented at the top of src/talkback-key.h).
+    if (cmd == "talkback_key") {
+        const QString state = req.value("state").toString();
+        // "off" always succeeds, even with a missing or invalid participant
+        // or source -- the whole design fails closed, and the one command a
+        // panicking operator will send is "off". It must never be refused on
+        // a technicality.
+        if (state == "off") {
+            TalkbackController::instance().key_off();
+            write_response(socket, {{"ok", true}, {"open", false}});
+            return;
+        }
+        const std::string participant = req.value("participant").toString().toStdString();
+        const std::string source = req.value("source").toString().toStdString();
+        const TalkbackKeyMode mode = req.value("mode").toString() == "latch"
+            ? TalkbackKeyMode::Latch : TalkbackKeyMode::PushToTalk;
+        std::string error;
+        const bool ok = TalkbackController::instance().key_on(
+            participant, source, mode, /*needs_renewal=*/true, error);
+        // "error" is a stable machine code for callers that branch on it;
+        // "message" carries the controller's specific reason (source
+        // missing, participant unknown, key already open) so an operator
+        // knows WHICH thing failed, not just that talkback failed.
+        write_response(socket, ok
+            ? QJsonObject{{"ok", true}, {"open", true}}
+            : QJsonObject{{"ok", false}, {"error", "talkback_key_denied"},
+                          {"message", QString::fromStdString(error)}});
+        return;
+    }
+
+    // Re-asserts an open key -- the lost-release backstop's liveness ping.
+    // Harmless (and reported ok) if no key is currently open.
+    if (cmd == "talkback_renew") {
+        TalkbackController::instance().renew();
+        write_response(socket, {{"ok", true}});
+        return;
+    }
+
+    if (cmd == "talkback_status") {
+        const QJsonDocument doc = QJsonDocument::fromJson(
+            QByteArray::fromStdString(TalkbackController::instance().status_json()));
+        write_response(socket, {{"ok", true}, {"talkback", doc.object()}});
         return;
     }
 

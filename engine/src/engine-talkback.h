@@ -43,7 +43,13 @@ class EngineTalkback : public ZOOMSDK::IMeetingTalkbackCtrlEvent {
 public:
     // Starts the probe ladder. Reports and returns without blocking; the
     // asynchronous rungs continue through the callbacks below and tick().
-    void probe(ZOOMSDK::IMeetingService *svc, const std::string &participant_name);
+    // Returns true if a new ladder actually started, false if the
+    // re-entrancy guard refused (a ladder is already in flight). The caller
+    // MUST use this to decide whether to spawn a tick()-driving thread --
+    // spawning one unconditionally reintroduces the exact two-threads-call-
+    // tick() hazard the invariants on m_chan_mtx / the batch-destroy API
+    // above are built to rule out. See the caller in engine/src/main.cpp.
+    bool probe(ZOOMSDK::IMeetingService *svc, const std::string &participant_name);
 
     // Called from the engine's main loop. Sends tone buffers while a send is
     // in progress, then destroys the channel.

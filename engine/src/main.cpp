@@ -1170,12 +1170,23 @@ int main()
     EngineMeetingEvent meeting_event(e2p, &meeting_svc, &participants,
                                      &video_engine, &share_engine);
     // Static storage duration, not a plain local: the TalkbackProbe branch
-    // below detaches a thread that calls talkback.tick()/is_idle() for up to
+    // below runs a thread that calls talkback.tick()/is_idle() for up to
     // ~30s. A plain local's lifetime ends when main() returns, and a thread
     // still running against it at that point is a use-after-free; static
-    // duration means the object outlives that, so the detached thread can
+    // duration means the object outlives that, so the driving thread can
     // never dangle a reference to it (Ruling B, task-5-brief).
     static EngineTalkback talkback;
+    // The thread is kept joinable (never detached) and joined explicitly --
+    // both before starting a fresh one and, critically, before any SDK
+    // teardown call at process exit (see the Quit path below). talkback.tick()
+    // calls through m_ctrl/m_svc, raw ZOOMSDK pointers that CleanUPSDK()
+    // invalidates; a detached thread has no point at which the engine can
+    // prove it is no longer touching those pointers before tearing the SDK
+    // down (review round 4 finding).
+    static std::thread talkback_thread;
+    // Lets the driving loop exit promptly on Quit instead of running out its
+    // full ~30s bound before main() can join it.
+    static std::atomic<bool> talkback_stop{false};
 
     // Persistent wide-string storage for async SDK calls (JoinParam / AuthContext
     // hold raw pointers — these must outlive the Join/SDKAuth call).
@@ -1367,27 +1378,50 @@ int main()
                     R"({"cmd":"talkback_probe","stage":"controller","ok":false,)"
                     R"("reason":"not_in_meeting"})");
             } else {
-                talkback.probe(meeting_svc, who);
-                // Drive tick() off the read loop's thread: ipc_read_line_with_
-                // message_pump() blocks, so tick() cannot live there. Bounded
-                // at 3000 x 10ms (~30s), not the ~12s a naive read of the
-                // probe's own "~3s of tone" comment suggests -- AwaitingChannel
-                // and AwaitingInvite each carry their own 10s timeout
-                // (kAwaitTimeout in engine-talkback.cpp) before falling through
-                // to Destroying, which itself retries up to kMaxDestroyAttempts
-                // times. Worst case is 10s timeout plus several destroy
-                // retries; 12s could expire the thread mid-destroy and strand
-                // a channel -- exactly what the destroy-retry machinery exists
-                // to prevent (Ruling A, task-5-brief). is_idle() breaks the
-                // loop as soon as the ladder settles so the happy path does
-                // not spin the full bound.
-                std::thread([]() {
-                    for (int i = 0; i < 3000; ++i) {
-                        talkback.tick();
-                        if (talkback.is_idle()) break;
-                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                    }
-                }).detach();
+                // A driving thread from a PRIOR probe can only still be
+                // joinable here if that probe already reached Idle/Done --
+                // probe() below refuses to start a new ladder otherwise, and
+                // this whole command loop is single-threaded (one
+                // ipc_read_line call at a time), so there is no concurrent
+                // second TalkbackProbe command to race against. Join it
+                // before reusing the std::thread handle: overwriting a
+                // joinable std::thread without joining/detaching first calls
+                // std::terminate.
+                if (talkback_thread.joinable()) talkback_thread.join();
+                talkback_stop.store(false, std::memory_order_release);
+
+                // probe() returns false only when its re-entrancy guard
+                // refused (a ladder is already in flight) -- see the
+                // declaration comment. Spawning the driving thread only when
+                // it returns true is what keeps "a ladder started" and "a
+                // driver is running" the same fact, so a refused probe (which
+                // leaves phase untouched) can never end up with two threads
+                // calling tick() on this object (review round 4 finding).
+                if (talkback.probe(meeting_svc, who)) {
+                    // Drive tick() off a dedicated thread: ipc_read_line_with_
+                    // message_pump() blocks, so tick() cannot live on the read
+                    // loop's thread. Bounded at 3000 x 10ms (~30s), not the
+                    // ~12s a naive read of the probe's own "~3s of tone"
+                    // comment suggests -- AwaitingChannel and AwaitingInvite
+                    // each carry their own 10s timeout (kAwaitTimeout in
+                    // engine-talkback.cpp) before falling through to
+                    // Destroying, which itself retries up to
+                    // kMaxDestroyAttempts times. Worst case is 10s timeout
+                    // plus several destroy retries; 12s could expire the
+                    // thread mid-destroy and strand a channel -- exactly what
+                    // the destroy-retry machinery exists to prevent (Ruling A,
+                    // task-5-brief). is_idle() breaks the loop as soon as the
+                    // ladder settles so the happy path does not spin the full
+                    // bound; talkback_stop lets Quit break it early too.
+                    talkback_thread = std::thread([]() {
+                        for (int i = 0; i < 3000; ++i) {
+                            if (talkback_stop.load(std::memory_order_acquire)) break;
+                            talkback.tick();
+                            if (talkback.is_idle()) break;
+                            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                        }
+                    });
+                }
             }
 
         } else if (command == IpcCommand::Leave) {
@@ -1459,6 +1493,17 @@ int main()
     // Stop the heartbeat before tearing down the SDK / IPC.
     running.store(false, std::memory_order_release);
     if (heartbeat.joinable()) heartbeat.join();
+
+    // Join the talkback driving thread BEFORE any SDK teardown call, not
+    // just before CleanUPSDK() -- Leave() below also runs through
+    // meeting_svc, and tick() calls through m_ctrl/m_svc (raw ZOOMSDK
+    // pointers captured at probe() time) on every iteration. A tick() still
+    // in flight when either of those tears down is a callback racing
+    // teardown on invalidated SDK pointers -- the defect class this project
+    // documents in CLAUDE.md's "Engine teardown" invariant. Signal stop
+    // first so this does not wait out the full ~30s bound.
+    talkback_stop.store(true, std::memory_order_release);
+    if (talkback_thread.joinable()) talkback_thread.join();
 
     if (meeting_svc) meeting_svc->Leave(ZOOMSDK::LEAVE_MEETING);
     share_engine.detach();

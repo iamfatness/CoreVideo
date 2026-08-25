@@ -29,7 +29,7 @@ void EngineTalkback::report(const std::string &stage, const std::string &fields)
     EngineIpc::write(line);
 }
 
-void EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
+bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
                            const std::string &participant_name)
 {
     // Re-entrancy guard: Task 5 wires this to a control-API command a human
@@ -37,10 +37,13 @@ void EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
     // unconditionally reset m_channel_id_z out from under the live ladder,
     // discarding the only handle we have to destroy it -- refusing is
     // correct for a probe; there is nothing sensible to queue or cancel.
+    // Returning false here (rather than starting a ladder) is also the
+    // caller's signal not to spawn a second tick()-driving thread -- see the
+    // return-value comment on this function's declaration.
     const Phase current = m_phase.load(std::memory_order_acquire);
     if (current != Phase::Idle && current != Phase::Done) {
         report("busy", R"("phase":)" + std::to_string(static_cast<int>(current)));
-        return;
+        return false;
     }
 
     m_svc = svc;
@@ -62,7 +65,7 @@ void EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
     if (!m_svc) {
         report("controller", R"("ok":false,"reason":"no_meeting_service")");
         m_phase.store(Phase::Done, std::memory_order_release);
-        return;
+        return true;
     }
 
     // RUNG 1: does the controller exist at all on this SDK/account?
@@ -70,7 +73,7 @@ void EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
     report("controller", std::string(R"("ok":)") + (m_ctrl ? "true" : "false"));
     if (!m_ctrl) {
         m_phase.store(Phase::Done, std::memory_order_release);
-        return;
+        return true;
     }
 
     // RUNG 2: the meeting-level gate. This is the one we expect Enhanced Media
@@ -80,14 +83,14 @@ void EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
            std::string(R"("supported":)") + (supported ? "true" : "false"));
     if (!supported) {
         m_phase.store(Phase::Done, std::memory_order_release);
-        return;
+        return true;
     }
 
     const ZOOMSDK::SDKError set_err = m_ctrl->SetEvent(this);
     report("set_event", R"("code":)" + std::to_string(static_cast<int>(set_err)));
     if (set_err != ZOOMSDK::SDKERR_SUCCESS) {
         m_phase.store(Phase::Done, std::memory_order_release);
-        return;
+        return true;
     }
 
     // RUNG 3: create exactly one channel. Max 16 exist; we make one and
@@ -98,10 +101,11 @@ void EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
            std::to_string(static_cast<int>(create_err)));
     if (create_err != ZOOMSDK::SDKERR_SUCCESS) {
         m_phase.store(Phase::Done, std::memory_order_release);
-        return;
+        return true;
     }
     m_phase_deadline = std::chrono::steady_clock::now() + kAwaitTimeout;
     m_phase.store(Phase::AwaitingChannel, std::memory_order_release);   // continues in onCreateChannelResponse
+    return true;
 }
 
 void EngineTalkback::drain_stray_channels()

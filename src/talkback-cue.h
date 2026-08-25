@@ -56,13 +56,18 @@ inline TalkbackCue talkback_cue_on_live_change(bool prev_live, bool live)
 // sounding.
 //
 // MUST NOT BLOCK. Callers are TalkbackController::evaluate() (the Qt main
-// thread, on a 25ms QTimer -- see talkback-controller.h) and key_off()
-// (which can run from the same timer OR from the control-server's request
-// handling, see zoom-control-server.cpp). A blocking sound call from either
-// stalls window dragging, every other dock, and every other talkback
-// operation for as long as the cue takes to play. talkback-cue.cpp's
-// implementation guarantees this by never doing OS playback work on the
-// calling thread.
+// thread, on a 25ms QTimer -- see talkback-controller.h) and key_off().
+// Both currently run serialized on that same Qt main-thread event loop
+// (zoom-control-server.cpp's request handling that calls key_off() has no
+// QThread/moveToThread of its own, so its Qt signals fire there too) -- but
+// talkback-cue.cpp's worker design does not lean on that: it exists because
+// two independently-spawned std::threads racing PlaySoundA calls on the OS
+// scheduler is nondeterministic regardless of which thread(s) requested
+// them, and because a bounded shutdown needs exactly one thread to join. A
+// blocking sound call from either caller stalls window dragging, every
+// other dock, and every other talkback operation for as long as the cue
+// takes to play. talkback-cue.cpp's implementation guarantees this by never
+// doing OS playback work on the calling thread.
 void talkback_play_cue(TalkbackCue cue);
 
 // Shutdown-only. Signals the cue-playback worker to exit and JOINS it

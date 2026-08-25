@@ -35,14 +35,19 @@
 //   1. ORDERING is not actually guaranteed. Two unsynchronized threads
 //      racing PlaySoundA calls can have their OS calls land in either
 //      order regardless of which talkback_play_cue() call happened first
-//      in wall-clock time. A CLOSE requested right after an OPEN (a normal
-//      "keyed, then immediately released" sequence, and key_off() is
-//      reachable from both the Qt timer thread AND the control-server
-//      thread -- zoom-control-server.cpp -- which is exactly the kind of
-//      skew that breaks thread-start ordering) could have its PlaySoundA
-//      call reach the OS BEFORE the OPEN's, so OPEN plays last. The
-//      operator would hear "you're live" after they are in fact cut --
-//      precisely the failure the close cue exists to prevent.
+//      in wall-clock time -- that is true of two independently-scheduled
+//      threads regardless of what thread requested each one. A CLOSE
+//      requested right after an OPEN (a normal "keyed, then immediately
+//      released" sequence) could have its PlaySoundA call reach the OS
+//      BEFORE the OPEN's, so OPEN plays last. The operator would hear
+//      "you're live" after they are in fact cut -- precisely the failure
+//      the close cue exists to prevent. (All current callers -- evaluate()
+//      and key_off(), the latter itself called from both the timer tick
+//      and zoom-control-server.cpp's request handling -- in fact run
+//      serialized on the single Qt main-thread event loop today, so this
+//      race does not depend on THEM being concurrent; it only needs two
+//      independently-spawned std::threads racing the OS scheduler, which
+//      is what talkback_play_cue() itself created on every call.)
 //   2. SHUTDOWN was unbounded. A detached thread's lifetime was bounded by
 //      nothing: TalkbackController::stop() -> key_off() -> a detached
 //      thread starts sleeping for up to ~230ms -> stop() returns
@@ -70,7 +75,6 @@
 #include <mmsystem.h>
 #pragma comment(lib, "winmm.lib")
 
-#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -165,9 +169,13 @@ std::vector<uint8_t> build_wav(TalkbackCue cue)
 // file-header comment for why this replaced one-detached-thread-per-cue.
 //
 // LIFECYCLE:
-//   START: lazily, on the first talkback_play_cue() call, via the
-//          function-local static in instance() (thread-safe init, same as
-//          TalkbackController::instance()'s own singleton pattern).
+//   START: the SINGLETON (CueWorker::instance()) is created lazily on first
+//          access, thread-safe init same as TalkbackController::instance().
+//          The WORKER THREAD is a separate, later step: request() starts it
+//          lazily too, under m_mtx, the first time a real cue is requested
+//          -- see m_started. Constructing the singleton alone spawns no
+//          thread, so a session that never plays a cue never has one to
+//          join at shutdown.
 //   WAKE:  the worker blocks on m_cv until either a cue is pending or
 //          shutdown has been requested; request() sets the pending slot
 //          (overwriting whatever was already there -- REPLACE) and notifies.
@@ -184,17 +192,24 @@ public:
 
     // Non-blocking: store the latest-requested cue and wake the worker.
     // Called from talkback_play_cue(), which evaluate() (Qt main thread,
-    // every 25ms) and key_off() (Qt timer thread OR the control-server
-    // thread) both call -- this function must never itself block.
+    // every 25ms) and key_off() both call -- currently always on that same
+    // Qt main-thread event loop (see the file-header comment) -- so this
+    // function must never itself block.
     void request(TalkbackCue cue)
     {
-        {
-            std::lock_guard<std::mutex> lock(m_mtx);
-            // Once shutdown has been requested, no new work is accepted --
-            // the worker is on its way out and nobody will pick this up.
-            if (m_shutting_down) return;
-            m_pending = cue; // latest wins: overwrites any still-unplayed cue
+        std::unique_lock<std::mutex> lock(m_mtx);
+        // Once shutdown has been requested, no new work is accepted -- the
+        // worker is on its way out and nobody will pick this up.
+        if (m_shutting_down) return;
+        // Lazily start the worker on first real use, under THIS SAME
+        // m_mtx -- see m_started's declaration and shutdown()'s mirrored
+        // check for why that matters.
+        if (!m_started) {
+            m_thread = std::thread([this] { run(); });
+            m_started = true;
         }
+        m_pending = cue; // latest wins: overwrites any still-unplayed cue
+        lock.unlock();
         m_cv.notify_one();
     }
 
@@ -205,7 +220,26 @@ public:
     void shutdown()
     {
         std::unique_lock<std::mutex> lock(m_mtx);
-        if (!m_thread.joinable() || m_shutting_down)
+        // REVIEW-ROUND FIX: "was a worker ever started" used to be tracked
+        // by an external std::atomic<bool> (g_cue_worker_used), checked
+        // BEFORE this function touched CueWorker at all, so that a session
+        // that never played a cue could skip spinning one up just to join
+        // it. That was a TOCTOU: it was correct only because every current
+        // caller happens to run on one thread, a fact the comments nearby
+        // used to overstate as already-untrue ("the control-server
+        // thread"). If a future change ever did move a caller to its own
+        // thread, shutdown() could observe the atomic as still-false and
+        // return while a concurrent first-ever request() was lazily
+        // starting a worker nobody would then join -- re-admitting the
+        // DLL-unload crash this class exists to prevent, unconditionally
+        // rather than only under a wedged driver.
+        //
+        // m_started, checked here under the SAME m_mtx request() uses to
+        // set it, removes the TOCTOU entirely: "never started" and "start
+        // now" are decided by the one lock, so there is no window in which
+        // an outside observer can see stale state. Correctness no longer
+        // depends on how many threads ever call into this file.
+        if (!m_started || m_shutting_down)
             return; // never started, or shutdown() already ran
         m_shutting_down = true;
         lock.unlock();
@@ -234,7 +268,9 @@ public:
     }
 
 private:
-    CueWorker() { m_thread = std::thread([this] { run(); }); }
+    // No thread here -- it starts lazily, inside request(), the first time
+    // a cue is actually requested. See m_started and request()'s comment.
+    CueWorker() = default;
 
     // Not expected to run during normal operation -- shutdown() always
     // leaves m_thread not-joinable (joined or detached) before returning,
@@ -245,7 +281,7 @@ private:
     // process" if some future caller forgets the shutdown() contract.
     ~CueWorker()
     {
-        if (m_thread.joinable()) {
+        if (m_started && m_thread.joinable()) {
             {
                 std::lock_guard<std::mutex> lock(m_mtx);
                 m_shutting_down = true;
@@ -310,30 +346,27 @@ private:
     std::mutex              m_mtx;
     std::condition_variable m_cv;
     TalkbackCue             m_pending = TalkbackCue::None;
+    // Whether the worker thread has ever been started. Set exactly once,
+    // by request() the first time a real cue is requested, under m_mtx --
+    // the ONLY thing shutdown() consults to decide "nothing to join". No
+    // external/unsynchronized flag exists any more; see shutdown()'s
+    // comment for what that used to cost.
+    bool                    m_started = false;
     bool                    m_shutting_down = false;
     bool                    m_exited = false;
     std::thread             m_thread;
 };
-
-// Set once talkback_play_cue() has actually been called, so shutdown() can
-// skip touching CueWorker::instance() entirely (and therefore never spin up
-// a worker thread just to immediately tear it down) on the common path
-// where a session never used talkback at all.
-std::atomic<bool> g_cue_worker_used{false};
 
 } // namespace
 
 void talkback_play_cue(TalkbackCue cue)
 {
     if (cue == TalkbackCue::None) return;
-    g_cue_worker_used.store(true, std::memory_order_relaxed);
     CueWorker::instance().request(cue);
 }
 
 void talkback_cue_shutdown()
 {
-    if (!g_cue_worker_used.load(std::memory_order_relaxed))
-        return; // nothing was ever started -- nothing to join
     CueWorker::instance().shutdown();
 }
 

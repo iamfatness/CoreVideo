@@ -112,12 +112,30 @@ inline uint32_t talkback_ring_drain(void *region_base, uint32_t &read_index,
         if (read_index == write_index) break;
 
         // If the writer lapped us, skip forward to the oldest slot still
-        // intact. Silent loss is the thing the free-running index exists to
-        // make visible; the caller reports it.
+        // intact -- and COUNT what the skip stepped over. Silent loss is the
+        // thing the free-running index exists to make visible, and this
+        // sentence used to say "the caller reports it" while handing the
+        // caller nothing to report: `*lost` was incremented only by seqlock
+        // give-ups, so a lapped ring -- the larger and more likely loss --
+        // was the one kind of dropped audio that stayed invisible. Found by
+        // the Task 3 closing sweep, in a comment claiming the count already
+        // existed.
+        //
+        // `*lost` therefore means one thing to a reader of the log: BUFFERS
+        // THAT NEVER REACHED THE FAR END, whether because the writer
+        // overwrote them before we got to them (here) or because three
+        // seqlock attempts could not copy one intact (below). Both are audio
+        // the director spoke and nobody heard.
         const uint32_t behind = audio_ring_slots_behind(write_index, read_index,
                                                         hdr->slot_count);
-        if (behind > hdr->slot_count)
-            read_index = write_index - hdr->slot_count;
+        if (behind > hdr->slot_count) {
+            const uint32_t oldest_intact = write_index - hdr->slot_count;
+            // Unsigned, and oldest_intact is strictly ahead of read_index
+            // whenever behind > slot_count, so this is the exact number of
+            // slots the skip is about to jump over.
+            if (lost != nullptr) *lost += oldest_intact - read_index;
+            read_index = oldest_intact;
+        }
 
         const uint32_t index = read_index % hdr->slot_count;
         auto *slot = reinterpret_cast<const ShmAudioSlot *>(

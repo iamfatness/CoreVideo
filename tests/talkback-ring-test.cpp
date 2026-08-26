@@ -134,6 +134,27 @@ int main()
                   kAudioRingSlots + 3,
               "slots_behind did not report the true overrun depth -- collapsing "
               "'caught up' and 'lapped by one ring' was the original defect");
+
+        // ...and DRAINING that lapped ring must ACCOUNT for what it steps
+        // over. The skip-forward used to be silent: `*lost` counted only
+        // seqlock give-ups, so the larger and likelier loss -- the writer
+        // overwriting buffers before the reader arrived -- was the one kind
+        // of dropped audio nothing reported, while the code's own comment
+        // said the caller reports it. 3 published buffers were overwritten
+        // (slot_count + 3 published, slot_count still intact).
+        Collected got2;
+        got2.region_base = r2.data();
+        got2.region_bytes = r2.size();
+        uint32_t lost2 = 0;
+        uint32_t ri2 = 0;
+        const uint32_t delivered2 =
+            talkback_ring_drain(r2.data(), ri2, collect, &got2, &lost2);
+        check(lost2 == 3,
+              "draining a lapped ring did not count the buffers the skip stepped "
+              "over -- audio the director spoke and nobody heard, reported as "
+              "nothing at all");
+        check(delivered2 == kAudioRingSlots,
+              "a lapped drain did not deliver exactly the slots still intact");
     }
 
     // ── A slot that fails every seqlock attempt increments *lost, silently

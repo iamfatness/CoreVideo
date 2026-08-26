@@ -80,15 +80,17 @@ bool TalkbackController::key_on(const std::string &participant,
     // so `talkback_start` no longer stands anything up; it selects.
     //
     // What the old order cost: `talkback_start` and `talkback_open` are
-    // handled by the same single engine command loop, in the order sent, and
-    // `open_audio()` snapshots the ring's CURRENT write index and steps over
-    // everything published before it. So every millisecond the engine spent
-    // inside `session_start` was a millisecond of director audio the tap had
-    // already published and `open_audio` then DISCARDED — dropped, not
-    // queued, the same mechanism as the create+invite clipping this whole
-    // milestone exists to remove, just smaller. Opening the tap first means
-    // the engine maps and snapshots the ring BEFORE any of that work, so
-    // audio produced during it queues in the ring's 8 slots instead.
+    // handled by the same single engine command loop, in the order sent, so
+    // every millisecond the engine spent inside `session_start` was a
+    // millisecond of director audio with nowhere to go — at the time
+    // `open_audio()` also snapped its read index past whatever had been
+    // published, so it was DISCARDED outright. The engine no longer snaps
+    // (that ring is re-laid-out per press, so it reads from 0), which is why
+    // this comment now states the ORDERING rather than the discard: opening
+    // the tap first means the engine has MAPPED the ring before any key-path
+    // work runs, so audio produced during that work lands in the ring's 8
+    // slots and is drained, instead of arriving at a region the engine has
+    // not opened yet.
     //
     // The one thing this trades: the first `talkback_audio` can now reach the
     // engine before the selection exists, and be counted as

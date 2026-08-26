@@ -755,11 +755,16 @@ private:
     // ON the key press, and the round-1 review traced why that was worse than
     // it looked: talkback_start and talkback_audio are branches of the SAME
     // command loop, so session_start() runs to completion before any buffer is
-    // read -- and the audio the tap publishes during that window is not
-    // delayed but DISCARDED, because open_audio() sets m_audio_read_index to
-    // the writer's current index and steps over everything published earlier.
-    // Same mechanism, same symptom (a clipped first syllable) as the defect
-    // this whole milestone removes, at smaller magnitude.
+    // read.
+    //
+    // Round 1 justified deferring it by saying that audio was then DISCARDED
+    // (open_audio() snapped the read index past it). Fix round 2 removed that
+    // mechanism -- this ring is re-laid-out per press, so open_audio() reads
+    // from 0 -- so the justification is restated here rather than carried
+    // forward: work on the key path DELAYS the first buffer, the ring bounds
+    // that delay at 8 slots, and past those slots it is loss (counted as
+    // `lost` now, which is not the same as avoided). The syllable the operator
+    // is listening for is the first one.
     //
     // So the duck is deferred to the first drain_audio() of the press, AFTER
     // its sends. Talent hearing one buffer of director-over-unducked-meeting

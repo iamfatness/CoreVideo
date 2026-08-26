@@ -47,7 +47,11 @@ Every one of these is documented at length where it lives; the list is the map.
   seqlock, **free-running** uint32 write/read indices (modulo only for
   physical offsets — collapsing "caught up" and "lapped by exactly one ring"
   was a real defect). Readers drain fully on any wakeup and account for every
-  lost slot (`audio_timeline_skip`).
+  lost slot (`audio_timeline_skip`). "Account for" includes the LAP: the
+  talkback drain's skip-forward counts the slots it steps over into `*lost`
+  (`src/talkback-ring.h`), which it did not until 2026-08-25 — only seqlock
+  give-ups were counted, so the larger and likelier loss was the one nothing
+  reported, under a comment saying the caller reports it.
 - **Edge-triggered notify** (`notify` flag + helpers in `src/engine-ipc.h`):
   whoever consumes a wakeup owns the flag until `audio_ring_reader_done` sees
   the ring empty after clearing, or `audio_ring_reader_abandon` hands it back.

@@ -311,11 +311,14 @@ int main()
         check(svc.ctrl.creates == creates_after_provisioning,
               "KEYING CREATED A CHANNEL -- the create+invite round trip this "
               "milestone removed is back on the key path");
-        // Fix round 1, M4: the duck must NOT run on the key press. talkback_start
-        // and talkback_audio are branches of one command loop, and open_audio()
-        // discards (not queues) whatever the tap published before it mapped the
-        // ring -- so SDK work here is dropped director audio, the same mechanism
-        // this milestone exists to remove.
+        // Fix round 1, M4: the duck must NOT run on the key press.
+        // talkback_start and talkback_audio are branches of one command loop,
+        // so SDK work here sits between the key going down and the first
+        // buffer leaving -- the one place in this feature where work is paid
+        // for in the director's first syllable. (Round 1 argued this from
+        // open_audio() discarding that audio; round 2 removed the discard, so
+        // the reason is the delay itself, bounded by the ring's 8 slots and
+        // real loss beyond them.)
         check(svc.ctrl.volumes.empty(),
               "the key press ducked synchronously -- that SDK work sits inside the "
               "window whose audio open_audio() DISCARDS");

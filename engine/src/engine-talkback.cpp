@@ -1918,8 +1918,16 @@ bool EngineTalkback::open_audio(const std::string &region_name,
     // (fix round 1 already removed all the SDK work that used to sit in it) but
     // real, uninstrumented, and the exact failure this milestone exists to
     // remove. Reading from 0 closes it: the ring's 8 slots become a buffer for
-    // that window instead of a wall, and an overrun is COUNTED (`lost` in
-    // drain_audio) rather than silent.
+    // that window instead of a wall, and an overrun past those slots is
+    // COUNTED (`lost` in drain_audio's audio_send report) rather than silent.
+    //
+    // That last clause was FALSE when this comment was first written, and the
+    // closing sweep caught it: talkback_ring_drain() skipped a lapped reader
+    // forward without touching `lost`, which counted only seqlock give-ups.
+    // The claim is true now because the skip was made to count what it steps
+    // over (src/talkback-ring.h) -- the fix went into the code rather than
+    // into the sentence, because a lapped ring is the LARGER of the two losses
+    // and was the one nothing reported.
     //
     // Do NOT "restore" the snap here on the strength of the general rule. It
     // remains correct for any ring that can be PRE-EXISTING when a reader
@@ -2097,10 +2105,9 @@ void EngineTalkback::drain_audio()
 
     // Fix round 1, M4: the key-down duck, applied AFTER this pass's sends and
     // never before them. session_start() only arms it -- see the comment there
-    // for why doing it on the key press put SDK calls inside the window whose
-    // audio open_audio() discards. Ordering within this function is the whole
-    // point: the first buffers are already on their way to Zoom by the time
-    // these calls run. Deliberately not gated on ctx.sent -- a drain that
+    // for why. Ordering within this function is the whole point: the first
+    // buffers are already on their way to Zoom by the time these calls run,
+    // and nothing the duck does can delay them. Deliberately not gated on ctx.sent -- a drain that
     // found nothing still means the ring is live and the press is real, and
     // waiting for a buffer that may not come would leave the duck unapplied
     // for the whole press.
@@ -2239,10 +2246,10 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
     // creating anything, and a key press cannot select a channel unless that
     // nomination succeeded in THIS meeting, because Leave clears the table.
     // Re-asking them per press put two SDK calls (one of which queries meeting
-    // state, the other re-registers a callback sink) inside the window whose
-    // audio open_audio() discards -- see the duck comment below for the
-    // mechanism. Only the null-controller check stays, because that is the one
-    // thing a stale pointer would not survive.
+    // state, the other re-registers a callback sink) between the key going
+    // down and the first buffer leaving -- see the duck comment below for why
+    // that is the one place work must not go. Only the null-controller check
+    // stays, because that is the one thing a stale pointer would not survive.
 
     // NO ARBITER GATE HERE, and that is deliberate rather than forgotten:
     // this function issues no CreateChannel, so it has nothing to arbitrate.
@@ -2364,21 +2371,39 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
     // nomination would leave every nominated talent hearing the meeting at 30%
     // from nomination until the meeting ends, whether or not anyone ever keys.
     //
-    // ...but NOT SYNCHRONOUSLY HERE either (fix round 1, M4). talkback_start
-    // and talkback_audio are branches of the same command loop, so anything
-    // this function does runs before the first buffer is read -- and that
-    // window is not a delay, it is a DISCARD: open_audio() sets
-    // m_audio_read_index to the writer's current index and steps over
-    // everything the tap published earlier. Same mechanism as the defect this
-    // milestone exists to remove. So the duck is armed here and applied by the
-    // first drain_audio() of the press, after its sends. One buffer of
-    // director-over-unducked-meeting is a far better failure than a lost first
-    // syllable.
+    // ...but NOT SYNCHRONOUSLY HERE either (fix round 1, M4; the
+    // justification is fix round 2's, because the one this originally rested
+    // on no longer exists). talkback_start and talkback_audio are branches of
+    // the same command loop, so everything this function does happens BEFORE
+    // the first buffer is read.
+    //
+    // The original argument was that open_audio() then DISCARDED that audio,
+    // by snapping m_audio_read_index to the writer's current index. It does
+    // not any more -- fix round 2 made it read from 0 for this ring, precisely
+    // so that window buffers instead of vanishing -- so do not reason from a
+    // discard here. What survives is the reason that never depended on it:
+    // THIS IS THE ONE PLACE WORK MUST NOT GO. A talkback key is judged by
+    // whether the director's first syllable is heard; the ring bounds the
+    // buffering at 8 slots (~80ms of 10ms buffers) and past that it is real
+    // loss -- counted as `lost` now, but counted is not the same as avoided.
+    // So the duck is armed here and applied by the first drain_audio() of the
+    // press, after its sends. One buffer of director-over-unducked-meeting is
+    // a far better failure than a late or lost first syllable.
     m_session_duck_pending = true;
 
+    // "audio_path" is a LABEL, not a gate (fix round 2). A refusal here would
+    // regress the ordering fix: "not_open" is the normal state for any caller
+    // that drives talkback_start before talkback_open, which is how this
+    // feature shipped until fix round 1 and which nothing stops a raw-pipe
+    // caller doing today. What it is worth is visibility -- a key that reports
+    // live with no ring behind it sends nothing, and this makes that legible
+    // in the log instead of leaving the operator to infer it from silence. A
+    // FAILED open is a different matter and is refused above; this only
+    // distinguishes open from not-yet.
     report_session("session_live", R"("target":")" + json_escape(target) +
                    R"(",)" + counts +
-                   R"(,"channel_ids":")" + json_escape(selected_ids) + "\"");
+                   R"(,"audio_path":")" + (m_audio_open ? "open" : "not_open") +
+                   R"(","channel_ids":")" + json_escape(selected_ids) + "\"");
     report_session_state(true, "live");
     return true;
 }

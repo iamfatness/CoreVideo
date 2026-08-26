@@ -21,111 +21,105 @@
 // it). All three misroutings are silent on a live show.
 //
 // THE RULE: exactly one create may be outstanding at a time, tracked in
-// EngineTalkback::m_pending_create (engine-talkback.h).
+// EngineTalkback::m_pending_create (engine-talkback.h) -- ONE member holding
+// the whole arbiter state (owner, both cancellation flags, and Nomination's
+// generation), mutated ONLY by the pure transitions in this file.
 //
 // THREADING -- read this before touching m_pending_create's synchronization.
 // An earlier version of this comment claimed both CreateChannel callers run
 // on the engine's single command-loop thread, so the field "costs nothing"
-// and needs none. That was true until review-round R3 added a driving-thread
-// writer, and is no longer true as written -- do not restore it. This
-// paragraph has ALREADY been caught stale THREE times by miscounting write
-// sites (once pre-Task-2; once in Task 2's own first pass, which also
-// asserted a write site -- session_stop()'s early branch clearing the field
-// -- that the F1 fix had removed; and once in fix round 3, which said SEVEN
-// while round 3's own new Stale branch had made it EIGHT). Do not trust the
-// count below either without re-deriving it from the actual code; the
-// discipline that matters is "verify the thread each writer runs on, from
-// the code, every time this paragraph is touched," not the specific number
-// that follows.
+// and needs no lock. That was true until review-round R3 added a
+// driving-thread writer, and is no longer true -- do not restore it.
 //
-// As of Task 2 fix round 4 (2026-08-25), SEVEN write STATEMENTS, in SEVEN
-// distinct functions, write m_pending_create, on TWO different threads --
-// re-counted in round 4 with `grep -nE "^[^/]*m_pending_create +="` over
-// engine-talkback.cpp, naming the enclosing function for each hit, not by
-// counting bullets in this paragraph. Use that regex, not the literal
-// `m_pending_create = `: expire_stale_pending_create_locked()'s write is
-// column-aligned (`m_pending_create           = state.owner;`) and a
-// fixed-space grep silently misses it, which is one way a previous count
-// went wrong. (An older version of the count, "five", counted bullets -- one
-// of which named three functions -- and separately misnamed nominate() as a
-// writer when only the function it calls, nomination_create_next(), actually
-// assigns the field.) Plus two call sites that deliberately do NOT write it
-// despite looking like they should:
-//   * probe() and session_start() (engine-talkback.cpp) CLAIM it (None ->
-//     Probe / None -> Session). nomination_create_next() (same file) CLAIMS
-//     it the same way (None -> Nomination) -- called from nominate() (which
-//     itself never writes the field) for the plan's first channel, and again
-//     from onCreateChannelResponse's Nomination branch for every channel
-//     still queued after that. All three claimers run on the engine's
-//     command-loop thread, which on
-//     Windows is also the SDK's message-pump thread. The GATE
-//     (talkback_may_request_create) is checked BEFORE their CreateChannel
-//     call; the CLAIM (the actual store of Probe/Session/Nomination) only
-//     happens AFTER that call returns SDKERR_SUCCESS. Do not conflate the
-//     two: the field reads None for the whole span between the gate check
-//     and the store, which is precisely the window this arbiter exists to
-//     reason about -- a maintainer who assumes the claim happens before the
-//     call will misjudge when m_pending_create actually becomes non-None.
-//   * onCreateChannelResponse (same file) CLAIMS-then-CLEARS it (-> None) in
-//     the same lock scope, for whichever owner is currently pending,
-//     regardless of what that owner's branch then does with the response
-//     (adopts it, destroys it as cancelled, destroys it as stale, or reports
-//     a failure) -- the clear happens before any of those branches run, and
-//     no branch re-claims it afterwards. That last clause is load-bearing
-//     and was FALSE for one round: round 3's Stale branch re-claimed the
-//     owner (m_pending_create = Nomination) after the clear, so a
-//     maintainer reasoning about the arbiter from this sentence got the
-//     wrong answer. Round 4 removed that re-claim -- if you add a branch
-//     here that writes this field, this sentence and the count above are
-//     both wrong again. Also the command-loop thread -- SDK callbacks run
-//     there for the same message-pump reason as above.
-//   * session_stop()'s MAIN teardown path (same file) CLEARS it (-> None,
-//     only when the pending owner is Session and there is a channel/session
-//     to actually tear down). Command-loop thread, same as every write site
-//     above.
-//   * tick()'s AwaitingChannel-timeout handling (same file, R3 fix) ALSO
-//     clears it (-> None, only when the pending owner is Probe), to stop a
-//     swallowed CreateChannel response from wedging the arbiter forever.
-//     This one runs on the PROBE'S OWN separate driving thread (see tick()'s
-//     own top-of-function comment) -- genuinely concurrent with the other
-//     six, not merely a different call site on the same thread. It is the
-//     ONLY write site not on the command-loop thread, and is therefore the
-//     entire reason this field needs synchronization at all.
-//   * expire_stale_pending_create_locked() (same file, extended for Task 2)
-//     ALSO clears it (-> None, for a stale Session OR a stale Nomination),
-//     lazily, from inside the gate check every claimer above already takes
-//     under m_chan_mtx -- the same self-healing tick()'s timeout gives
-//     Probe, given to Session and Nomination without a second thread or
-//     timer. Command-loop thread, same as its callers.
+// This paragraph has been caught wrong about itself in FOUR consecutive
+// rounds: twice by undercounting write sites, once by asserting a write site
+// the F1 fix had removed, once by prescribing a grep that matched `==` as
+// well as `=` (so following its own stated method yielded eleven "writes" and
+// re-condemned it), and once by introducing a five-bullet list of WRITERS
+// with the sentence "Plus two call sites that deliberately do NOT write it".
+// Learn from the pattern rather than from the corrections: prose that
+// enumerates code goes stale, so what follows enumerates as little as
+// possible and says how to re-derive the rest.
 //
-// The two call sites that deliberately do NOT write m_pending_create, even
-// though a naive read of "this is the teardown path" would expect them to:
-//   * session_stop()'s "nothing to tear down" early branch, when the pending
-//     owner is Session. Writing None here was the F1 CRITICAL bug: the
-//     CreateChannel had already gone to Zoom, and clearing the arbiter's
-//     record of it did not cancel that request -- the eventual response
-//     would be claimed by nobody, match no tracked channel, and wedge onto
-//     m_stray_channels forever. The fix sets m_session_create_cancelled
-//     instead and leaves the owner AS Session, so onCreateChannelResponse
-//     still routes the response to the Session branch, which destroys it.
-//   * nomination_reset() (same file, Task 2 fix round 1 -- the ORIGINAL
-//     version of this function DID write None here unconditionally, which
-//     was the Critical finding of fix round 1: the unfixed F1 bug,
-//     reintroduced for Nomination). Now mirrors session_stop()'s early
-//     branch exactly: sets m_nomination_create_cancelled instead of writing
-//     m_pending_create, for the same reason.
-// Because of the one driving-thread writer, m_pending_create is guarded by
-// EngineTalkback's m_chan_mtx everywhere it is read or written -- copy the
-// decision out under the lock, release, THEN call the SDK, same discipline
-// as every other m_chan_mtx access in that class. If a future change moves
-// tick()'s clear back onto the command-loop thread and removes the last
-// driving-thread writer, this paragraph -- and the mutex requirement -- can
-// be revisited, but do not strip the guarding on the strength of THIS
-// comment's old claim; verify the thread each writer runs on first, and
-// recount the write sites. A queue instead of a single outstanding slot
-// would buy nothing here and would add a way for the probe, the session, and
-// nomination to interleave -- fix round 3 proved that the expensive way, by
-// tracking outstanding creates in a FIFO one layer up (see "Generation
+// THE INVARIANT (verify this, not a list): every mutation of
+// m_pending_create is a WHOLE-STATE store, under EngineTalkback::m_chan_mtx,
+// of a state produced by one of the pure transitions below (issued /
+// response / expire / cancel / new_ladder). There are no field-by-field
+// writes and no partial updates -- that is deliberate, and it is fix round
+// 5's answer to two defects that both came from the state being four
+// separate members: a branch that returned before one of its updates (F1),
+// and a mutation deleting one of four write-backs with the entire test suite
+// still green.
+//
+// To re-derive the sites, run this over engine-talkback.cpp -- it is exact
+// because of the invariant above. It was run, and its output counted, before
+// the sentence after it was written; if you change this regex, do the same,
+// because a prescription that does not produce the number beside it has
+// itself been a finding in this file:
+//
+//     grep -nE "^[^/]*m_pending_create *= [^=]" engine/src/engine-talkback.cpp
+//
+// TEN stores, in NINE functions, on TWO threads (2026-08-25): probe(),
+// expire_stale_pending_create_locked(), tick(), onCreateChannelResponse(),
+// nominate(), nomination_create_next(), nomination_reset(), session_start(),
+// and session_stop() TWICE (its early cancel branch and its main teardown).
+// The `^[^/]*` prefix is what keeps commented-out and quoted occurrences out
+// of the count -- one comment in that file names an assignment round 5
+// removed -- and `= [^=]` is what keeps `==` comparisons out; the previous
+// version of this block prescribed a regex without either guard and told the
+// reader to expect a number four higher than the writes. If your count
+// differs from ten, the code changed; trust the grep, not this line.
+//
+// The distinctions that actually matter, none of which a count can carry:
+//
+//   * GATE then CLAIM, never together. probe(), session_start() and
+//     nomination_create_next() check talkback_may_request_create() BEFORE
+//     calling CreateChannel and store the claim (via talkback_create_issued())
+//     only AFTER it returns SDKERR_SUCCESS. The owner therefore reads None
+//     for the whole span between the gate check and the store -- precisely
+//     the window this arbiter exists to reason about. A maintainer who
+//     assumes the claim happens before the SDK call will misjudge it.
+//   * The response CLAIMS-then-CLEARS, and no branch may re-claim.
+//     onCreateChannelResponse attributes the response, releases the owner,
+//     check-and-clears that owner's cancellation flag and judges its
+//     generation in ONE call (talkback_create_response()) before any branch
+//     runs. Both halves of that sentence have been false and each cost a
+//     defect: round 3's Stale branch re-claimed the owner after the clear,
+//     and round 4's branches did their own check-and-clear, which the Stale
+//     branch's early return jumped over (F1 -- the next nomination then
+//     destroyed its own first channel and refused every later one for the
+//     rest of the meeting). If you add a branch here, it inherits the
+//     already-completed transition; do not give it one of its own.
+//   * TEARDOWN CANCELS, it does not forget. session_stop()'s "nothing to
+//     tear down" early branch and nomination_reset() both store a
+//     talkback_cancel() -- setting that owner's cancellation flag and
+//     LEAVING the owner claimed. Writing None there was the F1/C1 CRITICAL,
+//     twice (once for Session, then reintroduced for Nomination): the
+//     CreateChannel had already gone to Zoom, so forgetting it did not
+//     cancel it, and the eventual response was claimed by nobody, matched no
+//     tracked channel, and wedged onto m_stray_channels -- which nothing
+//     drains without a probe's driving thread, so has_pending_work() read
+//     true forever and gated the top of both nominate() and session_start().
+//   * ONE store is not on the command-loop thread: tick()'s
+//     AwaitingChannel-timeout clear (R3 fix), which runs on the probe's own
+//     driving thread. It is the entire reason this state needs a mutex at
+//     all. Every other store is command-loop -- the three claimers, the
+//     response callback (the SDK's message pump IS the command loop on
+//     Windows), session_stop(), nomination_reset(),
+//     expire_stale_pending_create_locked() (lazily, from inside the gate
+//     check its callers already take) and nominate().
+//
+// Because of that one driving-thread store, m_pending_create is guarded by
+// m_chan_mtx everywhere it is read or written -- copy the decision out under
+// the lock, release, THEN call the SDK, same discipline as every other
+// m_chan_mtx access in that class. If a future change moves tick()'s clear
+// back onto the command-loop thread and removes the last driving-thread
+// writer, this paragraph -- and the mutex requirement -- can be revisited,
+// but do not strip the guarding on the strength of THIS comment; verify the
+// thread each writer runs on first. A queue instead of a single outstanding
+// slot would buy nothing here and would add a way for the probe, the session
+// and nomination to interleave -- fix round 3 proved that the expensive way,
+// by tracking outstanding creates in a FIFO one layer up (see "Generation
 // tracking" below) and wedging the feature permanently the first time an
 // entry went unmatched.
 //
@@ -163,131 +157,6 @@ inline bool talkback_may_request_create(TalkbackChannelOwner pending)
 inline TalkbackChannelOwner talkback_claim_create(TalkbackChannelOwner pending)
 {
     return pending;
-}
-
-// ── Cancellation / disposition (Task 2 fix round 2, N1) ─────────────────────
-//
-// talkback_may_request_create / talkback_claim_create above answer "is a
-// create outstanding, and whose is it". These answer what sits on top of
-// that: Session and Nomination can each be CANCELLED while their create is
-// still in flight (session_stop()'s early branch, nomination_reset() --
-// both run when the caller wants to tear down but the CreateChannel already
-// went to Zoom and cannot be un-sent) without losing track of whose it was,
-// can EXPIRE unanswered (expire_stale_pending_create_locked(), the same
-// self-heal tick()'s AwaitingChannel timeout gives Probe), and the eventual
-// response must be given a DISPOSITION -- adopt it, or destroy it because it
-// was cancelled.
-//
-// engine-talkback.cpp calls these instead of re-deriving the transitions
-// inline, specifically because inlining them separately per owner is
-// exactly how they diverged: fix round 1 gave Session and Nomination each
-// their own cancellation flag and their own copy of the expiry logic, and
-// the Nomination copy forgot to clear its flag (N1, fix round 2) --
-// `m_nomination_create_cancelled` stayed true after
-// `expire_stale_pending_create_locked()` forgot the owner it belonged to,
-// so it silently misapplied to the NEXT Nomination create, destroying a
-// brand-new channel instead of adopting it. Routing both owners' expiry
-// through the ONE `talkback_expire()` below closes that specific asymmetry.
-//
-// Fix round 2 shipped with each flag's OTHER clearer -- the check-and-clear
-// at the top of onCreateChannelResponse's Session and Nomination branches --
-// still written as two hand-rolled per-owner copies, an overclaim the
-// round-2 re-review caught: "no second per-owner copy" was true for expiry
-// and false for this site. `talkback_check_and_clear_cancelled()` below
-// closes that gap the same way `talkback_expire()` closed the first one, so
-// there is now genuinely no per-owner copy of EITHER clearer left in
-// engine-talkback.cpp for an edit to apply to only one arm of.
-//
-// Bundles both owners' cancellation flags together (rather than two
-// separate bool parameters) because that is the actual shape of the bug:
-// N1 was a state that should not have been reachable -- Nomination pending
-// with a stale `nomination_cancelled` still true -- and a struct makes that
-// state constructible and inspectable in a test the same way the real
-// engine's three member variables are, rather than requiring two calls that
-// could themselves be called out of sync.
-struct TalkbackCreateState {
-    TalkbackChannelOwner owner = TalkbackChannelOwner::None;
-    bool session_cancelled = false;
-    bool nomination_cancelled = false;
-};
-
-// What a create response should do once its owner is known.
-enum class TalkbackCreateDisposition {
-    // Nothing was outstanding for this response -- an untracked stray.
-    Stray,
-    // The owner that made this create cancelled it before the response
-    // arrived -- destroy the channel, do not adopt it.
-    DestroyCancelled,
-    // Ordinary case: adopt the channel for whichever owner made the create.
-    Claim,
-};
-
-// Records a cancellation for the create currently pending for `owner`, if
-// any -- the pure decision behind session_stop()'s early branch and
-// nomination_reset(). Deliberately does NOT clear `state.owner`: the
-// create already went to Zoom, so forgetting it here (rather than
-// cancelling it) is the exact F1/C1 bug -- the eventual response would be
-// claimed by nobody and wedge onto a stray queue nothing drains. No-op
-// (state returned unchanged) if `owner` is not the one currently pending --
-// there is nothing outstanding to cancel.
-inline TalkbackCreateState talkback_cancel(TalkbackCreateState state, TalkbackChannelOwner owner)
-{
-    if (state.owner != owner) return state;
-    if (owner == TalkbackChannelOwner::Session) state.session_cancelled = true;
-    else if (owner == TalkbackChannelOwner::Nomination) state.nomination_cancelled = true;
-    return state;
-}
-
-// Forgets whichever create is currently pending -- the pure decision behind
-// expire_stale_pending_create_locked() (Session or Nomination only; Probe's
-// timeout is tick()'s separate AwaitingChannel mechanism and never reaches
-// this function). Clears the owner AND that owner's own cancellation flag
-// TOGETHER: this symmetry is the entire fix for N1. A no-op call (owner is
-// already None) returns `state` unchanged.
-inline TalkbackCreateState talkback_expire(TalkbackCreateState state)
-{
-    if (state.owner == TalkbackChannelOwner::Session) state.session_cancelled = false;
-    else if (state.owner == TalkbackChannelOwner::Nomination) state.nomination_cancelled = false;
-    state.owner = TalkbackChannelOwner::None;
-    return state;
-}
-
-// What onCreateChannelResponse should do with a response, given `owner`
-// (whichever owner talkback_claim_create() just returned for it) and
-// `cancelled` (that SAME owner's own cancellation flag at the moment of the
-// claim -- Probe has none, so its caller always passes false; Probe's
-// timeout disposition is tick()'s separate mechanism, not this one).
-inline TalkbackCreateDisposition talkback_create_disposition(TalkbackChannelOwner owner, bool cancelled)
-{
-    if (owner == TalkbackChannelOwner::None) return TalkbackCreateDisposition::Stray;
-    if (cancelled) return TalkbackCreateDisposition::DestroyCancelled;
-    return TalkbackCreateDisposition::Claim;
-}
-
-// Reads and clears whichever cancellation flag belongs to `owner`, in one
-// step -- the pure decision behind the check-and-clear at the top of
-// onCreateChannelResponse's Session and Nomination branches (`cancelled =
-// m_*_create_cancelled; m_*_create_cancelled = false;`). Fix round 2 routed
-// the SETTER (talkback_cancel()) and the EXPIRE clearer (talkback_expire())
-// through shared functions but left this, the RESPONSE clearer, as two
-// hand-written per-owner copies -- the round-2 re-review named this an
-// overclaim in this file's own header comment above. Routing it through one
-// function here closes the same class of gap N1 was, before an edit to only
-// one owner's copy has the chance to reopen it.
-struct TalkbackCreateCheckResult {
-    bool cancelled;
-    TalkbackCreateState next;
-};
-inline TalkbackCreateCheckResult talkback_check_and_clear_cancelled(TalkbackCreateState state,
-                                                                    TalkbackChannelOwner owner)
-{
-    const bool cancelled =
-        owner == TalkbackChannelOwner::Session   ? state.session_cancelled :
-        owner == TalkbackChannelOwner::Nomination ? state.nomination_cancelled :
-                                                     false;
-    if (owner == TalkbackChannelOwner::Session) state.session_cancelled = false;
-    else if (owner == TalkbackChannelOwner::Nomination) state.nomination_cancelled = false;
-    return TalkbackCreateCheckResult{cancelled, state};
 }
 
 // ── Generation tracking (Task 2 fix round 3; REBUILT in fix round 4) ────────
@@ -378,15 +247,16 @@ enum class TalkbackResponseFreshness {
     // generation the ladder has since moved past -- this response belongs to
     // a create we gave up on. The ONLY verdict that destroys.
     //
-    // With the engine's current wiring this verdict cannot be reached with
-    // an owner of Nomination at all (every bump site releases the owner
-    // first; see the Stale branch in onCreateChannelResponse for the
-    // derivation). That is the point: this whole mechanism's job is to make
-    // the desynchronised state that wedged fix round 3 inexpressible, not to
-    // catch it at runtime. A check that never fires is not therefore idle --
-    // do not widen what routes here to "make it do something", because
-    // guessing which response is stale, with no correlation id from Zoom,
-    // destroys channels the ladder is legitimately waiting on.
+    // Fix round 4 asserted here that this verdict was unreachable with an
+    // owner of Nomination. It was reachable, and a Major (F1) lived behind
+    // that assertion for a round -- so no reachability claim is made now, in
+    // either direction. What holds regardless: only a POSITIVELY superseded
+    // generation lands here. An ambiguous response is `Unexpected` and fails
+    // open. Do not widen what routes here on the theory that a rarely-taken
+    // check must be idle -- with no correlation id from Zoom, guessing which
+    // response is stale destroys channels the ladder is legitimately waiting
+    // on, which is a live-show outage, while guessing the other way leaks one
+    // channel out of sixteen.
     Stale,
     // The outstanding create's generation matches `current`: this is the
     // response the ladder is actually waiting on.
@@ -465,4 +335,251 @@ inline TalkbackResponseCheck talkback_generation_on_response(TalkbackGenerationS
     // outstanding until the next issue.
     state.outstanding = false;
     return TalkbackResponseCheck{TalkbackResponseFreshness::Current, state};
+}
+
+// ── Cancellation / disposition (Task 2 fix round 2, N1) ─────────────────────
+//
+// talkback_may_request_create / talkback_claim_create above answer "is a
+// create outstanding, and whose is it". These answer what sits on top of
+// that: Session and Nomination can each be CANCELLED while their create is
+// still in flight (session_stop()'s early branch, nomination_reset() --
+// both run when the caller wants to tear down but the CreateChannel already
+// went to Zoom and cannot be un-sent) without losing track of whose it was,
+// can EXPIRE unanswered (expire_stale_pending_create_locked(), the same
+// self-heal tick()'s AwaitingChannel timeout gives Probe), and the eventual
+// response must be given a DISPOSITION -- adopt it, or destroy it because it
+// was cancelled.
+//
+// engine-talkback.cpp calls these instead of re-deriving the transitions
+// inline, specifically because inlining them separately per owner is
+// exactly how they diverged: fix round 1 gave Session and Nomination each
+// their own cancellation flag and their own copy of the expiry logic, and
+// the Nomination copy forgot to clear its flag (N1, fix round 2) --
+// `nomination_cancelled` stayed true after
+// `expire_stale_pending_create_locked()` forgot the owner it belonged to,
+// so it silently misapplied to the NEXT Nomination create, destroying a
+// brand-new channel instead of adopting it. Routing both owners' expiry
+// through the ONE `talkback_expire()` below closes that specific asymmetry.
+//
+// Fix round 2 shipped with each flag's OTHER clearer -- the check-and-clear
+// at the top of onCreateChannelResponse's Session and Nomination branches --
+// still written as two hand-rolled per-owner copies, an overclaim the
+// round-2 re-review caught: "no second per-owner copy" was true for expiry
+// and false for this site. `talkback_check_and_clear_cancelled()` below
+// closes that gap the same way `talkback_expire()` closed the first one, so
+// there is now genuinely no per-owner copy of EITHER clearer left in
+// engine-talkback.cpp for an edit to apply to only one arm of.
+//
+// Bundles both owners' cancellation flags together (rather than two
+// separate bool parameters) because that is the actual shape of the bug:
+// N1 was a state that should not have been reachable -- Nomination pending
+// with a stale `nomination_cancelled` still true -- and a struct makes that
+// state constructible and inspectable in a test the same way the real
+// engine's three member variables are, rather than requiring two calls that
+// could themselves be called out of sync.
+//
+// Fix round 5 folded the generation state in here as a fourth field, for the
+// same reason the two flags were bundled in round 2 and one round harder:
+// the engine used to mirror these four values into four separate members and
+// write each back by hand, so "claim the arbiter" and "stamp the generation"
+// were two adjacent assignments. A re-review mutation deleted just the
+// generation one and the ENTIRE suite stayed green -- that is the shape that
+// shipped round 3's Critical and the shape round 5's Major (F1) lived in.
+// One struct, transitioned by the functions below and stored by the engine as
+// ONE member, is what makes "claimed but not stamped" and "judged but not
+// written back" unrepresentable rather than merely tested for.
+struct TalkbackCreateState {
+    TalkbackChannelOwner owner = TalkbackChannelOwner::None;
+    bool session_cancelled = false;
+    bool nomination_cancelled = false;
+    // Nomination's create identity. Meaningless for Probe/Session, which have
+    // no ladder to confuse a response with; see the generation section above.
+    TalkbackGenerationState generation;
+};
+
+// What a create response should do once its owner is known.
+enum class TalkbackCreateDisposition {
+    // Nothing was outstanding for this response -- an untracked stray.
+    Stray,
+    // The owner that made this create cancelled it before the response
+    // arrived -- destroy the channel, do not adopt it.
+    DestroyCancelled,
+    // Ordinary case: adopt the channel for whichever owner made the create.
+    Claim,
+};
+
+// Records a cancellation for the create currently pending for `owner`, if
+// any -- the pure decision behind session_stop()'s early branch and
+// nomination_reset(). Deliberately does NOT clear `state.owner`: the
+// create already went to Zoom, so forgetting it here (rather than
+// cancelling it) is the exact F1/C1 bug -- the eventual response would be
+// claimed by nobody and wedge onto a stray queue nothing drains. No-op
+// (state returned unchanged) if `owner` is not the one currently pending --
+// there is nothing outstanding to cancel.
+inline TalkbackCreateState talkback_cancel(TalkbackCreateState state, TalkbackChannelOwner owner)
+{
+    if (state.owner != owner) return state;
+    if (owner == TalkbackChannelOwner::Session) state.session_cancelled = true;
+    else if (owner == TalkbackChannelOwner::Nomination) state.nomination_cancelled = true;
+    return state;
+}
+
+// Forgets whichever create is currently pending -- the pure decision behind
+// expire_stale_pending_create_locked() (which only ever sees a stale Session
+// or Nomination), behind session_stop()'s main teardown, and behind tick()'s
+// AwaitingChannel timeout. Probe has no cancellation flag and no ladder, so
+// for Probe this is exactly "release the owner", which is all that timeout
+// needs -- it stores this transition rather than writing the field so that
+// the invariant "every mutation is a whole-state store of a transition's
+// result" has no exceptions to remember. Clears the owner AND that
+// owner's own cancellation flag TOGETHER: this symmetry is the entire fix for
+// N1. For Nomination it ALSO bumps the generation, so the abandoned create's
+// eventual response is not confused with whatever the next ladder issues --
+// one transition rather than a clear here and a bump on the line after it,
+// for the reason on TalkbackCreateState. A no-op call (owner already None)
+// returns `state` unchanged.
+inline TalkbackCreateState talkback_expire(TalkbackCreateState state)
+{
+    if (state.owner == TalkbackChannelOwner::Session) {
+        state.session_cancelled = false;
+    } else if (state.owner == TalkbackChannelOwner::Nomination) {
+        state.nomination_cancelled = false;
+        state.generation = talkback_generation_bump(state.generation);
+    }
+    state.owner = TalkbackChannelOwner::None;
+    return state;
+}
+
+// What onCreateChannelResponse should do with a response, given `owner`
+// (whichever owner talkback_claim_create() just returned for it) and
+// `cancelled` (that SAME owner's own cancellation flag at the moment of the
+// claim -- Probe has none, so its caller always passes false; Probe's
+// timeout disposition is tick()'s separate mechanism, not this one).
+inline TalkbackCreateDisposition talkback_create_disposition(TalkbackChannelOwner owner, bool cancelled)
+{
+    if (owner == TalkbackChannelOwner::None) return TalkbackCreateDisposition::Stray;
+    if (cancelled) return TalkbackCreateDisposition::DestroyCancelled;
+    return TalkbackCreateDisposition::Claim;
+}
+
+// Reads and clears whichever cancellation flag belongs to `owner`, in one
+// step -- the pure decision behind the check-and-clear at the top of
+// onCreateChannelResponse's Session and Nomination branches (`cancelled =
+// m_*_create_cancelled; m_*_create_cancelled = false;`). Fix round 2 routed
+// the SETTER (talkback_cancel()) and the EXPIRE clearer (talkback_expire())
+// through shared functions but left this, the RESPONSE clearer, as two
+// hand-written per-owner copies -- the round-2 re-review named this an
+// overclaim in this file's own header comment above. Routing it through one
+// function here closes the same class of gap N1 was, before an edit to only
+// one owner's copy has the chance to reopen it.
+struct TalkbackCreateCheckResult {
+    bool cancelled;
+    TalkbackCreateState next;
+};
+inline TalkbackCreateCheckResult talkback_check_and_clear_cancelled(TalkbackCreateState state,
+                                                                    TalkbackChannelOwner owner)
+{
+    const bool cancelled =
+        owner == TalkbackChannelOwner::Session   ? state.session_cancelled :
+        owner == TalkbackChannelOwner::Nomination ? state.nomination_cancelled :
+                                                     false;
+    if (owner == TalkbackChannelOwner::Session) state.session_cancelled = false;
+    else if (owner == TalkbackChannelOwner::Nomination) state.nomination_cancelled = false;
+    return TalkbackCreateCheckResult{cancelled, state};
+}
+
+// ── The two whole transitions the engine actually performs (fix round 5) ────
+//
+// Everything above is a piece of a transition. These two ARE the transitions,
+// and engine-talkback.cpp calls nothing else on this state: it reads the
+// state out under m_chan_mtx, calls one of these, and stores the returned
+// state back as a single assignment.
+//
+// That is the entire point, and it is worth stating plainly because the
+// previous shape looked fine. Round 4 had the engine perform "claim the
+// arbiter" and "stamp the generation" as two adjacent assignments in one lock
+// scope, and "release the arbiter", "check-and-clear the cancellation flag"
+// and "judge the generation" as three. A re-review mutation deleted ONE of
+// those assignments -- the response-side generation write-back -- and the
+// whole 64-test suite stayed green, because the composition lived in the
+// engine where no test can see it while the pieces lived here where every
+// test can. Composing them here moves the composition into the layer the
+// tests reach; leaving the engine one indivisible store means the mutation
+// that survived cannot be written at all, rather than being written and
+// caught.
+//
+// The engine still owns everything that is not a state transition: the SDK
+// calls, the deadlines, the reports, the queue and table bookkeeping.
+
+// A CreateChannel has just returned SDKERR_SUCCESS: claim the arbiter for
+// `owner` and, for Nomination, stamp the create with the current generation.
+// One operation, so a caller cannot claim without stamping -- the two used to
+// be separate lines in nomination_create_next() and either could be deleted
+// on its own.
+//
+// Caller must have found the gate open (talkback_may_request_create) in the
+// SAME lock scope it calls this from; this function does not re-check,
+// because a claim that loses a race has no safe local answer -- the SDK call
+// has already happened by then.
+inline TalkbackCreateState talkback_create_issued(TalkbackCreateState state,
+                                                  TalkbackChannelOwner owner)
+{
+    state.owner = owner;
+    if (owner == TalkbackChannelOwner::Nomination)
+        state.generation = talkback_generation_issue(state.generation);
+    return state;
+}
+
+// A create response has arrived: attribute it, release the arbiter,
+// check-and-clear that owner's cancellation flag, and judge its generation --
+// in one indivisible step, because every regression this feature has produced
+// came from one of those four escaping. Round 5's Major (F1) was the newest:
+// the Stale branch returned BEFORE the check-and-clear, orphaning
+// the nomination cancellation flag, which then destroyed the next nomination's
+// first channel and left already_provisioned set for the rest of the meeting.
+// A branch cannot skip what the caller has already done before any branch
+// runs.
+//
+// `cancelled` is that owner's OWN flag as it stood at claim time (Probe has
+// none, so it reads false); feed it to talkback_create_disposition().
+// `freshness` is NotNomination for every owner but Nomination.
+struct TalkbackCreateResponse {
+    TalkbackChannelOwner      owner;
+    bool                      cancelled;
+    TalkbackResponseFreshness freshness;
+    TalkbackCreateState       next;
+};
+inline TalkbackCreateResponse talkback_create_response(TalkbackCreateState state)
+{
+    const TalkbackChannelOwner owner = talkback_claim_create(state.owner);
+
+    const TalkbackCreateCheckResult check = talkback_check_and_clear_cancelled(state, owner);
+    state = check.next;
+
+    const TalkbackResponseCheck fresh = talkback_generation_on_response(state.generation, owner);
+    state.generation = fresh.next;
+
+    // Release LAST, so the two reads above see the state as it was at claim
+    // time -- and unconditionally for a real owner, with no branch left that
+    // could re-claim it (round 3's Stale branch did, and this file's THREADING
+    // section documents "claims-then-clears regardless of what the branch
+    // does" as load-bearing).
+    if (owner != TalkbackChannelOwner::None) state.owner = TalkbackChannelOwner::None;
+
+    return TalkbackCreateResponse{owner, check.cancelled, fresh.freshness, state};
+}
+
+// A fresh nomination ladder is starting: everything issued before now is
+// superseded. Refuses to bump while a create is still outstanding, because
+// bumping then is precisely how a response for a create the ladder still owns
+// becomes judgeable as Stale -- that manufactured state was half of round 5's
+// Major (nominate() bumped with no arbiter check, reachable through
+// nominate -> leave -> nominate inside the create deadline). nominate() also
+// refuses in that case; this is the half that cannot be forgotten at a call
+// site.
+inline TalkbackCreateState talkback_new_ladder(TalkbackCreateState state)
+{
+    if (state.owner != TalkbackChannelOwner::None) return state;
+    state.generation = talkback_generation_bump(state.generation);
+    return state;
 }

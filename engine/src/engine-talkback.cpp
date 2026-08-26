@@ -227,7 +227,7 @@ bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
         // evaluating the gate -- see expire_stale_pending_create_locked()'s
         // doc comment.
         expired_owner = expire_stale_pending_create_locked();
-        create_gate_ok = talkback_may_request_create(m_pending_create);
+        create_gate_ok = talkback_may_request_create(m_pending_create.owner);
     }
     handle_expired_create(expired_owner);
     if (!create_gate_ok) {
@@ -248,7 +248,8 @@ bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
     if (create_err != ZOOMSDK::SDKERR_SUCCESS) return probe_refused_without_ladder();
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
-        m_pending_create = TalkbackChannelOwner::Probe;
+        m_pending_create = talkback_create_issued(m_pending_create,
+                                                  TalkbackChannelOwner::Probe);
     }
     m_phase_deadline.store(
         (std::chrono::steady_clock::now() + kAwaitTimeout).time_since_epoch().count(),
@@ -344,9 +345,9 @@ TalkbackChannelOwner EngineTalkback::expire_stale_pending_create_locked()
     // the driving thread), so a stale Probe entry here would be a bug in
     // that machinery, not something this function should paper over.
     std::atomic<std::chrono::steady_clock::rep> *deadline_field = nullptr;
-    if (m_pending_create == TalkbackChannelOwner::Session)
+    if (m_pending_create.owner == TalkbackChannelOwner::Session)
         deadline_field = &m_session_create_deadline;
-    else if (m_pending_create == TalkbackChannelOwner::Nomination)
+    else if (m_pending_create.owner == TalkbackChannelOwner::Nomination)
         deadline_field = &m_nomination_create_deadline;
     else
         return TalkbackChannelOwner::None;
@@ -367,8 +368,8 @@ TalkbackChannelOwner EngineTalkback::expire_stale_pending_create_locked()
     // owner's own cancellation flag are now cleared TOGETHER by ONE shared
     // function, talkback_expire() (src/talkback-channel-owner.h), instead of
     // this function hand-rolling a separate if/else per owner. Round 1's
-    // hand-rolled version cleared m_session_create_cancelled in the Session
-    // arm but forgot the equivalent line for m_nomination_create_cancelled
+    // hand-rolled version cleared the SESSION cancellation flag in the
+    // Session arm but forgot the equivalent line for the NOMINATION one
     // in the Nomination arm: nominate() -> Leave (before the response is
     // pumped) -> nomination_reset() sets the flag and leaves the owner as
     // Nomination -> the response never arrives at all -> more than
@@ -381,13 +382,8 @@ TalkbackChannelOwner EngineTalkback::expire_stale_pending_create_locked()
     // through the one pure function is what makes that class of asymmetry
     // impossible to reintroduce without also breaking
     // CoreVideoTalkbackCreateState's test of it.
-    const TalkbackChannelOwner expired = m_pending_create;
-    TalkbackCreateState state{m_pending_create, m_session_create_cancelled,
-                              m_nomination_create_cancelled};
-    state = talkback_expire(state);
-    m_pending_create           = state.owner;
-    m_session_create_cancelled = state.session_cancelled;
-    m_nomination_create_cancelled = state.nomination_cancelled;
+    const TalkbackChannelOwner expired = m_pending_create.owner;
+    m_pending_create = talkback_expire(m_pending_create);
 
     if (expired == TalkbackChannelOwner::Session) {
         // Consequence, stated explicitly rather than left implicit: if that
@@ -420,17 +416,14 @@ TalkbackChannelOwner EngineTalkback::expire_stale_pending_create_locked()
         // holds -- see nominate()'s own comment on why the order matters.
         m_nomination_pending.clear();
 
-        // Fix round 3, "expire-path double create": bump the nomination
-        // generation too -- see src/talkback-channel-owner.h's "Generation
-        // tracking" section. This create's response, if it ever arrives
-        // before anything else is issued, must be recognized as stale
-        // rather than confused with whatever a later nominate() issues.
-        // Deliberately leaves the outstanding STAMP in place (fix round 4):
-        // that is what makes this abandoned create's own response read
-        // Stale, and the next talkback_generation_issue() overwrites the
-        // stamp rather than queuing behind it, so nothing can accumulate.
-        m_nomination_generation = talkback_generation_bump(m_nomination_generation);
-
+        // The generation bump that goes with abandoning this create is NOT
+        // a separate statement here: talkback_expire() above does it as part
+        // of the same transition (fix round 5). It used to sit on its own
+        // line, which is exactly the shape a re-review mutation exploited
+        // elsewhere in this file -- delete the one line, keep the other, and
+        // the whole suite stays green. See src/talkback-channel-owner.h's
+        // note on TalkbackCreateState.
+        //
         // Fix round 4: m_provisioned_channels is NOT cleared here -- the
         // caller destroys it via handle_expired_create() once the lock is
         // released, because those are real Zoom channels and clearing the
@@ -548,8 +541,8 @@ void EngineTalkback::tick()
             // channel-id strings do -- see the header comment on the field.
             if (phase == Phase::AwaitingChannel) {
                 std::lock_guard<std::mutex> lock(m_chan_mtx);
-                if (m_pending_create == TalkbackChannelOwner::Probe)
-                    m_pending_create = TalkbackChannelOwner::None;
+                if (m_pending_create.owner == TalkbackChannelOwner::Probe)
+                    m_pending_create = talkback_expire(m_pending_create);
             }
             m_phase.store(Phase::Destroying, std::memory_order_release);
         }
@@ -729,57 +722,51 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
     // observable as still "theirs" by anyone else, even for the instant
     // between a separate claim and a separate clear.
     //
-    // Fix round 4: the Nomination generation state is updated HERE, in the
-    // same scope, for EVERY response -- not inside the Nomination branch
-    // below. Round 3 updated it only when a response reached that branch,
-    // so a response claimed by None/Probe/Session silently skipped the
-    // update; with round 3's FIFO that was one of the two paths that
-    // desynchronised it permanently (see the field's comment in the
-    // header). talkback_generation_on_response() takes the owner and
-    // returns NotNomination-plus-unchanged-state for the others, so "what
-    // happens to this state when someone else's response arrives" is
-    // answered by one tested function instead of by a call that isn't
-    // there. Pure -- no SDK call under m_chan_mtx.
-    TalkbackChannelOwner owner;
-    TalkbackResponseFreshness freshness;
+    // Fix round 5: ALL FOUR parts of attributing a response -- who owns it,
+    // releasing the arbiter, reading-and-clearing that owner's cancellation
+    // flag, and judging its generation -- happen HERE, in one call, before
+    // any branch below runs. Not "in this scope, on four lines": in one
+    // transition (talkback_create_response()), so a branch cannot skip one
+    // and a mutation cannot delete one.
+    //
+    // Both halves of that were live defects. Round 3 updated the generation
+    // only inside the Nomination branch, so a response claimed by
+    // None/Probe/Session skipped it and permanently desynchronised the
+    // tracking. Round 4 moved it here but left it as its own assignment next
+    // to the claim -- a re-review deleted that one line and all 64 tests
+    // stayed green. And round 4 left the cancellation check-and-clear inside
+    // the two owner branches, where the Stale early-return jumped over it:
+    // the flag outlived its create, the next nomination destroyed its own
+    // first channel, and `already_provisioned` refused every nomination for
+    // the rest of the meeting (F1, Major -- N1's third door).
+    //
+    // Pure; no SDK call under m_chan_mtx.
+    TalkbackCreateResponse claimed;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
-        owner = talkback_claim_create(m_pending_create);
-        if (owner != TalkbackChannelOwner::None)
-            m_pending_create = TalkbackChannelOwner::None;
-        const auto check = talkback_generation_on_response(m_nomination_generation, owner);
-        freshness = check.freshness;
-        m_nomination_generation = check.next;
+        claimed = talkback_create_response(m_pending_create);
+        m_pending_create = claimed.next;
     }
+    const TalkbackChannelOwner owner = claimed.owner;
+    const bool cancelled = claimed.cancelled;
+    const TalkbackResponseFreshness freshness = claimed.freshness;
     if (owner == TalkbackChannelOwner::Session) {
         // F1 review-round fix (CRITICAL): session_stop() may have run while
-        // THIS create was still outstanding -- see the m_session_create_
-        // cancelled comment in the header. Check-and-clear it before doing
-        // anything else with this response: a cancelled session must never
-        // be adopted as live, invited, or queued as a stray (nothing drains
-        // strays without a probe's driving thread running). Destroy the
-        // channel immediately instead, using the same Begin/Add/Execute
-        // sequence session_stop() itself uses, on this same thread -- this
-        // callback runs on the command-loop thread, per the THREADING
-        // comment above open_audio() below, exactly like session_stop().
-        // Fix round 3, item B: routed through the shared
-        // talkback_check_and_clear_cancelled() (src/talkback-channel-owner.h)
-        // instead of hand-reading/clearing m_session_create_cancelled
-        // directly -- the round-2 re-review found this exact site was still
-        // a per-owner copy (the SETTER and the EXPIRE clearer were already
-        // shared; this, the RESPONSE clearer, was not) and named it the same
-        // defect class as N1. Session and Nomination now both go through
-        // this one function.
-        bool cancelled;
-        {
-            std::lock_guard<std::mutex> lock(m_chan_mtx);
-            TalkbackCreateState state{m_pending_create, m_session_create_cancelled,
-                                      m_nomination_create_cancelled};
-            const auto result = talkback_check_and_clear_cancelled(state, owner);
-            cancelled = result.cancelled;
-            m_session_create_cancelled    = result.next.session_cancelled;
-            m_nomination_create_cancelled = result.next.nomination_cancelled;
-        }
+        // THIS create was still outstanding -- see the cancellation-flag
+        // comment on m_pending_create in the header. A cancelled session
+        // must never be adopted as live, invited, or queued as a stray
+        // (nothing drains strays without a probe's driving thread running).
+        // Destroy the channel immediately instead, using the same
+        // Begin/Add/Execute sequence session_stop() itself uses, on this
+        // same thread -- this callback runs on the command-loop thread, per
+        // the THREADING comment above open_audio() below, exactly like
+        // session_stop().
+        //
+        // `cancelled` was read AND cleared by the arbiter transition above,
+        // before this branch existed. It is not read here, and it must not
+        // be: the round-4 code did the check-and-clear per branch, which is
+        // how the Nomination side's early return escaped it (F1).
+        //
         // Fix round 2: routed through the shared talkback_create_disposition()
         // (src/talkback-channel-owner.h) instead of branching on `cancelled`
         // directly -- the same function the Nomination branch below now
@@ -854,7 +841,7 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         // Fix round 3, "expire-path double create" (Major, found by the
         // round-2 re-review); mechanism rebuilt in fix round 4 -- see
         // src/talkback-channel-owner.h's "Generation tracking" section and
-        // m_nomination_generation's header comment. A create that merely
+        // m_pending_create's header comment. A create that merely
         // expired (nobody cancelled it) can still have its response arrive
         // after a fresh nomination re-armed this same owner and issued a
         // SECOND CreateChannel; Zoom's callback carries no id to tell the
@@ -880,38 +867,39 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
             // flight, the one invariant the arbiter exists to hold).
             //
             // This branch must NOT re-claim the owner (round 3 did:
-            // m_pending_create = Nomination). Stale means the state holds no
-            // record of a current outstanding create, so claiming the
-            // arbiter for one would wedge probe()/session_start()/nominate()
-            // until the deadline expired -- and it would falsify the
-            // "onCreateChannelResponse claims-then-clears regardless of what
-            // the branch then does" invariant that
+            // m_pending_create = Nomination). Doing so would claim the
+            // arbiter for a create the state has no record of, wedging
+            // probe()/session_start()/nominate() until the deadline expired,
+            // and it would falsify the "claims-then-clears regardless of
+            // what the branch then does" invariant that
             // src/talkback-channel-owner.h documents as load-bearing.
             //
-            // REACHABILITY -- read before "fixing" this branch. It is not
-            // reachable today, and that is the design working, not a hole in
-            // it. `owner == Nomination` implies the most recent
-            // talkback_generation_issue() stamped `current`; the only two
-            // sites that bump `current` (nominate(), the Nomination arm of
-            // expire_stale_pending_create_locked()) can each run only with
-            // the owner released. So `outstanding_generation != current`
-            // cannot coexist with `owner == Nomination`. The counter's value
-            // is therefore STRUCTURAL -- it makes the desynchronised state
-            // that wedged fix round 3 inexpressible -- not behavioural: it
-            // is not expected to catch anything at runtime.
+            // Fix round 5 deleted a six-line derivation that used to sit
+            // here claiming this branch was unreachable. It was WRONG --
+            // `talkback_nominate -> leave -> talkback_nominate` inside
+            // kAwaitTimeout reached it (nominate() bumped the generation
+            // with no arbiter check, and nomination_reset() empties both
+            // nomination tables while deliberately leaving the owner
+            // claimed) -- and it was actively harmful: it told the next
+            // reader not to look at a branch that fires, and this branch's
+            // early return was at the time skipping the cancellation
+            // check-and-clear, which is how one Major (F1) reached a live
+            // operator. Both holes are closed now, and no replacement
+            // derivation is offered in their place. Treat this branch as
+            // live, and if you need to know whether some sequence reaches
+            // it, derive that at the time against the code -- do not trust
+            // a claim about it written in the past tense.
             //
-            // Do not "restore" reachability on the theory that a check which
-            // never fires must be doing nothing. Making a late response
-            // distinguishable from the current one is impossible with what
-            // Zoom provides (onCreateChannelResponse carries no correlation
-            // id), so any change that routes more responses here is
-            // guessing, and guessing wrong here DESTROYS a channel the
-            // ladder is legitimately waiting on. The deliberate disposition
-            // for an ambiguous response is the opposite one -- fail open,
-            // adopt it, let the extra response fall out down
-            // channel_untracked. Keep this branch defensive and keep it
-            // conservative: destroy only what the response names, change no
-            // state, advance nothing.
+            // What must not change is the disposition. Making a late
+            // response distinguishable from the current one is impossible
+            // with what Zoom provides (onCreateChannelResponse carries no
+            // correlation id), so widening what routes here is guessing, and
+            // guessing wrong DESTROYS a channel the ladder is legitimately
+            // waiting on. The deliberate treatment of an AMBIGUOUS response
+            // is the opposite one -- fail open, adopt it, let any extra
+            // response fall out down channel_untracked. Only a positively
+            // superseded generation lands here: destroy exactly what the
+            // response names, change no state, advance nothing.
             if (error == TALKBACK_ERROR_OK && channelID != nullptr) {
                 uint32_t attempts = 0;
                 const ZOOMSDK::SDKError e = destroy_channel_retrying(channelID, &attempts);
@@ -931,36 +919,41 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
             return;
         }
 
-        // Fix round 1, C1 (CRITICAL): check-and-clear the cancellation flag
-        // BEFORE doing anything else with this response -- see
-        // nomination_reset()'s and m_nomination_create_cancelled's comments.
-        // A cancelled create must never be adopted (pushed into
-        // m_provisioned_channels), invited, or queued as a stray (nothing
-        // drains m_stray_channels without a probe's driving thread running,
-        // and queuing here would reproduce the exact wedge this fix exists
-        // to close) -- destroy it immediately instead, same Begin/Add/
-        // Execute sequence and retry bound as every other command-loop-
-        // thread destroy in this file (session_stop(), the Session-cancelled
-        // branch above, nomination_destroy_provisioned() below).
+        // Fix round 1, C1 (CRITICAL): a cancelled create must never be
+        // adopted (pushed into m_provisioned_channels), invited, or queued
+        // as a stray (nothing drains m_stray_channels without a probe's
+        // driving thread running, and queuing here would reproduce the exact
+        // wedge this fix exists to close) -- destroy it immediately instead,
+        // same Begin/Add/Execute sequence and retry bound as every other
+        // command-loop-thread destroy in this file (session_stop(), the
+        // Session-cancelled branch above, nomination_destroy_provisioned()
+        // below).
         //
-        // Fix round 3, item B: routed through the shared
-        // talkback_check_and_clear_cancelled() instead of hand-reading/
-        // clearing m_nomination_create_cancelled directly -- see the
-        // Session branch above's identical comment.
-        bool cancelled;
-        {
-            std::lock_guard<std::mutex> lock(m_chan_mtx);
-            TalkbackCreateState state{m_pending_create, m_session_create_cancelled,
-                                      m_nomination_create_cancelled};
-            const auto result = talkback_check_and_clear_cancelled(state, owner);
-            cancelled = result.cancelled;
-            m_session_create_cancelled    = result.next.session_cancelled;
-            m_nomination_create_cancelled = result.next.nomination_cancelled;
-        }
-        // Fix round 2: shared talkback_create_disposition() -- see the
-        // Session branch above's identical comment.
+        // Fix round 5: `cancelled` comes from the arbiter transition at the
+        // top of this function, which read AND cleared it before any branch
+        // ran. It used to be checked-and-cleared right here, which is how
+        // the Stale branch above -- returning earlier -- left the flag set
+        // for the NEXT nomination to inherit and destroy its own first
+        // channel with (F1, Major; N1's third door). The ordering is now a
+        // property of the function, not of where each branch remembers to
+        // put its check.
         if (talkback_create_disposition(owner, cancelled) ==
             TalkbackCreateDisposition::DestroyCancelled) {
+            // Terminal exit: leave no queue behind. nomination_reset() (the
+            // only setter of this flag) already cleared m_nomination_pending
+            // when it cancelled, and nominate() now refuses to start a
+            // ladder while a create is outstanding, so this is empty on
+            // every path I can construct -- but "the queue outlives the
+            // ladder" is exactly what left already_provisioned stuck for a
+            // whole meeting in F1, so make it structurally impossible here
+            // rather than argued. No destroy: the cancelled ladder's
+            // channels were already dealt with by nomination_reset()'s
+            // caller (Leave/quit), and destroying into a meeting we have
+            // left is not something this branch can do safely.
+            {
+                std::lock_guard<std::mutex> lock(m_chan_mtx);
+                m_nomination_pending.clear();
+            }
             if (error != TALKBACK_ERROR_OK || channelID == nullptr) {
                 report_nomination("channel_cancelled",
                                   R"("ok":true,"reason":"no_channel_to_destroy","error":)" +
@@ -1459,9 +1452,29 @@ bool EngineTalkback::nominate(ZOOMSDK::IMeetingService *svc,
     // src/talkback-channel-owner.h's "Generation tracking" section. A fresh
     // ladder must not be confused with an older one whose create may still
     // be floating around unresolved.
+    //
+    // Fix round 5 (F1, Major): this bump used to run with NO arbiter check.
+    // The gate lives inside nomination_create_next(), which runs after --
+    // and the already_provisioned gate above does not stand in for it,
+    // because nomination_reset() empties BOTH tables while deliberately
+    // leaving the owner as Nomination. So `talkback_nominate -> leave ->
+    // talkback_nominate` inside kAwaitTimeout bumped the generation with a
+    // create still outstanding, which is the one way to manufacture a
+    // response for a create the ladder still owns that judges as Stale. The
+    // gate check below is the fix at this call site; talkback_new_ladder()
+    // refusing to bump while a create is outstanding is the fix that cannot
+    // be forgotten at the next one. Refusing here rather than proceeding
+    // matches probe() and session_start(), which have always gated their
+    // claims this way.
+    bool create_gate_ok;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
-        m_nomination_generation = talkback_generation_bump(m_nomination_generation);
+        create_gate_ok = talkback_may_request_create(m_pending_create.owner);
+        if (create_gate_ok) m_pending_create = talkback_new_ladder(m_pending_create);
+    }
+    if (!create_gate_ok) {
+        report_nomination("nominate", R"("ok":false,"reason":"create_busy")");
+        return false;
     }
     if (!nomination_create_next())
         return false;
@@ -1488,7 +1501,7 @@ bool EngineTalkback::nomination_create_next()
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
         expired_owner = expire_stale_pending_create_locked();
-        create_gate_ok = talkback_may_request_create(m_pending_create);
+        create_gate_ok = talkback_may_request_create(m_pending_create.owner);
     }
     handle_expired_create(expired_owner);
     if (!create_gate_ok) {
@@ -1521,17 +1534,19 @@ bool EngineTalkback::nomination_create_next()
     }
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
-        m_pending_create = TalkbackChannelOwner::Nomination;
+        // Claiming the arbiter and stamping the create with the current
+        // generation are ONE transition (fix round 5) -- they used to be two
+        // adjacent assignments, and a re-review mutation showed that either
+        // could be deleted alone with the whole suite still green. The stamp
+        // OVERWRITES the one outstanding slot rather than queuing behind it
+        // (fix round 4): anything already there belonged to a create the
+        // ladder abandoned, so there is nothing to reconcile and nothing
+        // that can desynchronise.
+        m_pending_create = talkback_create_issued(m_pending_create,
+                                                  TalkbackChannelOwner::Nomination);
         m_nomination_create_deadline.store(
             (std::chrono::steady_clock::now() + kAwaitTimeout).time_since_epoch().count(),
             std::memory_order_release);
-        // Fix round 3: stamp this create with the CURRENT generation --
-        // see src/talkback-channel-owner.h's "Generation tracking" section.
-        // Fix round 4: this OVERWRITES the one outstanding slot rather than
-        // pushing onto a queue. Anything already stamped there belonged to
-        // a create the ladder abandoned, so there is nothing to reconcile
-        // -- and nothing that can desynchronise.
-        m_nomination_generation = talkback_generation_issue(m_nomination_generation);
     }
     return true;
 }
@@ -1656,12 +1671,13 @@ void EngineTalkback::nomination_reset()
     // -- so this one sequence (nominate, then leave before the create
     // response is pumped) permanently disabled the whole talkback feature,
     // citing a probe that never ran. This is precisely the bug F1 already
-    // fixed for Session (see m_session_create_cancelled's header comment);
+    // fixed for Session (see m_pending_create.session_cancelled's header
+    // comment);
     // Nomination had reintroduced the unfixed version.
     //
     // Fix: leave m_pending_create AS Nomination (so the eventual response is
     // still routed to the Nomination branch in onCreateChannelResponse, not
-    // lost to "owner == None") and set m_nomination_create_cancelled
+    // lost to "owner == None") and set m_pending_create.nomination_cancelled
     // instead; that branch destroys the channel immediately on arrival
     // rather than adopting it or queuing it as a stray. The nomination
     // table/queue are still cleared unconditionally here -- that part is
@@ -1672,16 +1688,12 @@ void EngineTalkback::nomination_reset()
     //
     // Fix round 2: routed through the shared talkback_cancel()
     // (src/talkback-channel-owner.h) instead of writing
-    // m_nomination_create_cancelled directly -- the same function
+    // m_pending_create.nomination_cancelled directly -- the same function
     // session_stop()'s early branch now calls for Session, so the two
     // owners' cancellation logic can no longer diverge the way their
     // EXPIRY logic did (N1).
     std::lock_guard<std::mutex> lock(m_chan_mtx);
-    TalkbackCreateState state{m_pending_create, m_session_create_cancelled,
-                              m_nomination_create_cancelled};
-    state = talkback_cancel(state, TalkbackChannelOwner::Nomination);
-    m_session_create_cancelled    = state.session_cancelled;
-    m_nomination_create_cancelled = state.nomination_cancelled;
+    m_pending_create = talkback_cancel(m_pending_create, TalkbackChannelOwner::Nomination);
     m_nomination_pending.clear();
     m_provisioned_channels.clear();
 }
@@ -2051,7 +2063,7 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
         // Nomination-owned one before evaluating the gate -- see
         // expire_stale_pending_create_locked()'s doc comment.
         expired_owner = expire_stale_pending_create_locked();
-        create_gate_ok = talkback_may_request_create(m_pending_create);
+        create_gate_ok = talkback_may_request_create(m_pending_create.owner);
     }
     handle_expired_create(expired_owner);
     if (!create_gate_ok) {
@@ -2074,7 +2086,8 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
 
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
-        m_pending_create = TalkbackChannelOwner::Session;
+        m_pending_create = talkback_create_issued(m_pending_create,
+                                                  TalkbackChannelOwner::Session);
         // Follow-up to the F1 review-round fix: same value as the probe's
         // kAwaitTimeout, reused deliberately rather than inventing a second
         // constant -- both time out the SAME underlying wait (a Zoom
@@ -2131,18 +2144,14 @@ void EngineTalkback::session_stop()
         //
         // Fix round 2: routed through the shared talkback_cancel()
         // (src/talkback-channel-owner.h) instead of writing
-        // m_session_create_cancelled directly -- see that function's
+        // m_pending_create.session_cancelled directly -- see that function's
         // comment for why sharing the transition with nomination_reset()'s
         // equivalent call matters (N1 was the two owners' WRAP-UP logic
         // diverging, not this exact line, but this and
         // expire_stale_pending_create_locked() are the same class of
         // per-owner duplication that let it happen).
         std::lock_guard<std::mutex> lock(m_chan_mtx);
-        TalkbackCreateState state{m_pending_create, m_session_create_cancelled,
-                                  m_nomination_create_cancelled};
-        state = talkback_cancel(state, TalkbackChannelOwner::Session);
-        m_session_create_cancelled    = state.session_cancelled;
-        m_nomination_create_cancelled = state.nomination_cancelled;
+        m_pending_create = talkback_cancel(m_pending_create, TalkbackChannelOwner::Session);
         return;
     }
 
@@ -2154,8 +2163,8 @@ void EngineTalkback::session_stop()
         channel_copy_utf8 = m_session_channel;
         m_session_channel_z.clear();
         m_session_channel.clear();
-        if (m_pending_create == TalkbackChannelOwner::Session)
-            m_pending_create = TalkbackChannelOwner::None;
+        if (m_pending_create.owner == TalkbackChannelOwner::Session)
+            m_pending_create = talkback_expire(m_pending_create);
     }
     m_session_live    = false;
     m_session_user_id = 0;

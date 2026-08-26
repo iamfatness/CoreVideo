@@ -574,32 +574,58 @@ private:
     // channel-id strings below rather than being lock-free. Never call the
     // SDK while holding m_chan_mtx for this field either -- same discipline
     // as everywhere else in this class.
-    TalkbackChannelOwner       m_pending_create = TalkbackChannelOwner::None;
+    // Fix round 5: ONE member, not four. This used to be the owner alone,
+    // with m_session_create_cancelled, m_nomination_create_cancelled and
+    // m_nomination_generation as three separate siblings that every
+    // transition had to unpack into a TalkbackCreateState, mutate, and write
+    // back field by field. Two defects came out of exactly that shape in one
+    // round -- a branch that returned before its check-and-clear (F1), and a
+    // re-review mutation that deleted ONE of the write-backs with the whole
+    // 64-test suite still green -- so the state is now stored, transitioned
+    // and written back whole. Everything that mutates it is a call to one of
+    // the pure transitions in src/talkback-channel-owner.h, under this lock,
+    // stored back as a single assignment; `grep -nE "m_pending_create *= "`
+    // over engine-talkback.cpp finds every one of them (run it -- the
+    // previous version of this block prescribed a regex that also matched
+    // `==` and told the reader to expect four extra "writes").
+    //
+    // Its fields, and the defect each one exists because of:
+    //   * owner -- who owns the outstanding create. F1/C1: session_stop()'s
+    //     early branch and nomination_reset() must NOT clear it (the create
+    //     already went to Zoom; forgetting it strands the response on a
+    //     stray queue nothing drains, which wedged the whole feature).
+    //   * session_cancelled / nomination_cancelled -- that owner tore down
+    //     while its create was in flight, so the response destroys instead
+    //     of adopting. N1: both must be cleared by BOTH clearers (the
+    //     response and the expiry) or a stale flag destroys the next
+    //     create's channel.
+    //   * generation -- which ladder issued the outstanding Nomination
+    //     create, so a response for one the ladder gave up on is not
+    //     mistaken for the one it is waiting on. Round 3 carried this as a
+    //     FIFO and wedged the feature permanently the first time an entry
+    //     went unmatched.
+    TalkbackCreateState        m_pending_create;
     std::basic_string<zchar_t> m_session_channel_z;   // guarded by m_chan_mtx
     std::string                m_session_channel;     // UTF-8, reporting only
     std::string                m_session_participant; // by NAME, re-resolved
     unsigned int               m_session_user_id = 0;
     bool                       m_session_live    = false;
 
-    // F1 review-round fix (CRITICAL): true when session_stop() ran while a
-    // Session-owned CreateChannel was still outstanding (m_pending_create ==
-    // Session at that moment). session_stop() used to clear m_pending_create
-    // in that situation and return -- but the CreateChannel had already gone
-    // to Zoom. When its response arrived, the arbiter saw None, the id
-    // matched neither m_channel_id_z nor m_session_channel_z, and it was
-    // queued onto m_stray_channels -- which nothing drains without a probe's
-    // driving thread running (drain_stray_channels() has exactly one caller,
-    // tick(), which has exactly one caller, the probe's driving thread).
-    // Reachable on ordinary paths: a push-to-talk tap released before the
-    // create round-trip returns, a dead-man close inside that window,
-    // key_on()'s tap-open failure path, Leave, quit. session_stop() now
-    // leaves m_pending_create as Session (so the eventual response is still
-    // routed to the Session branch in onCreateChannelResponse, not lost to
-    // "owner == None") and sets this flag instead; that branch destroys the
-    // channel immediately on arrival rather than adopting it as live or
-    // queuing it as a stray. Guarded by m_chan_mtx, same discipline as
-    // m_pending_create.
-    bool                       m_session_create_cancelled = false;
+    // F1 review-round fix (CRITICAL), now m_pending_create.session_cancelled
+    // above: set when session_stop() ran while a Session-owned CreateChannel
+    // was still outstanding. session_stop() used to clear the owner in that
+    // situation and return -- but the CreateChannel had already gone to
+    // Zoom. When its response arrived, the arbiter saw None, the id matched
+    // neither m_channel_id_z nor m_session_channel_z, and it was queued onto
+    // m_stray_channels -- which nothing drains without a probe's driving
+    // thread running. Reachable on ordinary paths: a push-to-talk tap
+    // released before the create round-trip returns, a dead-man close inside
+    // that window, key_on()'s tap-open failure path, Leave, quit.
+    // session_stop() now leaves the owner AS Session (so the eventual
+    // response is still routed to the Session branch in
+    // onCreateChannelResponse, not lost to "owner == None") and sets the
+    // flag instead; that branch destroys the channel immediately on arrival
+    // rather than adopting it as live or queuing it as a stray.
 
     // Follow-up to the F1 review-round fix above (CRITICAL): the ONLY
     // clearer of m_pending_create == Session is the response landing in
@@ -627,8 +653,8 @@ private:
 
     // ── Pre-provisioned channels (Task 2, 2026-08-25) ───────────────────────
     // Fix round 1, C1: this is now a SECONDARY backstop, not the fix for a
-    // create outstanding across Leave/quit -- m_nomination_create_cancelled
-    // below is. This still matters for the case that flag does not cover: a
+    // create outstanding across Leave/quit -- the nomination cancellation
+    // flag (m_pending_create.nomination_cancelled) is. This still matters for the case that flag does not cover: a
     // CreateChannel response that is genuinely never delivered at all (no
     // Leave, no cancellation, the SDK simply never calls back), which would
     // otherwise leave m_pending_create stuck at Nomination forever, refusing
@@ -643,7 +669,7 @@ private:
     // Fix round 1, C1 (CRITICAL): true when nomination_reset() (called from
     // Leave/quit) ran while a Nomination-owned CreateChannel was still
     // outstanding (m_pending_create == Nomination at that moment). Mirrors
-    // m_session_create_cancelled exactly, because this is the same bug F1
+    // m_pending_create.session_cancelled exactly, because this is the same bug F1
     // already fixed for Session, reintroduced here: the original
     // nomination_reset() cleared m_pending_create unconditionally and
     // returned, but the CreateChannel had already gone to Zoom. When its
@@ -668,7 +694,7 @@ private:
     // it when the create it belongs to actually responds. But if that
     // response is never delivered at all, expire_stale_pending_create_locked()
     // eventually expires the owner instead -- and round 1 only cleared
-    // m_session_create_cancelled there, not this flag, so a cancelled-but-
+    // the session's flag there, not this one, so a cancelled-but-
     // never-answered create left this true forever. The next nominate() then
     // re-armed the owner with a brand-new CreateChannel, and when THAT
     // create's real response arrived, it found this flag still set and
@@ -677,49 +703,32 @@ private:
     // stay in sync; see expire_stale_pending_create_locked()'s Nomination
     // arm for the fix and nominate()'s comment for why the ordering with
     // m_nomination_pending's assignment also had to change alongside this.
-    bool m_nomination_create_cancelled = false;
+    //
+    // Fix round 5, F1 (Major -- the SAME defect a third time, through a third
+    // door): the flag also outlived its create when a branch of
+    // onCreateChannelResponse RETURNED before reaching the check-and-clear.
+    // The Stale branch did exactly that. The clear no longer lives in any
+    // branch: talkback_create_response() does it as part of attributing the
+    // response, before any branch runs, so there is nothing left to jump
+    // over. This flag is now m_pending_create.nomination_cancelled above.
 
-    // Fix round 3 ("expire-path double create"): the cancellation flag
-    // above answers "did THIS create get cancelled" -- it says nothing
-    // about a create that simply EXPIRED (nobody cancelled it, its
-    // response is just slow or genuinely lost) and then has that response
-    // arrive AFTER a fresh nomination re-armed the SAME owner and issued a
-    // SECOND CreateChannel. onCreateChannelResponse cannot tell the two
-    // creates' responses apart by owner alone -- Zoom gives no correlation
-    // id -- so a late response for the FIRST one could be adopted as the
-    // SECOND ladder's channel 1 while the second create is still genuinely
-    // in flight, and the queue would then issue a THIRD: two outstanding
-    // creates at once, the one thing the arbiter exists to prevent. See
+    // Fix round 3 ("expire-path double create"), now
+    // m_pending_create.generation above: the cancellation flag answers "did
+    // THIS create get cancelled" -- it says nothing about a create that
+    // simply EXPIRED (nobody cancelled it, its response is just slow or
+    // genuinely lost) and then has that response arrive AFTER a fresh
+    // nomination re-armed the SAME owner and issued a SECOND CreateChannel.
+    // onCreateChannelResponse cannot tell the two creates' responses apart
+    // by owner alone -- Zoom gives no correlation id -- so a late response
+    // for the FIRST one could be adopted as the SECOND ladder's channel 1
+    // while the second create is still genuinely in flight, and the queue
+    // would then issue a THIRD: two outstanding creates at once, the one
+    // thing the arbiter exists to prevent. See
     // src/talkback-channel-owner.h's "Generation tracking" section for the
-    // full mechanism (mirrors src/shm-generation.h's fix for the same shape
-    // of problem).
-    //
-    // Fix round 4 (CRITICAL, introduced by fix round 3): round 3 carried
-    // this as a counter PLUS a FIFO of outstanding generations, pushed once
-    // per successful CreateChannel and popped only by a response that
-    // reached onCreateChannelResponse's Nomination branch. Two ordinary
-    // paths push without ever popping -- a response that is never delivered
-    // at all (the exact case m_nomination_create_deadline above exists for)
-    // and a late response arriving while the owner is None/Probe/Session --
-    // and ONE orphaned entry desynchronised the FIFO permanently: every
-    // later response then compared an older entry, read Stale, destroyed the
-    // channel Zoom had just created for it, and provisioned zero, for the
-    // life of the process. It is now ONE state object holding one scalar
-    // slot (see that header for the full argument): the arbiter's promise is
-    // that exactly one create is outstanding at a time, so a queue modelled
-    // a state the arbiter forbids, and every issue simply overwrites the
-    // slot -- there is nothing to keep in step, so nothing can fall out of
-    // step.
-    //
-    // Written by exactly four sites, ALL command-loop thread and all under
-    // m_chan_mtx: nominate() and expire_stale_pending_create_locked()'s
-    // Nomination arm (talkback_generation_bump()), nomination_create_next()
-    // after a successful CreateChannel (talkback_generation_issue()), and
-    // onCreateChannelResponse's arbiter scope (talkback_generation_on_
-    // response(), which is called for EVERY response regardless of owner --
-    // that is deliberate: the round-3 Critical's second orphan path was a
-    // response under another owner silently skipping the update).
-    TalkbackGenerationState m_nomination_generation;
+    // mechanism (mirrors src/shm-generation.h's fix for the same shape of
+    // problem), and its TalkbackCreateState comment for why round 3's FIFO
+    // became a permanent wedge and why the replacement is one scalar folded
+    // into the arbiter state rather than a member of its own.
 
     // One entry per Zoom channel nominate() has successfully created --
     // populated by onCreateChannelResponse's Nomination branch, one at a

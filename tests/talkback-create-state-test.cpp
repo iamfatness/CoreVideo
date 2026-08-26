@@ -407,6 +407,183 @@ int main()
               "not recognized as stale");
     }
 
+    // ── The whole transitions (fix round 5) ────────────────────────────────
+    //
+    // Everything above tests a PIECE of a transition. These test the two
+    // functions the engine actually calls, because the pieces being well
+    // covered while their composition lived in the engine is precisely what
+    // let two defects through: a re-review deleted the engine's response-side
+    // generation write-back and all 64 tests stayed green, and the engine's
+    // per-branch cancellation check-and-clear was escaped by an early return
+    // (F1). The composition is now here, so a mutation to it fails here.
+
+    // A response releases the arbiter, clears the cancellation flag, AND
+    // judges the generation -- all of it, in one call, for the SAME response.
+    {
+        TalkbackCreateState s;
+        s = talkback_new_ladder(s);                                   // nominate()
+        s = talkback_create_issued(s, TalkbackChannelOwner::Nomination);
+        const auto r = talkback_create_response(s);
+        check(r.owner == TalkbackChannelOwner::Nomination,
+              "talkback_create_response() did not attribute the response to the "
+              "owner that was pending");
+        check(r.next.owner == TalkbackChannelOwner::None,
+              "talkback_create_response() left the arbiter claimed -- every later "
+              "CreateChannel from ANY subsystem would be refused");
+        check(r.freshness == TalkbackResponseFreshness::Current,
+              "talkback_create_response() misjudged the response for the create "
+              "the ladder was actually waiting on");
+        check(!r.next.generation.outstanding,
+              "talkback_create_response() did not resolve the outstanding create "
+              "-- the generation write-back is the exact update a re-review "
+              "mutation deleted with the whole suite still green");
+    }
+    // F1, end to end: nominate -> Leave (cancels, owner deliberately left
+    // claimed, both tables emptied) -> the response finally arrives. The
+    // cancellation must be READ AND CLEARED by the claim itself, no matter
+    // which branch the caller then takes -- round 4 did it per branch and the
+    // Stale branch returned first, orphaning the flag onto the NEXT
+    // nomination, which then destroyed its own first channel and left
+    // already_provisioned set for the rest of the meeting.
+    {
+        TalkbackCreateState s;
+        s = talkback_new_ladder(s);
+        s = talkback_create_issued(s, TalkbackChannelOwner::Nomination);
+        s = talkback_cancel(s, TalkbackChannelOwner::Nomination);      // Leave
+        check(s.owner == TalkbackChannelOwner::Nomination && s.nomination_cancelled,
+              "setup: Leave did not leave the create claimed-and-cancelled");
+
+        const auto r = talkback_create_response(s);
+        check(r.cancelled,
+              "F1: the cancelled create's response was not reported as cancelled");
+        check(talkback_create_disposition(r.owner, r.cancelled) ==
+                  TalkbackCreateDisposition::DestroyCancelled,
+              "F1: a cancelled create's channel was adopted instead of destroyed");
+        check(!r.next.nomination_cancelled,
+              "F1: the cancellation flag survived the response that consumed it "
+              "-- it would be inherited by the NEXT nomination, which then "
+              "destroys its own first channel and refuses every nomination after "
+              "that for the rest of the meeting");
+
+        // ...and the next ladder is clean, whatever verdict the branch above
+        // reached.
+        TalkbackCreateState next = r.next;
+        next = talkback_new_ladder(next);
+        next = talkback_create_issued(next, TalkbackChannelOwner::Nomination);
+        const auto r2 = talkback_create_response(next);
+        check(!r2.cancelled && r2.freshness == TalkbackResponseFreshness::Current,
+              "F1: the nomination after a cancelled one did not provision -- this "
+              "is N1's shape for the third time");
+    }
+    // The same guarantee when the verdict is Stale: the flag is already gone
+    // by the time any branch can return early.
+    {
+        TalkbackCreateState s;
+        s = talkback_new_ladder(s);
+        s = talkback_create_issued(s, TalkbackChannelOwner::Nomination);
+        s = talkback_cancel(s, TalkbackChannelOwner::Nomination);
+        s.generation = talkback_generation_bump(s.generation); // a bump the ladder should not have made
+        const auto r = talkback_create_response(s);
+        check(r.freshness == TalkbackResponseFreshness::Stale,
+              "setup: this response should have been judged stale");
+        check(!r.next.nomination_cancelled,
+              "F1: a Stale verdict left the cancellation flag set -- the check "
+              "and clear must not be something a branch can return before");
+        check(r.next.owner == TalkbackChannelOwner::None,
+              "a Stale verdict left the arbiter claimed");
+    }
+    // A response for another owner must not consume Nomination's cancellation
+    // flag or its generation slot.
+    {
+        TalkbackCreateState s;
+        s = talkback_new_ladder(s);
+        s = talkback_create_issued(s, TalkbackChannelOwner::Nomination);
+        s = talkback_cancel(s, TalkbackChannelOwner::Nomination);
+        s.owner = TalkbackChannelOwner::Session;   // Session's create is now the pending one
+        const auto r = talkback_create_response(s);
+        check(r.owner == TalkbackChannelOwner::Session && !r.cancelled,
+              "a Session response read Nomination's cancellation flag");
+        check(r.next.nomination_cancelled,
+              "a Session response cleared NOMINATION's cancellation flag -- the "
+              "cancelled Nomination create would then be adopted when its own "
+              "response arrives");
+        check(r.freshness == TalkbackResponseFreshness::NotNomination &&
+                  r.next.generation.outstanding,
+              "a Session response consumed Nomination's outstanding create");
+    }
+    // Claiming an issued create stamps it: the two cannot be separated,
+    // because they are one call.
+    {
+        TalkbackCreateState s;
+        s.generation.current = 7;
+        const auto after = talkback_create_issued(s, TalkbackChannelOwner::Nomination);
+        check(after.owner == TalkbackChannelOwner::Nomination,
+              "talkback_create_issued() did not claim the arbiter");
+        check(after.generation.outstanding && after.generation.outstanding_generation == 7,
+              "talkback_create_issued() claimed without stamping -- these were two "
+              "adjacent assignments in the engine until fix round 5, and either "
+              "could be deleted alone");
+    }
+    // Probe and Session have no ladder, so claiming for them must not touch
+    // Nomination's generation at all.
+    {
+        TalkbackCreateState s;
+        s = talkback_new_ladder(s);
+        s = talkback_create_issued(s, TalkbackChannelOwner::Nomination);
+        const TalkbackGenerationState before = s.generation;
+        s.owner = TalkbackChannelOwner::None;
+        const auto after = talkback_create_issued(s, TalkbackChannelOwner::Probe);
+        check(after.generation.outstanding == before.outstanding &&
+                  after.generation.outstanding_generation == before.outstanding_generation &&
+                  after.generation.current == before.current,
+              "claiming for Probe overwrote Nomination's outstanding create stamp");
+    }
+    // Expiring an abandoned Nomination create supersedes it -- clearing the
+    // owner and bumping the generation are one transition, not two lines.
+    {
+        TalkbackCreateState s;
+        s = talkback_new_ladder(s);
+        s = talkback_create_issued(s, TalkbackChannelOwner::Nomination);
+        const uint32_t before = s.generation.current;
+        s = talkback_expire(s);
+        check(s.owner == TalkbackChannelOwner::None, "talkback_expire() did not release");
+        check(s.generation.current == before + 1,
+              "talkback_expire() released a Nomination create without superseding "
+              "its generation -- its late response would then be adopted as the "
+              "NEXT ladder's channel");
+        check(s.generation.outstanding,
+              "talkback_expire() dropped the abandoned create's stamp, so its own "
+              "late response can no longer be recognized");
+    }
+    // Expiring Session must not touch the generation.
+    {
+        TalkbackCreateState s;
+        s = talkback_new_ladder(s);
+        s = talkback_create_issued(s, TalkbackChannelOwner::Session);
+        const uint32_t before = s.generation.current;
+        s = talkback_expire(s);
+        check(s.generation.current == before,
+              "expiring a SESSION create bumped the nomination generation");
+    }
+    // F1's other half: a fresh ladder must not supersede a create that is
+    // still outstanding -- that is what manufactures a Stale verdict for a
+    // response the ladder still owns.
+    {
+        TalkbackCreateState s;
+        s = talkback_new_ladder(s);
+        s = talkback_create_issued(s, TalkbackChannelOwner::Nomination);
+        const TalkbackCreateState after = talkback_new_ladder(s);
+        check(after.generation.current == s.generation.current,
+              "F1: talkback_new_ladder() bumped the generation while a create was "
+              "still outstanding -- reachable as nominate -> leave -> nominate "
+              "inside the create deadline, and it makes the outstanding create's "
+              "own response judge as Stale");
+        const auto r = talkback_create_response(after);
+        check(r.freshness == TalkbackResponseFreshness::Current,
+              "F1: the outstanding create's own response was judged stale after a "
+              "second nominate()");
+    }
+
     if (failures == 0)
         std::cout << "talkback-create-state: all tests passed\n";
     return failures == 0 ? 0 : 1;

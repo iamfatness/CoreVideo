@@ -266,6 +266,44 @@ Every one of these is documented at length where it lives; the list is the map.
   `key_off()` directly (no dispatch) is correct, not a latent cross-thread
   bug; a hotkey or Companion surface added later must confirm it lands on
   that same thread before reusing this call shape.
+- **The operator surface, Task 5 fix round 1**: the review's Majors were
+  variations on one disease -- the plugin's local nomination record tracked
+  what was **sent**, not what the engine had **confirmed**. F1: writing
+  `requested` at `talkback_nominate()`'s send time meant a re-nomination the
+  engine refused (`session_live`/`probe_busy`/`create_busy`/etc. -- seven
+  paths, all of which leave the standing channel set untouched per
+  `nominate()`'s own comment) still overwrote the plugin's record, so
+  `key_on()` falsely refused a target whose channel was still standing --
+  worse than no pre-check at all, on the operator's own mistake-recovery
+  path. F2: nothing ever cleared the record at Leave/rejoin/engine restart,
+  so it kept advertising a plan the engine had already destroyed, reopening
+  the exact open-then-retract flicker the pre-check exists to close. Fixed
+  by extracting the whole thing into `src/talkback-nomination.h` (pure,
+  Qt/OBS-free, mirroring `talkback-plan.h`'s reason for existing): a
+  `TalkbackNominationPlan` (the CONFIRMED record) is written ONLY by
+  `talkback_nomination_commit()`, which fires on the engine's own
+  `nominate_done` for an attempt that was never refused; a refusal
+  (`talkback_nomination_note_refused()`) touches only diagnostic
+  `last_attempt_ok`/`last_attempt_reason` fields, never the confirmed
+  `requested`/`uncovered_private` `key_on()` reads. In-flight stage reports
+  stage into a separate `TalkbackNominationPending` first. `talkback_nomination
+  _reset()` is wired into the two existing per-meeting/per-process
+  world-resets (`handle_event()`'s `"left"` branch, `start()`'s fresh-launch
+  path) rather than a new hook. Both defects were mutation-tested: reverting
+  either fix (`note_refused` touching `requested`; `reset()` as a no-op) in
+  `src/talkback-nomination.h` fails `tests/talkback-nomination-test.cpp`
+  deterministically, reverted cleanly afterward. Also this round:
+  `talkback_nominate` now dedupes nominees plugin-side before recording them
+  (F4, matching the engine's own dedup in `talkback_plan()`), acks
+  `ok:false` when the engine pipe isn't running instead of silently dropping
+  the command (F6), and `engine/src/main.cpp`'s `"participant"` fallback for
+  `talkback_start` was deleted (F7 -- it said "delete once Task 5 ships" and
+  Task 5 shipped). Left documented, not fixed: a nominee display name
+  containing a control character (`\n`/`\r`/`\t`) desyncs the plugin's
+  `requested` list against what the engine's naive line-oriented parser
+  actually decodes (F5, `json_escape()` in `zoom-engine-client.cpp`) --
+  narrow, and the shared decoder is not something to change opportunistically
+  for one caller.
 
 ## Live testing against a real meeting
 
@@ -292,17 +330,24 @@ stray-channel cleanup, etc.) arrives asynchronously as OBS log lines
 control socket — watch the log, not the response.
 
 `talkback_nominate` (`{"cmd":"talkback_nominate","nominees":["Name", ...]}`,
-requires an active meeting) provisions channels for the given talent list —
-same fire-and-acknowledge shape as `talkback_probe` above: the response only
+requires an active meeting AND a running engine — acks `engine_not_running`
+if the pipe isn't up) provisions channels for the given talent list — same
+fire-and-acknowledge shape as `talkback_probe` above: the response only
 confirms the trigger was accepted, and the plan outcome (channel count,
 `all_talent_complete`, who is `uncovered_private`, who is `unreachable`)
 arrives as `"cmd":"talkback_nominate"` log lines AND is polled via
 `talkback_status`'s `"nomination"` field (which also derives
 `has_private_channel` client-side, since the engine only ever names
-shortfalls, never successes). `talkback_key` now takes `"target":"all"` or a
-nominee's display name (not `"participant"`) — `{"state":"off"}` still always
-succeeds; `{"state":"on"}` is refused with a specific message for a target
-the last nomination's plan already proves has no channel.
+shortfalls, never successes). That field is the **confirmed** plan only —
+fix round 1 fixed a Major where it used to be written optimistically at send
+time (see the CLAUDE.md entry above); `"last_attempt_ok"`/
+`"last_attempt_reason"` describe the most recent nominate *attempt*
+separately, which can disagree with the confirmed fields (e.g. a refused
+re-nomination) without corrupting them. `talkback_key` now takes
+`"target":"all"` or a nominee's display name (not `"participant"`) —
+`{"state":"off"}` still always succeeds; `{"state":"on"}` is refused with a
+specific message for a target the last *confirmed* nomination already
+proves has no channel.
 
 One asymmetry to know before testing a join fix this way: the join watchdog
 (`src/join-watchdog.h`) is armed in `on_join_clicked()` only. A control-API

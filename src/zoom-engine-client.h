@@ -2,6 +2,7 @@
 
 #include "engine-ipc.h"
 #include "media-event-queue.h"
+#include "talkback-nomination.h"
 #include "zoom-types.h"
 #include <atomic>
 #include <condition_variable>
@@ -51,34 +52,19 @@ public:
         std::string reason;
     };
 
-    // Task 5: the plugin's own record of the last talkback_nominate() plan,
-    // assembled from two sources that arrive at different times and never
-    // over the same call: `requested` is set LOCALLY, the instant
-    // talkback_nominate() is sent (it is simply the argument the caller
-    // passed); everything else is filled in from the engine's async
-    // "cmd":"talkback_nominate" stage lines
-    // (engine/src/engine-talkback.cpp's report_nomination(), same
-    // fire-and-log pattern as talkback_probe -- see talkback_probe_status()
-    // above) as they arrive. `done` distinguishes "no report has arrived
-    // yet" (freshly reset, everything empty) from "the plan finished with
-    // zero channels" (e.g. an explicit denominate) -- both look like
-    // channels == 0 otherwise.
-    //
-    // TalkbackController::key_on() reads `requested`/`uncovered_private`
-    // through talkback_target_known_unprovisioned() (src/talkback-plan.h) to
-    // refuse an obviously-unprovisioned target before ever opening the tap --
-    // see that function's header comment for exactly what this local record
-    // can and cannot know.
-    struct TalkbackNominationStatus {
-        bool done = false;                        // a terminal report has arrived
-        bool ok = true;                            // false only on an outright refusal
-        std::string reason;                        // refusal reason when ok == false
-        uint32_t channels = 0;                     // planned, then (once done) actually created
-        bool all_talent_complete = true;
-        std::vector<std::string> requested;        // this plugin's own last nominee list
-        std::vector<std::string> uncovered_private; // nominees with no private channel
-        std::vector<std::string> unreachable;       // nominees on no channel at all
-    };
+    // Task 5: the plugin's own record of the last CONFIRMED talkback_nominate()
+    // plan. Fix round 1 (F1/F2): this used to be written optimistically at
+    // send time and never invalidated, which both falsely refused a key on a
+    // still-standing channel after a refused re-nomination (F1) and kept
+    // advertising a plan a Leave/engine-restart had already destroyed (F2).
+    // It is now the pure TalkbackNominationPlan type from
+    // src/talkback-nomination.h -- see that header's comment for the full
+    // account and why it had to move out of Qt/OBS reach to be pinned by a
+    // test. `requested`/`uncovered_private` are the ONLY fields
+    // TalkbackController::key_on() may read (via
+    // talkback_target_known_unprovisioned(), src/talkback-plan.h);
+    // `last_attempt_ok`/`last_attempt_reason` are diagnostic only.
+    using TalkbackNominationStatus = TalkbackNominationPlan;
 
     struct SourceCallbacks {
         // shm_generation: engine-side generation of the SHM region backing the
@@ -387,8 +373,15 @@ private:
     // TalkbackSessionStatus and talkback_session_status() above. Guarded by
     // m_mtx, same as m_talkback_probe_status.
     TalkbackSessionStatus m_talkback_session_status;
-    // Task 5: guarded by m_mtx, same as the two statuses above.
+    // Task 5: guarded by m_mtx, same as the two statuses above. This is the
+    // CONFIRMED plan only -- see TalkbackNominationStatus's doc comment and
+    // src/talkback-nomination.h. `m_talkback_nomination_pending` stages an
+    // in-flight attempt's stage reports until they either commit into this
+    // field (talkback_nomination_commit(), on "nominate_done") or are
+    // discarded on a refusal (talkback_nomination_note_refused(), which
+    // leaves this field untouched).
     TalkbackNominationStatus m_talkback_nomination_status;
+    TalkbackNominationPending m_talkback_nomination_pending;
     std::deque<DebugEvent> m_debug_events;
     // Tracks whether the user deliberately requested a leave/stop (suppresses recovery).
     std::atomic<bool> m_user_leaving{false};

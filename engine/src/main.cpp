@@ -1625,16 +1625,13 @@ int main()
             // Task 3: a key press names a TARGET (kTalkbackAllTalentTarget or
             // a nominee's name), not a participant to open a channel for --
             // session_start() now selects an already-provisioned channel.
-            // "participant" is accepted as a fallback because the plugin
-            // still sends that key until Task 5 changes it (the plan's own
-            // pre-flight scan flagged this T3->T5 seam: a target valid on one
-            // side and not the other is invisible until a live show). The
-            // fallback is a compatibility shim with a known end date, not a
-            // second supported spelling -- delete it once Task 5 ships, and
-            // note that it is only ever a NAME, so an operator on the old
-            // wire can key a person but not "all".
-            std::string target = json_str(line, "target");
-            if (target.empty()) target = json_str(line, "participant");
+            // Task 5 fix round 1 (F7): the "participant" fallback that used
+            // to live here was a compatibility shim for the plugin's
+            // pre-Task-5 wire shape, with an explicit "delete once Task 5
+            // ships" note. Task 5 shipped and the review confirmed the new
+            // shape end-to-end (src/zoom-engine-client.cpp sends "target"
+            // unconditionally) -- deleted.
+            const std::string target = json_str(line, "target");
             talkback.session_start(meeting_svc, target);
 
         } else if (command == IpcCommand::TalkbackStop) {

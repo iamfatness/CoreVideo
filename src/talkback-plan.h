@@ -70,6 +70,26 @@ struct TalkbackPlan {
     bool all_talent_complete = true;
 };
 
+// Collapses duplicate names, preserving first-occurrence order. A name
+// repeated in a nomination list is one person; letting it consume two
+// private channels would spend the budget on nobody. Factored out of
+// talkback_plan() below (Task 5 fix round 1, F4) so
+// ZoomEngineClient::talkback_nominate() can dedupe the SAME WAY before
+// recording what it sent: without this, a duplicate nominee inflated the
+// plugin's `has_private_channel` count relative to `channels`, which the
+// engine reports post-dedup.
+inline std::vector<std::string> talkback_dedup_preserve_order(
+    const std::vector<std::string> &names)
+{
+    std::vector<std::string> unique;
+    for (const auto &n : names) {
+        bool seen = false;
+        for (const auto &u : unique) if (u == n) { seen = true; break; }
+        if (!seen) unique.push_back(n);
+    }
+    return unique;
+}
+
 inline TalkbackPlan talkback_plan(const std::vector<std::string> &nominees)
 {
     TalkbackPlan plan;
@@ -77,12 +97,7 @@ inline TalkbackPlan talkback_plan(const std::vector<std::string> &nominees)
     // Collapse duplicates, preserving nomination order. A name repeated in the
     // list is one person; letting it consume two private channels would spend
     // the budget on nobody.
-    std::vector<std::string> unique;
-    for (const auto &n : nominees) {
-        bool seen = false;
-        for (const auto &u : unique) if (u == n) { seen = true; break; }
-        if (!seen) unique.push_back(n);
-    }
+    const std::vector<std::string> unique = talkback_dedup_preserve_order(nominees);
     if (unique.empty()) return plan;
 
     // ── All-talent first, and never truncated to make room for privates ───

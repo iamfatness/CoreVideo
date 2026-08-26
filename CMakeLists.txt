@@ -1111,6 +1111,21 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoTalkbackPlan
              COMMAND CoreVideoTalkbackPlanTest)
 
+    # Task 5 fix round 1 (F1/F2): the plugin's own record of a nomination's
+    # outcome must track what the engine CONFIRMED, never what was merely
+    # sent or refused -- a refused re-nomination must not falsely refuse a
+    # key on a still-standing channel (F1), and a Leave/engine-restart world
+    # reset must not leave the record advertising a plan that no longer
+    # exists (F2). See src/talkback-nomination.h.
+    add_executable(CoreVideoTalkbackNominationTest
+        tests/talkback-nomination-test.cpp
+    )
+    target_include_directories(CoreVideoTalkbackNominationTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTalkbackNomination
+             COMMAND CoreVideoTalkbackNominationTest)
+
     # THE FIRST TEST TARGET THAT COMPILES AN ENGINE TRANSLATION UNIT.
     #
     # Every other talkback test above compiles a pure header with src/ on the

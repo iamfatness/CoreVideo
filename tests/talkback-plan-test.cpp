@@ -258,6 +258,20 @@ int main()
               "at 11 nominees the all-talent target did not select both of its channels");
     }
 
+    // ── talkback_dedup_preserve_order() (Task 5 fix round 1, F4) ────────────
+    // Factored out of talkback_plan() so ZoomEngineClient::talkback_nominate()
+    // can dedupe a nominee list the SAME WAY before recording it, instead of
+    // inflating has_private_channel relative to the engine's post-dedup count.
+    {
+        const std::vector<std::string> d =
+            talkback_dedup_preserve_order({"Bob", "Sarah", "Bob", "Luis", "Sarah"});
+        check(d.size() == 3, "duplicate names were not collapsed");
+        check((d == std::vector<std::string>{"Bob", "Sarah", "Luis"}),
+              "dedup did not preserve first-occurrence order");
+        check(talkback_dedup_preserve_order({}).empty(),
+              "deduping an empty list produced entries");
+    }
+
     // ── Task 5: what the plugin can refuse locally, before any round trip ──
     // talkback_target_known_unprovisioned() answers "known bad" from nothing
     // but the last nomination's reported plan -- see its header comment for

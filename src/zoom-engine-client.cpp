@@ -1,5 +1,6 @@
 #include "zoom-engine-client.h"
 #include "speaker-director.h"
+#include "talkback-plan.h" // talkback_dedup_preserve_order() -- Task 5 fix round 1, F4
 #include "zoom-join-decision.h"
 #include "zoom-reconnect.h"
 #include "zoom-sdk-init-retry.h"
@@ -477,6 +478,16 @@ bool ZoomEngineClient::start(const std::string &jwt_token,
     m_authenticated.store(false, std::memory_order_release);
     m_media_active.store(false, std::memory_order_release);
     m_awaiting_admission.store(false, std::memory_order_release);
+    // Task 5 fix round 1 (F2): a freshly launched engine process has zero
+    // provisioned channels -- this covers the world-reset a graceful Leave's
+    // "cmd":"left" handler (above) cannot: an engine crash or an explicit
+    // restart never sends "left" at all. Same world-reset, the other
+    // trigger for it -- not a new hook.
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        talkback_nomination_reset(m_talkback_nomination_status);
+        m_talkback_nomination_pending = TalkbackNominationPending{};
+    }
     // Join threads from any previous session (e.g. after a crash).
     if (m_reader.joinable())  m_reader.join();
     if (m_monitor.joinable()) m_monitor.join();
@@ -882,20 +893,46 @@ void ZoomEngineClient::talkback_start(const std::string &target)
 void ZoomEngineClient::talkback_nominate(const std::vector<std::string> &nominees)
 {
     if (!m_running.load(std::memory_order_acquire)) return;
-    // Reset to a fresh "no report yet" state, seeded with the list THIS call
-    // is about to send -- `requested` is never learned from the engine, it is
-    // simply the argument the caller passed. Scoped so the lock is released
+    // Task 5 fix round 1 (F4): dedupe here, matching talkback_plan()'s own
+    // collapsing of duplicate nominees (src/talkback-plan.h) -- the engine
+    // reports `channels` post-dedup, so recording the raw list here would
+    // inflate the plugin's own has_private_channel count against it.
+    const std::vector<std::string> deduped = talkback_dedup_preserve_order(nominees);
+    // Task 5 fix round 1 (F1): stage this attempt in the PENDING record only
+    // -- m_talkback_nomination_status (the CONFIRMED plan) must not move
+    // until the engine actually accepts it. See src/talkback-nomination.h's
+    // header comment: a refused nomination leaves the engine's standing
+    // channel set untouched, so overwriting the confirmed plan at send time
+    // (the old behaviour) falsely refused a key on a still-standing channel
+    // whenever a re-nomination was refused. Scoped so the lock is released
     // before write_json() re-acquires it (m_mtx is not recursive), same
     // discipline as talkback_start() above.
     {
         std::lock_guard<std::mutex> lk(m_mtx);
-        m_talkback_nomination_status = TalkbackNominationStatus{};
-        m_talkback_nomination_status.requested = nominees;
+        talkback_nomination_begin(m_talkback_nomination_pending, deduped);
     }
+    // Task 5 fix round 1 (F5, documented not fixed): json_escape() below
+    // escapes '\n'/'\r'/'\t' as two-character sequences ("\\n" etc.), but the
+    // engine's line-oriented parser (json_str/json_str_array,
+    // engine/src/main.cpp) is not a real JSON decoder -- it only knows
+    // "a backslash means take the NEXT BYTE literally", so it decodes "\\n"
+    // to a literal 'n' character, not a newline. '"' and '\\' happen to
+    // round-trip correctly under that rule (escaped-quote and
+    // escaped-backslash both collapse to the original byte), but a nominee
+    // display name containing an actual control character would not: the
+    // engine would plan around a different string than `requested` holds,
+    // silently desyncing uncovered_private/has_private_channel and letting a
+    // key by the real name be locally allowed then engine-refused (or vice
+    // versa). Not fixed here: the decoder is shared by every P2E command,
+    // not something to change opportunistically for one caller, and display
+    // names containing control characters are exceedingly rare in practice --
+    // the failure mode is a refusal or a coverage mismatch, not data
+    // corruption. A real fix means teaching the engine's decoder actual JSON
+    // escape semantics.
     std::string json = R"({"cmd":"talkback_nominate","nominees":[)";
-    for (std::size_t i = 0; i < nominees.size(); ++i) {
+    for (std::size_t i = 0; i < deduped.size(); ++i) {
         if (i != 0) json += ",";
-        json += "\"" + json_escape(nominees[i]) + "\"";
+        json += "\"" + json_escape(deduped[i]) + "\"";
     }
     json += "]}";
     write_json(json);
@@ -1292,43 +1329,46 @@ void ZoomEngineClient::handle_event(const std::string &line)
         return;
     }
     if (cmd == "talkback_nominate") {
-        // Task 5: mirrors talkback_probe's handling exactly -- the plan
-        // outcome is these stage lines reaching the operator, so log every
-        // one verbatim (see the comment on the talkback_probe branch above)
-        // AND fold the ones that matter into m_talkback_nomination_status so
-        // a control-API caller (or TalkbackController::key_on(), via
-        // talkback_target_known_unprovisioned()) has something to read back
-        // without tailing the log.
+        // Task 5: mirrors talkback_probe's handling exactly -- log every
+        // stage line verbatim (see the comment on the talkback_probe branch
+        // above). Fix round 1 (F1): what happens to
+        // m_talkback_nomination_status (the CONFIRMED plan) differs by
+        // stage -- see src/talkback-nomination.h's header comment. Stage
+        // reports for an in-flight attempt accumulate in
+        // m_talkback_nomination_pending; only "nominate_done" commits them
+        // into the confirmed plan, and a refusal touches only the
+        // confirmed plan's diagnostic fields, never its
+        // requested/uncovered_private/unreachable.
         blog(LOG_INFO, "[obs-zoom-plugin] talkback_nominate: %s", line.c_str());
         const QString stage = obj.value("stage").toString();
         std::lock_guard<std::mutex> lk(m_mtx);
         if (stage == "uncovered_private") {
-            m_talkback_nomination_status.uncovered_private.push_back(
+            talkback_nomination_note_uncovered(m_talkback_nomination_pending,
                 obj.value("name").toString().toStdString());
         } else if (stage == "unreachable") {
-            m_talkback_nomination_status.unreachable.push_back(
+            talkback_nomination_note_unreachable(m_talkback_nomination_pending,
                 obj.value("name").toString().toStdString());
         } else if (stage == "plan") {
-            m_talkback_nomination_status.channels =
-                static_cast<uint32_t>(obj.value("channels").toInt(0));
-            m_talkback_nomination_status.all_talent_complete =
-                obj.value("all_talent_complete").toBool(true);
+            talkback_nomination_note_plan(m_talkback_nomination_pending,
+                static_cast<uint32_t>(obj.value("channels").toInt(0)),
+                obj.value("all_talent_complete").toBool(true));
         } else if (stage == "nominate_done") {
-            // Overwrites the "plan" stage's count with the ACTUAL number of
-            // channels standing once provisioning finished -- these can
-            // differ if a create failed partway (see nomination_create_next()
-            // in engine/src/engine-talkback.cpp).
-            m_talkback_nomination_status.channels =
-                static_cast<uint32_t>(obj.value("channels").toInt(0));
-            m_talkback_nomination_status.done = true;
+            // This attempt was accepted -- promote the staged report to the
+            // confirmed plan. `channels` here is nominate_done's own count,
+            // which can differ from the earlier "plan" stage's if a create
+            // failed partway (see nomination_create_next() in
+            // engine/src/engine-talkback.cpp).
+            talkback_nomination_commit(m_talkback_nomination_status,
+                m_talkback_nomination_pending,
+                static_cast<uint32_t>(obj.value("channels").toInt(0)));
         } else if (stage == "nominate" && !obj.value("ok").toBool(true)) {
             // An outright refusal (session_live, probe_busy, not_in_meeting,
-            // create_busy, target_name_collision, ...) -- no plan was ever
-            // computed, so there is nothing else to fill in.
-            m_talkback_nomination_status.ok = false;
-            m_talkback_nomination_status.reason =
-                obj.value("reason").toString().toStdString();
-            m_talkback_nomination_status.done = true;
+            // create_busy, target_name_collision, ...). The engine leaves
+            // its standing provisioned set untouched on every one of these
+            // paths, so the confirmed plan must not move either -- see F1 in
+            // src/talkback-nomination.h.
+            talkback_nomination_note_refused(m_talkback_nomination_status,
+                obj.value("reason").toString().toStdString());
         }
         return;
     }
@@ -1357,6 +1397,16 @@ void ZoomEngineClient::handle_event(const std::string &line)
             m_roster.clear();
             m_active_speaker_id = 0;
             SpeakerDirector::instance().reset();
+            // Task 5 fix round 1 (F2): the engine's own Leave path calls
+            // nomination_reset() (engine/src/main.cpp) and destroys every
+            // provisioned channel. This is the plugin-side world-reset that
+            // already exists for exactly this moment -- join it here rather
+            // than inventing a new hook. Without this, talkback_status kept
+            // advertising the last meeting's plan after a Leave/rejoin, and
+            // key_on()'s pre-check kept passing for targets that would now
+            // refuse with "no_nomination".
+            talkback_nomination_reset(m_talkback_nomination_status);
+            m_talkback_nomination_pending = TalkbackNominationPending{};
             keep_failed = !m_last_error.empty() &&
                 !m_user_leaving.load(std::memory_order_acquire);
         }

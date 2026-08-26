@@ -403,20 +403,28 @@ static QJsonObject speaker_director_to_json()
     return obj;
 }
 
-// Task 5: the last talkback_nominate()'s plan outcome, in the shape the brief
-// asks the operator to be able to learn AT NOMINATION TIME -- how many
+// Task 5: the last CONFIRMED talkback_nominate() plan, in the shape the
+// brief asks the operator to be able to learn AT NOMINATION TIME -- how many
 // channels, who is uncovered, who is unreachable. "who has a private
 // channel" is not a field the engine ever reports by name (only shortfalls
 // are named -- see src/talkback-plan.h's header comment on why); it is the
 // requested list minus uncovered_private, computed here rather than
 // duplicating that arithmetic in ZoomEngineClient.
+//
+// Fix round 1 (F1/F3): `n` is always the CONFIRMED plan
+// (src/talkback-nomination.h) -- it is only ever written by a "nominate_done"
+// the engine actually accepted, never by a refused or in-flight attempt. So
+// `requested`/`uncovered_private` here can never contradict each other the
+// way F3 found (an ok:false report claiming full private coverage):
+// `last_attempt_ok`/`last_attempt_reason` describe the most recent ATTEMPT,
+// which may be newer than and disagree with the confirmed fields above (a
+// refused re-nomination, say), and are purely diagnostic -- never a comment
+// on whether `has_private_channel` below is trustworthy.
 static QJsonObject talkback_nomination_to_json(
     const ZoomEngineClient::TalkbackNominationStatus &n)
 {
     QJsonObject obj;
     obj["done"] = n.done;
-    obj["ok"] = n.ok;
-    if (!n.ok) obj["reason"] = QString::fromStdString(n.reason);
     obj["channels"] = static_cast<double>(n.channels);
     obj["all_talent_complete"] = n.all_talent_complete;
     QJsonArray uncovered, unreachable, has_private_channel;
@@ -433,6 +441,9 @@ static QJsonObject talkback_nomination_to_json(
     obj["uncovered_private"] = uncovered;
     obj["unreachable"] = unreachable;
     obj["has_private_channel"] = has_private_channel;
+    obj["last_attempt_ok"] = n.last_attempt_ok;
+    if (!n.last_attempt_ok)
+        obj["last_attempt_reason"] = QString::fromStdString(n.last_attempt_reason);
     return obj;
 }
 
@@ -892,6 +903,20 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
                 return;
             }
             nominees.push_back(v.toString().toStdString());
+        }
+        // Fix round 1 (F6): talkback_nominate() (zoom-engine-client.cpp)
+        // early-returns on !is_running() BEFORE staging anything, so without
+        // this check a request that arrived while the engine process wasn't
+        // up would ack "nomination started" for a command that was silently
+        // dropped -- InMeeting alone does not imply the engine pipe is live.
+        // key_on() checks both for the same reason.
+        if (!ZoomEngineClient::instance().is_running()) {
+            write_response(socket, {
+                {"ok", false},
+                {"error", "engine_not_running"},
+                {"message", "The Zoom engine is not running."},
+            });
+            return;
         }
         if (ZoomEngineClient::instance().state() != MeetingState::InMeeting) {
             write_response(socket, {

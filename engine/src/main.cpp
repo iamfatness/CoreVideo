@@ -1468,13 +1468,19 @@ int main()
                 if (talkback_thread.joinable()) talkback_thread.join();
                 talkback_stop.store(false, std::memory_order_release);
 
-                // probe() returns false only when its re-entrancy guard
-                // refused (a ladder is already in flight) -- see the
-                // declaration comment. Spawning the driving thread only when
-                // it returns true is what keeps "a ladder started" and "a
-                // driver is running" the same fact, so a refused probe (which
-                // leaves phase untouched) can never end up with two threads
-                // calling tick() on this object (review round 4 finding).
+                // probe() returns true if and only if it issued a
+                // CreateChannel -- every refusal, not just the re-entrancy
+                // guard, returns false. Spawning the driving thread only on
+                // true is what keeps "a ladder started" and "a driver is
+                // running" the same fact. That matters beyond thread count:
+                // the driving thread is the only thread besides this one
+                // that drives the batch-destroy API, and a thread spawned
+                // for a probe that created nothing can be draining strays
+                // while an onCreateChannelResponse branch destroys on this
+                // thread. Do not "helpfully" spawn it on a refusal to get
+                // strays drained -- probe() drains them itself on those
+                // paths. See probe()'s return-value contract in
+                // engine-talkback.h.
                 if (talkback.probe(meeting_svc, who)) {
                     // Drive tick() off a dedicated thread: ipc_read_line_with_
                     // message_pump() blocks, so tick() cannot live on the read
@@ -1499,8 +1505,10 @@ int main()
                             // channel queued by a late/duplicate
                             // onCreateChannelResponse can leave the ladder
                             // itself Idle/Done while drain_stray_channels()
-                            // (called only from tick(), which only this
-                            // thread drives) still has not run for it. If
+                            // (reached from tick(), which only this thread
+                            // drives, and from probe()'s own refusal paths,
+                            // which run only when this thread does not
+                            // exist) still has not run for it. If
                             // this loop exited on is_idle() alone it could
                             // stop right after AwaitingChannel's 10s timeout
                             // -> Destroying -> Done settles, and then a

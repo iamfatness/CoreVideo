@@ -55,12 +55,35 @@ class EngineTalkback : public ZOOMSDK::IMeetingTalkbackCtrlEvent {
 public:
     // Starts the probe ladder. Reports and returns without blocking; the
     // asynchronous rungs continue through the callbacks below and tick().
-    // Returns true if a new ladder actually started, false if the
-    // re-entrancy guard refused (a ladder is already in flight). The caller
-    // MUST use this to decide whether to spawn a tick()-driving thread --
-    // spawning one unconditionally reintroduces the exact two-threads-call-
-    // tick() hazard the invariants on m_chan_mtx / the batch-destroy API
-    // above are built to rule out. See the caller in engine/src/main.cpp.
+    //
+    // THE RETURN VALUE IS A CONTRACT, not a status code: true means, and
+    // means only, "this call issued a CreateChannel, so there is now SDK
+    // work a tick()-driving thread must own". The caller MUST spawn that
+    // thread on true and MUST NOT on false. Every refusal returns false --
+    // the re-entrancy guard, a live session, no service, no controller,
+    // talkback unsupported, SetEvent failing, the create arbiter being held
+    // by someone else, and CreateChannel failing synchronously. There is
+    // exactly one `return true`, at the end of the function, immediately
+    // after the create is claimed; that is deliberate, so the contract is
+    // checkable by reading the exits rather than by trusting this comment.
+    // (It is not checkable by a test: the decision that is not already
+    // covered by talkback_may_request_create()'s own tests is "did this call
+    // reach CreateChannel", which needs a live IMeetingTalkbackController --
+    // the talkback tests compile pure headers with no engine and no SDK.
+    // Structure carries this invariant, not ctest.)
+    //
+    // Why it is a contract: the driving thread is the only thread besides
+    // the command loop that drives the batch-destroy API (see the inventory
+    // at the top of tick()), and four branches of onCreateChannelResponse
+    // destroy directly on the command loop. A thread spawned for a probe
+    // that created nothing can be draining strays at exactly the moment one
+    // of those branches fires -- and the arbiter-refused case is the worst
+    // one, because the refusal reason IS that a Session/Nomination create
+    // is outstanding. A probe that did issue a create holds the arbiter
+    // itself, which excludes those responses for as long as its thread
+    // lives. Refusals that create nothing therefore drain any queued stray
+    // synchronously before returning false, so "no thread" never means
+    // "nobody drains" -- see probe_refused_without_ladder().
     bool probe(ZOOMSDK::IMeetingService *svc, const std::string &participant_name);
 
     // Called from the engine's main loop. Sends tone buffers while a send is
@@ -251,9 +274,19 @@ private:
     unsigned int resolve_participant(const std::string &name,
                                      ReportSink sink = ReportSink::Probe) const;
 
-    // Drains m_stray_channels and destroys each one. Called from tick() only
-    // -- see the invariant comment at that call site.
+    // Drains m_stray_channels and destroys each one. The caller must be the
+    // only batch-destroy caller alive at that moment; the two callers that
+    // satisfy that, and why, are named at the function's own comment.
     void drain_stray_channels();
+
+    // The single exit every probe() refusal that created nothing routes
+    // through: settles the phase, drains any queued stray on this thread
+    // (nobody else will -- no driving thread is being spawned), and returns
+    // false so main.cpp does not spawn one. See probe()'s return-value
+    // contract above for why "created nothing -> no driving thread" is an
+    // invariant of the batch-destroy serialization rather than a tidiness
+    // preference. Command-loop thread only, and only from probe().
+    bool probe_refused_without_ladder();
 
     // Follow-up to the F1 review-round fix, extended for Task 2: lazily
     // expires a stale Session- or Nomination-owned m_pending_create -- see

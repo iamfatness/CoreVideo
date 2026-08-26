@@ -377,6 +377,16 @@ enum class TalkbackResponseFreshness {
     // A create IS recorded as outstanding, but it was issued under a
     // generation the ladder has since moved past -- this response belongs to
     // a create we gave up on. The ONLY verdict that destroys.
+    //
+    // With the engine's current wiring this verdict cannot be reached with
+    // an owner of Nomination at all (every bump site releases the owner
+    // first; see the Stale branch in onCreateChannelResponse for the
+    // derivation). That is the point: this whole mechanism's job is to make
+    // the desynchronised state that wedged fix round 3 inexpressible, not to
+    // catch it at runtime. A check that never fires is not therefore idle --
+    // do not widen what routes here to "make it do something", because
+    // guessing which response is stale, with no correlation id from Zoom,
+    // destroys channels the ladder is legitimately waiting on.
     Stale,
     // The outstanding create's generation matches `current`: this is the
     // response the ladder is actually waiting on.

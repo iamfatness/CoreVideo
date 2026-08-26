@@ -71,6 +71,45 @@ void EngineTalkback::report_session_state(bool live, const std::string &reason) 
     EngineIpc::write(line);
 }
 
+bool EngineTalkback::probe_refused_without_ladder()
+{
+    // CONSTRAINT: a tick()-driving thread may exist ONLY while there is SDK
+    // work that thread owns -- a probe ladder it must advance. Every probe()
+    // exit that did not issue a CreateChannel routes through here, and here
+    // returns false, because main.cpp spawns that thread on probe()'s return
+    // value alone.
+    //
+    // Why the constraint, not just the tidiness: the driving thread is the
+    // ONLY other thread that drives the batch-destroy API (see the inventory
+    // at the top of tick()), and four branches of onCreateChannelResponse
+    // now destroy directly on the command-loop thread. Those two can only
+    // collide if a driving thread exists while a Session- or
+    // Nomination-owned create response is in flight -- which is exactly the
+    // state a refused probe leaves behind, since the refusal reason IS that
+    // someone else owns the arbiter. A probe that genuinely issued a create
+    // owns the arbiter itself, so no Session/Nomination response can be
+    // delivered for as long as its thread lives, and the two callers cannot
+    // overlap. That is the whole reason "no ladder -> no thread" is a
+    // constraint rather than a preference: it is what makes the batch-destroy
+    // serialization argument hold.
+    //
+    // Phase::Done, not Idle: the ladder settled without starting, and
+    // main.cpp's own "already in progress" gate reads is_idle().
+    m_phase.store(Phase::Done, std::memory_order_release);
+
+    // Drain here, synchronously, instead of leaving it to the thread we are
+    // deliberately not spawning. A queued stray keeps has_pending_work()
+    // true, and has_pending_work() gates the top of BOTH nominate() and
+    // session_start() -- the C1 wedge shape -- so "no thread" must not mean
+    // "nobody drains". Safe on this thread precisely because there is no
+    // driving thread: main.cpp joins it before every probe() call, so this
+    // is the sole batch-destroy caller for the duration. A null or
+    // unsupported controller leaves the queue intact for a later probe;
+    // drain_stray_channels() self-guards for that.
+    drain_stray_channels();
+    return false;
+}
+
 bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
                            const std::string &participant_name)
 {
@@ -82,6 +121,13 @@ bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
     // Returning false here (rather than starting a ladder) is also the
     // caller's signal not to spawn a second tick()-driving thread -- see the
     // return-value comment on this function's declaration.
+    //
+    // Deliberately NOT routed through probe_refused_without_ladder(): a
+    // ladder IS in flight here, so a driving thread is alive and may be
+    // inside its own Begin/Add/Execute right now. That helper drains strays
+    // synchronously, which is safe only when this thread is the sole
+    // batch-destroy caller -- true on every other refusal path, false on
+    // this one. The thread already owns the drain while it runs.
     const Phase current = m_phase.load(std::memory_order_acquire);
     if (current != Phase::Idle && current != Phase::Done) {
         report("busy", R"("phase":)" + std::to_string(static_cast<int>(current)));
@@ -99,6 +145,16 @@ bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
     // 4). A probe is a ~3s diagnostic; refusing it for the life of an active
     // talkback session costs nothing real -- do not "relax" this to allow
     // concurrent use. See the matching guard in session_start().
+    //
+    // Also not routed through probe_refused_without_ladder(), for a
+    // different reason than the guard above: no driving thread can exist
+    // here (this guard is what stops one starting, and session_start()
+    // joins any earlier one before going live), so draining would be safe
+    // -- but it would be a NEW batch-destroy on a live show's command loop,
+    // which is the session path this task is explicitly not reworking.
+    // Unchanged behaviour: a stray queued during a live session waits for
+    // the next probe. The return value, which is what this round is about,
+    // is false either way.
     if (m_session_live) {
         report("busy", R"("reason":"session_live")");
         return false;
@@ -122,34 +178,33 @@ bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
 
     if (!m_svc) {
         report("controller", R"("ok":false,"reason":"no_meeting_service")");
+        // The one created-nothing exit that deliberately does NOT drain:
+        // m_ctrl is only reassigned at RUNG 1 below, which this exit
+        // precedes, so with no meeting service it may still point at a
+        // PREVIOUS meeting's controller -- and there is no meeting to
+        // destroy channels in anyway. Leave the queue for a probe that has
+        // a live controller; that is exactly what drain_stray_channels()'
+        // own null-guard does for the neighbouring case. The return value
+        // is the same false: no ladder, no driving thread.
         m_phase.store(Phase::Done, std::memory_order_release);
-        return true;
+        return false;
     }
 
     // RUNG 1: does the controller exist at all on this SDK/account?
     m_ctrl = m_svc->GetMeetingTalkbackController();
     report("controller", std::string(R"("ok":)") + (m_ctrl ? "true" : "false"));
-    if (!m_ctrl) {
-        m_phase.store(Phase::Done, std::memory_order_release);
-        return true;
-    }
+    if (!m_ctrl) return probe_refused_without_ladder();
 
     // RUNG 2: the meeting-level gate. This is the one we expect Enhanced Media
     // to satisfy, and the one that decides whether the feature is viable.
     const bool supported = m_ctrl->IsMeetingSupportTalkBack();
     report("meeting_supported",
            std::string(R"("supported":)") + (supported ? "true" : "false"));
-    if (!supported) {
-        m_phase.store(Phase::Done, std::memory_order_release);
-        return true;
-    }
+    if (!supported) return probe_refused_without_ladder();
 
     const ZOOMSDK::SDKError set_err = m_ctrl->SetEvent(this);
     report("set_event", R"("code":)" + std::to_string(static_cast<int>(set_err)));
-    if (set_err != ZOOMSDK::SDKERR_SUCCESS) {
-        m_phase.store(Phase::Done, std::memory_order_release);
-        return true;
-    }
+    if (set_err != ZOOMSDK::SDKERR_SUCCESS) return probe_refused_without_ladder();
 
     // RUNG 3: create exactly one channel. Max 16 exist; we make one and
     // destroy it, so a failed probe cannot leak channel budget into the
@@ -176,17 +231,21 @@ bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
     }
     handle_expired_create(expired_owner);
     if (!create_gate_ok) {
+        // THIS is the refusal that made the two-batch-destroy-callers window
+        // reachable while it still reported success -- see
+        // probe_refused_without_ladder() and the inventory at the top of
+        // tick(). The gate is closed precisely because a Session- or
+        // Nomination-owned create is outstanding, i.e. precisely when a
+        // response that destroys directly is about to land on the command
+        // loop; a driving thread spawned here would be the second
+        // batch-destroy caller.
         report("busy", R"("reason":"create_busy")");
-        m_phase.store(Phase::Done, std::memory_order_release);
-        return true;
+        return probe_refused_without_ladder();
     }
     const ZOOMSDK::SDKError create_err = m_ctrl->CreateChannel(1);
     report("create_channel", R"("code":)" +
            std::to_string(static_cast<int>(create_err)));
-    if (create_err != ZOOMSDK::SDKERR_SUCCESS) {
-        m_phase.store(Phase::Done, std::memory_order_release);
-        return true;
-    }
+    if (create_err != ZOOMSDK::SDKERR_SUCCESS) return probe_refused_without_ladder();
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
         m_pending_create = TalkbackChannelOwner::Probe;
@@ -200,10 +259,15 @@ bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
 
 void EngineTalkback::drain_stray_channels()
 {
-    // Only tick() calls this, and tick() is the sole caller of the
-    // batch-destroy API -- see the invariant comment at the top of the
-    // Destroying branch below. Swap the queue out under lock, then never
-    // touch the SDK while holding m_chan_mtx.
+    // TWO callers, and the constraint they share is that the caller must be
+    // the only batch-destroy caller alive at that moment (see the inventory
+    // at the top of tick()): tick(), on the probe's driving thread, which
+    // exists only for a ladder that thread owns; and
+    // probe_refused_without_ladder(), on the command-loop thread, reached
+    // only when no driving thread exists at all (main.cpp joins it before
+    // every probe()). Do not add a third without re-deriving that. Swap the
+    // queue out under lock, then never touch the SDK while holding
+    // m_chan_mtx.
     //
     // F6 review-round fix: m_ctrl can be null here. probe()'s RUNG 1
     // reassigns m_ctrl on EVERY call (`m_ctrl = m_svc->GetMeetingTalkback
@@ -421,26 +485,35 @@ void EngineTalkback::tick()
     // implies the controller holds implicit per-batch state, so two
     // Begin/Add/Execute sequences interleaving on different threads could
     // merge or corrupt batches. What keeps them apart is NOT a single-caller
-    // rule -- it is that the probe's driving thread only exists while a
-    // probe is running, and main.cpp joins it before session_start() and
-    // before nominate() (see session_stop()'s F3 comment, which already
-    // traced exactly this).
+    // rule -- it is a chain of three facts, each of which must hold:
+    //   1. This thread exists ONLY for a probe that issued a CreateChannel.
+    //      probe() returns false from every exit that created nothing, so
+    //      main.cpp spawns nothing for it (see probe()'s return-value
+    //      contract in the header, and probe_refused_without_ladder()).
+    //   2. Such a probe HOLDS the arbiter (m_pending_create == Probe), which
+    //      excludes any Session- or Nomination-owned create for as long as
+    //      it does -- and the four command-loop destroy branches all sit
+    //      inside `owner == Session` / `owner == Nomination`, so none of
+    //      them can be reached while this thread is alive.
+    //   3. Every other command-loop destroy (session_stop(),
+    //      nomination_destroy_provisioned() via nominate()/
+    //      handle_expired_create()) is reached only from command branches
+    //      that JOIN this thread first -- main.cpp joins before
+    //      session_start() and before nominate(), and probe() itself is
+    //      called after a join (see session_stop()'s F3 comment, which
+    //      traced exactly this for the session).
+    // Fact 1 was FALSE until fix round 4: a probe refused because the
+    // arbiter was held -- i.e. refused precisely when a Session/Nomination
+    // response was about to land -- still returned true and still got a
+    // driving thread, which could then be inside drain_stray_channels()'
+    // batch while that response destroyed on the command loop. Breaking
+    // fact 1 again breaks the whole chain, which is why probe()'s return
+    // value is documented as a contract rather than a status.
     //
-    // That is not airtight, and the gap is recorded here rather than papered
-    // over a fourth time: probe() does NOT refuse while a Nomination create
-    // is outstanding -- it reports create_busy, stores Phase::Done and
-    // returns TRUE, so main.cpp spawns the driving thread anyway. If a stray
-    // is queued at that instant, that thread's drain_stray_channels() can be
-    // mid-Begin/Add/Execute while the Nomination create's response lands on
-    // the command loop and takes one of the destroy branches above. Narrow
-    // (it needs a queued stray inside a single tick's window) and never
-    // observed, but it is a live gap, not merely a stale comment. Do NOT
-    // close it by wrapping the SDK calls in a mutex: blocking the SDK's
-    // message-pump thread while the driving thread is inside an SDK call
-    // trades a rare batch corruption for a possible hard hang. The safe fix
-    // is at the entry point -- do not spawn a driving thread for a probe
-    // that was refused before it created anything -- and this round
-    // deliberately did not take it on.
+    // Do NOT instead serialize these with a mutex: blocking the SDK's
+    // message-pump thread while the driving thread sits inside an SDK call
+    // trades a rare batch corruption for a possible hard hang, and in this
+    // engine a hang is the worse failure.
     drain_stray_channels();
 
     const Phase phase = m_phase.load(std::memory_order_acquire);
@@ -806,25 +879,39 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
             // (which would issue a second create while one may still be in
             // flight, the one invariant the arbiter exists to hold).
             //
-            // Fix round 4 removed the re-CLAIM (m_pending_create =
-            // Nomination) round 3 did here. With the scalar it is both
-            // wrong and unreachable: Stale means the state has no record of
-            // a current outstanding create, so claiming the arbiter for one
-            // would wedge probe()/session_start()/nominate() until the
-            // deadline expired. It also silently falsified this file's own
-            // "onCreateChannelResponse claims-then-clears, regardless of
-            // what the branch then does" invariant, which
+            // This branch must NOT re-claim the owner (round 3 did:
+            // m_pending_create = Nomination). Stale means the state holds no
+            // record of a current outstanding create, so claiming the
+            // arbiter for one would wedge probe()/session_start()/nominate()
+            // until the deadline expired -- and it would falsify the
+            // "onCreateChannelResponse claims-then-clears regardless of what
+            // the branch then does" invariant that
             // src/talkback-channel-owner.h documents as load-bearing.
             //
-            // Reachability, stated honestly because the previous version of
-            // this branch was written as if it were the common case: with
-            // one scalar slot, owner == Nomination implies the last
-            // talkback_generation_issue() stamped `current`, and both bump
-            // sites (nominate(), the Nomination expiry) can only run with
-            // the owner released -- so I could not construct a sequence
-            // that reaches here. It is a defensive branch with a defined,
-            // conservative disposition, not a path the engine is expected
-            // to take.
+            // REACHABILITY -- read before "fixing" this branch. It is not
+            // reachable today, and that is the design working, not a hole in
+            // it. `owner == Nomination` implies the most recent
+            // talkback_generation_issue() stamped `current`; the only two
+            // sites that bump `current` (nominate(), the Nomination arm of
+            // expire_stale_pending_create_locked()) can each run only with
+            // the owner released. So `outstanding_generation != current`
+            // cannot coexist with `owner == Nomination`. The counter's value
+            // is therefore STRUCTURAL -- it makes the desynchronised state
+            // that wedged fix round 3 inexpressible -- not behavioural: it
+            // is not expected to catch anything at runtime.
+            //
+            // Do not "restore" reachability on the theory that a check which
+            // never fires must be doing nothing. Making a late response
+            // distinguishable from the current one is impossible with what
+            // Zoom provides (onCreateChannelResponse carries no correlation
+            // id), so any change that routes more responses here is
+            // guessing, and guessing wrong here DESTROYS a channel the
+            // ladder is legitimately waiting on. The deliberate disposition
+            // for an ambiguous response is the opposite one -- fail open,
+            // adopt it, let the extra response fall out down
+            // channel_untracked. Keep this branch defensive and keep it
+            // conservative: destroy only what the response names, change no
+            // state, advance nothing.
             if (error == TALKBACK_ERROR_OK && channelID != nullptr) {
                 uint32_t attempts = 0;
                 const ZOOMSDK::SDKError e = destroy_channel_retrying(channelID, &attempts);

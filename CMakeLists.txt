@@ -1111,6 +1111,42 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoTalkbackPlan
              COMMAND CoreVideoTalkbackPlanTest)
 
+    # THE FIRST TEST TARGET THAT COMPILES AN ENGINE TRANSLATION UNIT.
+    #
+    # Every other talkback test above compiles a pure header with src/ on the
+    # include path, so engine-talkback.cpp's own call sites -- which SDK calls
+    # it makes, in what order, and what it stores in the arbiter afterwards --
+    # were covered by nothing at all. Three consecutive review rounds named
+    # that gap, and Task 2's last Major lived in it: a reviewer deleted the
+    # engine's generation-stamp line and the whole 64-test suite stayed green.
+    # This target links the real engine TU and drives it through fakes for the
+    # two Zoom interfaces it touches (both pure-abstract, so no SDK LIBRARY is
+    # linked -- only ZOOM_SDK_INCLUDE_DIR).
+    #
+    # Guarded on the SDK headers being present for the same reason
+    # ZoomObsEngine is: without them this file cannot compile at all. NOMINMAX
+    # /WIN32_LEAN_AND_MEAN mirror the engine target's, and for the same reason
+    # -- talkback-plan.h calls std::min, and windows.h arrives transitively via
+    # zoom_sdk_def.h's HWND use.
+    if(EXISTS "${ZOOM_SDK_INCLUDE_DIR}/zoom_sdk.h")
+        add_executable(CoreVideoEngineTalkbackSelectTest
+            tests/engine-talkback-select-test.cpp
+            engine/src/engine-talkback.cpp
+        )
+        target_include_directories(CoreVideoEngineTalkbackSelectTest PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${CMAKE_CURRENT_SOURCE_DIR}/engine/src"
+            "${ZOOM_SDK_INCLUDE_DIR}"
+        )
+        if(WIN32)
+            target_compile_definitions(CoreVideoEngineTalkbackSelectTest PRIVATE
+                NOMINMAX WIN32_LEAN_AND_MEAN)
+        endif()
+        target_link_libraries(CoreVideoEngineTalkbackSelectTest PRIVATE Threads::Threads)
+        add_test(NAME CoreVideoEngineTalkbackSelect
+                 COMMAND CoreVideoEngineTalkbackSelectTest)
+    endif()
+
     # The master clock every audio buffer is stamped from. Wall-clock arrival
     # stamps let IPC jitter reach OBS, which resampled continuously — the
     # 2026-08-16 "audio is very bad" report.

@@ -1299,9 +1299,31 @@ void EngineTalkback::onChannelUserJoinResponse(const zchar_t *channelID,
                     for (auto &pc : m_provisioned_channels) {
                         if (pc.channel_id_z != channelID) continue;
                         bool already = false;
-                        for (const auto &n : pc.present)
+                        for (const auto &m : pc.present)
+                            if (m.name == resolved_name) { already = true; break; }
+                        if (!already) pc.present.push_back({resolved_name, userID});
+                        channel_id_utf8 = pc.channel_id;
+                        break;
+                    }
+                } else {
+                    // Fix round 1, M1 (Major): a genuine gate used to be
+                    // reported and then FORGOTTEN -- the pending entry was
+                    // erased above and nothing else remembered it failed, so
+                    // present_here && !was_present read true again on the
+                    // very next roster event and re-invited forever (up to
+                    // 10 invites / 20 report lines across 5 events, proved
+                    // live). `failed` marks this presence stint as resolved
+                    // (attempted, and the attempt did not work) without
+                    // counting as present -- resolve_roster_change() will not
+                    // retry it until the person's name actually leaves the
+                    // roster and comes back, the one signal that plausibly
+                    // changes the outcome.
+                    for (auto &pc : m_provisioned_channels) {
+                        if (pc.channel_id_z != channelID) continue;
+                        bool already = false;
+                        for (const auto &n : pc.failed)
                             if (n == resolved_name) { already = true; break; }
-                        if (!already) pc.present.push_back(resolved_name);
+                        if (!already) pc.failed.push_back(resolved_name);
                         channel_id_utf8 = pc.channel_id;
                         break;
                     }
@@ -1394,7 +1416,62 @@ void EngineTalkback::onChannelUserJoinResponse(const zchar_t *channelID,
     m_phase.store(Phase::Sending, std::memory_order_release);   // tick() takes it from here
 }
 
-void EngineTalkback::onChannelUserLeaveResponse(const zchar_t *, unsigned int, TalkbackError) {}
+void EngineTalkback::onChannelUserLeaveResponse(const zchar_t *channelID, unsigned int userID,
+                                                TalkbackError error)
+{
+    report("leave_response",
+           R"("channel":")" + json_escape(zchar_to_utf8(channelID)) +
+           R"(","user_id":)" + std::to_string(userID) +
+           R"(,"error":)" + std::to_string(static_cast<int>(error)));
+
+    // Fix round 1, M4 (Major): the mirror image of the correlation
+    // onChannelUserJoinResponse now does. Before this fix, `present` only
+    // ever decremented on a MEETING departure (resolve_roster_change()'s
+    // name-based diff against the roster). A CHANNEL-side removal while the
+    // person stays in the meeting -- a host action, a Zoom-side eviction,
+    // channel churn -- left them counted in `present`/"N of M present"
+    // forever and never re-invited, because resolve_roster_change() only
+    // ever sees present_here == true (they never left the MEETING) and
+    // was_present == true (nothing cleared it).
+    //
+    // Correlated structurally by (channel, user_id) against
+    // TalkbackPresentMember -- the id it stores for exactly this purpose --
+    // never by re-resolving the name through the participants list, which
+    // could fail anyway if the person already left the meeting entirely by
+    // the time this response arrives. A leave for someone not currently
+    // present (never invited, already removed, or a stray/duplicate
+    // response) finds nothing and is a NO-OP: `present` is a vector sized by
+    // what is actually in it, so there is no counter to underflow and no
+    // separate guard needed to make "not present" and "leave it alone" the
+    // same code path.
+    if (!channelID || error != TALKBACK_ERROR_OK) return;
+
+    std::string resolved_name;
+    std::string channel_id_utf8;
+    bool found = false;
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        for (auto &pc : m_provisioned_channels) {
+            if (pc.channel_id_z != channelID) continue;
+            auto it = std::find_if(pc.present.begin(), pc.present.end(),
+                                   [userID](const TalkbackPresentMember &m) {
+                                       return m.user_id == userID;
+                                   });
+            if (it != pc.present.end()) {
+                resolved_name = it->name;
+                channel_id_utf8 = pc.channel_id;
+                pc.present.erase(it);
+                found = true;
+            }
+            break;
+        }
+    }
+    if (found) {
+        report_nomination("member_left",
+                          R"("name":")" + json_escape(resolved_name) + R"(","channel":")" +
+                          json_escape(channel_id_utf8) + "\"");
+    }
+}
 void EngineTalkback::onJoinTalkbackChannel(unsigned int) {}
 void EngineTalkback::onLeaveTalkbackChannel(unsigned int) {}
 void EngineTalkback::onInviterAudioLevel(unsigned int, unsigned int) {}
@@ -1795,8 +1872,15 @@ void EngineTalkback::invite_nominee(const std::basic_string<zchar_t> &channel_id
     // rule as everywhere else in this file) and update this channel's
     // `present` set, which is what session_start()'s "N of M present" line
     // and resolve_roster_change()'s own idempotence both read.
+    //
+    // Fix round 1, C1: stamped with a deadline (kAwaitTimeout, same bound
+    // every other "did Zoom actually answer" wait in this file uses) so
+    // resolve_roster_change()'s sweep can forget an entry whose response is
+    // never coming -- see m_nomination_pending_invites' header comment for
+    // why an un-expiring entry here permanently suppressed a rejoin.
     std::lock_guard<std::mutex> lock(m_chan_mtx);
-    m_nomination_pending_invites.push_back({channel_id_z, uid, name});
+    m_nomination_pending_invites.push_back(
+        {channel_id_z, uid, name, std::chrono::steady_clock::now() + kAwaitTimeout});
 }
 
 void EngineTalkback::nomination_reset()
@@ -1861,21 +1945,22 @@ void EngineTalkback::nomination_reset()
 }
 
 // ── Roster re-resolution (Task 4, 2026-08-25) ───────────────────────────────
-std::vector<std::string> EngineTalkback::current_roster_names() const
+std::vector<EngineTalkback::TalkbackRosterEntry> EngineTalkback::current_roster() const
 {
-    std::vector<std::string> names;
-    if (!m_svc) return names;
+    std::vector<TalkbackRosterEntry> roster;
+    if (!m_svc) return roster;
     auto *part = m_svc->GetMeetingParticipantsController();
-    if (!part) return names;
+    if (!part) return roster;
     ZOOMSDK::IList<unsigned int> *ids = part->GetParticipantsList();
-    if (!ids) return names;
-    names.reserve(static_cast<std::size_t>(ids->GetCount()));
+    if (!ids) return roster;
+    roster.reserve(static_cast<std::size_t>(ids->GetCount()));
     for (int i = 0; i < ids->GetCount(); ++i) {
-        ZOOMSDK::IUserInfo *u = part->GetUserByUserID(ids->GetItem(i));
+        const unsigned int uid = ids->GetItem(i);
+        ZOOMSDK::IUserInfo *u = part->GetUserByUserID(uid);
         if (!u) continue;
-        names.push_back(zchar_to_utf8(u->GetUserName()));
+        roster.push_back({uid, zchar_to_utf8(u->GetUserName())});
     }
-    return names;
+    return roster;
 }
 
 void EngineTalkback::resolve_roster_change(ZOOMSDK::IMeetingService *svc)
@@ -1890,53 +1975,120 @@ void EngineTalkback::resolve_roster_change(ZOOMSDK::IMeetingService *svc)
     // under the arbiter's single-outstanding-create rule
     // (src/talkback-channel-owner.h), and nothing below calls it.
 
-    // Gated exactly like nominate()/session_start(): this reassigns
-    // m_svc/m_ctrl and, when it invites, runs the same kind of
-    // Begin/Add/Execute sequence tick()'s own inventory documents as unsafe
-    // to interleave, on different threads, with the probe's driving thread.
-    // A refusal here costs nothing but a delay -- nothing below is marked
-    // resolved until an invite actually goes out, so the next roster event
-    // (onUserJoin etc. keep coming) tries again.
-    if (has_pending_work()) {
-        report_nomination("roster_resolve", R"("ok":false,"reason":"probe_busy")");
-        return;
-    }
-
+    // Fix round 1, m1 (Minor): checked BEFORE has_pending_work() so a
+    // meeting that has never nominated anyone -- the common case for most of
+    // a meeting's life -- never emits "roster_resolve probe_busy" during an
+    // unrelated ~30s probe. There is nothing here to be busy ABOUT.
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
         if (m_provisioned_channels.empty()) return;   // nothing nominated yet
     }
 
-    m_svc  = svc;
-    m_ctrl = m_svc->GetMeetingTalkbackController();
-    if (!m_ctrl) return;
+    // Gated exactly like nominate()/session_start(): when it invites, this
+    // runs the same kind of Begin/Add/Execute sequence tick()'s own
+    // inventory documents as unsafe to interleave, on different threads,
+    // with the probe's driving thread. A refusal here costs nothing but a
+    // delay -- nothing below is marked resolved until an invite actually
+    // goes out, so the next roster event (onUserJoin etc. keep coming)
+    // tries again.
+    if (has_pending_work()) {
+        report_nomination("roster_resolve", R"("ok":false,"reason":"probe_busy")");
+        return;
+    }
 
-    const std::vector<std::string> present_now = current_roster_names();
-    auto is_present_now = [&present_now](const std::string &name) {
-        return std::find(present_now.begin(), present_now.end(), name) != present_now.end();
+    // Fix round 1, M3 (Major): m_svc/m_ctrl are reassigned ONLY when no
+    // session is live. probe() and nominate() both refuse OUTRIGHT while
+    // m_session_live because they touch these exact fields; this function
+    // cannot refuse outright (a rejoin mid-press must still be invited), so
+    // it leaves the press's own pointers alone instead. Without this, a
+    // roster event firing mid-press (anybody muting, unmuting, joining,
+    // leaving or renaming does) could have GetMeetingTalkbackController()
+    // return null for one call -- a meeting reconnect/ending state -- and
+    // null m_ctrl for the REST of the press: drain_audio() then snapshots a
+    // null ctrl into every subsequent buffer's SendCtx (counted as
+    // no_channel_drops, so not silent -- but the director is mid-sentence
+    // and off air), and session_stop()'s `!m_ctrl` bail then also skips
+    // restoring the duck, stranding the talent at 30% meeting audio for the
+    // rest of the show. A live press already proved m_ctrl valid at
+    // session_start() time; reusing it is strictly safer than re-querying it
+    // here.
+    if (m_session_live) {
+        if (!m_ctrl) return;   // paranoia only -- session_start() would not
+                               // have gone live without a valid m_ctrl
+    } else {
+        m_svc  = svc;
+        m_ctrl = m_svc->GetMeetingTalkbackController();
+        if (!m_ctrl) return;
+    }
+
+    const std::vector<TalkbackRosterEntry> roster = current_roster();
+    auto is_present_now = [&roster](const std::string &name) {
+        for (const auto &r : roster) if (r.name == name) return true;
+        return false;
+    };
+    auto uid_in_roster = [&roster](unsigned int uid) {
+        for (const auto &r : roster) if (r.user_id == uid) return true;
+        return false;
     };
 
     // Snapshot the work under the lock -- the SDK is never called while
     // holding m_chan_mtx, same discipline as everywhere else in this file.
-    // Departures are applied to `pc.present` in THIS scope (so a concurrent
-    // reader, e.g. session_start()'s own present-count read, never sees a
-    // half-updated table); invites happen AFTER the lock is released, below.
+    // Departures are applied to `pc.present`/`pc.failed` in THIS scope (so a
+    // concurrent reader, e.g. session_start()'s own present-count read,
+    // never sees a half-updated table); invites happen AFTER the lock is
+    // released, below.
     struct ChannelInvites {
         std::basic_string<zchar_t> channel_id_z;
         std::string channel_id;
         std::vector<std::string> names;
     };
     std::vector<ChannelInvites> to_invite;
-    std::vector<std::pair<std::string, std::string> > left;   // (name, channel)
+    std::vector<std::pair<std::string, std::string> > left;             // (name, channel)
+    std::vector<std::pair<std::string, std::string> > expired_invites;  // (name, reason)
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
+
+        // Fix round 1, C1 (CRITICAL): prune every pending invite this file
+        // can never hear a USEFUL answer for, BEFORE the per-channel diff
+        // below reads m_nomination_pending_invites to decide what is
+        // "already outstanding". Two independent triggers -- see
+        // m_nomination_pending_invites' header comment for the two
+        // triggering sequences this closes and why one alone leaves the
+        // other open:
+        //   * TIMED OUT -- the response is never delivered at all (this SDK
+        //     swallows responses; kAwaitTimeout is the same bound
+        //     tick()'s AwaitingChannel timeout and
+        //     expire_stale_pending_create_locked() use for the identical
+        //     reason on the CREATE side).
+        //   * LEFT THE ROSTER -- the id this invite was issued to is no
+        //     longer in the meeting at all. This is the semantically RIGHT
+        //     trigger (a response for an id that no longer exists cannot
+        //     mean anything useful) and fires immediately rather than after
+        //     up to kAwaitTimeout.
+        const auto now = std::chrono::steady_clock::now();
+        for (auto it = m_nomination_pending_invites.begin();
+             it != m_nomination_pending_invites.end(); ) {
+            const bool timed_out = now >= it->deadline;
+            const bool uid_left  = !uid_in_roster(it->user_id);
+            if (timed_out || uid_left) {
+                expired_invites.emplace_back(it->name, uid_left ? "left_meeting" : "timeout");
+                it = m_nomination_pending_invites.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
         for (auto &pc : m_provisioned_channels) {
             ChannelInvites work;
             for (const auto &name : pc.members) {
-                const bool was_present =
-                    std::find(pc.present.begin(), pc.present.end(), name) != pc.present.end();
+                const auto present_it = std::find_if(
+                    pc.present.begin(), pc.present.end(),
+                    [&name](const TalkbackPresentMember &m) { return m.name == name; });
+                const bool was_present = present_it != pc.present.end();
+                const bool was_failed =
+                    std::find(pc.failed.begin(), pc.failed.end(), name) != pc.failed.end();
                 const bool present_here = is_present_now(name);
-                if (present_here && !was_present) {
+                if (present_here && !was_present && !was_failed) {
                     // Idempotence: skip a name that already has an invite
                     // outstanding. A burst of the five roster callbacks for
                     // the SAME join must issue ONE ExecuteBatchInviteUsers,
@@ -1944,6 +2096,13 @@ void EngineTalkback::resolve_roster_change(ZOOMSDK::IMeetingService *svc)
                     // covers Zoom's side of a redundant invite, this covers
                     // ours, and "make the work proportional to what actually
                     // changed" means not relying on Zoom's answer alone.
+                    // `was_failed` is the OTHER half (fix round 1, M1): a
+                    // permanently-gated invite must not be retried on every
+                    // roster event either, including the two of the five
+                    // callbacks (onUserAudioStatusChange,
+                    // onUserVideoStatusChange) that fire on every mute and
+                    // camera toggle by anyone in the meeting, not just on an
+                    // actual roster change.
                     bool already_pending = false;
                     for (const auto &pi : m_nomination_pending_invites) {
                         if (pi.channel_id_z == pc.channel_id_z && pi.name == name) {
@@ -1952,16 +2111,26 @@ void EngineTalkback::resolve_roster_change(ZOOMSDK::IMeetingService *svc)
                         }
                     }
                     if (!already_pending) work.names.push_back(name);
-                } else if (!present_here && was_present) {
+                } else if (!present_here && (was_present || was_failed)) {
                     // A talent renaming themselves is a LEAVE of the old
                     // name (handled here, generically -- no special case)
                     // and possibly a JOIN of a nominated new name, handled
                     // by the `present_here && !was_present` branch above on
                     // this SAME pass, for whichever channel plans the new
                     // name.
-                    pc.present.erase(std::remove(pc.present.begin(), pc.present.end(), name),
-                                     pc.present.end());
-                    left.emplace_back(name, pc.channel_id);
+                    //
+                    // Fix round 1, M1: clearing `failed` HERE -- on an
+                    // actual roster departure, never on a timer -- is the
+                    // "retry only on that person's join transition" ruling.
+                    // A permanently-gated client is invited exactly ONCE per
+                    // presence stint and gets a fresh attempt only once they
+                    // actually leave and rejoin.
+                    if (was_present) {
+                        pc.present.erase(present_it);
+                        left.emplace_back(name, pc.channel_id);
+                    }
+                    pc.failed.erase(std::remove(pc.failed.begin(), pc.failed.end(), name),
+                                    pc.failed.end());
                 }
             }
             if (!work.names.empty()) {
@@ -1971,6 +2140,11 @@ void EngineTalkback::resolve_roster_change(ZOOMSDK::IMeetingService *svc)
             }
         }
     }
+
+    for (const auto &e : expired_invites)
+        report_nomination("pending_invite_expired",
+                          R"("name":")" + json_escape(e.first) + R"(","reason":")" +
+                          e.second + "\"");
 
     for (const auto &l : left)
         report_nomination("member_left",
@@ -2391,6 +2565,24 @@ void EngineTalkback::drain_audio()
 // (measured live 2026-08-25 as no_channel_drops), and the fix is not to make
 // it faster but to have already done it, at nomination time.
 bool EngineTalkback::session_live() const { return m_session_live; }
+
+void EngineTalkback::members_present_for_target(const std::string &target,
+                                                 std::size_t *present,
+                                                 std::size_t *total) const
+{
+    std::size_t p = 0, t = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        for (const auto &pc : m_provisioned_channels) {
+            if (!talkback_channel_serves_target(pc.is_all_talent, pc.members, target))
+                continue;
+            t += pc.members.size();
+            p += pc.present.size();
+        }
+    }
+    if (present) *present = p;
+    if (total) *total = t;
+}
 
 bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
                                    const std::string &target)

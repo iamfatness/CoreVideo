@@ -204,7 +204,25 @@ Every one of these is documented at length where it lives; the list is the map.
   presence, not a failure to retry. `session_start()`'s `session_live` report
   now carries `members_present`/`members_total` for the keyed target — Task 3
   deliberately left this out because the provisioned entry didn't track
-  membership at all.
+  membership at all. **A pending invite MUST expire** (fix round 1, C1,
+  Critical, 2026-08-26): the suppression check keys on (channel, NAME), the
+  only clearer keys on (channel, USER ID), and with no expiry a talent who
+  drops while an invite is in flight and rejoins under a new id was
+  permanently suppressed — the director sees "1 of 1 present" while the
+  talent hears nothing. `TalkbackPendingInvite` now carries a `kAwaitTimeout`
+  deadline AND is dropped the moment its `user_id` leaves the roster (the
+  semantically right trigger, fires immediately rather than after 10s); both
+  are needed, they close different halves. A genuinely failing invite
+  (`TalkbackProvisionedChannel::failed`) is retried only on that PERSON's own
+  join transition, never on a timer or on every roster event — two of the
+  five callbacks fire on every mute and camera toggle by anyone in the
+  meeting. The roster path reassigns `m_svc`/`m_ctrl` only when no session is
+  live, matching `probe()`/`nominate()`'s own guard, because a roster event
+  can fire mid-press and a stray null return from
+  `GetMeetingTalkbackController()` would otherwise null `m_ctrl` for the rest
+  of the press. `onChannelUserLeaveResponse` decrements `present` for a
+  CHANNEL-side removal (host action, Zoom-side eviction) — the mirror image
+  of the join correlation, and previously an empty stub.
 - **Engine teardown**: never let SDK callbacks race teardown; `set_terminate`
   is a bare `_exit(5)` (code 5 maps to EngineCrash recovery; no pipe writes,
   no locks, no allocation in the handler).

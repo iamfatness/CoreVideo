@@ -350,8 +350,14 @@ class FakeMeetingService : public ZOOMSDK::IMeetingService {
 public:
     FakeTalkbackController ctrl;
     FakeParticipantsController participants;
+    // Fix round 1, M3: simulates GetMeetingTalkbackController() returning
+    // null for one call -- the meeting reconnect/ending state the review
+    // named as the trigger for m_ctrl going null mid-press if
+    // resolve_roster_change() ever reassigns it without an m_session_live
+    // guard. Off by default so every pre-existing test is unaffected.
+    bool controller_returns_null = false;
     ZOOMSDK::IMeetingTalkbackController *GetMeetingTalkbackController() override
-    { return &ctrl; }
+    { return controller_returns_null ? nullptr : &ctrl; }
     ZOOMSDK::IMeetingParticipantsController *GetMeetingParticipantsController() override
     { return &participants; }
 
@@ -835,6 +841,21 @@ int main()
         check(svc.ctrl.invited.size() == 2,
               "TALKBACK_ERROR_ALREADY_EXIST WAS TREATED AS A FAILURE -- Sarah "
               "was re-invited into a channel the SDK already says she is in");
+        // Fix round 1: the invite-count check above by itself is NOT enough
+        // to prove ALREADY_EXIST landed in `present` rather than `failed` --
+        // M1's fix (this same round) makes both suppress re-invites
+        // identically, so a mutation routing ALREADY_EXIST to the failure
+        // branch left the check above green. `members_present_for_target`
+        // is the one place the two are NOT the same: `chan_id(1)` is the
+        // all-talent channel (the ALREADY_EXIST response), and only "all"
+        // matches an all-talent channel by target.
+        std::size_t present = 0, total = 0;
+        tb.members_present_for_target(kTalkbackAllTalentTarget, &present, &total);
+        check(present == 1 && total == 1,
+              "TALKBACK_ERROR_ALREADY_EXIST DID NOT MARK THE MEMBER PRESENT "
+              "-- it was treated as a gate (M1's `failed`) instead of "
+              "confirmed presence (`present`), which invite-count alone "
+              "cannot distinguish");
 
         // Sarah drops (onUserLeft) and rejoins under a NEW session id
         // (onUserJoin) -- the realistic case, since ids are meeting-scoped
@@ -869,8 +890,9 @@ int main()
               "quietly drop the invite");
     }
 
-    // -- Task 4: roster re-resolution never creates, and defers to a busy
-    // probe instead of racing its driving thread's SDK calls -----------------
+    // -- Task 4: roster re-resolution defers to a busy probe instead of
+    // racing its driving thread's SDK calls, issuing neither an invite nor a
+    // create -------------------------------------------------------------
     {
         FakeMeetingService svc;
         EngineTalkback tb;
@@ -884,16 +906,221 @@ int main()
         svc.participants.users.push_back(make_user(3001, "Sarah"));
         tb.resolve_roster_change(&svc);
         check(svc.ctrl.creates == creates_before_roster_event,
-              "ROSTER RE-RESOLUTION ISSUED A CreateChannel -- the ruling is "
-              "invite-only; a channel must already exist from nomination "
-              "time, and CreateChannel is command-loop-thread-only under the "
-              "arbiter's single-outstanding-create rule");
+              "ROSTER RE-RESOLUTION ISSUED A CreateChannel while the probe "
+              "was busy");
         check(svc.ctrl.invited.empty(),
               "roster re-resolution invited while the probe's ladder was "
               "still live -- Begin/Add/Execute sequences on two threads is "
               "the exact hazard tick()'s own inventory documents");
 
         tb.tick();   // settle the probe so the object can be destroyed cleanly
+    }
+
+    // -- Fix round 1, M2: "never creates" pinned on the LIVE invite path,
+    // not just behind the busy refusal -------------------------------------
+    // The block above proves resolve_roster_change() creates nothing when it
+    // does NOTHING AT ALL (refused for being busy) -- that pins "a refused
+    // resolution creates nothing", not "resolution creates nothing". This
+    // block runs the function to completion, with a present nominee it
+    // actually invites, and checks the create counter across THAT.
+    // Mutation-proved below main(): inserting a CreateChannel immediately
+    // before the invite loop left the busy-path block above green while this
+    // one catches it.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+        const int creates_before_resolution = svc.ctrl.creates;
+
+        svc.participants.users.push_back(make_user(3101, "Sarah"));
+        tb.resolve_roster_change(&svc);
+        check(svc.ctrl.invited.size() == 2,
+              "the setup for the M2 regression test did not actually invite "
+              "-- this block is meaningless if nothing was invited");
+        check(svc.ctrl.creates == creates_before_resolution,
+              "A SUCCESSFUL ROSTER RESOLUTION THAT INVITES ALSO CREATED -- "
+              "the invite-only ruling must hold on the path that actually "
+              "does the work, not just behind the busy refusal");
+    }
+
+    // -- Fix round 1, C1 (CRITICAL): a leave BEFORE the invite response
+    // arrives no longer wedges the rejoin, and the stale response for the
+    // dead id no longer marks the new presence stint "present" --------------
+    // Sequence B from the review: join -> invite -> leave before the
+    // response -> rejoin under a new id. The new id's uid-based prune (the
+    // fast trigger; the deadline is the backstop for when no roster event
+    // ever reports the departure) must clear the stale pending entries
+    // immediately on the leave event, so the rejoin invites again rather
+    // than staying suppressed forever.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+
+        svc.participants.users.push_back(make_user(4001, "Sarah"));
+        tb.resolve_roster_change(&svc);
+        check(svc.ctrl.invited.size() == 2,
+              "Sarah's join did not invite her into both her channels");
+
+        // She leaves BEFORE either onChannelUserJoinResponse ever arrives --
+        // the two pending entries for uid 4001 are still outstanding.
+        svc.participants.users.clear();
+        tb.resolve_roster_change(&svc);   // onUserLeft
+
+        // She rejoins under a brand new id.
+        svc.participants.users.push_back(make_user(4002, "Sarah"));
+        tb.resolve_roster_change(&svc);   // onUserJoin
+        check(svc.ctrl.invited.size() == 4,
+              "A REJOIN AFTER AN UNANSWERED INVITE WAS PERMANENTLY SUPPRESSED "
+              "-- the stale pending entries for the OLD id must be pruned the "
+              "moment that id leaves the roster, not left to block the NAME "
+              "forever");
+
+        // The stale responses for the dead id (4001) finally arrive. They
+        // must not be able to mark "Sarah" present -- the pending entries
+        // are already gone (pruned above), so these fall through to the
+        // "channel_untracked"/mismatch paths and touch nothing. If they DID
+        // still match, the fresh invites issued for 4002 above would double
+        // up or the count would be inconsistent; asserting the count again
+        // after feeding them is the check that they were inert.
+        tb.onChannelUserJoinResponse(chan_id(1).c_str(), 4001, kOk);
+        tb.onChannelUserJoinResponse(chan_id(2).c_str(), 4001, kOk);
+        tb.resolve_roster_change(&svc);
+        check(svc.ctrl.invited.size() == 4,
+              "A STALE RESPONSE FOR A DEAD ID RE-TRIGGERED AN INVITE OR "
+              "CONFUSED THE PENDING TABLE");
+    }
+
+    // -- Fix round 1, M1 (Major): a permanently-failing invite is attempted
+    // exactly once per presence stint, and retried only on that person's
+    // next join transition -------------------------------------------------
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        check(tb.nominate(&svc, {"Ivan"}), "nominate refused a one-name plan");
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+
+        svc.participants.users.push_back(make_user(5001, "Ivan"));
+        tb.resolve_roster_change(&svc);
+        check(svc.ctrl.invited.size() == 2, "Ivan's join did not invite him");
+
+        // Both invites come back permanently rejected.
+        static const IMeetingTalkbackCtrlEvent::TalkbackError kNoPermission =
+            IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_NOPERMISSION;
+        tb.onChannelUserJoinResponse(chan_id(1).c_str(), 5001, kNoPermission);
+        tb.onChannelUserJoinResponse(chan_id(2).c_str(), 5001, kNoPermission);
+
+        // Five more roster events for the SAME presence stint -- the shape
+        // onUserAudioStatusChange/onUserVideoStatusChange produce on every
+        // mute and camera toggle by anyone in the meeting, not just Ivan.
+        for (int i = 0; i < 5; ++i) tb.resolve_roster_change(&svc);
+        check(svc.ctrl.invited.size() == 2,
+              "A PERMANENTLY FAILING INVITE WAS RETRIED ON EVERY ROSTER "
+              "EVENT -- a genuine gate (IsSupportTalkback() == false, most "
+              "commonly) must be attempted once per presence stint, not "
+              "spammed on every mute/camera toggle in the meeting");
+
+        // He leaves and rejoins -- the one signal that plausibly changes the
+        // outcome -- and gets a fresh attempt.
+        svc.participants.users.clear();
+        tb.resolve_roster_change(&svc);
+        svc.participants.users.push_back(make_user(5002, "Ivan"));
+        tb.resolve_roster_change(&svc);
+        check(svc.ctrl.invited.size() == 4,
+              "A REJOIN AFTER A PERMANENT FAILURE DID NOT GET A FRESH INVITE "
+              "ATTEMPT");
+    }
+
+    // -- Fix round 1, M3 (Major): a roster event mid-press does not null
+    // m_ctrl for the rest of the press ---------------------------------------
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+
+        ShmRegion region{};
+        const std::string region_name = "ZoomObsPluginTest_talkback_m3";
+        check(shm_region_create(region, region_name,
+                                shm_audio_region_bytes(kTalkbackSlotBytes)),
+              "the test could not create a talkback ring region");
+        talkback_ring_init(static_cast<ShmAudioHeader *>(region.ptr), 48000, 1);
+        check(tb.open_audio(region_name, 48000, 1),
+              "the engine refused to open the test's talkback ring");
+        check(tb.session_start(&svc, "Sarah"),
+              "keying Sarah's private channel was refused");
+        check(tb.session_live(), "the key press did not report live");
+
+        // Simulate the reconnect/ending state the review describes:
+        // GetMeetingTalkbackController() would now return null if
+        // resolve_roster_change() called it.
+        svc.controller_returns_null = true;
+        svc.participants.users.push_back(make_user(6001, "Someone Else"));
+        tb.resolve_roster_change(&svc);   // a roster event mid-press
+
+        // m_ctrl must still be the ORIGINAL, valid controller: a buffer sent
+        // now must still reach Zoom, not silently become a no_channel_drops
+        // for the rest of the press.
+        int16_t pcm[480] = {0};
+        pcm[0] = 999;
+        check(talkback_ring_publish(region.ptr, pcm, sizeof(pcm), 1),
+              "the test could not publish a buffer into the ring");
+        const size_t sends_before = svc.ctrl.sends.size();
+        tb.drain_audio();
+        check(svc.ctrl.sends.size() == sends_before + 1,
+              "A ROSTER EVENT MID-PRESS NULLED m_ctrl -- the rest of the "
+              "press silently stopped reaching Zoom");
+
+        tb.session_stop();
+        check(svc.ctrl.volumes.size() >= 1,
+              "session_stop() could not restore the duck -- m_ctrl went null "
+              "mid-press");
+        tb.close_audio();
+        shm_region_destroy(region);
+    }
+
+    // -- Fix round 1, M4 (Major): a CHANNEL-side leave (not a meeting leave)
+    // decrements `present` and makes the person re-inviteable into THAT
+    // channel -----------------------------------------------------------
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);   // all-talent
+        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);   // Sarah private
+
+        svc.participants.users.push_back(make_user(7001, "Sarah"));
+        tb.resolve_roster_change(&svc);
+        check(svc.ctrl.invited.size() == 2, "Sarah's join did not invite her");
+        tb.onChannelUserJoinResponse(chan_id(1).c_str(), 7001, kOk);
+        tb.onChannelUserJoinResponse(chan_id(2).c_str(), 7001, kOk);
+
+        // Sarah stays in the MEETING throughout -- this is a channel-side
+        // removal (host action / Zoom-side eviction), not a departure
+        // resolve_roster_change()'s roster diff would ever see.
+        tb.onChannelUserLeaveResponse(chan_id(1).c_str(), 7001, kOk);
+
+        // Re-resolving with Sarah still in the meeting must invite her back
+        // into channel 1 ONLY -- channel 2 still has her confirmed present.
+        tb.resolve_roster_change(&svc);
+        check(svc.ctrl.invited.size() == 3,
+              "A CHANNEL-SIDE LEAVE DID NOT DECREMENT `present` -- Sarah was "
+              "never re-invited into the channel she was removed from, and "
+              "\"N of M present\" would overstate her membership forever");
+        check(svc.ctrl.invited.back().first == utf8_of(chan_id(1).c_str()),
+              "the re-invite landed on the wrong channel");
+
+        // A leave for someone not present in a channel (already handled, or
+        // a stray/duplicate response) must be a no-op, not a crash or a
+        // spurious decrement.
+        tb.onChannelUserLeaveResponse(chan_id(1).c_str(), 7001, kOk);
+        tb.onChannelUserLeaveResponse(chan_id(9).c_str(), 9999, kOk);
     }
 
     if (failures == 0)

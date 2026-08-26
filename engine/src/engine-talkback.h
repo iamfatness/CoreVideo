@@ -129,6 +129,22 @@ public:
     void session_stop();
     bool session_live() const;
 
+    // Fix round 1: the same "N of M present" computation session_start()'s
+    // "session_live" report line makes, exposed as a direct, read-only
+    // query instead of only a pipe line. Added because the fix-round review
+    // (M1) found that an unchanged invite count alone cannot distinguish a
+    // CONFIRMED member (TalkbackProvisionedChannel::present) from a member
+    // this file merely stopped retrying after a permanent gate
+    // (TalkbackProvisionedChannel::failed) -- both suppress re-invites
+    // identically, so neither the ALREADY_EXIST-is-success test nor a future
+    // one could tell "present" from "gated" by invite count alone. Sums
+    // across every provisioned channel matching `target`
+    // (talkback_channel_serves_target()), same as session_start(); takes
+    // m_chan_mtx like every other read of this table. `*present`/`*total`
+    // are left at 0 if `target` matches no provisioned channel.
+    void members_present_for_target(const std::string &target,
+                                    std::size_t *present, std::size_t *total) const;
+
     // ── Pre-provisioned channels (Task 2, 2026-08-25) ───────────────────────
     // Computes talkback_plan(nominees) (src/talkback-plan.h) and provisions
     // every channel it decides on, so a later key press only SELECTS an
@@ -204,26 +220,73 @@ public:
     // (nominate()/nomination_create_next()), specifically so nothing on this
     // path ever needs a create -- CreateChannel is command-loop-thread-only
     // under the arbiter's single-outstanding-create rule
-    // (src/talkback-channel-owner.h), and while this function happens to also
-    // run on the command-loop thread (see the THREADING comment on the audio
-    // path below -- the roster callbacks are SDK callbacks, and on Windows
-    // this engine's main loop is the SDK's message-pump thread), the
-    // arbiter's one-outstanding-create invariant has no way to serialize a
-    // create issued from a roster burst against one issued from a nominate()
-    // command, and this function must never need to try. If a name has no
-    // channel to join, that is a planning gap for the operator to fix with a
-    // fresh nominate() -- report it, never create one here.
+    // (src/talkback-channel-owner.h), and this function must never need to
+    // try. If a name has no channel to join, that is a planning gap for the
+    // operator to fix with a fresh nominate() -- report it, never create one
+    // here. (Fix round 1, M2: this was previously pinned only behind the
+    // has_pending_work() refusal below, where the function does nothing at
+    // all -- a mutant `CreateChannel` inserted on the LIVE invite path left
+    // all 65 tests green. A second test now asserts the ruling on a
+    // resolution that actually invites.)
     //
-    // Idempotent: presence is tracked per provisioned channel
-    // (TalkbackProvisionedChannel::present, updated here and by the async
-    // invite responses onChannelUserJoinResponse now correlates -- see
-    // TALKBACK_ERROR_ALREADY_EXIST's handling there), so re-running this with
-    // nothing changed invites nobody twice and reports nothing again. A burst
-    // of the five callbacks for the SAME underlying change re-derives the
-    // same "nothing new" answer every time.
+    // TWO GUARANTEES, from two different sources -- do not conflate them.
+    // (1) SERIALIZATION with the command loop: on Windows, the five roster
+    // callbacks and the command loop are the SAME THREAD --
+    // ipc_read_line_with_message_pump() (main.cpp) pumps the SDK's messages
+    // ON the command-loop thread, the same fact the audio path's THREADING
+    // comment already relies on. So this function can only ever run BETWEEN
+    // command-loop turns, never inside one: the interleaving with
+    // nominate()'s own ladder is TEMPORAL (which roster event lands between
+    // which two responses), not concurrent, and there is no data race to
+    // reason about with the command loop itself. (2) m_chan_mtx around every
+    // access to m_provisioned_channels/m_nomination_pending_invites/
+    // TalkbackProvisionedChannel::present exists for a DIFFERENT reason and
+    // is NOT redundant with (1): the probe's tick() driving thread is a
+    // genuine second thread, has_pending_work() only excludes it while it is
+    // known to be running, and any future platform or future change that
+    // makes the roster callbacks arrive off the command-loop thread inherits
+    // this file's cross-thread state, not just its single-thread ordering.
+    // Keep both: (1) is what makes today's interleaving reasoned about
+    // (below and in the Task 4 review's Q4), (2) is what keeps that
+    // reasoning from silently depending on today's thread model.
     //
-    // Gated on has_pending_work(), same as nominate()/session_start(): this
-    // reassigns m_svc/m_ctrl and, when it invites, runs
+    // Idempotent, with two independent forms of idempotence that are easy to
+    // conflate:
+    //   * A confirmed presence (TalkbackProvisionedChannel::present, set by
+    //     onChannelUserJoinResponse on TALKBACK_ERROR_OK or
+    //     TALKBACK_ERROR_ALREADY_EXIST) is never re-invited while the person
+    //     stays in the meeting.
+    //   * A CONFIRMED FAILURE (TalkbackProvisionedChannel::failed, fix round
+    //     1, M1) is ALSO never re-invited while the person stays in the
+    //     meeting -- a permanent gate (IsSupportTalkback() == false, most
+    //     commonly) must not be retried on every roster event, and two of
+    //     the five callbacks (onUserAudioStatusChange, onUserVideoStatusChange)
+    //     fire on every mute and every camera toggle by anyone in the
+    //     meeting, not just on an actual roster change. `failed` is cleared
+    //     ONLY when the person's name actually leaves the roster -- a
+    //     person-scoped state change is the only signal that plausibly
+    //     changes the outcome; a timer would just space out the same retries
+    //     without ever answering whether retrying helps.
+    // A burst of the five callbacks for the SAME underlying change therefore
+    // invites (or fails to invite) exactly once, and reports nothing extra,
+    // whether that one outcome is success or a permanent gate.
+    //
+    // FIX ROUND 1, C1 (CRITICAL): a pending invite (m_nomination_pending_invites)
+    // is now swept for two independent reasons before anything else runs --
+    // see that member's header comment for the two triggering sequences this
+    // closes and why one alone is not enough.
+    //
+    // FIX ROUND 1, M3 (Major): m_svc/m_ctrl are reassigned ONLY when no
+    // session is live. probe() and nominate() both refuse outright while
+    // m_session_live specifically because they touch these fields; this
+    // function cannot refuse outright (a rejoin mid-press must still be
+    // invited), so instead it leaves the press's own pointers alone and
+    // reuses them -- see the guard's own comment below for the failure mode
+    // this closes (m_ctrl silently going null for the rest of a live press).
+    //
+    // Gated on has_pending_work() before touching m_ctrl, same as
+    // nominate()/session_start(): this reassigns m_svc/m_ctrl (when no
+    // session is live) and, when it invites, runs
     // BeginBatchInviteUsers/AddUserToInvite/ExecuteBatchInviteUsers -- the
     // same shape of Begin/Add/Execute sequence tick()'s own inventory
     // documents as unsafe to interleave, on different threads, with the
@@ -356,8 +419,15 @@ private:
     unsigned int resolve_participant(const std::string &name,
                                      ReportSink sink = ReportSink::Probe) const;
 
-    // Task 4: every display name currently in the meeting, via the same
-    // participants controller resolve_participant() uses one name at a time.
+    // Fix round 1: `(user_id, name)`, not a bare name -- see current_roster()
+    // below for why the id is now needed too.
+    struct TalkbackRosterEntry {
+        unsigned int user_id = 0;
+        std::string name;
+    };
+
+    // Task 4: every participant currently in the meeting, via the same
+    // controller resolve_participant() uses one name at a time.
     // resolve_roster_change() needs the whole roster to diff against, not a
     // single lookup. Empty if there is no meeting service, no controller, or
     // no participants list -- callers treat that the same as "nobody is
@@ -366,7 +436,16 @@ private:
     // only read m_svc, and command-loop-thread-only convention (not a lock)
     // is what makes that safe -- see m_pending_create's header comment for
     // why that convention is stated once there rather than re-argued here.
-    std::vector<std::string> current_roster_names() const;
+    //
+    // Fix round 1, C1: originally returned bare names (current_roster_names()).
+    // The id is now needed too -- resolve_roster_change()'s pending-invite
+    // sweep has to ask "is the id this invite was issued to still in the
+    // meeting", which a name-only roster cannot answer (the same name could
+    // now belong to nobody, or -- after a rename collision -- to someone
+    // else's rejoin). One participants-controller walk answers both
+    // questions; this does not add a second walk beyond what the old
+    // name-only version already did.
+    std::vector<TalkbackRosterEntry> current_roster() const;
 
     // Drains m_stray_channels and destroys each one. The caller must be the
     // only batch-destroy caller alive at that moment; the two callers that
@@ -972,6 +1051,25 @@ private:
     // the ids serving a target out of here under the lock. THE ID COPY IS
     // WHAT MAKES A KEY PRESS INSTANT -- there is no SDK call between the key
     // and the first buffer any more, which is the whole milestone.
+    // Fix round 1, M4: `present` needs the id it was confirmed under, not
+    // just the name -- onChannelUserLeaveResponse (a CHANNEL-side removal,
+    // distinct from a MEETING departure) carries (channelID, userID) and
+    // nothing else, and names are deliberately never sent to the SDK, so the
+    // id captured at confirmation time is the only key that response can be
+    // matched against without a second participants-controller lookup (which
+    // could fail anyway if the person already left the meeting entirely by
+    // the time the response arrives). The id is purely a LOCAL correlation
+    // key for THIS presence stint -- never compared against a plan, never
+    // used to decide who to invite (that is always resolve_participant()
+    // re-resolving the NAME at invite time) -- so storing it here does not
+    // reintroduce the meeting-scoped-id problem this whole file is built to
+    // avoid: a rejoin gets a brand new TalkbackPresentMember under its own
+    // fresh id, not a stale one reused.
+    struct TalkbackPresentMember {
+        std::string name;           // the plan's identity; see above
+        unsigned int user_id = 0;   // this stint's id; see above
+    };
+
     struct TalkbackProvisionedChannel {
         std::basic_string<zchar_t> channel_id_z;
         std::string channel_id;              // UTF-8, reporting only
@@ -980,18 +1078,32 @@ private:
         // Task 4: the subset of `members` this file currently believes are
         // actually in the channel -- populated by onChannelUserJoinResponse
         // when a nomination invite is confirmed (TALKBACK_ERROR_OK or
-        // TALKBACK_ERROR_ALREADY_EXIST, both treated as success), and pruned
-        // by resolve_roster_change() when a member drops out of the meeting
-        // roster entirely. NOT the same fact as "is in `members`" -- that is
-        // the PLAN, this is what Zoom has actually confirmed -- and not the
-        // same fact as "is in the meeting" either: being in the meeting and
-        // being in THIS channel are different things, and only the invite
-        // response confirms the second one. This is what session_start()'s
-        // "N of M present" report line counts, and what
-        // resolve_roster_change() reads to decide who still needs inviting
-        // (present_here && !was_present) and who has left
+        // TALKBACK_ERROR_ALREADY_EXIST, both treated as success), pruned by
+        // onChannelUserLeaveResponse on a CHANNEL-side removal (fix round 1,
+        // M4) and by resolve_roster_change() when a member drops out of the
+        // MEETING roster entirely. NOT the same fact as "is in `members`" --
+        // that is the PLAN, this is what Zoom has actually confirmed -- and
+        // not the same fact as "is in the meeting" either: being in the
+        // meeting and being in THIS channel are different things, and only
+        // an invite (or leave) response confirms which one applies. This is
+        // what session_start()'s "N of M present" report line counts, and
+        // what resolve_roster_change() reads to decide who still needs
+        // inviting (present_here && !was_present) and who has left
         // (!present_here && was_present) -- see that function's own comment.
-        std::vector<std::string> present;
+        std::vector<TalkbackPresentMember> present;
+        // Fix round 1, M1 (Major): names resolve_roster_change() invited and
+        // received a NON-OK, NON-ALREADY_EXIST response for (a permanent
+        // gate, most commonly IsSupportTalkback() == false) -- set by
+        // onChannelUserJoinResponse, cleared ONLY when the person's name
+        // leaves the roster (resolve_roster_change()'s departure branch).
+        // Gates present_here && !was_present the same way `present` does, so
+        // a permanently-failing invite is attempted exactly ONCE per
+        // presence stint rather than on every roster event -- see
+        // resolve_roster_change()'s header comment for why a person-scoped
+        // clear, not a timer, is the right trigger. Never counted in
+        // "N of M present": failing to reach someone is not the same fact as
+        // reaching them.
+        std::vector<std::string> failed;
     };
     std::vector<TalkbackProvisionedChannel> m_provisioned_channels;
 
@@ -1012,21 +1124,51 @@ private:
     // synchronously-successful ExecuteBatchInviteUsers (called from both the
     // initial provisioning loop in onCreateChannelResponse and from
     // resolve_roster_change()); onChannelUserJoinResponse erases the
-    // matching entry when its response arrives. Bounded by the number of
-    // outstanding invites -- resolve_roster_change() will not issue a
-    // second invite for a name that already has one pending, see its own
-    // comment -- so this never grows past the size of the nomination plan.
-    // An entry whose response never arrives at all (the SDK simply never
-    // calls back) is left here permanently; unlike m_pending_create's single
-    // outstanding-create slot, there is no lazy-expiry sweep for this today
-    // -- the cost of that gap is a few stray bytes per orphaned entry
-    // (bounded by the plan size), not a wedge of the feature the way a
-    // stuck arbiter slot would be, so it is accepted rather than built.
+    // matching entry when its response arrives; resolve_roster_change()'s
+    // sweep (below) erases an entry that can never usefully resolve. Bounded
+    // by the number of outstanding invites -- resolve_roster_change() will
+    // not issue a second invite for a name that already has one pending --
+    // so this never grows past the size of the nomination plan.
+    //
+    // FIX ROUND 1, C1 (CRITICAL -- the cost below was WRONG). This used to
+    // read: "An entry whose response never arrives at all ... is left here
+    // permanently ... the cost of that gap is a few stray bytes per orphaned
+    // entry ... not a wedge of the feature ... so it is accepted rather than
+    // built." That was false, and the false costing is what made accepting
+    // the gap look reasonable: the suppression check
+    // (resolve_roster_change()) keys on (channel, NAME); the only clearer
+    // (onChannelUserJoinResponse) keys on (channel, USER ID). A stuck entry
+    // for a stale id therefore blocks every future invite for that NAME
+    // forever, which is a permanent, silent suppression of the rejoin this
+    // whole feature exists to guarantee -- proved live by two sequences:
+    //   A) join -> invite -> response never arrives -> leave -> rejoin under
+    //      a new id: every later roster event finds the stale entry still
+    //      "pending" for that name and never invites the new id.
+    //   B) join -> invite -> leave BEFORE the response -> rejoin under a new
+    //      id -> the STALE response for the OLD id finally arrives, is
+    //      matched (ids are matched, not staleness-checked), and marks the
+    //      NAME present -- the operator sees "1 of 1 present" for a talent
+    //      who was never invited under the id they are actually in the
+    //      meeting with.
+    // TWO INDEPENDENT FIXES, because they close different halves: a DEADLINE
+    // (`deadline` below, swept in resolve_roster_change()'s lock scope,
+    // reusing kAwaitTimeout -- same bound tick()'s AwaitingChannel timeout
+    // and expire_stale_pending_create_locked() use for the identical "this
+    // SDK swallows responses" reason) closes sequence A; dropping any entry
+    // whose `user_id` has left the roster (checked against the same
+    // current_roster() snapshot resolve_roster_change() already has to
+    // fetch) is the SEMANTICALLY RIGHT trigger and closes sequence B
+    // immediately rather than after up to kAwaitTimeout -- an id that no
+    // longer exists in the meeting cannot receive a response that means
+    // anything. Keep both: the deadline is the backstop for "no roster event
+    // ever tells us the id left" (e.g. the meeting itself is winding down),
+    // the roster check is the fast path for the common case.
     struct TalkbackPendingInvite {
         std::basic_string<zchar_t> channel_id_z;
         unsigned int user_id = 0;
         std::string name;   // for reporting only -- never compared against
                              // the SDK, same rule as every name in this file
+        std::chrono::steady_clock::time_point deadline;
     };
     std::vector<TalkbackPendingInvite> m_nomination_pending_invites;
 

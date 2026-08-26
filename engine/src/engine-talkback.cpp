@@ -470,7 +470,17 @@ void EngineTalkback::handle_expired_create(TalkbackChannelOwner expired_owner)
         // fires against a stalled ladder's OWN partial set, because
         // nominate()'s replace path destroys any earlier COMPLETE set before
         // issuing a create. No-op when the table is empty, the common case.
-        nomination_destroy_provisioned();
+        //
+        // Fix round 3 (N6, Major): nomination_abort_ladder() (not a bare
+        // nomination_destroy_provisioned()) is what tells the plugin this
+        // ladder is over -- this was one of the three async abort paths that
+        // destroyed silently while round 2 fixed only the two SYNCHRONOUS
+        // ones inside nomination_create_next(). Its own queue-clear is
+        // redundant with the one above (harmless -- clearing an
+        // already-empty vector) but kept rather than special-cased, so this
+        // call site looks exactly like every other nomination_abort_ladder()
+        // caller.
+        nomination_abort_ladder("create_expired");
     }
 }
 
@@ -885,10 +895,6 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
             // response fall out down channel_untracked. Only a positively
             // superseded generation lands here: destroy exactly what the
             // response names, advance nothing.
-            {
-                std::lock_guard<std::mutex> lock(m_chan_mtx);
-                m_nomination_pending.clear();
-            }
             if (error == TALKBACK_ERROR_OK && channelID != nullptr) {
                 uint32_t attempts = 0;
                 const ZOOMSDK::SDKError e = destroy_channel_retrying(channelID, &attempts);
@@ -905,6 +911,22 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
                                   R"("ok":true,"reason":"no_channel_to_destroy","error":)" +
                                   std::to_string(static_cast<int>(error)));
             }
+            // Fix round 3 (N6, Major): nomination_abort_ladder() replaces the
+            // bare queue-clear this branch used to do on its own -- the
+            // review named this "the queue-clearing sibling" of the other
+            // four abort paths' nomination_destroy_provisioned() calls.
+            // Whether this is reachable at all is exactly the question the
+            // comment above (line 855) declines to answer positively OR
+            // negatively, by this file's own hard-won policy -- so it is
+            // handled exactly as fully as every path this file DOES know
+            // reaches a live operator, rather than half-handled on an
+            // argument that it cannot. `nomination_destroy_provisioned()`
+            // (called from inside nomination_abort_ladder()) is a no-op on
+            // whatever is left in m_provisioned_channels beyond the one
+            // channel already destroyed above by name -- normally nothing,
+            // per that same comment -- and the terminal report is the one
+            // thing this branch never had, on any analysis of when it fires.
+            nomination_abort_ladder("channel_stale");
             return;
         }
 
@@ -962,24 +984,20 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         }
 
         if (error != TALKBACK_ERROR_OK || channelID == nullptr) {
+            // Fix round 3 (N6, Major): this is the LIKELIER real-world abort
+            // of the two N1 originally fixed -- CreateChannel()'s synchronous
+            // return mostly validates arguments; a genuine Zoom-side failure
+            // (budget past 16 channels, permission, transport) arrives HERE,
+            // on the async callback. Kept its own rich diagnostic (the raw
+            // SDK error code) in addition to nomination_abort_ladder()'s
+            // terminal report -- that function does the "queue can never be
+            // provisioned by THIS ladder, forget it" clear and the "channel
+            // k failing must not strand 1..k-1 forever" destroy (fix round 1,
+            // M2) that used to be hand-written here, AND tells the plugin the
+            // attempt is over -- which the hand-written version never did.
             report_nomination("channel_failed",
                               R"("error":)" + std::to_string(static_cast<int>(error)));
-            // The rest of the queued plan can never be provisioned by THIS
-            // ladder -- there is nothing to resume from, and issuing the
-            // next queued CreateChannel now would be indistinguishable from
-            // a fresh attempt that happens to reuse a stale queue. Forget
-            // it; a later nominate() call starts clean.
-            {
-                std::lock_guard<std::mutex> lock(m_chan_mtx);
-                m_nomination_pending.clear();
-            }
-            // Fix round 1, M2: destroy whatever this ladder already
-            // provisioned before this failure -- without this, channel k
-            // failing left channels 1..k-1 standing forever (consuming
-            // budget, unreachable by any key) and nominate()'s
-            // "already_provisioned" gate refused every retry for the rest
-            // of the meeting.
-            nomination_destroy_provisioned();
+            nomination_abort_ladder("channel_failed");
             return;
         }
 
@@ -1707,7 +1725,8 @@ bool EngineTalkback::nomination_create_next()
         // unrelated create's whole round trip, and the plan-level ruling
         // already says nomination must not block on the arbiter.
         //
-        // Fix round 2 (N1, Major): "channels_destroyed":true is what tells
+        // Fix round 2 (N1, Major), unified in fix round 3 (N6) via
+        // nomination_abort_ladder(): "channels_destroyed":true is what tells
         // the plugin this is NOT the same "create_busy" nominate() itself
         // reports from its own early gate check (above, before the replace
         // step -- see this function's header comment) -- that one leaves the
@@ -1718,40 +1737,19 @@ bool EngineTalkback::nomination_create_next()
         // plugin cannot tell those apart from "reason" alone, which is
         // exactly what left it holding a plan for destroyed channels
         // (src/talkback-nomination.h's talkback_nomination_note_failed_after_destroy()).
-        report_nomination("nominate",
-            R"("ok":false,"reason":"create_busy","channels_destroyed":true)");
-        {
-            std::lock_guard<std::mutex> lock(m_chan_mtx);
-            m_nomination_pending.clear();
-        }
-        // Fix round 1, M2: destroy whatever was already provisioned before
-        // this refusal -- see nomination_destroy_provisioned()'s comment.
-        // Without this a plan that got as far as channel k before hitting a
-        // busy arbiter left 1..k-1 standing forever with no way to retry.
-        nomination_destroy_provisioned();
+        nomination_abort_ladder("create_busy");
         return false;
     }
 
     const ZOOMSDK::SDKError e = m_ctrl->CreateChannel(1);
     report_nomination("create_channel", R"("code":)" + std::to_string(static_cast<int>(e)));
     if (e != ZOOMSDK::SDKERR_SUCCESS) {
-        // Fix round 2 (N1, Major): this branch used to report ONLY the
-        // "create_channel" diagnostic line above, with the SDK error code --
-        // a stage line, not a terminal outcome. The plugin has no way to
-        // know a ladder is DONE except a "nominate_done"/"nominate ok:false"
-        // report, and this path was neither: it destroys whatever this
-        // ladder provisioned so far (nomination_destroy_provisioned() below)
-        // and returns false with NOTHING telling the far side the attempt is
-        // over. Emit the terminal report every abort path must have --
-        // "channels_destroyed":true for the same reason as the create_busy
-        // branch above.
-        report_nomination("nominate",
-            R"("ok":false,"reason":"create_channel_failed","channels_destroyed":true)");
-        {
-            std::lock_guard<std::mutex> lock(m_chan_mtx);
-            m_nomination_pending.clear();
-        }
-        nomination_destroy_provisioned();
+        // Fix round 2 (N1, Major), unified in fix round 3 (N6): this branch
+        // used to report ONLY the "create_channel" diagnostic line above,
+        // with the SDK error code -- a stage line, not a terminal outcome.
+        // nomination_abort_ladder() is the terminal report every abort path
+        // must have, for the same reason as the create_busy branch above.
+        nomination_abort_ladder("create_channel_failed");
         return false;
     }
     {
@@ -1860,6 +1858,29 @@ void EngineTalkback::nomination_destroy_provisioned()
                               R"("channel":")" + json_escape(channel_id_utf8) + "\"");
         }
     }
+}
+
+void EngineTalkback::nomination_abort_ladder(const std::string &reason)
+{
+    // See the header comment: this exists so a ladder-ending teardown cannot
+    // happen without the terminal report that goes with it. Clear the
+    // not-yet-created queue first (same ordering every existing call site
+    // already used), then destroy whatever WAS provisioned -- harmless as a
+    // no-op when there is nothing to destroy, which is the common case for a
+    // ladder that never got past channel 1.
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        m_nomination_pending.clear();
+    }
+    nomination_destroy_provisioned();
+    // Reported AFTER the destroy above -- outside m_chan_mtx either way, but
+    // this ordering means "channels_destroyed":true is "it's actually gone
+    // now", not merely "about to be". `reason` is always an engine-authored
+    // literal today (never participant-controlled), but json_escape() costs
+    // nothing and keeps this call site honest if that ever stops being true.
+    report_nomination("nominate",
+                      R"("ok":false,"reason":")" + json_escape(reason) +
+                      R"(","channels_destroyed":true)");
 }
 
 void EngineTalkback::invite_nominee(const std::basic_string<zchar_t> &channel_id_z,
@@ -2632,6 +2653,18 @@ void EngineTalkback::debug_expire_pending_invites_for_test()
     std::lock_guard<std::mutex> lock(m_chan_mtx);
     const auto past = std::chrono::steady_clock::now() - std::chrono::seconds(1);
     for (auto &pi : m_nomination_pending_invites) pi.deadline = past;
+}
+
+void EngineTalkback::debug_expire_pending_create_for_test()
+{
+    // Only forces the DEADLINE into the past -- see the header comment. The
+    // next lazy self-heal (nominate()/nomination_create_next()/probe()) reads
+    // m_nomination_create_deadline the same way it reads a real one, so the
+    // whole expire_stale_pending_create_locked()/handle_expired_create() path
+    // runs exactly as it would after a real kAwaitTimeout wait.
+    const auto past = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+    m_nomination_create_deadline.store(past.time_since_epoch().count(),
+                                       std::memory_order_release);
 }
 
 bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,

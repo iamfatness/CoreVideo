@@ -323,7 +323,9 @@ Every one of these is documented at length where it lives; the list is the map.
   existed (a discarded `bool` at the `main.cpp` call site is how a
   no-terminal-report path could exist undetected at all). Fixed on both
   ends: the engine now emits `"nominate","ok":false,"channels_destroyed":true`
-  on both abort branches -- a field, not a reason string, because
+  on both of `nomination_create_next()`'s SYNCHRONOUS abort branches --
+  **incomplete, see fix round 3 below: three more ASYNC abort branches had
+  the identical gap** -- a field, not a reason string, because
   `nominate()`'s OWN early gate reports the IDENTICAL `"create_busy"` reason
   for a refusal that does NOT destroy anything; reason strings collide, the
   field does not. The plugin maps `channels_destroyed:true` to a NEW
@@ -352,6 +354,61 @@ Every one of these is documented at length where it lives; the list is the map.
   comment in `talkback-controller.cpp` that claimed a mid-ladder key press
   "falls through to `session_start()`'s async refusal, unchanged" -- it does
   not; it is refused locally too, from whatever the last confirmed plan says.
+- **The operator surface, Task 5 fix round 3**: round 2 fixed N1 on the two
+  branches the review named by line number and not on the disease.
+  `nominate()`'s ladder can also abort ASYNCHRONOUSLY, after `nominate()`
+  itself has already returned true: `onCreateChannelResponse`'s
+  `channel_failed` (a genuine Zoom-side rejection -- budget past 16 channels,
+  permission, transport -- and the LIKELIER real-world failure, since
+  `CreateChannel()`'s synchronous return mostly just validates arguments),
+  `channel_stale` (a late response for an already-abandoned create), and
+  `handle_expired_create()`'s Nomination arm (a swallowed response, self-healed
+  lazily by a later `nominate()`/`probe()` call) all clear the queue, destroy
+  what was provisioned, and reported only a diagnostic stage -- N6, the same
+  Major, on three more structurally identical branches. Ruling: stop patching
+  branches one at a time and make the omission inexpressible. Every one of
+  these paths (or "its queue-clearing sibling", `channel_stale`'s narrower
+  one-channel destroy) now funnels through ONE new function,
+  `EngineTalkback::nomination_abort_ladder(reason)`
+  (`engine/src/engine-talkback.cpp`): clear the queue, destroy what's
+  provisioned, THEN report `"nominate","ok":false,"channels_destroyed":true`
+  -- a sixth future abort branch cannot skip the report without also skipping
+  the teardown, because there is no longer a separate step to forget. The
+  engine-side pin the round-2 re-review found totally missing ("nothing pins
+  the engine side... mutant (c) survives") is a new `EngineIpc::test_sink()`
+  hook (`engine/src/engine-writer.h`, TEST-ONLY, no production call site) that
+  makes a `report_nomination()` line observable at all from
+  `CoreVideoEngineTalkbackSelectTest`, plus a sibling of
+  `debug_expire_pending_invites_for_test()` for the CREATE-side deadline
+  (`debug_expire_pending_create_for_test()`) so the swallowed-response
+  self-heal can be driven without a real 10s wait. Three new tests drive the
+  synchronous `CreateChannel()` failure, the async `channel_failed` response,
+  and the self-healed swallowed create -- all three fail if
+  `nomination_abort_ladder()`'s report is deleted OR if a call site bypasses
+  it entirely (both mutation-proved). `channel_stale` was wired into the same
+  function per the ruling and per this file's own standing policy (never
+  assert a branch unreachable -- two Majors have lived behind exactly that
+  claim in this feature already) but is NOT covered by a passing/failing
+  test: reaching it requires `onCreateChannelResponse` to see
+  `owner==Nomination` with a stale `outstanding_generation` simultaneously,
+  and every code path that bumps the generation (`talkback_new_ladder()`,
+  gated on `owner==None`; `talkback_expire()`, which sets `owner=None` in the
+  same transition) appears to make that combination unreachable through the
+  exposed engine API as the code stands today -- consistent with, not
+  contradicting, the file's refusal to assert it can't happen. N7 (this
+  round's own regression): `stop_for_reconnect()` is not on every path to a
+  fresh `start()` -- `monitor_loop()` declining recovery (policy disabled,
+  auth failure, max attempts, no stored session) and
+  `fail_after_init_retries_exhausted()` both clear `m_running` directly, and
+  the operator's next manual dock Join calls `start()` with nothing in
+  between, reopening F2/N1's exact symptom on a third trigger. Restored
+  `start()`'s own reset -- AFTER its joins this time (N2's actual bug was the
+  position, not the existence, of that reset) -- alongside
+  `stop_for_reconnect()`'s; both are idempotent so keeping both costs
+  nothing. N8: fixed the third surviving copy of the stale "falls through to
+  `session_start()`'s async refusal" claim, in `src/talkback-plan.h`'s own
+  header comment (N3 had corrected CLAUDE.md and `talkback-controller.cpp`
+  but missed this one, which the controller comment pointed straight at).
 
 ## Live testing against a real meeting
 

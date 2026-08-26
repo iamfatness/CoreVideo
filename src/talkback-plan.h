@@ -233,9 +233,14 @@ inline std::string talkback_nominate_sentinel_collision(
 // that would have worked. The one case this CANNOT see is
 // "provisioning_incomplete" -- a target whose channel the nomination ladder
 // is still creating -- because the plugin is only ever told the finished
-// PLAN, never the ladder's in-flight progress; that case still relies on
-// session_start()'s own async refusal (see TalkbackController::evaluate()'s
-// grace period).
+// PLAN, never the ladder's in-flight progress. Task 5 fix round 2 (N3): that
+// case does NOT merely fall through to session_start()'s own async refusal --
+// key_on() (src/talkback-controller.cpp) refuses it LOCALLY too, from
+// whichever plan is currently CONFIRMED (src/talkback-nomination.h): during a
+// first-ever nomination's whole ladder `requested` is still empty, so every
+// target is refused with "No one has been nominated yet"; during a
+// re-nomination's ladder the PREVIOUS plan's names still correctly fall
+// through while brand-new names are refused as not-provisioned.
 //
 // `requested` is the nominee list the plugin itself sent with the last
 // talkback_nominate; `uncovered_private` is the engine's own report of who

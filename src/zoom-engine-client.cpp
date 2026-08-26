@@ -479,21 +479,42 @@ bool ZoomEngineClient::start(const std::string &jwt_token,
     m_authenticated.store(false, std::memory_order_release);
     m_media_active.store(false, std::memory_order_release);
     m_awaiting_admission.store(false, std::memory_order_release);
-    // Task 5 fix round 2 (N2): the nomination-record reset for an engine
-    // restart used to live HERE, before the joins immediately below --
-    // reachable on the crash path (monitor_loop() clears m_running without
-    // joining the reader, then recovery calls start()), where a dead
-    // engine's already-queued "nominate_done" could still be handled by the
-    // not-yet-joined reader and commit AFTER this reset ran, leaving a
-    // freshly restarted engine with zero channels holding a stale confirmed
-    // plan. Moved to stop_for_reconnect() below instead: every restart on
-    // every path (explicit stop(), reconnect's execute_retry()) calls it
-    // BEFORE calling start() again, and it already joins both threads
-    // before touching per-session state -- the rule this file states three
-    // lines below and the reset must obey too.
+    // Task 5 fix round 2 (N2): a nomination-record reset used to live HERE,
+    // before the joins immediately below -- reachable on the crash path
+    // (monitor_loop() clears m_running without joining the reader, then
+    // recovery calls start()), where a dead engine's already-queued
+    // "nominate_done" could still be handled by the not-yet-joined reader and
+    // commit AFTER a reset run this early, leaving a freshly restarted engine
+    // with zero channels holding a stale confirmed plan. That bug was the
+    // POSITION, not the existence of a reset here -- see the one after the
+    // joins below, and stop_for_reconnect()'s own copy, for fix round 3 (N7)
+    // restoring it correctly.
     // Join threads from any previous session (e.g. after a crash).
     if (m_reader.joinable())  m_reader.join();
     if (m_monitor.joinable()) m_monitor.join();
+
+    // Task 5 fix round 3 (N7): a SECOND world-reset of the nomination record,
+    // alongside stop_for_reconnect()'s (below). Both are needed, and both are
+    // plain `= TalkbackNominationPlan{}`, so having both costs nothing:
+    // stop_for_reconnect() is NOT on every path to a fresh start() --
+    // monitor_loop() clears m_running directly (without calling it) when
+    // recovery is DECLINED (policy disabled, auth failure, max attempts, no
+    // stored session, or the m_user_leaving race), and so does
+    // fail_after_init_retries_exhausted() (its own comment: clearing
+    // m_running first is what "makes a subsequent start() work"). On both,
+    // the operator's next action is a manual dock Join, which calls start()
+    // directly -- no stop()/stop_for_reconnect() in between -- and round 2's
+    // fix left exactly that path holding the dead engine's confirmed plan
+    // again (N7, the same F2/N1 symptom on a third trigger). Placed AFTER the
+    // joins above, unlike round 1's original mistake at this same call site:
+    // the previous session's reader thread owns this field and can still be
+    // inside handle_event() committing a queued "nominate_done" until it is
+    // joined.
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        talkback_nomination_reset(m_talkback_nomination_status);
+        m_talkback_nomination_pending = TalkbackNominationPending{};
+    }
 
     // Fresh engine session: no init retry is owed. This must come AFTER the
     // joins above — the previous session's reader thread owns these fields and
@@ -623,7 +644,13 @@ void ZoomEngineClient::stop_for_reconnect()
     // where round 1 had the equivalent block in start() -- see the comment
     // there): the previous session's reader thread owns this field and can
     // still be inside handle_event() committing a queued "nominate_done"
-    // until it is joined.
+    // until it is joined. Fix round 3 (N7): start() ALSO resets this, after
+    // its own joins -- not every path to a fresh start() passes through here
+    // first (monitor_loop() declining recovery, or
+    // fail_after_init_retries_exhausted(), both clear m_running directly),
+    // and a manual dock Join calls start() with nothing in between. Both
+    // resets are idempotent plain `= TalkbackNominationPlan{}`, so keeping
+    // both costs nothing and covers every trigger.
     {
         std::lock_guard<std::mutex> lk(m_mtx);
         talkback_nomination_reset(m_talkback_nomination_status);

@@ -51,6 +51,7 @@
 // talkback-create-state-test.cpp, which is the layer that CAN be driven
 // exhaustively.
 #include "engine-talkback.h"
+#include "engine-writer.h"   // EngineIpc::test_sink() -- Task 5 fix round 3 (N6)
 #include "talkback-ring.h"   // the tap side of the ring, so drain_audio() has real audio
 
 #include <iostream>
@@ -80,6 +81,34 @@ static void check(bool ok, const char *message)
         std::cerr << "FAIL: " << message << "\n";
         ++failures;
     }
+}
+
+// Task 5 fix round 3 (N6): substring matching, not real JSON parsing --
+// matches this file's own low-tech style (no JSON library anywhere in this
+// TU) and is all that is needed: report_nomination() builds these lines by
+// concatenation with a fixed field order, so a substring check is exactly as
+// precise as the producer's own guarantee.
+static bool line_has(const std::string &line, const std::string &needle)
+{
+    return line.find(needle) != std::string::npos;
+}
+
+// Counts captured E2P lines matching the terminal "this nomination ladder is
+// over AND it took the standing set down with it" shape --
+// nomination_abort_ladder()'s report, and the ONLY thing that shape. Neither
+// nominate()'s seven early refusals (never carry channels_destroyed) nor
+// "nominate_done" (carries no "ok":false) can match this.
+static int count_abort_reports(const std::vector<std::string> &lines)
+{
+    int n = 0;
+    for (const auto &l : lines) {
+        if (line_has(l, "\"cmd\":\"talkback_nominate\"") &&
+            line_has(l, "\"stage\":\"nominate\"") &&
+            line_has(l, "\"ok\":false") &&
+            line_has(l, "\"channels_destroyed\":true"))
+            ++n;
+    }
+    return n;
 }
 
 // zchar_t is wchar_t on Windows and char elsewhere, so channel ids are built a
@@ -131,8 +160,18 @@ public:
 
     ZOOMSDK::SDKError SetEvent(ZOOMSDK::IMeetingTalkbackCtrlEvent *) override
     { return ZOOMSDK::SDKERR_SUCCESS; }
+    // Task 5 fix round 3 (N6): lets a test drive CreateChannel()'s
+    // SYNCHRONOUS failure path (nomination_create_next()'s CreateChannel-!=-
+    // SUCCESS abort) without a real SDK error -- the round-2 re-review's
+    // mutant (c), "nothing pins the engine side". 1-based index of the
+    // `creates` call to fail; -1 (default) never fails.
+    int fail_create_call = -1;
     ZOOMSDK::SDKError CreateChannel(unsigned int) override
-    { ++creates; return ZOOMSDK::SDKERR_SUCCESS; }
+    {
+        ++creates;
+        if (creates == fail_create_call) return ZOOMSDK::SDKERR_UNKNOWN;
+        return ZOOMSDK::SDKERR_SUCCESS;
+    }
     ZOOMSDK::IMeetingTalkbackChannel *GetChannelByID(const zchar_t *) override
     { return nullptr; }
     ZOOMSDK::IList<ZOOMSDK::IMeetingTalkbackChannel *> *GetChannelList() override
@@ -1187,6 +1226,96 @@ int main()
         // spurious decrement.
         tb.onChannelUserLeaveResponse(chan_id(1).c_str(), 7001, kOk);
         tb.onChannelUserLeaveResponse(chan_id(9).c_str(), 9999, kOk);
+    }
+
+    // -- Task 5 fix round 3 (N6, Major): every ladder-abort path must emit
+    // exactly one terminal report carrying channels_destroyed:true. The
+    // round-2 re-review found this fixed on two of five structurally
+    // identical branches; these three tests are the engine-side pin the
+    // review named as missing entirely ("(c) nothing pins the engine side")
+    // -- EngineIpc::test_sink() (engine-writer.h) is what makes a
+    // report_nomination() line observable from a host test at all. ---------
+
+    // Synchronous abort: CreateChannel() itself returns non-SUCCESS
+    // (nomination_create_next()'s :1735 branch) -- the round-2 re-review's
+    // mutant (c) target. Mostly validates arguments in practice, so this is
+    // the LESS likely of the two nomination_create_next() aborts, but it was
+    // already "fixed" with no test able to notice a regression.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        std::vector<std::string> lines;
+        EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
+
+        svc.ctrl.fail_create_call = 1;   // fail the very first CreateChannel()
+        check(!tb.nominate(&svc, {"Sarah"}),
+              "nominate() did not report failure when CreateChannel() itself failed");
+        check(count_abort_reports(lines) == 1,
+              "a synchronous CreateChannel() failure did not emit exactly one "
+              "terminal abort report with channels_destroyed:true");
+
+        EngineIpc::test_sink() = nullptr;
+    }
+
+    // Async abort: the create response arrives with an error
+    // (onCreateChannelResponse's channel_failed branch) -- the LIKELIER
+    // real-world failure per the re-review: a genuine Zoom-side rejection
+    // (budget, permission, transport) arrives here, not on CreateChannel()'s
+    // synchronous return. "Sarah" plans 2 channels (all-talent + private);
+    // channel 1 succeeds and is provisioned, channel 2's response fails.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        std::vector<std::string> lines;
+        EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
+
+        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+        check(svc.ctrl.destroyed.empty(),
+              "setup: channel 1 was destroyed before the failure even arrived");
+        tb.onCreateChannelResponse(chan_id(2).c_str(),
+            IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_NOPERMISSION);
+
+        check(count_abort_reports(lines) == 1,
+              "an async channel_failed response did not emit exactly one "
+              "terminal abort report with channels_destroyed:true");
+        // nomination_abort_ladder() must also have actually destroyed
+        // whatever channel 1's success DID provision -- the report alone,
+        // with the channel still standing, would be a lie in the other
+        // direction.
+        check(!svc.ctrl.destroyed.empty(),
+              "channel_failed reported channels_destroyed:true but never "
+              "destroyed the channel this ladder had already provisioned");
+
+        EngineIpc::test_sink() = nullptr;
+    }
+
+    // Async abort: a swallowed create response, self-healed by a later
+    // nominate() call (handle_expired_create()'s Nomination arm, via
+    // debug_expire_pending_create_for_test() -- the sibling of
+    // debug_expire_pending_invites_for_test(), for the OTHER expiry this
+    // file has). No response is ever delivered for "Sarah"'s first channel;
+    // the deadline is forced into the past, and the SECOND nominate() call's
+    // own lazy self-heal is what discovers and reports the abandonment.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        std::vector<std::string> lines;
+        EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
+
+        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        check(svc.ctrl.creates == 1, "setup: the first channel's create was not issued");
+        tb.debug_expire_pending_create_for_test();
+        // A denominate (empty list) is enough to trigger the self-heal at
+        // the top of nominate() -- it runs before this call's own plan is
+        // even computed, so an empty plan afterward does not mask it.
+        check(tb.nominate(&svc, {}), "an empty-list denominate was refused");
+
+        check(count_abort_reports(lines) == 1,
+              "a swallowed create response's lazy self-heal did not emit "
+              "exactly one terminal abort report with channels_destroyed:true");
+
+        EngineIpc::test_sink() = nullptr;
     }
 
     if (failures == 0)

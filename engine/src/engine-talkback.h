@@ -158,6 +158,17 @@ public:
     // unpinned -- 65/65 stayed green with it silently doing nothing.
     void debug_expire_pending_invites_for_test();
 
+    // Task 5 fix round 3 (N6): the sibling hook for the OTHER expiry this
+    // file has -- m_nomination_create_deadline, which guards a pending
+    // CreateChannel response, not a pending invite. Same TEST-ONLY
+    // discipline as debug_expire_pending_invites_for_test() above: no
+    // production call site exists or should exist, and this only forces the
+    // deadline into the past -- it does not itself run the expiry. The next
+    // lazy self-heal (nominate()/nomination_create_next()/probe(), all of
+    // which call expire_stale_pending_create_locked() before anything else)
+    // is what actually fires it, exactly as a real timeout would.
+    void debug_expire_pending_create_for_test();
+
     // ── Pre-provisioned channels (Task 2, 2026-08-25) ───────────────────────
     // Computes talkback_plan(nominees) (src/talkback-plan.h) and provisions
     // every channel it decides on, so a later key press only SELECTS an
@@ -617,6 +628,24 @@ private:
     // that same thread). Never call it with m_chan_mtx held; it takes the
     // lock itself to copy the ids out, then calls the SDK after releasing.
     void nomination_destroy_provisioned();
+
+    // Task 5 fix round 3 (N6, Major). Every path that ends a nomination
+    // ladder by tearing down what it (or the replace step before it) had
+    // provisioned funnels through here: clears the not-yet-created queue,
+    // destroys whatever IS provisioned, and reports the terminal outcome --
+    // ONE function, so a future abort branch cannot tear down without also
+    // reporting, because the report is no longer a separate step to forget.
+    // The round-2 re-review found the report missing on three of five
+    // structurally identical branches (only two, both inside
+    // nomination_create_next(), had been fixed after N1); this is what makes
+    // that specific omission inexpressible going forward. `reason` becomes
+    // the report's `"reason"` field; the report always carries
+    // `"channels_destroyed":true` (see src/talkback-nomination.h /
+    // src/talkback-nomination-dispatch.h on the plugin side for why that
+    // field, not the reason string, decides the plugin's response). Reported
+    // AFTER the destroy, same discipline as every other report/SDK-call
+    // ordering in this file: never under m_chan_mtx.
+    void nomination_abort_ladder(const std::string &reason);
 
     // Fix round 3: the bounded Begin/Add/Execute destroy retry, which had
     // grown to four hand-copied loops. Extracted so a future change to the

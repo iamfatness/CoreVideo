@@ -294,29 +294,48 @@ static uint32_t json_uint(const std::string &json, const std::string &key)
 // non-string element) yields whatever prefix parsed cleanly rather than
 // looping or throwing -- a hostile or buggy peer gets a short/empty list,
 // not a hung engine.
-static std::vector<std::string> json_str_array(const std::string &json, const std::string &key)
+//
+// TASK 3 FIX ROUND 1 (review, Minor 1): that "short/empty list" was harmless
+// while a re-nomination was REFUSED. It is not any more -- an empty list now
+// means DENOMINATE, so a truncated pipe line, an absent key, or a display name
+// carrying an unescaped quote or bracket would destroy the standing talent
+// channels and report the same nominate_done a deliberate denominate reports.
+// The destructive interpretation must not also be the FAILURE interpretation.
+// `*well_formed` (when non-null) is true only when the key was present as an
+// array AND the scan closed on `]` with every element a complete string --
+// i.e. only when an empty list the caller is about to act on is one the peer
+// actually sent.
+static std::vector<std::string> json_str_array(const std::string &json, const std::string &key,
+                                               bool *well_formed = nullptr)
 {
     std::vector<std::string> out;
+    if (well_formed) *well_formed = false;
     const std::string needle = "\"" + key + "\":[";
     auto pos = json.find(needle);
     if (pos == std::string::npos) return out;
     pos += needle.size();
     while (pos < json.size() && json[pos] != ']') {
         if (json[pos] == ',' || json[pos] == ' ') { ++pos; continue; }
-        if (json[pos] != '"') break;
+        if (json[pos] != '"') return out;   // non-string element: malformed
         ++pos;
         std::string s;
+        bool closed = false;
         while (pos < json.size()) {
             char c = json[pos++];
             if (c == '\\') {
                 if (pos < json.size()) s += json[pos++];
                 continue;
             }
-            if (c == '"') break;
+            if (c == '"') { closed = true; break; }
             s += c;
         }
+        // An unterminated string means the line was truncated (or a name
+        // carried an unescaped quote): everything after it is guesswork.
+        if (!closed) return out;
         out.push_back(std::move(s));
     }
+    if (pos >= json.size()) return out;     // ran off the end: no closing ']'
+    if (well_formed) *well_formed = true;
     return out;
 }
 
@@ -1581,7 +1600,21 @@ int main()
             // m_svc/m_ctrl, same as session_start()) can never race it --
             // see the comment there.
             if (talkback_thread.joinable()) talkback_thread.join();
-            talkback.nominate(meeting_svc, json_str_array(line, "nominees"));
+            // Task 3 fix round 1 (Minor 1): an empty nominee list is a
+            // DELIBERATE denominate -- it destroys the standing set -- so a
+            // request whose list could not be parsed must never reach
+            // nominate(). Refuse loudly instead; the operator retries, and the
+            // talent channels are still standing when they do.
+            bool nominees_ok = false;
+            const std::vector<std::string> nominees =
+                json_str_array(line, "nominees", &nominees_ok);
+            if (!nominees_ok) {
+                EngineIpc::write(
+                    R"({"cmd":"talkback_nominate","stage":"nominate","ok":false,)"
+                    R"("reason":"malformed_nominees"})");
+            } else {
+                talkback.nominate(meeting_svc, nominees);
+            }
 
         } else if (command == IpcCommand::Leave) {
             // F4 review-round fix: mirror the quit path below (see the

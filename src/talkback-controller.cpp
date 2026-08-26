@@ -73,17 +73,30 @@ bool TalkbackController::key_on(const std::string &participant,
         return false;
     }
 
-    // Order matters: the engine must have a channel before audio arrives, and
-    // the tap must be laid out before the engine maps its region. Start the
-    // session first, then open the tap (which sends talkback_open itself).
+    // ORDER REVERSED IN TASK 3 FIX ROUND 1, and the reason the old order gave
+    // is no longer true. It said "the engine must have a channel before audio
+    // arrives" — a Milestone 5 statement, from when the engine CREATED the
+    // channel on this key press. The channel now exists from nomination time,
+    // so `talkback_start` no longer stands anything up; it selects.
+    //
+    // What the old order cost: `talkback_start` and `talkback_open` are
+    // handled by the same single engine command loop, in the order sent, and
+    // `open_audio()` snapshots the ring's CURRENT write index and steps over
+    // everything published before it. So every millisecond the engine spent
+    // inside `session_start` was a millisecond of director audio the tap had
+    // already published and `open_audio` then DISCARDED — dropped, not
+    // queued, the same mechanism as the create+invite clipping this whole
+    // milestone exists to remove, just smaller. Opening the tap first means
+    // the engine maps and snapshots the ring BEFORE any of that work, so
+    // audio produced during it queues in the ring's 8 slots instead.
+    //
+    // The one thing this trades: the first `talkback_audio` can now reach the
+    // engine before the selection exists, and be counted as
+    // `no_channel_drops`. That is a loud, already-instrumented outcome in a
+    // line the operator can read, which is strictly better than a silent
+    // discard — and it is bounded by one command-loop turn.
+    if (!m_tap.open(source, error_out)) return false;
     ZoomEngineClient::instance().talkback_start(participant);
-    if (!m_tap.open(source, error_out)) {
-        // The tap failed after the engine already stood up a channel with
-        // nothing to feed it -- stop the session rather than leave a live
-        // channel with no audio source behind it.
-        ZoomEngineClient::instance().talkback_stop();
-        return false;
-    }
 
     m_participant = participant;
     m_source      = source;

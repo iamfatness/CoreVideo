@@ -334,6 +334,33 @@ void EngineTalkback::drain_stray_channels()
     }
 }
 
+bool EngineTalkback::channel_is_provisioned_locked(const zchar_t *channelID) const
+{
+    // Caller holds m_chan_mtx -- see the header. Null-safe by construction:
+    // comparing a basic_string against a null zchar_t* would be
+    // char_traits::length(nullptr), and a null id is reachable here on any
+    // error code (the callback's own null guard says so).
+    if (!channelID) return false;
+    for (const auto &pc : m_provisioned_channels)
+        if (pc.channel_id_z == channelID) return true;
+    return false;
+}
+
+bool EngineTalkback::adopt_probe_channel(const zchar_t *channelID,
+                                         const std::string &id_utf8)
+{
+    // Fix round 1, M1. ONE lock scope containing both the check and the
+    // assignment, so "is this already somebody's live channel" cannot be
+    // asked by one adoption path and skipped by another -- which is exactly
+    // what Task 3 shipped: the provisioned-table check guarded the stray
+    // queue and not the probe's adoption.
+    std::lock_guard<std::mutex> lock(m_chan_mtx);
+    if (channel_is_provisioned_locked(channelID)) return false;
+    m_channel_id = id_utf8;             // UTF-8, reporting only
+    m_channel_id_z.assign(channelID);   // SDK identifier, verbatim -- see header
+    return true;
+}
+
 TalkbackChannelOwner EngineTalkback::expire_stale_pending_create_locked()
 {
     // Caller holds m_chan_mtx -- see the header comment on this function and
@@ -426,14 +453,22 @@ void EngineTalkback::handle_expired_create(TalkbackChannelOwner expired_owner)
         report_nomination("create_expired",
                           R"("reason":"swallowed_create_response")");
         // The expiry has already forgotten the queue (m_nomination_pending)
-        // but the channels this ladder DID create are still standing on
-        // Zoom, still in m_provisioned_channels, and still refusing every
-        // later nominate() with "already_provisioned" -- a Major found by
-        // the round-3 re-review: one transient swallowed response cost the
-        // operator re-nomination for the rest of the meeting, recoverable
-        // only by a Leave. Destroy them so the next nominate() starts
-        // clean, exactly as fix round 1's M2 does for an error response.
-        // No-op when the table is empty, which is the common case.
+        // but the channels this ladder DID create are still standing on Zoom
+        // and still in m_provisioned_channels: a PARTIAL set, unreachable by
+        // any key that needs the whole fan-out and consuming budget out of
+        // the meeting's 16. Destroy them, exactly as fix round 1's M2 does
+        // for an error response, so what remains is either a complete set or
+        // nothing.
+        //
+        // The reason this arm was originally written -- "they refuse every
+        // later nominate() with already_provisioned" -- is VOID as of Task 3,
+        // which replaced that gate with a replace-in-place path; the round-1
+        // review caught the comment still arguing from it. The behaviour is
+        // unchanged and still right for the reason above, and the ordering
+        // that makes it safe is worth stating in its place: this only ever
+        // fires against a stalled ladder's OWN partial set, because
+        // nominate()'s replace path destroys any earlier COMPLETE set before
+        // issuing a create. No-op when the table is empty, the common case.
         nomination_destroy_provisioned();
     }
 }
@@ -588,6 +623,18 @@ void EngineTalkback::tick()
             channel_copy = m_channel_id_z;
             channel_copy_utf8 = m_channel_id;
         }
+
+        // Fix round 1 (review, Minor 5): put the probe's own duck back before
+        // destroying. RUNG 4 sets this channel's background volume to 0.3 so
+        // the tone is unambiguous, and nothing ever restored it. Usually
+        // harmless -- the channel is about to cease to exist -- but the
+        // destroy below can exhaust its retries and be ABANDONED, and then a
+        // participant is left hearing the meeting at 30% for the rest of it
+        // because of a three-second diagnostic. Task 3 established the
+        // set-on-the-way-in / restore-on-the-way-out pairing for the session;
+        // this is the one place that still had only half of it.
+        if (!channel_copy.empty())
+            m_ctrl->SetChannelBackgroundVolume(channel_copy.c_str(), 1.0f);
 
         ZOOMSDK::SDKError e = m_ctrl->BeginBatchDestroyChannels();
         if (e == ZOOMSDK::SDKERR_SUCCESS && !channel_copy.empty())
@@ -749,10 +796,17 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
     // create back, this branch has to come back WITH the disposition
     // machinery -- and inherit that history, not just the code.
     //
-    // Nothing special is done for a hypothetical owner == Session response:
-    // it falls through to the id-comparison path at the bottom, which is the
-    // generic disposition for "a response nobody currently claims" and is
-    // already the right one.
+    // Nothing special is done for a hypothetical owner == Session response.
+    // Where it actually goes -- corrected in fix round 1, because the Task 3
+    // version of this sentence claimed it "falls through to the id-comparison
+    // path at the bottom", and that is only true when m_phase is NOT
+    // AwaitingChannel. With a probe mid-ladder it reaches the probe's
+    // ADOPTION instead, and that mis-statement is the exact argument M1 hid
+    // behind for owner == Probe (a real, reachable case). Both destinations
+    // are now safe for the same reason: adoption goes through
+    // adopt_probe_channel(), which refuses any id the provisioned table
+    // already holds. Do not restate where a response "falls through to"
+    // without checking m_phase; that is what made this comment wrong.
     if (owner == TalkbackChannelOwner::Nomination) {
         // Fix round 3, "expire-path double create" (Major, found by the
         // round-2 re-review); mechanism rebuilt in fix round 4 -- see
@@ -1086,18 +1140,14 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         // channel is meant to survive every key press until the meeting ends.
         if (error == TALKBACK_ERROR_OK) {
             bool is_probe_channel;
-            bool is_provisioned_channel = false;
+            bool is_provisioned_channel;
             {
                 std::lock_guard<std::mutex> lock(m_chan_mtx);
                 is_probe_channel = (m_channel_id_z == channelID);
-                if (!is_probe_channel) {
-                    for (const auto &pc : m_provisioned_channels) {
-                        if (pc.channel_id_z == channelID) {
-                            is_provisioned_channel = true;
-                            break;
-                        }
-                    }
-                }
+                // Fix round 1, M1: the same question the adoption path asks,
+                // through the same helper, so the two answers cannot drift.
+                is_provisioned_channel =
+                    !is_probe_channel && channel_is_provisioned_locked(channelID);
                 if (!is_probe_channel && !is_provisioned_channel) {
                     // A genuinely different, untracked channel now exists.
                     // Queue it (still under the lock, so the check and the
@@ -1133,10 +1183,28 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         m_phase.store(Phase::Done, std::memory_order_release);
         return;
     }
-    {
-        std::lock_guard<std::mutex> lock(m_chan_mtx);
-        m_channel_id = id;              // UTF-8, reporting only
-        m_channel_id_z.assign(channelID); // SDK identifier, verbatim -- see header
+    // Fix round 1, M1 (Major): ADOPT ONLY WHAT IS NOT ALREADY OURS. This
+    // used to be a bare assignment of m_channel_id/m_channel_id_z, and it is
+    // the path a redelivered NOMINATION response takes when a probe holds the
+    // arbiter: the response is attributed to Probe, so the Nomination branch
+    // above is skipped, and phase IS AwaitingChannel, so the stray path's own
+    // provisioned-table check is skipped too. The probe then invited a
+    // participant into a talent's live channel, sent 3s of tone into it, and
+    // destroyed it from tick(). Task 3 did not introduce that shape -- R2 had
+    // the same hole against the session's channel -- but pre-provisioning
+    // widened the window from one key press to the whole meeting.
+    //
+    // Refusing to adopt is the right disposition, not destroying and not
+    // queuing: the channel is legitimately ours and in use, and THIS ladder's
+    // own response has simply not arrived yet. Stay in AwaitingChannel so it
+    // still can; if it never does, tick()'s existing 10s timeout settles the
+    // probe with no channel id to destroy. Fail open, exactly as the arbiter
+    // does elsewhere -- a probe that reports nothing costs a diagnostic, a
+    // destroyed provisioned channel costs the show.
+    if (!adopt_probe_channel(channelID, id)) {
+        report("create_channel_response_provisioned_duplicate",
+               R"("channel":")" + json_escape(id) + R"(","adopted":false)");
+        return;
     }
 
     // RUNG 4: invite one participant, resolved from a NAME. A raw id would
@@ -1293,6 +1361,24 @@ bool EngineTalkback::nominate(ZOOMSDK::IMeetingService *svc,
         return false;
     }
     m_ctrl->SetEvent(this);
+
+    // Fix round 1 (review, promoted from Minor): refuse a nominee whose
+    // display name IS the all-talent sentinel, BEFORE anything is destroyed
+    // or created. Keying that name would put a private aside on air to the
+    // whole panel -- the one promise this feature makes -- and names are
+    // participant-controlled, so this is provokable, not just unlucky. Refuse
+    // the whole nomination and name the person: the operator can rename them
+    // or drop them, and either is better than a nomination that looks fine
+    // and broadcasts. Placed above the arbiter gate and the replace path so a
+    // refused nomination leaves the standing set exactly as it was.
+    const std::string collision = talkback_nominate_sentinel_collision(nominees);
+    if (!collision.empty()) {
+        report_nomination("nominate",
+                          R"("ok":false,"reason":"target_name_collision","name":")" +
+                          json_escape(collision) + R"(","sentinel":")" +
+                          std::string(kTalkbackAllTalentTarget) + "\"");
+        return false;
+    }
 
     // Fix round 4 (Major, found by the round-3 re-review): run the lazy
     // self-heal FIRST, before anything else decides this call's fate. A
@@ -1974,6 +2060,26 @@ void EngineTalkback::drain_audio()
         if (pass == 3) audio_ring_reader_abandon(hdr);
     }
 
+    // Fix round 1, M4: the key-down duck, applied AFTER this pass's sends and
+    // never before them. session_start() only arms it -- see the comment there
+    // for why doing it on the key press put SDK calls inside the window whose
+    // audio open_audio() discards. Ordering within this function is the whole
+    // point: the first buffers are already on their way to Zoom by the time
+    // these calls run. Deliberately not gated on ctx.sent -- a drain that
+    // found nothing still means the ring is live and the press is real, and
+    // waiting for a buffer that may not come would leave the duck unapplied
+    // for the whole press.
+    if (m_session_duck_pending) {
+        m_session_duck_pending = false;
+        if (m_ctrl && !channels.empty()) {
+            for (const auto &id : channels)
+                m_ctrl->SetChannelBackgroundVolume(id.c_str(), 0.3f);
+            m_session_ducked = true;
+            report_session("audio_duck", R"("channels":)" +
+                           std::to_string(channels.size()));
+        }
+    }
+
     if (ctx.failed != 0 || lost != 0 || ctx.no_channel_drops != 0) {
         // F8 review-round fix: this used to report on every drain_audio()
         // call that saw any failure. drain_audio() runs on every
@@ -2060,12 +2166,17 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
         report_session_state(false, "no_controller");
         return false;
     }
-    if (!m_ctrl->IsMeetingSupportTalkBack()) {
-        report_session("session_start", R"("ok":false,"reason":"not_supported")");
-        report_session_state(false, "not_supported");
-        return false;
-    }
-    m_ctrl->SetEvent(this);
+
+    // Fix round 1, M4: IsMeetingSupportTalkBack() and SetEvent() USED to run
+    // here and no longer do. They are nomination-time facts -- nominate()
+    // checks the same gate and registers the same sink (this object) before
+    // creating anything, and a key press cannot select a channel unless that
+    // nomination succeeded in THIS meeting, because Leave clears the table.
+    // Re-asking them per press put two SDK calls (one of which queries meeting
+    // state, the other re-registers a callback sink) inside the window whose
+    // audio open_audio() discards -- see the duck comment below for the
+    // mechanism. Only the null-controller check stays, because that is the one
+    // thing a stale pointer would not survive.
 
     // NO ARBITER GATE HERE, and that is deliberate rather than forgotten:
     // this function issues no CreateChannel, so it has nothing to arbitrate.
@@ -2085,6 +2196,8 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
     std::vector<std::basic_string<zchar_t>> selected;
     std::string selected_ids;   // UTF-8, reporting only
     std::size_t provisioned_total = 0;
+    std::size_t still_coming = 0;   // channels for THIS target not created yet
+    const char *reason = nullptr;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
         provisioned_total = m_provisioned_channels.size();
@@ -2095,23 +2208,68 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
             if (!selected_ids.empty()) selected_ids += ",";
             selected_ids += pc.channel_id;
         }
-        if (!selected.empty()) m_session_channels = selected;
+        // Fix round 1, M2 (Major): the provisioned table answers "how many
+        // channels does this target own SO FAR", and nothing distinguished
+        // that from "how many it owns". Provisioning is sequential -- one
+        // CreateChannel per response, so an 11-name plan is 13 round trips --
+        // and a key pressed a few hundred ms after nominate() would match the
+        // one all-talent slice created so far, report "live", and put the
+        // director on air to the first ten of eleven. m_nomination_pending
+        // holds the plan entries not yet created, and the SAME pure matcher
+        // answers the same question about them, so the shortfall is knowable
+        // exactly rather than inferred.
+        for (const auto &planned : m_nomination_pending)
+            if (talkback_channel_serves_target(planned.is_all_talent,
+                                               planned.members, target))
+                ++still_coming;
+
+        if (still_coming != 0) {
+            // FAIL CLOSED. A refused key is recoverable in a second -- press
+            // it again -- while a half-broadcast is not recoverable at all:
+            // the director briefs a panel believing everyone heard, and no
+            // one in the room can tell. This feature's standing rule is that
+            // a shortfall is NAMED, never swallowed (src/talkback-plan.h),
+            // and this is that rule arriving through the table instead of
+            // through the fan-out loop.
+            reason = "provisioning_incomplete";
+        } else if (selected.empty()) {
+            // REFUSE WITH A SPECIFIC REASON, and never create one on demand.
+            // Creating here is precisely the behaviour this milestone exists
+            // to remove: it would silently restore the clipped-first-syllable
+            // defect for whichever target the operator forgot to nominate --
+            // and it would do so on the press where the operator is least
+            // expecting it, with no signal that this press differed from the
+            // last. The two reasons are kept apart because they need
+            // different actions: nominate anybody at all, versus nominate
+            // THIS person (or key "all" instead).
+            reason = provisioned_total == 0 ? "no_nomination"
+                                            : "target_not_provisioned";
+        }
+
+        // Fix round 1, Minor 6: an UNCONDITIONAL store, of a value the
+        // decision above has already made empty on every refusal. The Task 3
+        // version was `if (!selected.empty()) m_session_channels = selected;`
+        // -- correct only by an argument about the other writers, in the one
+        // file whose whole discipline is that state changes are structural
+        // rather than argued. Clearing on refusal is also load-bearing now
+        // that provisioning_incomplete exists: that path refuses with a
+        // NON-empty `selected`, and drain_audio() sends to
+        // m_session_channels without consulting m_session_live, so storing it
+        // would put audio into a partial fan-out the key press just refused.
+        if (reason) selected.clear();
+        m_session_channels = selected;
     }
 
-    if (selected.empty()) {
-        // REFUSE WITH A SPECIFIC REASON, and never create one on demand.
-        // Creating here is precisely the behaviour this milestone exists to
-        // remove: it would silently restore the clipped-first-syllable defect
-        // for whichever target the operator forgot to nominate -- and it
-        // would do so on the press where the operator is least expecting it,
-        // with no signal that this press was different from the last one.
-        // The two reasons are kept apart because they need different actions
-        // from the operator: nominate anybody at all, versus nominate THIS
-        // person (or key "all" instead).
-        const char *reason = provisioned_total == 0 ? "no_nomination"
-                                                    : "target_not_provisioned";
+    // Expected vs actual on EVERY key, refused or not: "2 of 13" is what tells
+    // the operator (and the log, after the fact) that the fan-out was short.
+    const std::string counts =
+        R"("channels":)" + std::to_string(selected.size()) +
+        R"(,"expected":)" + std::to_string(selected.size() + still_coming);
+
+    if (reason) {
         report_session("session_start", std::string(R"("ok":false,"reason":")") +
-                       reason + R"(","target":")" + json_escape(target) + "\"");
+                       reason + R"(","target":")" + json_escape(target) + "\"," +
+                       counts);
         report_session_state(false, reason);
         return false;
     }
@@ -2123,21 +2281,26 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
     // is unambiguous rather than competing with meeting audio -- the same
     // 0.3 the probe's invite path has always used.
     //
-    // ON THE KEY, NOT AT NOMINATION, and this is a decision Task 3 had to
-    // make rather than inherit: the SDK documents this as "the main meeting
-    // audio volume that people in the talkback channel can hear", and a
-    // pre-provisioned channel now stands for the WHOLE SHOW. Ducking it once
-    // at nomination would leave every nominated talent hearing the meeting at
-    // 30% from the moment they are nominated until the meeting ends, whether
-    // or not anyone ever keys. So it is set on the way in and restored on the
-    // way out. It costs one synchronous SDK call per channel -- no response is
-    // awaited, which is what separates it from the create/invite round trips
-    // this milestone removed.
-    for (const auto &id : selected)
-        m_ctrl->SetChannelBackgroundVolume(id.c_str(), 0.3f);
+    // ON THE KEY, NOT AT NOMINATION: the SDK documents this as "the main
+    // meeting audio volume that people in the talkback channel can hear", and
+    // a pre-provisioned channel now stands for the WHOLE SHOW. Ducking once at
+    // nomination would leave every nominated talent hearing the meeting at 30%
+    // from nomination until the meeting ends, whether or not anyone ever keys.
+    //
+    // ...but NOT SYNCHRONOUSLY HERE either (fix round 1, M4). talkback_start
+    // and talkback_audio are branches of the same command loop, so anything
+    // this function does runs before the first buffer is read -- and that
+    // window is not a delay, it is a DISCARD: open_audio() sets
+    // m_audio_read_index to the writer's current index and steps over
+    // everything the tap published earlier. Same mechanism as the defect this
+    // milestone exists to remove. So the duck is armed here and applied by the
+    // first drain_audio() of the press, after its sends. One buffer of
+    // director-over-unducked-meeting is a far better failure than a lost first
+    // syllable.
+    m_session_duck_pending = true;
 
     report_session("session_live", R"("target":")" + json_escape(target) +
-                   R"(","channels":)" + std::to_string(selected.size()) +
+                   R"(",)" + counts +
                    R"(,"channel_ids":")" + json_escape(selected_ids) + "\"");
     report_session_state(true, "live");
     return true;
@@ -2164,8 +2327,13 @@ void EngineTalkback::session_stop()
         std::lock_guard<std::mutex> lock(m_chan_mtx);
         channels.swap(m_session_channels);
     }
-    const bool was_live = m_session_live;
-    m_session_live = false;
+    const bool was_live   = m_session_live;
+    const bool was_ducked = m_session_ducked;
+    m_session_live         = false;
+    m_session_ducked       = false;
+    m_session_duck_pending = false;   // a press released before its first
+                                      // drain never ducked; disarm it so the
+                                      // NEXT press's drain cannot inherit it
     m_session_target.clear();
 
     if (channels.empty() || !m_ctrl) {
@@ -2174,18 +2342,23 @@ void EngineTalkback::session_stop()
         return;
     }
 
-    // Undo the key-down duck. 1.0 is the SDK's unattenuated value (the
-    // documented range is 0.0-2.0), so the talent is left hearing the meeting
-    // exactly as everybody else does between presses rather than at 30% for
-    // the rest of the show -- see session_start() for why the duck is keyed
-    // rather than provisioned. Best-effort by design: a failure here costs
-    // one person's meeting-audio level, and refusing to release the key over
-    // it would cost the operator the feature.
-    for (const auto &id : channels)
-        m_ctrl->SetChannelBackgroundVolume(id.c_str(), 1.0f);
+    // Undo the key-down duck -- but only if it was ever applied. 1.0 is the
+    // SDK's unattenuated value (documented range 0.0-2.0), so the talent is
+    // left hearing the meeting exactly as everybody else does between presses
+    // rather than at 30% for the rest of the show. A press released before its
+    // first drain_audio() never ducked (fix round 1, M4), and restoring then
+    // would be N SDK calls setting 1.0 on channels already at 1.0.
+    // Best-effort by design: a failure here costs one person's meeting-audio
+    // level, and refusing to release the key over it would cost the operator
+    // the feature.
+    if (was_ducked) {
+        for (const auto &id : channels)
+            m_ctrl->SetChannelBackgroundVolume(id.c_str(), 1.0f);
+    }
 
     report_session("session_stop", R"("ok":true,"channels":)" +
-                   std::to_string(channels.size()));
+                   std::to_string(channels.size()) + R"(,"restored":)" +
+                   (was_ducked ? "true" : "false"));
 }
 
 

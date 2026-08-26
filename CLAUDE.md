@@ -162,7 +162,16 @@ Every one of these is documented at length where it lives; the list is the map.
   (`no_channel_drops`), i.e. the director's first syllable gone every time.
   An unprovisioned target is refused with a reason and never provisioned on
   demand, and a key RELEASE destroys nothing: the channel has to survive it or
-  the next press pays the same cost. A target is not a channel — all-talent
+  the next press pays the same cost. **Nothing SDK-shaped may sit between the
+  key and the first buffer**, because that window is a discard and not a
+  delay: `talkback_start` and `talkback_audio` are branches of one command
+  loop, and `open_audio()` snapshots the ring's write index and steps over
+  everything published earlier. That is why the plugin opens the tap *before*
+  `talkback_start` and why the background-volume duck is deferred to the first
+  `drain_audio()` after its sends. A key pressed while the nomination ladder
+  is still provisioning is REFUSED (`provisioning_incomplete`), never
+  half-honoured — briefing ten of eleven while the log says "live" is the
+  failure mode this whole feature is written against. A target is not a channel — all-talent
   past 10 people owns `ceil(n/10)` of them and one drain pass fans the same
   PCM out to all (`talkback_channel_serves_target`). Milestone incomplete
   until the Task 6 live gate: the first-syllable claim is measured on the old

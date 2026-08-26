@@ -308,6 +308,38 @@ private:
     // satisfy that, and why, are named at the function's own comment.
     void drain_stray_channels();
 
+    // Is `channelID` one of the channels nomination has already provisioned?
+    // CALLER MUST HOLD m_chan_mtx (it walks m_provisioned_channels).
+    //
+    // Fix round 1, M1 (Major): this is the one question every disposition of a
+    // create response has to ask before it does anything irreversible, and
+    // Task 3 first asked it in only ONE of them. The SDK redelivers
+    // onCreateChannelResponse -- this file's own duplicate handling exists
+    // because it does -- and a redelivered NOMINATION response can arrive
+    // while a probe holds the arbiter, in which case it is attributed to
+    // Probe, skips the Nomination branch entirely, and lands on the probe's
+    // adoption path. The probe then invited into a talent's live channel,
+    // toned 3s of 440Hz at them, and destroyed it from tick(): a director's
+    // private channel emitting a test tone mid-show and then dying, with
+    // every later key press for that target selecting fewer channels and
+    // nothing left to re-provision them.
+    //
+    // Null-safe: a null id matches nothing (basic_string comparison against a
+    // null zchar_t* is char_traits::length(nullptr), an access violation, so
+    // the guard is here rather than at each caller).
+    bool channel_is_provisioned_locked(const zchar_t *channelID) const;
+
+    // Adopt `channelID` as the PROBE's channel, unless it is already
+    // provisioned. Returns false when it is, meaning this response belongs to
+    // somebody else's create and the ladder must keep waiting for its own.
+    //
+    // Fix round 1, M1: the check and the assignment are ONE call, in ONE lock
+    // scope, so a future adoption path cannot be added that skips the check --
+    // the same reasoning that moved the arbiter's claim-and-stamp into a
+    // single transition last task. If you add another adopter, call this;
+    // never assign m_channel_id_z directly.
+    bool adopt_probe_channel(const zchar_t *channelID, const std::string &id_utf8);
+
     // The single exit every probe() refusal that created nothing routes
     // through: settles the phase, drains any queued stray on this thread
     // (nobody else will -- no driving thread is being spawned), and returns
@@ -354,14 +386,19 @@ private:
     // fall-through.
     //
     // The Nomination arm destroys whatever the expired ladder had already
-    // provisioned. Without that, a ladder whose channel-k create response
-    // was swallowed left channels 1..k-1 standing in m_provisioned_channels
-    // forever -- and nominate()'s already_provisioned gate refuses on that
-    // table, so ONE transient SDK hiccup disabled re-nomination for the rest
-    // of the meeting, recoverable only by a Leave. Same reasoning and same
-    // helper as fix round 1's M2 (an error response destroys the partial
-    // set so a retry can start clean); the expiry path had simply never
-    // been wired to it.
+    // provisioned. Without that, a ladder whose channel-k create response was
+    // swallowed leaves channels 1..k-1 standing forever: a PARTIAL set that
+    // consumes budget out of the meeting's 16 and that no key needing the
+    // whole fan-out can use. Same reasoning and same helper as fix round 1's
+    // M2 (an error response destroys the partial set so a retry can start
+    // clean); the expiry path had simply never been wired to it.
+    //
+    // Task 3 fix round 1: this used to be justified by "nominate()'s
+    // already_provisioned gate refuses on that table, so one transient SDK
+    // hiccup disabled re-nomination for the rest of the meeting". That gate
+    // is gone -- Task 3 replaced it -- so the justification was void while
+    // the behaviour stayed correct. Corrected rather than deleted, because
+    // the arm still needs a reason and now has the true one.
     void handle_expired_create(TalkbackChannelOwner expired_owner);
 
     // Issues the CreateChannel for the front of m_nomination_pending and, on
@@ -677,6 +714,31 @@ private:
     std::vector<std::basic_string<zchar_t>> m_session_channels;
     std::string                m_session_target;  // UTF-8, reporting only
     bool                       m_session_live = false;
+
+    // Fix round 1, M4: has the key-down duck actually been applied yet?
+    //
+    // The duck (SetChannelBackgroundVolume, see session_start()) used to run
+    // ON the key press, and the round-1 review traced why that was worse than
+    // it looked: talkback_start and talkback_audio are branches of the SAME
+    // command loop, so session_start() runs to completion before any buffer is
+    // read -- and the audio the tap publishes during that window is not
+    // delayed but DISCARDED, because open_audio() sets m_audio_read_index to
+    // the writer's current index and steps over everything published earlier.
+    // Same mechanism, same symptom (a clipped first syllable) as the defect
+    // this whole milestone removes, at smaller magnitude.
+    //
+    // So the duck is deferred to the first drain_audio() of the press, AFTER
+    // its sends. Talent hearing one buffer of director-over-unducked-meeting
+    // is a far better failure than the director losing their first word.
+    // Command-loop thread only, like the audio path itself; not under
+    // m_chan_mtx, because it is not channel-id state and is never read off
+    // that thread.
+    bool                       m_session_duck_pending = false;
+    // ...and was it applied, so session_stop() knows whether there is anything
+    // to restore. A key released before the first buffer never ducked, and
+    // restoring then would be N SDK calls to set 1.0 on channels already at
+    // 1.0.
+    bool                       m_session_ducked = false;
 
     // WHAT USED TO BE HERE, and why its absence is the fix rather than an
     // omission (Task 3): m_session_channel_z / m_session_channel /

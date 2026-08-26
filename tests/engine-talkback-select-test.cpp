@@ -36,6 +36,7 @@
 // machine underneath them is tested separately in talkback-create-state-test.cpp,
 // which is the layer that CAN be driven exhaustively.
 #include "engine-talkback.h"
+#include "talkback-ring.h"   // the tap side of the ring, so drain_audio() has real audio
 
 #include <iostream>
 #include <string>
@@ -94,6 +95,13 @@ public:
     std::vector<std::pair<std::string, float> > volumes;
     std::vector<std::pair<std::string, unsigned int> > sends;  // (channel, bytes)
     bool supported = true;
+    // A monotonic call counter, so ORDER between two different SDK calls is
+    // observable and not just their counts. Fix round 1, M4 turns on ordering
+    // -- the duck must not precede the first buffer -- and a count-only fake
+    // cannot tell the difference.
+    int calls = 0;
+    int first_send_call = -1;
+    int first_volume_call = -1;
 
     ZOOMSDK::SDKError SetEvent(ZOOMSDK::IMeetingTalkbackCtrlEvent *) override
     { return ZOOMSDK::SDKERR_SUCCESS; }
@@ -130,9 +138,19 @@ public:
     ZOOMSDK::SDKError SendAudioDataToChannel(const zchar_t *id, const char *,
                                              unsigned int len, unsigned int,
                                              ZOOMSDK::ZoomSDKAudioChannel) override
-    { sends.push_back(std::make_pair(utf8_of(id), len)); return ZOOMSDK::SDKERR_SUCCESS; }
+    {
+        if (first_send_call < 0) first_send_call = calls;
+        ++calls;
+        sends.push_back(std::make_pair(utf8_of(id), len));
+        return ZOOMSDK::SDKERR_SUCCESS;
+    }
     ZOOMSDK::SDKError SetChannelBackgroundVolume(const zchar_t *id, float v) override
-    { volumes.push_back(std::make_pair(utf8_of(id), v)); return ZOOMSDK::SDKERR_SUCCESS; }
+    {
+        if (first_volume_call < 0) first_volume_call = calls;
+        ++calls;
+        volumes.push_back(std::make_pair(utf8_of(id), v));
+        return ZOOMSDK::SDKERR_SUCCESS;
+    }
     bool IsMeetingSupportTalkBack() override { return supported; }
 };
 
@@ -260,15 +278,60 @@ int main()
         check(creates_after_provisioning == 13,
               "the 11-name plan did not provision 13 channels");
 
+        // The tap's ring, built here the way TalkbackTap does, so drain_audio()
+        // has something real to fan out. This is what lets the test see SENDS
+        // rather than only the selection (fix round 1, M3: a `break` after the
+        // first channel in send_one() previously left all 65 tests green).
+        ShmRegion region{};
+        const std::string region_name = "ZoomObsPluginTest_talkback_select";
+        check(shm_region_create(region, region_name,
+                                shm_audio_region_bytes(kTalkbackSlotBytes)),
+              "the test could not create a talkback ring region");
+        talkback_ring_init(static_cast<ShmAudioHeader *>(region.ptr), 48000, 1);
+        check(tb.open_audio(region_name, 48000, 1),
+              "the engine refused to open the test's talkback ring");
+
         check(tb.session_start(&svc, kTalkbackAllTalentTarget),
               "keying the all-talent target was refused after a complete nomination");
         check(tb.session_live(), "a successful key press did not report the session live");
         check(svc.ctrl.creates == creates_after_provisioning,
               "KEYING CREATED A CHANNEL -- the create+invite round trip this "
               "milestone removed is back on the key path");
+        // Fix round 1, M4: the duck must NOT run on the key press. talkback_start
+        // and talkback_audio are branches of one command loop, and open_audio()
+        // discards (not queues) whatever the tap published before it mapped the
+        // ring -- so SDK work here is dropped director audio, the same mechanism
+        // this milestone exists to remove.
+        check(svc.ctrl.volumes.empty(),
+              "the key press ducked synchronously -- that SDK work sits inside the "
+              "window whose audio open_audio() DISCARDS");
+
+        // One buffer in, and it must reach BOTH channels of the target.
+        int16_t pcm[480] = {0};
+        pcm[0] = 1234;
+        check(talkback_ring_publish(region.ptr, pcm, sizeof(pcm), 1),
+              "the test could not publish a buffer into the ring");
+        tb.drain_audio();
+
+        check(svc.ctrl.sends.size() == 2,
+              "ONE BUFFER DID NOT REACH EVERY CHANNEL OF THE TARGET -- an "
+              "all-talent target past ten people owns several channels, and "
+              "sending to only the first leaves everyone from the eleventh on "
+              "hearing silence with nothing to show it");
+        if (svc.ctrl.sends.size() == 2) {
+            check(svc.ctrl.sends[0].first != svc.ctrl.sends[1].first,
+                  "the same channel was sent to twice instead of both channels");
+            check(svc.ctrl.sends[0].second == sizeof(pcm) &&
+                  svc.ctrl.sends[1].second == sizeof(pcm),
+                  "the fanned-out buffers were not the buffer that was published");
+        }
+        // ...and only now does the duck run, after those sends.
         check(svc.ctrl.volumes.size() == 2,
-              "keying all-talent did not reach both of its channels -- everyone "
-              "past the tenth person hears silence");
+              "the deferred duck never ran, so talent hear the director competing "
+              "with full meeting audio for the whole press");
+        check(svc.ctrl.first_send_call < svc.ctrl.first_volume_call,
+              "the duck ran BEFORE the first buffer was sent -- deferring it is "
+              "the point; ordering here is the whole fix");
 
         svc.ctrl.volumes.clear();
         tb.session_stop();
@@ -285,6 +348,94 @@ int main()
         check(svc.ctrl.creates == creates_after_provisioning,
               "the second key press created a channel");
         tb.session_stop();
+        tb.close_audio();
+        shm_region_destroy(region);
+    }
+
+    // -- Keying mid-ladder is REFUSED, not half-honoured ------------------
+    // Fix round 1, M2. Provisioning is sequential -- one CreateChannel per
+    // response -- so a key pressed a few hundred ms after nominate() finds
+    // only part of its target's fan-out in the table. Selecting what exists so
+    // far and reporting "live" put the director on air to the first ten of
+    // eleven with nothing anywhere saying so. Fail closed: a refused key is
+    // recoverable by pressing again, a half-broadcast is not recoverable at
+    // all.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        std::vector<std::string> nominees;
+        for (int i = 0; i < 11; ++i) nominees.push_back("Talent " + std::to_string(i + 1));
+        check(tb.nominate(&svc, nominees), "nominate refused an 11-name plan");
+        // Answer ONE create: all-talent slice 1 of 2 exists, slice 2 does not.
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+
+        check(!tb.session_start(&svc, kTalkbackAllTalentTarget),
+              "keying a HALF-PROVISIONED all-talent target was accepted -- the "
+              "director would brief ten of eleven and be told it was live");
+        check(!tb.session_live(), "a refused mid-ladder key reported the session live");
+
+        // A target whose own channels are all present is still keyable -- the
+        // refusal must be about THIS target's fan-out, not about the ladder
+        // being busy. Talent 1's private channel is created second in plan
+        // order (all-talent slices first, then privates).
+        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);   // all-talent 2/2
+        tb.onCreateChannelResponse(chan_id(3).c_str(), kOk);   // Talent 1 private
+        check(tb.session_start(&svc, "Talent 1"),
+              "keying a fully-provisioned private target was refused just because "
+              "OTHER channels were still being created");
+        tb.session_stop();
+    }
+
+    // -- A redelivered nomination response must not be adopted by a probe --
+    // Fix round 1, M1 (Major). The SDK redelivers onCreateChannelResponse. If
+    // one arrives while a probe holds the arbiter, it is attributed to Probe,
+    // skips the Nomination branch, and lands on the probe's adoption path --
+    // which used to take it. The probe then invited into a talent's live
+    // channel, toned at them, and destroyed it from tick().
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+
+        check(tb.probe(&svc, "Someone"), "the probe refused to start after a nomination");
+        // The SDK redelivers the response for a PROVISIONED channel while the
+        // probe is waiting for its own.
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+        // With the defect, the probe has adopted chan-1, failed to resolve a
+        // participant (no participants controller), moved to Destroying, and
+        // this tick() destroys a live talent channel.
+        tb.tick();
+        check(svc.ctrl.destroyed.empty(),
+              "A PROBE ADOPTED AND DESTROYED A PROVISIONED CHANNEL -- talent hear "
+              "a test tone and then lose the channel for the rest of the meeting");
+    }
+
+    // -- A nominee named like the all-talent sentinel is refused ------------
+    // Fix round 1 (review, promoted from Minor). Display names are set by the
+    // participant, and one that IS the sentinel makes keying that person's
+    // name broadcast to the whole panel -- the opposite of the private aside
+    // talkback exists for. Any casing, because a failure that depends on
+    // capitalisation looks intermittent to an operator.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        check(!tb.nominate(&svc, {"Sarah", "all"}),
+              "a nominee named \"all\" was nominated -- keying that name would go "
+              "out to everyone");
+        check(svc.ctrl.creates == 0, "a refused nomination still created a channel");
+        check(!tb.nominate(&svc, {"Sarah", "All"}),
+              "the sentinel collision was case-sensitive, so the failure comes and "
+              "goes with a participant's capitalisation");
+
+        // ...and the refusal leaves an existing nomination untouched.
+        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a clean plan");
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+        check(!tb.nominate(&svc, {"ALL"}), "a colliding re-nomination was accepted");
+        check(svc.ctrl.destroyed.empty(),
+              "a REFUSED nomination destroyed the standing channels anyway");
     }
 
     // -- An unprovisioned target is refused, never created on demand -------

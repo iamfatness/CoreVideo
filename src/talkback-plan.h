@@ -158,19 +158,55 @@ inline TalkbackPlan talkback_plan(const std::vector<std::string> &nominees)
 // goes to all of them, so this answers "does this channel serve that target",
 // once per channel, rather than returning a single id.
 //
-// The sentinel is a plain name-space collision risk and there is no way around
-// it -- the control API's target argument is one string (Task 5: `"all"` or a
-// nominee's name). A participant genuinely displaying as "all" would key the
-// whole panel instead of themselves; that is stated here rather than papered
-// over, because the alternative (a second "kind" field on every wire message
-// and every Companion button) costs more than the collision does.
+// The sentinel shares a namespace with participant display names, and the
+// control API's target argument is one string (Task 5: `"all"` or a nominee's
+// name), so a participant displaying as "all" collides with it. Fix round 1
+// (review, promoted from Minor): the consequence is not merely that they
+// cannot be keyed privately -- it is that keying their name goes on air to
+// the WHOLE PANEL, which is the exact privacy promise talkback is built on,
+// and display names are set by the participant, so it is provokable rather
+// than only accidental. So this is DETECTED AND REFUSED at nomination
+// (`talkback_nominate_sentinel_collision()` below), where the operator can
+// still do something about it, instead of being documented and left live.
 constexpr const char *kTalkbackAllTalentTarget = "all";
+
+// Is `target` the all-talent target? ASCII case-insensitive, deliberately.
+// The review found the case-sensitive version worse than a plain collision:
+// "All" did not collide while "all" did, so an operator would see the failure
+// come and go with a participant's capitalisation and have no way to reason
+// about it. One rule, both directions -- any casing is the sentinel here, and
+// any casing is refused as a nominee name below. Participant names themselves
+// are still compared EXACTLY (identity is by name; two people can differ only
+// in case and both be real).
+inline bool talkback_target_is_all_talent(const std::string &target)
+{
+    static const std::string sentinel = kTalkbackAllTalentTarget;
+    if (target.size() != sentinel.size()) return false;
+    for (std::size_t i = 0; i < target.size(); ++i) {
+        char a = target[i];
+        if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+        if (a != sentinel[i]) return false;
+    }
+    return true;
+}
+
+// The first nominee whose name would collide with the sentinel, or an empty
+// string if none does. nominate() refuses the whole plan on a hit and names
+// the person: provisioning around them would leave a channel nobody can key
+// privately and a name that silently broadcasts.
+inline std::string talkback_nominate_sentinel_collision(
+    const std::vector<std::string> &nominees)
+{
+    for (const auto &n : nominees)
+        if (talkback_target_is_all_talent(n)) return n;
+    return {};
+}
 
 inline bool talkback_channel_serves_target(bool is_all_talent,
                                            const std::vector<std::string> &members,
                                            const std::string &target)
 {
-    if (target == kTalkbackAllTalentTarget) return is_all_talent;
+    if (talkback_target_is_all_talent(target)) return is_all_talent;
     // A private channel is matched by MEMBERSHIP, not by "members[0] == target":
     // talkback_plan() gives every private channel exactly one member today, and
     // matching by membership keeps this correct if that ever stops being true

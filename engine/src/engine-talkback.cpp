@@ -361,6 +361,18 @@ TalkbackChannelOwner EngineTalkback::expire_stale_pending_create_locked()
         // AFTER that assignment without re-verifying that ordering still
         // holds -- see nominate()'s own comment on why the order matters.
         m_nomination_pending.clear();
+
+        // Fix round 3, "expire-path double create": bump the nomination
+        // generation too -- see src/talkback-channel-owner.h's "Generation
+        // tracking" section. This create's response, if it ever arrives,
+        // must be recognized as stale rather than confused with whatever
+        // create a later nominate() issues under the bumped generation.
+        // Deliberately does NOT touch m_nomination_outstanding_generations:
+        // this create's own entry stays queued so the comparison above has
+        // something to pop and reject when that response shows up.
+        TalkbackGenerationState g{m_nomination_generation, m_nomination_outstanding_generations};
+        g = talkback_bump_generation(g);
+        m_nomination_generation = g.current;
     }
     return expired;
 }
@@ -608,11 +620,23 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         // sequence session_stop() itself uses, on this same thread -- this
         // callback runs on the command-loop thread, per the THREADING
         // comment above open_audio() below, exactly like session_stop().
+        // Fix round 3, item B: routed through the shared
+        // talkback_check_and_clear_cancelled() (src/talkback-channel-owner.h)
+        // instead of hand-reading/clearing m_session_create_cancelled
+        // directly -- the round-2 re-review found this exact site was still
+        // a per-owner copy (the SETTER and the EXPIRE clearer were already
+        // shared; this, the RESPONSE clearer, was not) and named it the same
+        // defect class as N1. Session and Nomination now both go through
+        // this one function.
         bool cancelled;
         {
             std::lock_guard<std::mutex> lock(m_chan_mtx);
-            cancelled = m_session_create_cancelled;
-            m_session_create_cancelled = false;
+            TalkbackCreateState state{m_pending_create, m_session_create_cancelled,
+                                      m_nomination_create_cancelled};
+            const auto result = talkback_check_and_clear_cancelled(state, owner);
+            cancelled = result.cancelled;
+            m_session_create_cancelled    = result.next.session_cancelled;
+            m_nomination_create_cancelled = result.next.nomination_cancelled;
         }
         // Fix round 2: routed through the shared talkback_create_disposition()
         // (src/talkback-channel-owner.h) instead of branching on `cancelled`
@@ -628,18 +652,12 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
                                std::to_string(static_cast<int>(error)));
                 return;
             }
-            ZOOMSDK::SDKError e = ZOOMSDK::SDKERR_UNKNOWN;
-            uint32_t attempt = 0;
-            for (; attempt < kMaxDestroyAttempts; ++attempt) {
-                e = m_ctrl->BeginBatchDestroyChannels();
-                if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->AddChannelToDestroy(channelID);
-                if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->ExecuteBatchDestroyChannels();
-                if (e == ZOOMSDK::SDKERR_SUCCESS) break;
-            }
+            uint32_t attempts = 0;
+            const ZOOMSDK::SDKError e = destroy_channel_retrying(channelID, &attempts);
             report_session("session_channel_cancelled",
                            R"("channel":")" + json_escape(id) + R"(","code":)" +
                            std::to_string(static_cast<int>(e)) + R"(,"attempts":)" +
-                           std::to_string(attempt + 1));
+                           std::to_string(attempts));
             if (e != ZOOMSDK::SDKERR_SUCCESS) {
                 report_session("session_channel_cancelled_abandoned",
                                R"("channel":")" + json_escape(id) + "\"");
@@ -691,6 +709,61 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         return;
     }
     if (owner == TalkbackChannelOwner::Nomination) {
+        // Fix round 3, "expire-path double create" (Major, found by the
+        // round-2 re-review): checked FIRST, before cancellation -- see
+        // src/talkback-channel-owner.h's "Generation tracking" section and
+        // m_nomination_generation's header comment for the full mechanism.
+        // A create that merely expired (nobody cancelled it) can still have
+        // its response arrive after a fresh nomination re-armed this same
+        // owner and issued a SECOND CreateChannel; Zoom's callback carries
+        // no id to tell the two responses apart, so identity has to be
+        // tracked here instead. Popping the oldest outstanding generation
+        // and comparing it to the current one is what answers "is this
+        // response for the create I am now waiting on."
+        TalkbackResponseFreshness freshness;
+        {
+            std::lock_guard<std::mutex> lock(m_chan_mtx);
+            TalkbackGenerationState g{m_nomination_generation, m_nomination_outstanding_generations};
+            const auto check = talkback_check_response_generation(g);
+            freshness = check.freshness;
+            m_nomination_outstanding_generations = check.next.outstanding;
+        }
+        if (freshness == TalkbackResponseFreshness::Stale) {
+            // This response belongs to a create the ladder has since moved
+            // past. Destroy it if Zoom actually created a channel (do NOT
+            // touch m_nomination_pending or m_provisioned_channels -- the
+            // CURRENT create's plan entry is still correctly waiting), and
+            // -- critically -- RE-CLAIM the owner rather than leaving it
+            // None: a second, genuinely outstanding create for THIS same
+            // ladder is still in flight, and its eventual response must
+            // still be routed here, not fall through to the generic stray
+            // path at the bottom of this function (which has no idea how
+            // to recognize a Nomination channel and would destroy it as
+            // untracked, losing a channel that could otherwise have been
+            // adopted). Never call nomination_create_next() here: doing so
+            // would issue a THIRD create while the second is still
+            // outstanding, exactly the invariant this fix exists to hold.
+            if (error == TALKBACK_ERROR_OK && channelID != nullptr) {
+                uint32_t attempts = 0;
+                const ZOOMSDK::SDKError e = destroy_channel_retrying(channelID, &attempts);
+                report_nomination("channel_stale",
+                                  R"("channel":")" + json_escape(id) + R"(","code":)" +
+                                  std::to_string(static_cast<int>(e)) + R"(,"attempts":)" +
+                                  std::to_string(attempts));
+                if (e != ZOOMSDK::SDKERR_SUCCESS) {
+                    report_nomination("channel_stale_destroy_abandoned",
+                                      R"("channel":")" + json_escape(id) + "\"");
+                }
+            } else {
+                report_nomination("channel_stale",
+                                  R"("ok":true,"reason":"no_channel_to_destroy","error":)" +
+                                  std::to_string(static_cast<int>(error)));
+            }
+            std::lock_guard<std::mutex> lock(m_chan_mtx);
+            m_pending_create = TalkbackChannelOwner::Nomination;
+            return;
+        }
+
         // Fix round 1, C1 (CRITICAL): check-and-clear the cancellation flag
         // BEFORE doing anything else with this response -- see
         // nomination_reset()'s and m_nomination_create_cancelled's comments.
@@ -702,11 +775,20 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         // Execute sequence and retry bound as every other command-loop-
         // thread destroy in this file (session_stop(), the Session-cancelled
         // branch above, nomination_destroy_provisioned() below).
+        //
+        // Fix round 3, item B: routed through the shared
+        // talkback_check_and_clear_cancelled() instead of hand-reading/
+        // clearing m_nomination_create_cancelled directly -- see the
+        // Session branch above's identical comment.
         bool cancelled;
         {
             std::lock_guard<std::mutex> lock(m_chan_mtx);
-            cancelled = m_nomination_create_cancelled;
-            m_nomination_create_cancelled = false;
+            TalkbackCreateState state{m_pending_create, m_session_create_cancelled,
+                                      m_nomination_create_cancelled};
+            const auto result = talkback_check_and_clear_cancelled(state, owner);
+            cancelled = result.cancelled;
+            m_session_create_cancelled    = result.next.session_cancelled;
+            m_nomination_create_cancelled = result.next.nomination_cancelled;
         }
         // Fix round 2: shared talkback_create_disposition() -- see the
         // Session branch above's identical comment.
@@ -718,18 +800,12 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
                                   std::to_string(static_cast<int>(error)));
                 return;
             }
-            ZOOMSDK::SDKError e = ZOOMSDK::SDKERR_UNKNOWN;
-            uint32_t attempt = 0;
-            for (; attempt < kMaxDestroyAttempts; ++attempt) {
-                e = m_ctrl->BeginBatchDestroyChannels();
-                if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->AddChannelToDestroy(channelID);
-                if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->ExecuteBatchDestroyChannels();
-                if (e == ZOOMSDK::SDKERR_SUCCESS) break;
-            }
+            uint32_t attempts = 0;
+            const ZOOMSDK::SDKError e = destroy_channel_retrying(channelID, &attempts);
             report_nomination("channel_cancelled",
                               R"("channel":")" + json_escape(id) + R"(","code":)" +
                               std::to_string(static_cast<int>(e)) + R"(,"attempts":)" +
-                              std::to_string(attempt + 1));
+                              std::to_string(attempts));
             if (e != ZOOMSDK::SDKERR_SUCCESS) {
                 report_nomination("channel_cancelled_abandoned",
                                   R"("channel":")" + json_escape(id) + "\"");
@@ -776,35 +852,36 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
             }
         }
         if (!have_planned) {
-            // Fix round 1, M5: this branch is reachable, not "believed
-            // unreachable" as the previous comment claimed -- e.g. a stale
-            // response claimed by a LATER nomination once the arbiter has
-            // been re-armed, or expire_stale_pending_create_locked() clearing
-            // m_nomination_pending while a create is genuinely still in
-            // flight and a subsequent nominate() re-arms the owner before
-            // that create's response lands. Either way the channel Zoom just
-            // created is real and now genuinely untracked. Queuing it onto
-            // m_stray_channels (the previous behaviour) would reproduce the
-            // exact has_pending_work() wedge C1 was fixed for -- nothing
-            // drains that queue without a probe's driving thread running --
-            // so destroy it directly here instead, same bounded-retry
-            // sequence as every other command-loop-thread destroy in this
-            // file. report_nomination() is called only AFTER the lock above
-            // is released, matching this file's "report outside m_chan_mtx"
-            // discipline (this branch used to violate it).
+            // Fix round 3: the two paths fix round 1's M5 named to prove
+            // this branch reachable -- a stale response claimed by a later
+            // re-armed nomination, and expiry clearing m_nomination_pending
+            // while a create was genuinely still in flight -- are both a
+            // generation MISMATCH by construction (this response's create
+            // was issued under an earlier generation than whatever is
+            // current), so the freshness check above now catches them
+            // before this point is ever reached; see that check's own
+            // comment. What is left is narrower: `have_planned` false while
+            // freshness read Current or Unexpected means the queue/owner
+            // invariant this class relies on (one push per issued create,
+            // one m_nomination_pending entry per queued channel, matched
+            // one-to-one) was violated somewhere else. Genuinely defensive
+            // now, not "believed unreachable" -- if it is ever hit, the
+            // channel Zoom just created is still real and still untracked,
+            // so destroy it the same way as before rather than assume the
+            // invariant holds. Queuing it onto m_stray_channels (the
+            // pre-fix-round-1 behaviour) would reproduce the exact
+            // has_pending_work() wedge C1 was fixed for -- nothing drains
+            // that queue without a probe's driving thread running.
+            // report_nomination() is called only AFTER the lock above is
+            // released, matching this file's "report outside m_chan_mtx"
+            // discipline.
             report_nomination("channel_untracked", R"("channel":")" + json_escape(id) + "\"");
-            ZOOMSDK::SDKError e = ZOOMSDK::SDKERR_UNKNOWN;
-            uint32_t attempt = 0;
-            for (; attempt < kMaxDestroyAttempts; ++attempt) {
-                e = m_ctrl->BeginBatchDestroyChannels();
-                if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->AddChannelToDestroy(channelID);
-                if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->ExecuteBatchDestroyChannels();
-                if (e == ZOOMSDK::SDKERR_SUCCESS) break;
-            }
+            uint32_t attempts = 0;
+            const ZOOMSDK::SDKError e = destroy_channel_retrying(channelID, &attempts);
             report_nomination("channel_untracked_destroy",
                               R"("channel":")" + json_escape(id) + R"(","code":)" +
                               std::to_string(static_cast<int>(e)) + R"(,"attempts":)" +
-                              std::to_string(attempt + 1));
+                              std::to_string(attempts));
             if (e != ZOOMSDK::SDKERR_SUCCESS) {
                 report_nomination("channel_untracked_destroy_abandoned",
                                   R"("channel":")" + json_escape(id) + "\"");
@@ -1170,6 +1247,18 @@ bool EngineTalkback::nominate(ZOOMSDK::IMeetingService *svc,
     // the response for the create it issues cannot be delivered until this
     // function returns and control goes back to the command loop / message
     // pump, so the queue is populated well before anything could consult it.
+    //
+    // Fix round 3, "expire-path double create": bump the nomination
+    // generation HERE, before issuing this ladder's first create -- see
+    // src/talkback-channel-owner.h's "Generation tracking" section. A fresh
+    // ladder must not be confused with an older one whose create may still
+    // be floating around unresolved.
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        TalkbackGenerationState g{m_nomination_generation, m_nomination_outstanding_generations};
+        g = talkback_bump_generation(g);
+        m_nomination_generation = g.current;
+    }
     if (!nomination_create_next())
         return false;
 
@@ -1238,6 +1327,14 @@ bool EngineTalkback::nomination_create_next()
         m_nomination_create_deadline.store(
             (std::chrono::steady_clock::now() + kAwaitTimeout).time_since_epoch().count(),
             std::memory_order_release);
+        // Fix round 3: stamp this create with the CURRENT generation --
+        // see src/talkback-channel-owner.h's "Generation tracking" section.
+        // Whichever response arrives first for Nomination pops this entry;
+        // if it does not match m_nomination_generation at that point, it is
+        // a stale response, not this create's.
+        TalkbackGenerationState g{m_nomination_generation, m_nomination_outstanding_generations};
+        g = talkback_issue_create(g);
+        m_nomination_outstanding_generations = g.outstanding;
     }
     return true;
 }
@@ -1258,6 +1355,26 @@ void EngineTalkback::assert_command_loop_thread(const char *where) const
     if (std::this_thread::get_id() != command_loop_id) {
         report_nomination("thread_assert_failed", R"("where":")" + std::string(where) + "\"");
     }
+}
+
+ZOOMSDK::SDKError EngineTalkback::destroy_channel_retrying(const zchar_t *channelID,
+                                                            uint32_t *attempts)
+{
+    // Fix round 3: the bounded Begin/Add/Execute retry, extracted from four
+    // identical hand-copies (the Nomination cancelled branch, the untracked
+    // branch, nomination_destroy_provisioned()'s loop, and the new
+    // stale-response branch below) -- see the header comment on why. Never
+    // called with m_chan_mtx held; m_ctrl is dereferenced here.
+    ZOOMSDK::SDKError e = ZOOMSDK::SDKERR_UNKNOWN;
+    uint32_t attempt = 0;
+    for (; attempt < kMaxDestroyAttempts; ++attempt) {
+        e = m_ctrl->BeginBatchDestroyChannels();
+        if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->AddChannelToDestroy(channelID);
+        if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->ExecuteBatchDestroyChannels();
+        if (e == ZOOMSDK::SDKERR_SUCCESS) break;
+    }
+    if (attempts) *attempts = attempt + 1;
+    return e;
 }
 
 void EngineTalkback::nomination_destroy_provisioned()
@@ -1283,18 +1400,12 @@ void EngineTalkback::nomination_destroy_provisioned()
     }
     for (const auto &channel_id_z : ids) {
         const std::string channel_id_utf8 = zchar_to_utf8(channel_id_z.c_str());
-        ZOOMSDK::SDKError e = ZOOMSDK::SDKERR_UNKNOWN;
-        uint32_t attempt = 0;
-        for (; attempt < kMaxDestroyAttempts; ++attempt) {
-            e = m_ctrl->BeginBatchDestroyChannels();
-            if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->AddChannelToDestroy(channel_id_z.c_str());
-            if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->ExecuteBatchDestroyChannels();
-            if (e == ZOOMSDK::SDKERR_SUCCESS) break;
-        }
+        uint32_t attempts = 0;
+        const ZOOMSDK::SDKError e = destroy_channel_retrying(channel_id_z.c_str(), &attempts);
         report_nomination("channel_destroyed",
                           R"("channel":")" + json_escape(channel_id_utf8) + R"(","code":)" +
                           std::to_string(static_cast<int>(e)) + R"(,"attempts":)" +
-                          std::to_string(attempt + 1));
+                          std::to_string(attempts));
         if (e != ZOOMSDK::SDKERR_SUCCESS) {
             report_nomination("channel_destroy_abandoned",
                               R"("channel":")" + json_escape(channel_id_utf8) + "\"");

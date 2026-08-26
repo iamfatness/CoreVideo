@@ -120,6 +120,9 @@
 // Free of Qt / OBS / Zoom SDK dependencies so the routing can be pinned by a
 // test with no engine and no meeting.
 //
+#include <cstdint>
+#include <vector>
+
 enum class TalkbackChannelOwner {
     // Nothing outstanding.
     None,
@@ -173,10 +176,16 @@ inline TalkbackChannelOwner talkback_claim_create(TalkbackChannelOwner pending)
 // `expire_stale_pending_create_locked()` forgot the owner it belonged to,
 // so it silently misapplied to the NEXT Nomination create, destroying a
 // brand-new channel instead of adopting it. Routing both owners' expiry
-// through the ONE `talkback_expire()` below is what makes that class of
-// asymmetry impossible to reintroduce without also breaking its test --
-// there is no longer a second per-owner copy in engine-talkback.cpp for an
-// edit to apply to only one arm of.
+// through the ONE `talkback_expire()` below closes that specific asymmetry.
+//
+// Fix round 2 shipped with each flag's OTHER clearer -- the check-and-clear
+// at the top of onCreateChannelResponse's Session and Nomination branches --
+// still written as two hand-rolled per-owner copies, an overclaim the
+// round-2 re-review caught: "no second per-owner copy" was true for expiry
+// and false for this site. `talkback_check_and_clear_cancelled()` below
+// closes that gap the same way `talkback_expire()` closed the first one, so
+// there is now genuinely no per-owner copy of EITHER clearer left in
+// engine-talkback.cpp for an edit to apply to only one arm of.
 //
 // Bundles both owners' cancellation flags together (rather than two
 // separate bool parameters) because that is the actual shape of the bug:
@@ -242,4 +251,127 @@ inline TalkbackCreateDisposition talkback_create_disposition(TalkbackChannelOwne
     if (owner == TalkbackChannelOwner::None) return TalkbackCreateDisposition::Stray;
     if (cancelled) return TalkbackCreateDisposition::DestroyCancelled;
     return TalkbackCreateDisposition::Claim;
+}
+
+// Reads and clears whichever cancellation flag belongs to `owner`, in one
+// step -- the pure decision behind the check-and-clear at the top of
+// onCreateChannelResponse's Session and Nomination branches (`cancelled =
+// m_*_create_cancelled; m_*_create_cancelled = false;`). Fix round 2 routed
+// the SETTER (talkback_cancel()) and the EXPIRE clearer (talkback_expire())
+// through shared functions but left this, the RESPONSE clearer, as two
+// hand-written per-owner copies -- the round-2 re-review named this an
+// overclaim in this file's own header comment above. Routing it through one
+// function here closes the same class of gap N1 was, before an edit to only
+// one owner's copy has the chance to reopen it.
+struct TalkbackCreateCheckResult {
+    bool cancelled;
+    TalkbackCreateState next;
+};
+inline TalkbackCreateCheckResult talkback_check_and_clear_cancelled(TalkbackCreateState state,
+                                                                    TalkbackChannelOwner owner)
+{
+    const bool cancelled =
+        owner == TalkbackChannelOwner::Session   ? state.session_cancelled :
+        owner == TalkbackChannelOwner::Nomination ? state.nomination_cancelled :
+                                                     false;
+    if (owner == TalkbackChannelOwner::Session) state.session_cancelled = false;
+    else if (owner == TalkbackChannelOwner::Nomination) state.nomination_cancelled = false;
+    return TalkbackCreateCheckResult{cancelled, state};
+}
+
+// ── Generation tracking (Task 2 fix round 3) ────────────────────────────────
+//
+// C1/N1 fixed the CANCELLATION half of "a create outstanding across
+// Leave()/expiry must not be misattributed". This is the other half, found
+// by the round-2 re-review: a create that merely EXPIRES -- nobody
+// cancelled it, its response is just slow, or genuinely lost -- can still
+// have that response arrive AFTER a fresh nomination has re-armed the SAME
+// owner and issued a SECOND CreateChannel. `onCreateChannelResponse` carries
+// no id correlating it to which CreateChannel call produced it, so `owner`
+// alone cannot tell "the response I am currently waiting for" apart from "a
+// response for a create I gave up on". A flag cannot answer this either --
+// N1 was a flag surviving too long; this is an IDENTITY problem, not a
+// binary one. src/shm-generation.h solves the same shape of problem (a
+// stale SHM reader must not be mistaken for a current one) with a
+// monotonically increasing generation carried alongside the state and
+// checked when the ambiguous event resolves; this follows that precedent.
+//
+// `current` is bumped on every nominate() (a fresh ladder must not be
+// confused with an older one) and on every Nomination expiry (an abandoned
+// create's eventual response must not be confused with whatever comes
+// after it) -- both call talkback_bump_generation(). Every CreateChannel a
+// ladder issues is stamped with `current` AT ITS OWN issue time
+// (talkback_issue_create(), pushed onto `outstanding`) and responses are
+// assumed to resolve in the order their creates were issued: Zoom's
+// callbacks for one controller are not reordered relative to the calls
+// that triggered them, the same assumption "exactly one create outstanding"
+// already rests on everywhere else in this file. Popping the FRONT of
+// `outstanding` and comparing it against `current`
+// (talkback_check_response_generation()) is what answers "is this response
+// for the create I am now waiting on, or for one I gave up on" without
+// needing an id the SDK never provides.
+//
+// No wraparound handling: realistic usage is dozens of nominate() calls and
+// expiries in a show, not the four billion `current` would need to wrap --
+// unlike src/shm-generation.h's counter (bumped per resubscribe, which CAN
+// run into the tens of thousands over a long process lifetime), saturating
+// this one would be solving a problem this feature does not have.
+struct TalkbackGenerationState {
+    uint32_t current = 0;
+    std::vector<uint32_t> outstanding; // FIFO: front = oldest still-unresolved
+};
+
+enum class TalkbackResponseFreshness {
+    // The oldest outstanding create's generation does not match `current`
+    // -- this response is for a create the ladder has since moved past.
+    Stale,
+    // The oldest outstanding create's generation matches `current` --
+    // this is the response the ladder is actually waiting on.
+    Current,
+    // Nothing was recorded as outstanding at all. Reachable only if this
+    // class's own invariant (one `talkback_issue_create()` per successful
+    // CreateChannel, one pop per response for that owner) is violated --
+    // engine-talkback.cpp treats this the same as `Current` (fails open)
+    // rather than risk destroying a channel it cannot explain.
+    Unexpected,
+};
+
+// Bumps the generation -- the pure decision behind nominate() (a fresh
+// ladder) and expire_stale_pending_create_locked()'s Nomination arm (an
+// abandoned create). Does NOT touch `outstanding`: an entry already queued
+// under an EARLIER generation must stay queued so its eventual response is
+// still recognized -- and correctly discarded -- by the comparison below;
+// bumping only changes what counts as "current" going forward.
+inline TalkbackGenerationState talkback_bump_generation(TalkbackGenerationState state)
+{
+    ++state.current;
+    return state;
+}
+
+// Records that a new create was issued under the current generation -- the
+// pure decision behind nomination_create_next() stamping a CreateChannel
+// call right after it returns SDKERR_SUCCESS.
+inline TalkbackGenerationState talkback_issue_create(TalkbackGenerationState state)
+{
+    state.outstanding.push_back(state.current);
+    return state;
+}
+
+// Pops the oldest outstanding generation (if any) and reports whether it
+// matches `state.current`. See TalkbackResponseFreshness::Unexpected for
+// why an empty queue is not treated as Stale.
+struct TalkbackResponseCheck {
+    TalkbackResponseFreshness freshness;
+    TalkbackGenerationState next;
+};
+inline TalkbackResponseCheck talkback_check_response_generation(TalkbackGenerationState state)
+{
+    if (state.outstanding.empty())
+        return TalkbackResponseCheck{TalkbackResponseFreshness::Unexpected, state};
+    const uint32_t resolved = state.outstanding.front();
+    state.outstanding.erase(state.outstanding.begin());
+    return TalkbackResponseCheck{
+        resolved == state.current ? TalkbackResponseFreshness::Current
+                                   : TalkbackResponseFreshness::Stale,
+        state};
 }

@@ -316,6 +316,18 @@ private:
     // from the SDK message pump on that same thread).
     void nomination_destroy_provisioned();
 
+    // Fix round 3: the bounded Begin/Add/Execute destroy retry -- identical
+    // in the cancelled branch, the untracked branch, nomination_destroy_
+    // provisioned()'s loop, and the new stale-response branch below -- had
+    // grown to four hand-copied loops in this file's Nomination-related
+    // code alone. Extracted so a future change to the retry bound or the
+    // sequence itself cannot apply to three of the four and miss the
+    // fourth, the exact shape of duplication this task's own review history
+    // keeps finding. Never called with m_chan_mtx held (dereferences
+    // m_ctrl); *attempts (if non-null) receives how many tries it took, for
+    // callers that report it.
+    ZOOMSDK::SDKError destroy_channel_retrying(const zchar_t *channelID, uint32_t *attempts);
+
     // Resolves `name` to a live user id and, if found, invites it into the
     // already-created channel `channel_id_z`. Deliberately independent of
     // the create-queue machinery above -- it takes a channel id and a name,
@@ -596,6 +608,29 @@ private:
     // arm for the fix and nominate()'s comment for why the ordering with
     // m_nomination_pending's assignment also had to change alongside this.
     bool m_nomination_create_cancelled = false;
+
+    // Fix round 3 ("expire-path double create"): the cancellation flag
+    // above answers "did THIS create get cancelled" -- it says nothing
+    // about a create that simply EXPIRED (nobody cancelled it, its
+    // response is just slow or genuinely lost) and then has that response
+    // arrive AFTER a fresh nomination re-armed the SAME owner and issued a
+    // SECOND CreateChannel. onCreateChannelResponse cannot tell the two
+    // creates' responses apart by owner alone -- Zoom gives no correlation
+    // id -- so a late response for the FIRST one could be adopted as the
+    // SECOND ladder's channel 1 while the second create is still genuinely
+    // in flight, and the queue would then issue a THIRD: two outstanding
+    // creates at once, the one thing the arbiter exists to prevent. See
+    // src/talkback-channel-owner.h's "Generation tracking" section for the
+    // full mechanism (mirrors src/shm-generation.h's fix for the same shape
+    // of problem). `m_nomination_generation` is bumped by nominate() (a
+    // fresh ladder) and by expire_stale_pending_create_locked()'s
+    // Nomination arm (an abandoned create); `m_nomination_outstanding_
+    // generations` is the FIFO queue nomination_create_next() pushes onto
+    // at issue time and onCreateChannelResponse's Nomination branch pops
+    // from at response time. Both guarded by m_chan_mtx, same discipline as
+    // every other nomination field in this class.
+    uint32_t m_nomination_generation = 0;
+    std::vector<uint32_t> m_nomination_outstanding_generations;
 
     // One entry per Zoom channel nominate() has successfully created --
     // populated by onCreateChannelResponse's Nomination branch, one at a

@@ -1656,7 +1656,23 @@ int main()
                     R"({"cmd":"talkback_nominate","stage":"nominate","ok":false,)"
                     R"("reason":"malformed_nominees"})");
             } else {
-                talkback.nominate(meeting_svc, nominees);
+                // Fix round 2 (N1): this bool used to be discarded outright.
+                // nominate() reports its own terminal outcome on every
+                // return-false path today (that discipline is the actual
+                // fix for N1 -- see nomination_create_next()'s two abort
+                // branches), so this is a backstop, not the primary signal:
+                // if a FUTURE path inside nominate() ever returns false
+                // without having reported anything, a silently discarded
+                // bool is exactly how that would go unnoticed again. This
+                // "debug" line is diagnostic-only -- handle_event()'s
+                // generic "debug" branch just logs it, it does not
+                // participate in the plugin's nomination state machine, so
+                // it can never double up with report_nomination()'s own
+                // terminal line.
+                if (!talkback.nominate(meeting_svc, nominees)) {
+                    EngineIpc::write(
+                        R"({"cmd":"debug","stage":"nominate_returned_false"})");
+                }
             }
 
         } else if (command == IpcCommand::Leave) {

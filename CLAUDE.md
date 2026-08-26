@@ -256,9 +256,15 @@ Every one of these is documented at length where it lives; the list is the map.
   already existed to avoid -- but this can only ever prove "known bad": a
   target whose channel is still mid-creation (`provisioning_incomplete`) is
   invisible to it, because the plugin is only ever told the *finished* plan,
-  never the ladder's live progress, so that case still falls through to
-  `session_start()`'s own async refusal via `evaluate()`'s existing grace
-  period, unchanged. `ZoomControlServer`'s socket handlers run on the Qt main
+  never the ladder's live progress. **Corrected in fix round 2 (N3):** that
+  case does NOT fall through to `session_start()`'s async refusal unchanged
+  -- it is refused LOCALLY too, from whatever the last CONFIRMED plan says
+  (`src/talkback-nomination.h`). During a first-ever nomination's whole
+  ladder `requested` is still empty, so every target (including `"all"`) is
+  refused with "No one has been nominated yet"; during a re-nomination's
+  ladder the previous plan's names still correctly fall through while
+  brand-new names are refused as not-provisioned. `ZoomControlServer`'s
+  socket handlers run on the Qt main
   thread (confirmed: `QTcpServer`/`QTcpSocket` are parented to the server,
   which is constructed on that thread, and `readyRead` is a plain
   `Qt::AutoConnection`) -- the same thread `TalkbackController`'s `QTimer`
@@ -287,9 +293,9 @@ Every one of these is documented at length where it lives; the list is the map.
   `last_attempt_ok`/`last_attempt_reason` fields, never the confirmed
   `requested`/`uncovered_private` `key_on()` reads. In-flight stage reports
   stage into a separate `TalkbackNominationPending` first. `talkback_nomination
-  _reset()` is wired into the two existing per-meeting/per-process
-  world-resets (`handle_event()`'s `"left"` branch, `start()`'s fresh-launch
-  path) rather than a new hook. Both defects were mutation-tested: reverting
+  _reset()` is wired into existing per-meeting/per-process world-resets
+  (`handle_event()`'s `"left"` branch; `stop_for_reconnect()` as of fix round
+  2, see below) rather than a new hook. Both defects were mutation-tested: reverting
   either fix (`note_refused` touching `requested`; `reset()` as a no-op) in
   `src/talkback-nomination.h` fails `tests/talkback-nomination-test.cpp`
   deterministically, reverted cleanly afterward. Also this round:
@@ -304,6 +310,48 @@ Every one of these is documented at length where it lives; the list is the map.
   actually decodes (F5, `json_escape()` in `zoom-engine-client.cpp`) --
   narrow, and the shared decoder is not something to change opportunistically
   for one caller.
+- **The operator surface, Task 5 fix round 2**: round 1's {confirmed,
+  refused} model missed a THIRD engine outcome (N1, Major). `nominate()`
+  destroys the standing provisioned set BEFORE planning a re-nomination
+  (`nomination_destroy_provisioned()`, its own comment: "destroying is safe
+  HERE and nowhere earlier"); if the ladder then aborts part-way
+  (`nomination_create_next()`'s arbiter-busy check, or `CreateChannel`
+  itself failing), the engine ends the attempt having ALREADY destroyed what
+  it was replacing -- and the `CreateChannel`-failure branch reported only a
+  diagnostic `"create_channel"` stage, never a terminal outcome, so the
+  plugin's confirmed plan just sat there describing channels that no longer
+  existed (a discarded `bool` at the `main.cpp` call site is how a
+  no-terminal-report path could exist undetected at all). Fixed on both
+  ends: the engine now emits `"nominate","ok":false,"channels_destroyed":true`
+  on both abort branches -- a field, not a reason string, because
+  `nominate()`'s OWN early gate reports the IDENTICAL `"create_busy"` reason
+  for a refusal that does NOT destroy anything; reason strings collide, the
+  field does not. The plugin maps `channels_destroyed:true` to a NEW
+  transition, `talkback_nomination_note_failed_after_destroy()` (resets the
+  confirmed plan like a world-reset, but keeps the reason as a diagnostic,
+  unlike a bare `reset()`), never to `note_refused()`. N2/N4: the
+  nomination-record reset for an engine restart moved from `start()` (which
+  ran it BEFORE joining the previous session's reader thread -- violating
+  the ordering rule stated three lines below it in that same function) into
+  `stop_for_reconnect()`, the third world-reset point, which every restart
+  path already calls AFTER joining both threads. N5, the structural finding:
+  round 1's mutation tests covered only the pure state machine
+  (`src/talkback-nomination.h`); both F1 and N1 were bugs in the WIRING
+  (which report shape maps to which transition), which lived inlined in
+  `handle_event()` and could not be reached by a host test. That mapping is
+  now `talkback_nomination_apply_report()` in the new
+  `src/talkback-nomination-dispatch.h` -- Qt-JSON-only, no OBS/socket/thread
+  dependency, the same bar `tests/zoom-control-parse-test.cpp` already
+  clears -- and `tests/talkback-nomination-dispatch-test.cpp` drives it with
+  the exact report shapes the engine emits, including the
+  `"create_busy"`-means-two-different-things case. Mutation-reproved: F1
+  again (the refusal branch calling `commit()`), and the N1 mapping
+  (ignoring `channels_destroyed` and always calling `note_refused()`), both
+  caught by the new dispatch test where round 1's header-only test could
+  not see them. N3: corrected the round-1 CLAUDE.md paragraph and a matching
+  comment in `talkback-controller.cpp` that claimed a mid-ladder key press
+  "falls through to `session_start()`'s async refusal, unchanged" -- it does
+  not; it is refused locally too, from whatever the last confirmed plan says.
 
 ## Live testing against a real meeting
 

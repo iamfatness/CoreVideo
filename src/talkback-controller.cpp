@@ -75,18 +75,25 @@ bool TalkbackController::key_on(const std::string &target,
     }
 
     // Task 5: refuse a target this plugin already KNOWS was never given a
-    // channel, from the last talkback_nominate()'s reported plan -- fail
+    // channel, from the last CONFIRMED talkback_nominate() plan -- fail
     // closed here for the same reason the two checks above do: without it,
     // key_on() would return true, the tap would start publishing, and
     // session_start() (engine/src/engine-talkback.cpp) would refuse a moment
     // later with "no_nomination"/"target_not_provisioned", forcing
     // evaluate()'s ~1.5s grace period to notice and retract the key -- the
     // same open-then-retract flicker, for a cause this plugin already had
-    // enough information to name immediately. See
-    // talkback_target_known_unprovisioned()'s header comment (src/talkback-
-    // plan.h) for the one case it cannot see (provisioning still in
-    // progress), which still falls through to that same async refusal,
-    // unchanged.
+    // enough information to name immediately. `nomination` only ever reflects
+    // the CONFIRMED plan (src/talkback-nomination.h); a target still
+    // provisioning (the one case talkback_target_known_unprovisioned() --
+    // src/talkback-plan.h -- cannot see) is therefore ALSO refused locally
+    // here, not passed through to the engine: during a first-ever
+    // nomination's whole ladder `requested` is still empty, so every target
+    // (including "all") gets "No one has been nominated for talkback yet";
+    // during a re-nomination's ladder the PREVIOUS plan's names still
+    // correctly fall through while brand-new names are refused as
+    // not-provisioned. Fix round 2 (N3): this used to say the mid-ladder case
+    // "falls through to session_start()'s async refusal, unchanged" -- it
+    // does not, and CLAUDE.md's matching claim was corrected alongside this.
     const auto nomination = ZoomEngineClient::instance().talkback_nomination_status();
     if (talkback_target_known_unprovisioned(target, nomination.requested,
                                             nomination.uncovered_private)) {

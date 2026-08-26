@@ -1706,7 +1706,20 @@ bool EngineTalkback::nomination_create_next()
         // there is no sensible way to hold this queue open across an
         // unrelated create's whole round trip, and the plan-level ruling
         // already says nomination must not block on the arbiter.
-        report_nomination("nominate", R"("ok":false,"reason":"create_busy")");
+        //
+        // Fix round 2 (N1, Major): "channels_destroyed":true is what tells
+        // the plugin this is NOT the same "create_busy" nominate() itself
+        // reports from its own early gate check (above, before the replace
+        // step -- see this function's header comment) -- that one leaves the
+        // standing set untouched; THIS one is reached only mid-ladder, after
+        // nominate()'s replace already destroyed the previous set, and is
+        // about to destroy whatever this ladder itself got as far as. Same
+        // reason string, opposite truth about what is still standing -- the
+        // plugin cannot tell those apart from "reason" alone, which is
+        // exactly what left it holding a plan for destroyed channels
+        // (src/talkback-nomination.h's talkback_nomination_note_failed_after_destroy()).
+        report_nomination("nominate",
+            R"("ok":false,"reason":"create_busy","channels_destroyed":true)");
         {
             std::lock_guard<std::mutex> lock(m_chan_mtx);
             m_nomination_pending.clear();
@@ -1722,6 +1735,18 @@ bool EngineTalkback::nomination_create_next()
     const ZOOMSDK::SDKError e = m_ctrl->CreateChannel(1);
     report_nomination("create_channel", R"("code":)" + std::to_string(static_cast<int>(e)));
     if (e != ZOOMSDK::SDKERR_SUCCESS) {
+        // Fix round 2 (N1, Major): this branch used to report ONLY the
+        // "create_channel" diagnostic line above, with the SDK error code --
+        // a stage line, not a terminal outcome. The plugin has no way to
+        // know a ladder is DONE except a "nominate_done"/"nominate ok:false"
+        // report, and this path was neither: it destroys whatever this
+        // ladder provisioned so far (nomination_destroy_provisioned() below)
+        // and returns false with NOTHING telling the far side the attempt is
+        // over. Emit the terminal report every abort path must have --
+        // "channels_destroyed":true for the same reason as the create_busy
+        // branch above.
+        report_nomination("nominate",
+            R"("ok":false,"reason":"create_channel_failed","channels_destroyed":true)");
         {
             std::lock_guard<std::mutex> lock(m_chan_mtx);
             m_nomination_pending.clear();

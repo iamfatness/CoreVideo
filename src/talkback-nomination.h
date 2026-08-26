@@ -138,6 +138,38 @@ inline void talkback_nomination_note_refused(TalkbackNominationPlan &confirmed,
     confirmed.last_attempt_reason = reason;
 }
 
+// Fix round 2 (N1, Major). A THIRD outcome the {confirmed, refused} model
+// above did not represent: nominate() destroys the standing provisioned set
+// BEFORE planning (its own comment: "destroying is safe HERE and nowhere
+// earlier"), so if the ladder then aborts part-way
+// (engine-talkback.cpp's nomination_create_next(): the arbiter is busy, or
+// CreateChannel itself fails), the engine ends this attempt having already
+// destroyed whatever it was replacing -- and, on the CreateChannel-failure
+// branch, without ever emitting the "nominate_done" that would let
+// talkback_nomination_commit() run. Routing this outcome through
+// talkback_nomination_note_refused() (as round 1 did for every ok:false)
+// would leave the confirmed plan describing channels that no longer exist --
+// the exact F2 flicker, on a trigger neither Leave nor an engine restart
+// covers, because nothing here is either of those.
+//
+// The engine marks this outcome with an explicit "channels_destroyed":true
+// field (see report_nomination() call sites in nomination_create_next()) --
+// NOT inferred from the "reason" string, because nominate()'s OWN early gate
+// check reports the identical "create_busy" reason for a refusal that does
+// NOT destroy anything (it runs before the replace step). Reason strings
+// collide; this field does not.
+//
+// Unlike a plain talkback_nomination_reset() (Leave, engine restart -- no
+// single attempt to blame), this keeps the reason as a diagnostic: the
+// operator still needs to know WHY there is suddenly no nomination.
+inline void talkback_nomination_note_failed_after_destroy(TalkbackNominationPlan &confirmed,
+                                                           const std::string &reason)
+{
+    confirmed = TalkbackNominationPlan{};
+    confirmed.last_attempt_ok     = false;
+    confirmed.last_attempt_reason = reason;
+}
+
 // F2: the confirmed plan describes a real channel set that a Leave or an
 // engine restart just destroyed. Reset to "nothing has ever been confirmed"
 // -- the same state a brand new meeting starts in, which

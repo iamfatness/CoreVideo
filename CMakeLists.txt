@@ -1333,11 +1333,31 @@ if(BUILD_TESTING)
         add_test(NAME CoreVideoControlParse
                  COMMAND CoreVideoControlParseTest)
 
+        # Task 5 fix round 2 (N5): the stage-report-to-transition MAPPING for
+        # a talkback nomination -- where both F1 and N1 actually lived, per
+        # the round 1/round 2 reviews -- factored out to depend on nothing
+        # but Qt Core's JSON types (same bar as the two targets above) so it
+        # can be driven directly, instead of only through the pure state
+        # machine underneath it (CoreVideoTalkbackNomination) or the whole
+        # OBS plugin. See src/talkback-nomination-dispatch.h.
+        add_executable(CoreVideoTalkbackNominationDispatchTest
+            tests/talkback-nomination-dispatch-test.cpp
+        )
+        target_include_directories(CoreVideoTalkbackNominationDispatchTest PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        )
+        target_link_libraries(CoreVideoTalkbackNominationDispatchTest PRIVATE Qt6::Core)
+        add_test(NAME CoreVideoTalkbackNominationDispatch
+                 COMMAND CoreVideoTalkbackNominationDispatchTest)
+
         if(WIN32 AND _qt_bin_dir)
             set_tests_properties(CoreVideoOscWire PROPERTIES
                 ENVIRONMENT_MODIFICATION
                     "PATH=path_list_prepend:${_qt_bin_dir}")
             set_tests_properties(CoreVideoControlParse PROPERTIES
+                ENVIRONMENT_MODIFICATION
+                    "PATH=path_list_prepend:${_qt_bin_dir}")
+            set_tests_properties(CoreVideoTalkbackNominationDispatch PROPERTIES
                 ENVIRONMENT_MODIFICATION
                     "PATH=path_list_prepend:${_qt_bin_dir}")
         endif()

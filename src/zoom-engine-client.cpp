@@ -1,5 +1,6 @@
 #include "zoom-engine-client.h"
 #include "speaker-director.h"
+#include "talkback-nomination-dispatch.h" // Task 5 fix round 2, N5
 #include "talkback-plan.h" // talkback_dedup_preserve_order() -- Task 5 fix round 1, F4
 #include "zoom-join-decision.h"
 #include "zoom-reconnect.h"
@@ -478,16 +479,18 @@ bool ZoomEngineClient::start(const std::string &jwt_token,
     m_authenticated.store(false, std::memory_order_release);
     m_media_active.store(false, std::memory_order_release);
     m_awaiting_admission.store(false, std::memory_order_release);
-    // Task 5 fix round 1 (F2): a freshly launched engine process has zero
-    // provisioned channels -- this covers the world-reset a graceful Leave's
-    // "cmd":"left" handler (above) cannot: an engine crash or an explicit
-    // restart never sends "left" at all. Same world-reset, the other
-    // trigger for it -- not a new hook.
-    {
-        std::lock_guard<std::mutex> lk(m_mtx);
-        talkback_nomination_reset(m_talkback_nomination_status);
-        m_talkback_nomination_pending = TalkbackNominationPending{};
-    }
+    // Task 5 fix round 2 (N2): the nomination-record reset for an engine
+    // restart used to live HERE, before the joins immediately below --
+    // reachable on the crash path (monitor_loop() clears m_running without
+    // joining the reader, then recovery calls start()), where a dead
+    // engine's already-queued "nominate_done" could still be handled by the
+    // not-yet-joined reader and commit AFTER this reset ran, leaving a
+    // freshly restarted engine with zero channels holding a stale confirmed
+    // plan. Moved to stop_for_reconnect() below instead: every restart on
+    // every path (explicit stop(), reconnect's execute_retry()) calls it
+    // BEFORE calling start() again, and it already joins both threads
+    // before touching per-session state -- the rule this file states three
+    // lines below and the reset must obey too.
     // Join threads from any previous session (e.g. after a crash).
     if (m_reader.joinable())  m_reader.join();
     if (m_monitor.joinable()) m_monitor.join();
@@ -611,6 +614,21 @@ void ZoomEngineClient::stop_for_reconnect()
     m_media_active.store(false, std::memory_order_release);
     m_awaiting_admission.store(false, std::memory_order_release);
     m_state.store(MeetingState::Idle, std::memory_order_release);
+    // Task 5 fix round 2 (N2/N4): the third world-reset point, alongside the
+    // per-session fields above -- covers an engine restart (crash recovery's
+    // execute_retry() calls this before the next start()) AND the window
+    // between an operator stop()/leave and the next start(), where
+    // talkback_status would otherwise keep advertising a plan whose engine
+    // process no longer exists. Placed AFTER the joins above (not before,
+    // where round 1 had the equivalent block in start() -- see the comment
+    // there): the previous session's reader thread owns this field and can
+    // still be inside handle_event() committing a queued "nominate_done"
+    // until it is joined.
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        talkback_nomination_reset(m_talkback_nomination_status);
+        m_talkback_nomination_pending = TalkbackNominationPending{};
+    }
 }
 
 void ZoomEngineClient::monitor_loop()
@@ -1331,45 +1349,17 @@ void ZoomEngineClient::handle_event(const std::string &line)
     if (cmd == "talkback_nominate") {
         // Task 5: mirrors talkback_probe's handling exactly -- log every
         // stage line verbatim (see the comment on the talkback_probe branch
-        // above). Fix round 1 (F1): what happens to
-        // m_talkback_nomination_status (the CONFIRMED plan) differs by
-        // stage -- see src/talkback-nomination.h's header comment. Stage
-        // reports for an in-flight attempt accumulate in
-        // m_talkback_nomination_pending; only "nominate_done" commits them
-        // into the confirmed plan, and a refusal touches only the
-        // confirmed plan's diagnostic fields, never its
-        // requested/uncovered_private/unreachable.
+        // above). Fix round 2 (N5): the stage-to-transition MAPPING (which
+        // pure talkback-nomination.h function each report shape calls) is
+        // factored into talkback_nomination_apply_report()
+        // (src/talkback-nomination-dispatch.h) precisely so that mapping --
+        // where both F1 and N1 actually lived -- can be driven by a host
+        // test without the rest of this class. Do not inline stage-handling
+        // logic back here; extend the dispatcher and its test instead.
         blog(LOG_INFO, "[obs-zoom-plugin] talkback_nominate: %s", line.c_str());
-        const QString stage = obj.value("stage").toString();
         std::lock_guard<std::mutex> lk(m_mtx);
-        if (stage == "uncovered_private") {
-            talkback_nomination_note_uncovered(m_talkback_nomination_pending,
-                obj.value("name").toString().toStdString());
-        } else if (stage == "unreachable") {
-            talkback_nomination_note_unreachable(m_talkback_nomination_pending,
-                obj.value("name").toString().toStdString());
-        } else if (stage == "plan") {
-            talkback_nomination_note_plan(m_talkback_nomination_pending,
-                static_cast<uint32_t>(obj.value("channels").toInt(0)),
-                obj.value("all_talent_complete").toBool(true));
-        } else if (stage == "nominate_done") {
-            // This attempt was accepted -- promote the staged report to the
-            // confirmed plan. `channels` here is nominate_done's own count,
-            // which can differ from the earlier "plan" stage's if a create
-            // failed partway (see nomination_create_next() in
-            // engine/src/engine-talkback.cpp).
-            talkback_nomination_commit(m_talkback_nomination_status,
-                m_talkback_nomination_pending,
-                static_cast<uint32_t>(obj.value("channels").toInt(0)));
-        } else if (stage == "nominate" && !obj.value("ok").toBool(true)) {
-            // An outright refusal (session_live, probe_busy, not_in_meeting,
-            // create_busy, target_name_collision, ...). The engine leaves
-            // its standing provisioned set untouched on every one of these
-            // paths, so the confirmed plan must not move either -- see F1 in
-            // src/talkback-nomination.h.
-            talkback_nomination_note_refused(m_talkback_nomination_status,
-                obj.value("reason").toString().toStdString());
-        }
+        talkback_nomination_apply_report(m_talkback_nomination_status,
+            m_talkback_nomination_pending, obj.value("stage").toString(), obj);
         return;
     }
     if (cmd == "awaiting_admission") {

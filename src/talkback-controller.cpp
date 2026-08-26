@@ -1,4 +1,5 @@
 #include "talkback-controller.h"
+#include "talkback-plan.h"
 #include "zoom-engine-client.h"
 
 #include <obs-module.h>
@@ -6,7 +7,7 @@
 
 // Built with Qt's JSON types rather than hand-rolled concatenation, matching
 // the pattern zoom-diagnostics-dialog.cpp already uses for its status
-// payloads: m_participant and m_source are a Zoom display name and an OBS
+// payloads: m_target and m_source are "all"/a Zoom display name and an OBS
 // source name, both operator/user-controlled text that can contain '"' or
 // '\\'. Task 5 parses this string back into a QJsonObject, so an unescaped
 // quote here is a parse failure in a different file, not a cosmetic glitch.
@@ -45,14 +46,14 @@ TalkbackController::TalkbackController()
     m_timer->start();
 }
 
-bool TalkbackController::key_on(const std::string &participant,
+bool TalkbackController::key_on(const std::string &target,
                                 const std::string &source,
                                 TalkbackKeyMode mode, bool needs_renewal,
                                 std::string &error_out)
 {
     std::lock_guard<std::mutex> lock(m_mtx);
     if (m_key.open) { error_out = "A talkback key is already open"; return false; }
-    if (participant.empty()) { error_out = "No participant named"; return false; }
+    if (target.empty()) { error_out = "No talkback target named"; return false; }
     if (source.empty())      { error_out = "No OBS audio source chosen"; return false; }
 
     // Check the precondition BEFORE starting anything. talkback_start() is
@@ -70,6 +71,28 @@ bool TalkbackController::key_on(const std::string &participant,
     }
     if (ZoomEngineClient::instance().state() != MeetingState::InMeeting) {
         error_out = "not in a meeting";
+        return false;
+    }
+
+    // Task 5: refuse a target this plugin already KNOWS was never given a
+    // channel, from the last talkback_nominate()'s reported plan -- fail
+    // closed here for the same reason the two checks above do: without it,
+    // key_on() would return true, the tap would start publishing, and
+    // session_start() (engine/src/engine-talkback.cpp) would refuse a moment
+    // later with "no_nomination"/"target_not_provisioned", forcing
+    // evaluate()'s ~1.5s grace period to notice and retract the key -- the
+    // same open-then-retract flicker, for a cause this plugin already had
+    // enough information to name immediately. See
+    // talkback_target_known_unprovisioned()'s header comment (src/talkback-
+    // plan.h) for the one case it cannot see (provisioning still in
+    // progress), which still falls through to that same async refusal,
+    // unchanged.
+    const auto nomination = ZoomEngineClient::instance().talkback_nomination_status();
+    if (talkback_target_known_unprovisioned(target, nomination.requested,
+                                            nomination.uncovered_private)) {
+        error_out = nomination.requested.empty()
+            ? "No one has been nominated for talkback yet -- run talkback_nominate first"
+            : "\"" + target + "\" has no talkback channel -- nominate them, or key \"all\"";
         return false;
     }
 
@@ -98,10 +121,10 @@ bool TalkbackController::key_on(const std::string &participant,
     // line the operator can read, which is strictly better than a silent
     // discard — and it is bounded by one command-loop turn.
     if (!m_tap.open(source, error_out)) return false;
-    ZoomEngineClient::instance().talkback_start(participant);
+    ZoomEngineClient::instance().talkback_start(target);
 
-    m_participant = participant;
-    m_source      = source;
+    m_target = target;
+    m_source = source;
     m_key.open            = true;
     m_key.mode            = mode;
     m_key.needs_renewal   = needs_renewal;
@@ -117,7 +140,7 @@ bool TalkbackController::key_on(const std::string &participant,
     // previous key ended. See m_last_live's declaration.
     m_last_live = false;
     blog(LOG_INFO, "[obs-zoom-plugin] talkback: key OPEN to \"%s\" via \"%s\"",
-         participant.c_str(), source.c_str());
+         target.c_str(), source.c_str());
     return true;
 }
 
@@ -285,9 +308,11 @@ std::string TalkbackController::status_json() const
 {
     std::lock_guard<std::mutex> lock(m_mtx);
     QJsonObject obj;
-    obj["open"]        = m_key.open;      // local intent: the operator/API asked for this
-    obj["participant"] = QString::fromStdString(m_participant);
-    obj["source"]      = QString::fromStdString(m_source);
+    obj["open"]   = m_key.open;      // local intent: the operator/API asked for this
+    // Task 5: "target", not "participant" -- a key selects "all" or one
+    // nominee's name, not a single person to open a channel for.
+    obj["target"] = QString::fromStdString(m_target);
+    obj["source"] = QString::fromStdString(m_source);
     obj["tap_open"]    = m_tap.is_open(); // local: the OBS capture path is attached
     // F2 review-round fix: the engine's own CONFIRMED state, clearly
     // distinguished from "open"/"tap_open" above -- both of those can be

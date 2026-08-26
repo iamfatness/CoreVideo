@@ -88,9 +88,9 @@ inline QString meeting_state_to_string(MeetingState state)
 // Kept in sync manually with the "help" response and the if-chain in
 // handle_line(); used here only to give the "unknown command" acceptance
 // criterion something pure to test against.
-inline const std::array<const char *, 24> &known_control_commands()
+inline const std::array<const char *, 25> &known_control_commands()
 {
-    static const std::array<const char *, 24> kCommands = {
+    static const std::array<const char *, 25> kCommands = {
         "help", "status", "list_participants", "list_outputs",
         "list_audio_sources",
         "assign_output", "assign_output_ex",
@@ -100,6 +100,7 @@ inline const std::array<const char *, 24> &known_control_commands()
         "join", "leave", "start_engine", "stop_engine",
         "oauth_callback", "subscribe_events", "recovery_cancel",
         "talkback_probe", "talkback_key", "talkback_renew", "talkback_status",
+        "talkback_nominate",
     };
     return kCommands;
 }

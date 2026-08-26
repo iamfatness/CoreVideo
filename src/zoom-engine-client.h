@@ -51,6 +51,35 @@ public:
         std::string reason;
     };
 
+    // Task 5: the plugin's own record of the last talkback_nominate() plan,
+    // assembled from two sources that arrive at different times and never
+    // over the same call: `requested` is set LOCALLY, the instant
+    // talkback_nominate() is sent (it is simply the argument the caller
+    // passed); everything else is filled in from the engine's async
+    // "cmd":"talkback_nominate" stage lines
+    // (engine/src/engine-talkback.cpp's report_nomination(), same
+    // fire-and-log pattern as talkback_probe -- see talkback_probe_status()
+    // above) as they arrive. `done` distinguishes "no report has arrived
+    // yet" (freshly reset, everything empty) from "the plan finished with
+    // zero channels" (e.g. an explicit denominate) -- both look like
+    // channels == 0 otherwise.
+    //
+    // TalkbackController::key_on() reads `requested`/`uncovered_private`
+    // through talkback_target_known_unprovisioned() (src/talkback-plan.h) to
+    // refuse an obviously-unprovisioned target before ever opening the tap --
+    // see that function's header comment for exactly what this local record
+    // can and cannot know.
+    struct TalkbackNominationStatus {
+        bool done = false;                        // a terminal report has arrived
+        bool ok = true;                            // false only on an outright refusal
+        std::string reason;                        // refusal reason when ok == false
+        uint32_t channels = 0;                     // planned, then (once done) actually created
+        bool all_talent_complete = true;
+        std::vector<std::string> requested;        // this plugin's own last nominee list
+        std::vector<std::string> uncovered_private; // nominees with no private channel
+        std::vector<std::string> unreachable;       // nominees on no channel at all
+    };
+
     struct SourceCallbacks {
         // shm_generation: engine-side generation of the SHM region backing the
         // frame (increments each time the region is (re)created). 0 when the
@@ -125,11 +154,31 @@ public:
     // pattern as talkback_probe_status() above, for the same reason.
     TalkbackSessionStatus talkback_session_status() const;
 
+    // Task 5: forwards a nomination's name list to the engine's nominate()
+    // (engine/src/engine-talkback.cpp). Fire-and-forget like talkback_probe --
+    // the plan outcome (channel count, who is uncovered, who is unreachable)
+    // arrives asynchronously as "cmd":"talkback_nominate" stage lines, logged
+    // verbatim in handle_event() and summarised in
+    // talkback_nomination_status() below. An empty list is a deliberate
+    // denominate (see nominate()'s own doc comment), not a no-op.
+    void talkback_nominate(const std::vector<std::string> &nominees);
+    // Same polled-not-signalled pattern as talkback_probe_status() /
+    // talkback_session_status() above -- see TalkbackNominationStatus's doc
+    // comment for what each field means and where it comes from.
+    TalkbackNominationStatus talkback_nomination_status() const;
+
     // Milestone 5's live-talkback senders. All five follow talkback_probe's
     // shape exactly: guarded by m_running, fire-and-forget, no result
     // returned here -- the engine's dispatch/response, if any, arrives async
     // like every other command on this pipe.
-    void talkback_start(const std::string &participant_name);
+    //
+    // Task 5: `target` is "all" (kTalkbackAllTalentTarget) or a nominee's
+    // name -- session_start() on the engine side SELECTS an
+    // already-provisioned channel, it does not create one. Sent as the
+    // "target" JSON field; the engine's "participant" fallback
+    // (engine/src/main.cpp) is a compatibility shim for pre-Task-5 senders
+    // only, not a second spelling this plugin uses.
+    void talkback_start(const std::string &target);
     void talkback_stop();
     // Must be sent only after the caller's ring header is fully laid out
     // (talkback_ring_init has run): the engine validates slot_count/
@@ -338,6 +387,8 @@ private:
     // TalkbackSessionStatus and talkback_session_status() above. Guarded by
     // m_mtx, same as m_talkback_probe_status.
     TalkbackSessionStatus m_talkback_session_status;
+    // Task 5: guarded by m_mtx, same as the two statuses above.
+    TalkbackNominationStatus m_talkback_nomination_status;
     std::deque<DebugEvent> m_debug_events;
     // Tracks whether the user deliberately requested a leave/stop (suppresses recovery).
     std::atomic<bool> m_user_leaving{false};

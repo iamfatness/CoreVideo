@@ -29,9 +29,12 @@ class TalkbackController : public QObject {
 public:
     static TalkbackController &instance();
 
-    // Opens a key. Returns false with a human-readable reason -- an operator
+    // Opens a key. `target` is "all" (kTalkbackAllTalentTarget, src/talkback-
+    // plan.h) or one nominee's display name -- Task 5: a key SELECTS an
+    // already-provisioned channel, it does not name a participant to create
+    // one for. Returns false with a human-readable reason -- an operator
     // whose key did not open needs to know WHICH thing failed.
-    bool key_on(const std::string &participant, const std::string &source,
+    bool key_on(const std::string &target, const std::string &source,
                 TalkbackKeyMode mode, bool needs_renewal,
                 std::string &error_out);
     void key_off();
@@ -60,7 +63,7 @@ private:
     mutable std::mutex m_mtx;
     TalkbackTap        m_tap;
     TalkbackKeyState   m_key{};
-    std::string        m_participant;
+    std::string        m_target;
     std::string        m_source;
     QTimer            *m_timer = nullptr;
     // F2 review-round fix: monotonic ms when key_on() opened THIS key.

@@ -855,7 +855,7 @@ void ZoomEngineClient::talkback_probe(const std::string &participant_name)
                json_escape(participant_name) + "\"}");
 }
 
-void ZoomEngineClient::talkback_start(const std::string &participant_name)
+void ZoomEngineClient::talkback_start(const std::string &target)
 {
     if (!m_running.load(std::memory_order_acquire)) return;
     // F2 review-round fix: reset the engine-confirmed session state at the
@@ -872,8 +872,33 @@ void ZoomEngineClient::talkback_start(const std::string &participant_name)
         std::lock_guard<std::mutex> lk(m_mtx);
         m_talkback_session_status = TalkbackSessionStatus{};
     }
-    write_json(R"({"cmd":"talkback_start","participant":")" +
-               json_escape(participant_name) + "\"}");
+    // Task 5: "target", not "participant" -- see this method's header
+    // comment. main.cpp still accepts the old field as a fallback, but this
+    // plugin only ever sends the new one.
+    write_json(R"({"cmd":"talkback_start","target":")" +
+               json_escape(target) + "\"}");
+}
+
+void ZoomEngineClient::talkback_nominate(const std::vector<std::string> &nominees)
+{
+    if (!m_running.load(std::memory_order_acquire)) return;
+    // Reset to a fresh "no report yet" state, seeded with the list THIS call
+    // is about to send -- `requested` is never learned from the engine, it is
+    // simply the argument the caller passed. Scoped so the lock is released
+    // before write_json() re-acquires it (m_mtx is not recursive), same
+    // discipline as talkback_start() above.
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        m_talkback_nomination_status = TalkbackNominationStatus{};
+        m_talkback_nomination_status.requested = nominees;
+    }
+    std::string json = R"({"cmd":"talkback_nominate","nominees":[)";
+    for (std::size_t i = 0; i < nominees.size(); ++i) {
+        if (i != 0) json += ",";
+        json += "\"" + json_escape(nominees[i]) + "\"";
+    }
+    json += "]}";
+    write_json(json);
 }
 
 void ZoomEngineClient::talkback_stop()
@@ -1080,6 +1105,12 @@ ZoomEngineClient::TalkbackSessionStatus ZoomEngineClient::talkback_session_statu
     return m_talkback_session_status;
 }
 
+ZoomEngineClient::TalkbackNominationStatus ZoomEngineClient::talkback_nomination_status() const
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    return m_talkback_nomination_status;
+}
+
 void ZoomEngineClient::fail_after_init_retries_exhausted()
 {
     // Monitor thread only.
@@ -1258,6 +1289,47 @@ void ZoomEngineClient::handle_event(const std::string &line)
             return;
         }
         blog(LOG_INFO, "[obs-zoom-plugin] talkback_session: %s", line.c_str());
+        return;
+    }
+    if (cmd == "talkback_nominate") {
+        // Task 5: mirrors talkback_probe's handling exactly -- the plan
+        // outcome is these stage lines reaching the operator, so log every
+        // one verbatim (see the comment on the talkback_probe branch above)
+        // AND fold the ones that matter into m_talkback_nomination_status so
+        // a control-API caller (or TalkbackController::key_on(), via
+        // talkback_target_known_unprovisioned()) has something to read back
+        // without tailing the log.
+        blog(LOG_INFO, "[obs-zoom-plugin] talkback_nominate: %s", line.c_str());
+        const QString stage = obj.value("stage").toString();
+        std::lock_guard<std::mutex> lk(m_mtx);
+        if (stage == "uncovered_private") {
+            m_talkback_nomination_status.uncovered_private.push_back(
+                obj.value("name").toString().toStdString());
+        } else if (stage == "unreachable") {
+            m_talkback_nomination_status.unreachable.push_back(
+                obj.value("name").toString().toStdString());
+        } else if (stage == "plan") {
+            m_talkback_nomination_status.channels =
+                static_cast<uint32_t>(obj.value("channels").toInt(0));
+            m_talkback_nomination_status.all_talent_complete =
+                obj.value("all_talent_complete").toBool(true);
+        } else if (stage == "nominate_done") {
+            // Overwrites the "plan" stage's count with the ACTUAL number of
+            // channels standing once provisioning finished -- these can
+            // differ if a create failed partway (see nomination_create_next()
+            // in engine/src/engine-talkback.cpp).
+            m_talkback_nomination_status.channels =
+                static_cast<uint32_t>(obj.value("channels").toInt(0));
+            m_talkback_nomination_status.done = true;
+        } else if (stage == "nominate" && !obj.value("ok").toBool(true)) {
+            // An outright refusal (session_live, probe_busy, not_in_meeting,
+            // create_busy, target_name_collision, ...) -- no plan was ever
+            // computed, so there is nothing else to fill in.
+            m_talkback_nomination_status.ok = false;
+            m_talkback_nomination_status.reason =
+                obj.value("reason").toString().toStdString();
+            m_talkback_nomination_status.done = true;
+        }
         return;
     }
     if (cmd == "awaiting_admission") {

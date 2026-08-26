@@ -202,6 +202,53 @@ inline std::string talkback_nominate_sentinel_collision(
     return {};
 }
 
+// Task 5: can the PLUGIN, from nothing but the last nomination's async plan
+// report (the "plan"/"uncovered_private" stage lines, forwarded verbatim over
+// the E2P pipe), already know that keying `target` cannot possibly succeed --
+// so a control-API key press can be refused before it ever opens the tap or
+// asks the engine, instead of opening then being retracted a tick later once
+// session_start()'s refusal arrives (the exact flicker key_on()'s
+// engine-running/in-meeting checks already exist to avoid, for the same
+// reason).
+//
+// This is deliberately a "known bad" test, not a "known good" one: a false
+// negative here just costs one refused round trip (session_start() still
+// checks, and still refuses with a specific reason -- see
+// engine/src/engine-talkback.cpp), while a false positive would refuse a key
+// that would have worked. The one case this CANNOT see is
+// "provisioning_incomplete" -- a target whose channel the nomination ladder
+// is still creating -- because the plugin is only ever told the finished
+// PLAN, never the ladder's in-flight progress; that case still relies on
+// session_start()'s own async refusal (see TalkbackController::evaluate()'s
+// grace period).
+//
+// `requested` is the nominee list the plugin itself sent with the last
+// talkback_nominate; `uncovered_private` is the engine's own report of who
+// in that list got no private channel. "all" is coverable whenever
+// `requested` is non-empty: talkback_plan() always allocates at least one
+// all-talent slice first, and never sacrifices it for private channels (see
+// this file's header comment), so the only way "all" is unprovisioned is
+// that nothing was ever nominated. A specific name is coverable only when it
+// was nominated AND is not in uncovered_private -- talkback_channel_serves_target()
+// matches a private target by membership alone, never by belonging to an
+// all-talent slice, so being reachable via "all" does not make a person's
+// OWN name keyable.
+inline bool talkback_target_known_unprovisioned(
+    const std::string &target,
+    const std::vector<std::string> &requested,
+    const std::vector<std::string> &uncovered_private)
+{
+    if (talkback_target_is_all_talent(target))
+        return requested.empty();
+    for (const auto &name : requested) {
+        if (name != target) continue;
+        for (const auto &u : uncovered_private)
+            if (u == target) return true; // nominated, but no private channel
+        return false;                     // nominated AND privately covered
+    }
+    return true; // never nominated at all
+}
+
 inline bool talkback_channel_serves_target(bool is_all_talent,
                                            const std::vector<std::string> &members,
                                            const std::string &target)

@@ -258,6 +258,49 @@ int main()
               "at 11 nominees the all-talent target did not select both of its channels");
     }
 
+    // ── Task 5: what the plugin can refuse locally, before any round trip ──
+    // talkback_target_known_unprovisioned() answers "known bad" from nothing
+    // but the last nomination's reported plan -- see its header comment for
+    // why a false negative (missing a case) is fine but a false positive
+    // (refusing a target that would have worked) is not.
+    {
+        // Nothing ever nominated: both "all" and a name are unprovisioned.
+        check(talkback_target_known_unprovisioned("all", {}, {}),
+              "\"all\" was called provisioned with nothing ever nominated");
+        check(talkback_target_known_unprovisioned("Bob", {}, {}),
+              "a name was called provisioned with nothing ever nominated");
+        // Case-insensitive sentinel match, mirroring talkback_target_is_all_talent.
+        check(talkback_target_known_unprovisioned("ALL", {}, {}),
+              "\"ALL\" was not recognised as the all-talent sentinel");
+    }
+    {
+        // Nominated with room for private channels for everyone: "all" and
+        // every nominee's own name are provisioned.
+        const std::vector<std::string> requested = {"Bob", "Sue"};
+        check(!talkback_target_known_unprovisioned("all", requested, {}),
+              "\"all\" was refused although someone was nominated");
+        check(!talkback_target_known_unprovisioned("Bob", requested, {}),
+              "a privately-covered nominee was refused");
+        check(!talkback_target_known_unprovisioned("Sue", requested, {}),
+              "a privately-covered nominee was refused");
+        // A name that was never nominated at all is refused.
+        check(talkback_target_known_unprovisioned("Stranger", requested, {}),
+              "a name never nominated was not refused");
+    }
+    {
+        // Budget exhausted for Sue's private channel (she is in
+        // uncovered_private): her own name is refused, but "all" still isn't
+        // -- the all-talent fan-out still reaches her.
+        const std::vector<std::string> requested = {"Bob", "Sue"};
+        const std::vector<std::string> uncovered = {"Sue"};
+        check(talkback_target_known_unprovisioned("Sue", requested, uncovered),
+              "a nominee with no private channel of her own was not refused");
+        check(!talkback_target_known_unprovisioned("Bob", requested, uncovered),
+              "Bob's own private channel was refused by Sue's shortfall");
+        check(!talkback_target_known_unprovisioned("all", requested, uncovered),
+              "\"all\" was refused even though the all-talent slice still exists");
+    }
+
     if (failures == 0)
         std::cout << "talkback-plan: all tests passed\n";
     return failures == 0 ? 0 : 1;

@@ -237,6 +237,35 @@ Every one of these is documented at length where it lives; the list is the map.
 - **Engine teardown**: never let SDK callbacks race teardown; `set_terminate`
   is a bare `_exit(5)` (code 5 maps to EngineCrash recovery; no pipe writes,
   no locks, no allocation in the handler).
+- **The operator surface, Task 5**: nothing on the plugin side could drive
+  the engine's pre-provisioned channels until this task -- every key press
+  refused `no_nomination` before it, because nothing ever sent
+  `talkback_nominate`. The control API's `talkback_nominate` and
+  `talkback_key` (now target-based: `"all"` or a nominee's name, not a
+  participant to open a channel for) are **fire-and-acknowledge**, the same
+  shape as `talkback_probe`: the plan outcome (channel count, who has a
+  private channel, who is uncovered, who is unreachable) arrives
+  asynchronously as `"cmd":"talkback_nominate"` stage lines
+  (`ZoomEngineClient::handle_event()`, logged verbatim like `talkback_probe`)
+  and is summarised for polling in `talkback_status`'s new `"nomination"`
+  field -- there is no synchronous round trip, on purpose. `TalkbackController
+  ::key_on()` refuses a target the last nomination's *reported* plan already
+  proves cannot work (`talkback_target_known_unprovisioned()`,
+  `src/talkback-plan.h`) BEFORE opening the tap, closing the same
+  open-then-retract flicker window the engine-running/in-meeting checks
+  already existed to avoid -- but this can only ever prove "known bad": a
+  target whose channel is still mid-creation (`provisioning_incomplete`) is
+  invisible to it, because the plugin is only ever told the *finished* plan,
+  never the ladder's live progress, so that case still falls through to
+  `session_start()`'s own async refusal via `evaluate()`'s existing grace
+  period, unchanged. `ZoomControlServer`'s socket handlers run on the Qt main
+  thread (confirmed: `QTcpServer`/`QTcpSocket` are parented to the server,
+  which is constructed on that thread, and `readyRead` is a plain
+  `Qt::AutoConnection`) -- the same thread `TalkbackController`'s `QTimer`
+  drives `evaluate()`/`key_off()` on, so `handle_line()` calling `key_on()`/
+  `key_off()` directly (no dispatch) is correct, not a latent cross-thread
+  bug; a hotkey or Companion surface added later must confirm it lands on
+  that same thread before reusing this call shape.
 
 ## Live testing against a real meeting
 
@@ -261,6 +290,19 @@ trigger was accepted — every stage of the probe ladder (`controller`,
 stray-channel cleanup, etc.) arrives asynchronously as OBS log lines
 (`blog(LOG_INFO, "[obs-zoom-plugin] talkback_probe: ...")`), not over the
 control socket — watch the log, not the response.
+
+`talkback_nominate` (`{"cmd":"talkback_nominate","nominees":["Name", ...]}`,
+requires an active meeting) provisions channels for the given talent list —
+same fire-and-acknowledge shape as `talkback_probe` above: the response only
+confirms the trigger was accepted, and the plan outcome (channel count,
+`all_talent_complete`, who is `uncovered_private`, who is `unreachable`)
+arrives as `"cmd":"talkback_nominate"` log lines AND is polled via
+`talkback_status`'s `"nomination"` field (which also derives
+`has_private_channel` client-side, since the engine only ever names
+shortfalls, never successes). `talkback_key` now takes `"target":"all"` or a
+nominee's display name (not `"participant"`) — `{"state":"off"}` still always
+succeeds; `{"state":"on"}` is refused with a specific message for a target
+the last nomination's plan already proves has no channel.
 
 One asymmetry to know before testing a join fix this way: the join watchdog
 (`src/join-watchdog.h`) is armed in `on_join_clicked()` only. A control-API

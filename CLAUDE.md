@@ -152,6 +152,21 @@ Every one of these is documented at length where it lives; the list is the map.
   FFmpeg is fed by a raw pipe + blocking writer thread + bounded
   drop-oldest queue, pinned by CoreVideoIsoFfmpegPipeTest. The `-encoders`
   availability probe may keep QProcess: `waitFor*` pumps without a loop.
+- **Talkback keying SELECTS, it never creates** (`session_start` in
+  `engine/src/engine-talkback.cpp`, feat/talkback): channels are created at
+  NOMINATION time, one `CreateChannel` at a time through the arbiter in
+  `src/talkback-channel-owner.h`, and a key press only looks its target up in
+  the provisioned table and starts sending. Creating on the press cost a
+  create round trip plus an invite round trip before any audio could flow —
+  measured live 2026-08-25 as buffers discarded on every press
+  (`no_channel_drops`), i.e. the director's first syllable gone every time.
+  An unprovisioned target is refused with a reason and never provisioned on
+  demand, and a key RELEASE destroys nothing: the channel has to survive it or
+  the next press pays the same cost. A target is not a channel — all-talent
+  past 10 people owns `ceil(n/10)` of them and one drain pass fans the same
+  PCM out to all (`talkback_channel_serves_target`). Milestone incomplete
+  until the Task 6 live gate: the first-syllable claim is measured on the old
+  path, not yet re-measured on the new one.
 - **Engine teardown**: never let SDK callbacks race teardown; `set_terminate`
   is a bare `_exit(5)` (code 5 maps to EngineCrash recovery; no pipe writes,
   no locks, no allocation in the handler).

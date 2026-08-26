@@ -1781,11 +1781,17 @@ bool EngineTalkback::open_audio(const std::string &region_name,
                                 uint32_t sample_rate, uint16_t channels)
 {
     close_audio();
+    // Every attempt starts from a clean verdict -- see m_audio_fail_reason's
+    // header comment for why "failed" and "not attempted yet" must stay
+    // distinguishable. close_audio() above already clears it; this is the
+    // statement that makes that independent of what close_audio() does.
+    m_audio_fail_reason.clear();
     if (!shm_region_open_readwrite(
             m_audio_region, region_name,
             shm_audio_region_bytes(kTalkbackSlotBytes))) {
         report_session("audio_open", R"("ok":false,"reason":"map_failed","region":")" +
                        json_escape(region_name) + "\"");
+        m_audio_fail_reason = "map_failed";   // session_start() refuses on this
         report_session_state(false, "map_failed");
         return false;
     }
@@ -1814,6 +1820,7 @@ bool EngineTalkback::open_audio(const std::string &region_name,
                        std::to_string(hdr->slot_bytes) + R"(,"expected_slot_bytes":)" +
                        std::to_string(kTalkbackSlotBytes) + R"(,"region":")" +
                        json_escape(region_name) + "\"");
+        m_audio_fail_reason = "layout_mismatch";   // session_start() refuses on this
         report_session_state(false, "layout_mismatch");
         // F5 review-round fix: this used to shm_region_destroy()/reset the
         // mapping immediately on every rejection below. The writer
@@ -1856,6 +1863,7 @@ bool EngineTalkback::open_audio(const std::string &region_name,
                        R"("ok":false,"reason":"unsupported_rate","rate":)" +
                        std::to_string(hdr_rate) + R"(,"region":")" +
                        json_escape(region_name) + "\"");
+        m_audio_fail_reason = "unsupported_rate";   // session_start() refuses on this
         report_session_state(false, "unsupported_rate");
         // F5 review-round fix: leave the mapping open -- see the comment on
         // the layout_mismatch rejection above.
@@ -1866,6 +1874,7 @@ bool EngineTalkback::open_audio(const std::string &region_name,
                        R"("ok":false,"reason":"unsupported_channels","channels":)" +
                        std::to_string(hdr_channels) + R"(,"region":")" +
                        json_escape(region_name) + "\"");
+        m_audio_fail_reason = "unsupported_channels";   // session_start() refuses on this
         report_session_state(false, "unsupported_channels");
         // F5 review-round fix: leave the mapping open -- see the comment on
         // the layout_mismatch rejection above.
@@ -1879,6 +1888,7 @@ bool EngineTalkback::open_audio(const std::string &region_name,
                        std::to_string(channels) + R"(,"header_channels":)" +
                        std::to_string(hdr_channels) + R"(,"region":")" +
                        json_escape(region_name) + "\"");
+        m_audio_fail_reason = "pipe_header_mismatch";   // session_start() refuses on this
         report_session_state(false, "pipe_header_mismatch");
         // F5 review-round fix: leave the mapping open -- see the comment on
         // the layout_mismatch rejection above.
@@ -1888,10 +1898,35 @@ bool EngineTalkback::open_audio(const std::string &region_name,
     m_audio_region_name = region_name;
     m_audio_rate        = hdr_rate;
     m_audio_channels    = hdr_channels;
-    // Start at the writer's CURRENT index, not 0: buffers published before we
-    // mapped are stale by definition, and replaying them would put a burst of
-    // old audio in the channel the moment a key opens.
-    m_audio_read_index = hdr->write_index;
+    // START AT 0, NOT AT THE WRITER'S CURRENT INDEX (Task 3 fix round 2).
+    //
+    // This line used to read `m_audio_read_index = hdr->write_index;` with the
+    // reasoning "buffers published before we mapped are stale by definition".
+    // That reasoning is inherited from the MAIN audio ring, where the region
+    // outlives many subscriptions and a late reader genuinely would replay
+    // somebody else's old audio. It is false for THIS ring: TalkbackTap::open()
+    // lays the region out and calls talkback_ring_init() -- which memsets the
+    // header and sets write_index = 0 -- on every key press, and only THEN
+    // sends talkback_open and attaches its OBS capture callback
+    // (src/talkback-tap.cpp). So every buffer at an index below the writer's
+    // current one belongs to THIS press and is the director's first syllable,
+    // not stale audio.
+    //
+    // Snapping past it was therefore a discard, not a de-staling: the residual
+    // window between the tap attaching its callback and this engine getting to
+    // run open_audio() -- one pipe write plus one command-loop turn. Small
+    // (fix round 1 already removed all the SDK work that used to sit in it) but
+    // real, uninstrumented, and the exact failure this milestone exists to
+    // remove. Reading from 0 closes it: the ring's 8 slots become a buffer for
+    // that window instead of a wall, and an overrun is COUNTED (`lost` in
+    // drain_audio) rather than silent.
+    //
+    // Do NOT "restore" the snap here on the strength of the general rule. It
+    // remains correct for any ring that can be PRE-EXISTING when a reader
+    // arrives; it is wrong for one the writer re-initialises per press. If a
+    // future change makes this region survive across presses without a fresh
+    // talkback_ring_init(), the snap has to come back with it.
+    m_audio_read_index = 0;
 
     // F1 review-round fix (CRITICAL): the tap's capture callback attaches
     // and starts publishing as soon as TalkbackTap::open() runs on the
@@ -2138,6 +2173,37 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
         return false;
     }
 
+    // Fix round 2 (Major): A KEY MAY NOT GO LIVE OVER A DEAD AUDIO PATH.
+    //
+    // open_audio() rejects a ring it cannot use (map_failed, layout_mismatch,
+    // unsupported_rate/channels, pipe_header_mismatch) and says so with
+    // report_session_state(false, reason). Fix round 1 made the plugin open
+    // the tap BEFORE talkback_start, which is right -- it stops the key path
+    // from sitting inside a discard window -- but it also made that failure
+    // arrive FIRST, where the plugin's last-write-wins status handler let this
+    // function's "live" overwrite it. The key then stayed open with the OPEN
+    // cue played and a live tally shown while drain_audio() bailed on
+    // !m_audio_open and nothing ever reached Zoom: the director believing they
+    // are heard, which is the failure this whole feature exists to prevent.
+    //
+    // The dependency is the fix, not the ordering. Refuse with the AUDIO
+    // path's own reason (not a generic one) so the operator is told what is
+    // actually wrong -- layout_mismatch means a half-applied install, which
+    // CLAUDE.md documents as routine, and it is fixed by installing both
+    // binaries rather than by anything they can do at the desk.
+    //
+    // Deliberately keyed on the REASON and not on !m_audio_open: "the open
+    // failed" and "no open has happened yet" are different states, and under
+    // any ordering where talkback_start arrives first (which is how this
+    // feature shipped until fix round 1) the latter is the normal case. See
+    // m_audio_fail_reason's header comment.
+    if (!m_audio_fail_reason.empty()) {
+        report_session("session_start", R"("ok":false,"reason":")" +
+                       json_escape(m_audio_fail_reason) + R"(","audio_path":"failed")");
+        report_session_state(false, m_audio_fail_reason);
+        return false;
+    }
+
     // R1 review-round fix (mutual exclusion): refuse while the probe's
     // driving thread might still be running -- see the matching guard at the
     // top of probe(), which explains why. This check MUST come before
@@ -2267,9 +2333,20 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
         R"(,"expected":)" + std::to_string(selected.size() + still_coming);
 
     if (reason) {
+        // Fix round 2 (Minor): name the recovery, not just the refusal. Fail
+        // closed is right and stands, but a ladder whose create response was
+        // swallowed leaves this target refusing FOREVER -- session_start
+        // deliberately does not run the lazy self-heal, because
+        // handle_expired_create() destroys, and a key press must never destroy
+        // the channels it is about to talk on. So the recovery is manual, and
+        // an operator who is refused mid-show needs to be told what it is in
+        // the same line rather than having to know.
+        const char *recover = std::string(reason) == "provisioning_incomplete"
+                                  ? R"(,"recover":"re-nominate")"
+                                  : "";
         report_session("session_start", std::string(R"("ok":false,"reason":")") +
                        reason + R"(","target":")" + json_escape(target) + "\"," +
-                       counts);
+                       counts + recover);
         report_session_state(false, reason);
         return false;
     }
@@ -2378,6 +2455,10 @@ void EngineTalkback::close_audio()
     // truly nothing to release.
     if (!m_audio_open && m_audio_region.ptr == nullptr) return;
     m_audio_open = false;
+    // The verdict belongs to the attempt, and the attempt is over. Leaving it
+    // set would make the NEXT press refuse for a failure that has already been
+    // torn down -- see m_audio_fail_reason's header comment.
+    m_audio_fail_reason.clear();
     if (m_audio_region.ptr) {
         // Hand the flag back so the writer re-notifies rather than assuming a
         // reader is still listening.

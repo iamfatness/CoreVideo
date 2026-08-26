@@ -622,6 +622,40 @@ private:
     // region is opened so each session gets its own "first occurrence".
     uint32_t    m_audio_send_fail_count = 0;
 
+    // Why the LAST open_audio() attempt was rejected, or empty if the last
+    // attempt succeeded or none has been made. Task 3 fix round 2 (Major,
+    // introduced by fix round 1's reorder).
+    //
+    // THREE STATES, not two, and that is the whole point: "open failed"
+    // (non-empty), "open succeeded" (empty, m_audio_open true) and "no open
+    // has happened yet" (empty, m_audio_open false). session_start() refuses
+    // only on the first. Keying on !m_audio_open instead would conflate the
+    // failure with the not-yet, and refuse every press on any ordering where
+    // talkback_start reaches the engine before talkback_open -- which is the
+    // order this feature shipped with until fix round 1.
+    //
+    // Why it exists: open_audio()'s four rejections (map_failed,
+    // layout_mismatch, unsupported_rate, pipe_header_mismatch) each emit
+    // report_session_state(false, reason), and session_start() emits
+    // report_session_state(true, "live"). The plugin's talkback_session
+    // handler is last-write-wins. Fix round 1 made the plugin open the tap
+    // BEFORE talkback_start (so the ring is mapped before any key-path work),
+    // which also made the audio failure arrive FIRST -- and be overwritten by
+    // "live". The key then stayed open with the OPEN cue played, a live tally
+    // shown, a dead-man switch kept fresh by the tap's own plugin-side stamp,
+    // and NOTHING EVER SENT, because drain_audio() bails on !m_audio_open.
+    // The director believes they are on air. That is the worst failure this
+    // feature has, and the realistic trigger is layout_mismatch from a
+    // DLL-only install, which CLAUDE.md calls a routine mistake here.
+    //
+    // Fixed as a DEPENDENCY, not as a message order: session_start() consults
+    // this and refuses with the audio reason. Making the outcome depend on
+    // which report lands last would be the same coin, flipped. No lock: every
+    // reader and writer of this and of m_audio_open is the command-loop
+    // thread (see the THREADING comment above open_audio()), which is a
+    // stronger guarantee than a mutex, not a weaker one.
+    std::string m_audio_fail_reason;
+
     // ── Persistent talkback session (Milestone 5) ──────────────────────────
     // Exactly one CreateChannel may be outstanding across the probe, the
     // session, and nomination (Task 2); see src/talkback-channel-owner.h for

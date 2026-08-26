@@ -288,6 +288,20 @@ int main()
                                 shm_audio_region_bytes(kTalkbackSlotBytes)),
               "the test could not create a talkback ring region");
         talkback_ring_init(static_cast<ShmAudioHeader *>(region.ptr), 48000, 1);
+
+        // Fix round 2: a buffer published BEFORE the engine gets to
+        // open_audio(). This is the residual window the tap's capture callback
+        // opens -- it attaches as soon as TalkbackTap::open() runs, one pipe
+        // write and one command-loop turn before the engine maps the region --
+        // and it is the director's first syllable. open_audio() used to snap
+        // the read index to the writer's current index, which stepped over it;
+        // this ring is re-initialised per press, so index 0 is this press's
+        // first buffer and reading from 0 is correct.
+        int16_t early[480] = {0};
+        early[0] = 4321;
+        check(talkback_ring_publish(region.ptr, early, sizeof(early), 1),
+              "the test could not publish the pre-open buffer");
+
         check(tb.open_audio(region_name, 48000, 1),
               "the engine refused to open the test's talkback ring");
 
@@ -306,24 +320,27 @@ int main()
               "the key press ducked synchronously -- that SDK work sits inside the "
               "window whose audio open_audio() DISCARDS");
 
-        // One buffer in, and it must reach BOTH channels of the target.
+        // A second buffer, published after the key. Both must reach BOTH
+        // channels: 2 buffers x 2 channels = 4 sends.
         int16_t pcm[480] = {0};
         pcm[0] = 1234;
-        check(talkback_ring_publish(region.ptr, pcm, sizeof(pcm), 1),
+        check(talkback_ring_publish(region.ptr, pcm, sizeof(pcm), 2),
               "the test could not publish a buffer into the ring");
         tb.drain_audio();
 
-        check(svc.ctrl.sends.size() == 2,
-              "ONE BUFFER DID NOT REACH EVERY CHANNEL OF THE TARGET -- an "
-              "all-talent target past ten people owns several channels, and "
-              "sending to only the first leaves everyone from the eleventh on "
-              "hearing silence with nothing to show it");
-        if (svc.ctrl.sends.size() == 2) {
+        check(svc.ctrl.sends.size() == 4,
+              "ONE BUFFER DID NOT REACH EVERY CHANNEL OF THE TARGET, or the "
+              "buffer published before open_audio() was DISCARDED -- an "
+              "all-talent target past ten people owns several channels, and the "
+              "pre-open buffer is the director's first syllable");
+        if (svc.ctrl.sends.size() == 4) {
             check(svc.ctrl.sends[0].first != svc.ctrl.sends[1].first,
                   "the same channel was sent to twice instead of both channels");
-            check(svc.ctrl.sends[0].second == sizeof(pcm) &&
-                  svc.ctrl.sends[1].second == sizeof(pcm),
-                  "the fanned-out buffers were not the buffer that was published");
+            bool all_full_length = true;
+            for (const auto &s : svc.ctrl.sends)
+                if (s.second != sizeof(pcm)) all_full_length = false;
+            check(all_full_length,
+                  "the fanned-out buffers were not the buffers that were published");
         }
         // ...and only now does the duck run, after those sends.
         check(svc.ctrl.volumes.size() == 2,
@@ -350,6 +367,61 @@ int main()
         tb.session_stop();
         tb.close_audio();
         shm_region_destroy(region);
+    }
+
+    // -- A dead audio path REFUSES the key, it does not go live over it ----
+    // Fix round 2 (Major). open_audio() rejects a ring it cannot use and says
+    // live:false with a reason; session_start() then said live:true, and the
+    // plugin's status handler is last-write-wins. With the tap opened first
+    // (fix round 1) the failure arrives first and loses -- key open, OPEN cue
+    // played, live tally shown, dead-man switch fresh, and nothing ever sent,
+    // because drain_audio() bails on !m_audio_open. The director believes they
+    // are on air. layout_mismatch is the realistic trigger: a DLL-only install,
+    // which CLAUDE.md calls a routine mistake.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+
+        ShmRegion bad{};
+        const std::string bad_name = "ZoomObsPluginTest_talkback_badlayout";
+        check(shm_region_create(bad, bad_name,
+                                shm_audio_region_bytes(kTalkbackSlotBytes)),
+              "the test could not create a talkback ring region");
+        talkback_ring_init(static_cast<ShmAudioHeader *>(bad.ptr), 48000, 1);
+        // A plugin built with a different ring layout -- i.e. half an install.
+        static_cast<ShmAudioHeader *>(bad.ptr)->slot_count = kAudioRingSlots + 1;
+        check(!tb.open_audio(bad_name, 48000, 1),
+              "the engine accepted a ring whose layout it cannot address");
+
+        check(!tb.session_start(&svc, "Sarah"),
+              "A KEY WENT LIVE OVER A DEAD AUDIO PATH -- the director is cued, "
+              "told they are live, and nothing they say ever reaches Zoom");
+        check(!tb.session_live(),
+              "the session reported live with the audio path rejected");
+        check(svc.ctrl.sends.empty(), "a refused key sent audio");
+
+        tb.close_audio();
+        shm_region_destroy(bad);
+
+        // ...and the refusal belongs to that attempt, not to the engine: a
+        // sound ring afterwards keys normally.
+        ShmRegion good{};
+        const std::string good_name = "ZoomObsPluginTest_talkback_recovered";
+        check(shm_region_create(good, good_name,
+                                shm_audio_region_bytes(kTalkbackSlotBytes)),
+              "the test could not create the second ring region");
+        talkback_ring_init(static_cast<ShmAudioHeader *>(good.ptr), 48000, 1);
+        check(tb.open_audio(good_name, 48000, 1),
+              "the engine refused a sound ring after an earlier rejection");
+        check(tb.session_start(&svc, "Sarah"),
+              "a failed open poisoned the next press -- the reason outlived its "
+              "own attempt");
+        tb.session_stop();
+        tb.close_audio();
+        shm_region_destroy(good);
     }
 
     // -- Keying mid-ladder is REFUSED, not half-honoured ------------------

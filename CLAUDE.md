@@ -163,12 +163,20 @@ Every one of these is documented at length where it lives; the list is the map.
   An unprovisioned target is refused with a reason and never provisioned on
   demand, and a key RELEASE destroys nothing: the channel has to survive it or
   the next press pays the same cost. **Nothing SDK-shaped may sit between the
-  key and the first buffer**, because that window is a discard and not a
-  delay: `talkback_start` and `talkback_audio` are branches of one command
-  loop, and `open_audio()` snapshots the ring's write index and steps over
-  everything published earlier. That is why the plugin opens the tap *before*
+  key and the first buffer**: `talkback_start` and `talkback_audio` are
+  branches of one command loop, so anything on that path runs before the first
+  buffer is read. That is why the plugin opens the tap *before*
   `talkback_start` and why the background-volume duck is deferred to the first
-  `drain_audio()` after its sends. A key pressed while the nomination ladder
+  `drain_audio()` after its sends. The talkback ring is re-laid-out by
+  `talkback_ring_init()` on every press, so `open_audio()` reads it **from
+  index 0** — unlike the main audio ring, where a reader must snap past
+  whatever a previous subscription left; snapping here discarded the
+  director's first syllable rather than de-staling anything. And a key **may
+  not report live over a dead audio path**: `session_start()` consults the
+  last `open_audio()` verdict and refuses with its reason, because the
+  plugin's status handler is last-write-wins and a `layout_mismatch` from a
+  half-applied install would otherwise be overwritten by `live:true` — key
+  open, cue played, nothing sent. A key pressed while the nomination ladder
   is still provisioning is REFUSED (`provisioning_incomplete`), never
   half-honoured — briefing ten of eleven while the log says "live" is the
   failure mode this whole feature is written against. A target is not a channel — all-talent

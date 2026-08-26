@@ -6,8 +6,15 @@
 //
 //   * the Milestone 1 PROBE, which creates one, sends a 3s tone, and destroys
 //     it from tick() on its own driving thread;
-//   * the talkback SESSION, which creates one and holds it open for as long
-//     as a key is down;
+//   * the talkback SESSION, which used to create one on the key press and
+//     hold it open for as long as the key was down. It does not any more:
+//     Task 3 (2026-08-25) made keying SELECT an already-provisioned channel,
+//     so no call site claims this arbiter for Session. The enum value and its
+//     transitions are still modelled and tested below, and this file still
+//     describes them, because they are the record of what a create-on-key
+//     subsystem has to do -- but do not read the Session arms as live code.
+//     `grep -n "TalkbackChannelOwner::Session" engine/src/engine-talkback.cpp`
+//     is the check, and it finds nothing today;
 //   * NOMINATION (Task 2, 2026-08-25), which creates every channel
 //     talkback_plan() decides on for a nominated talent list, one at a time,
 //     at nomination time rather than at key time -- see src/talkback-plan.h
@@ -59,22 +66,24 @@
 //
 //     grep -nE "^[^/]*m_pending_create *= [^=]" engine/src/engine-talkback.cpp
 //
-// TEN stores, in NINE functions, on TWO threads (2026-08-25): probe(),
-// expire_stale_pending_create_locked(), tick(), onCreateChannelResponse(),
-// nominate(), nomination_create_next(), nomination_reset(), session_start(),
-// and session_stop() TWICE (its early cancel branch and its main teardown).
-// The `^[^/]*` prefix is what keeps commented-out and quoted occurrences out
-// of the count -- one comment in that file names an assignment round 5
-// removed -- and `= [^=]` is what keeps `==` comparisons out; the previous
-// version of this block prescribed a regex without either guard and told the
-// reader to expect a number four higher than the writes. If your count
-// differs from ten, the code changed; trust the grep, not this line.
+// SEVEN stores, in SEVEN functions, on TWO threads (Task 3, 2026-08-25):
+// probe(), expire_stale_pending_create_locked(), tick(),
+// onCreateChannelResponse(), nominate(), nomination_create_next(), and
+// nomination_reset(). It was ten in nine before Task 3 removed the session's
+// CreateChannel and with it session_start()'s claim and session_stop()'s two
+// stores. The `^[^/]*` prefix is what keeps commented-out and quoted
+// occurrences out of the count -- and `= [^=]` is what keeps `==`
+// comparisons out; an earlier version of this block prescribed a regex
+// without either guard and told the reader to expect a number four higher
+// than the writes. If your count differs from seven, the code changed; trust
+// the grep, not this line.
 //
 // The distinctions that actually matter, none of which a count can carry:
 //
-//   * GATE then CLAIM, never together. probe(), session_start() and
-//     nomination_create_next() check talkback_may_request_create() BEFORE
-//     calling CreateChannel and store the claim (via talkback_create_issued())
+//   * GATE then CLAIM, never together. probe() and nomination_create_next()
+//     -- the two CreateChannel callers left -- check
+//     talkback_may_request_create() BEFORE calling CreateChannel and store
+//     the claim (via talkback_create_issued())
 //     only AFTER it returns SDKERR_SUCCESS. The owner therefore reads None
 //     for the whole span between the gate check and the store -- precisely
 //     the window this arbiter exists to reason about. A maintainer who
@@ -90,10 +99,12 @@
 //     destroyed its own first channel and refused every later one for the
 //     rest of the meeting). If you add a branch here, it inherits the
 //     already-completed transition; do not give it one of its own.
-//   * TEARDOWN CANCELS, it does not forget. session_stop()'s "nothing to
-//     tear down" early branch and nomination_reset() both store a
+//   * TEARDOWN CANCELS, it does not forget. nomination_reset() stores a
 //     talkback_cancel() -- setting that owner's cancellation flag and
-//     LEAVING the owner claimed. Writing None there was the F1/C1 CRITICAL,
+//     LEAVING the owner claimed. session_stop()'s "nothing to tear down"
+//     early branch did the same for Session until Task 3; it is named here
+//     because the rule is what matters, not the count of call sites.
+//     Writing None there was the F1/C1 CRITICAL,
 //     twice (once for Session, then reintroduced for Nomination): the
 //     CreateChannel had already gone to Zoom, so forgetting it did not
 //     cancel it, and the eventual response was claimed by nobody, matched no
@@ -103,9 +114,9 @@
 //   * ONE store is not on the command-loop thread: tick()'s
 //     AwaitingChannel-timeout clear (R3 fix), which runs on the probe's own
 //     driving thread. It is the entire reason this state needs a mutex at
-//     all. Every other store is command-loop -- the three claimers, the
+//     all. Every other store is command-loop -- the two claimers, the
 //     response callback (the SDK's message pump IS the command loop on
-//     Windows), session_stop(), nomination_reset(),
+//     Windows), nomination_reset(),
 //     expire_stale_pending_create_locked() (lazily, from inside the gate
 //     check its callers already take) and nominate().
 //
@@ -341,8 +352,8 @@ inline TalkbackResponseCheck talkback_generation_on_response(TalkbackGenerationS
 //
 // talkback_may_request_create / talkback_claim_create above answer "is a
 // create outstanding, and whose is it". These answer what sits on top of
-// that: Session and Nomination can each be CANCELLED while their create is
-// still in flight (session_stop()'s early branch, nomination_reset() --
+// that: an owner can be CANCELLED while its create is still in flight
+// (nomination_reset() today; session_stop()'s early branch until Task 3 --
 // both run when the caller wants to tear down but the CreateChannel already
 // went to Zoom and cannot be un-sent) without losing track of whose it was,
 // can EXPIRE unanswered (expire_stale_pending_create_locked(), the same
@@ -409,8 +420,8 @@ enum class TalkbackCreateDisposition {
 };
 
 // Records a cancellation for the create currently pending for `owner`, if
-// any -- the pure decision behind session_stop()'s early branch and
-// nomination_reset(). Deliberately does NOT clear `state.owner`: the
+// any -- the pure decision behind nomination_reset() (and, until Task 3,
+// session_stop()'s early branch). Deliberately does NOT clear `state.owner`: the
 // create already went to Zoom, so forgetting it here (rather than
 // cancelling it) is the exact F1/C1 bug -- the eventual response would be
 // claimed by nobody and wedge onto a stray queue nothing drains. No-op
@@ -425,9 +436,9 @@ inline TalkbackCreateState talkback_cancel(TalkbackCreateState state, TalkbackCh
 }
 
 // Forgets whichever create is currently pending -- the pure decision behind
-// expire_stale_pending_create_locked() (which only ever sees a stale Session
-// or Nomination), behind session_stop()'s main teardown, and behind tick()'s
-// AwaitingChannel timeout. Probe has no cancellation flag and no ladder, so
+// expire_stale_pending_create_locked() (which only ever sees a stale
+// Nomination) and behind tick()'s AwaitingChannel timeout. It was also
+// session_stop()'s main teardown until Task 3. Probe has no cancellation flag and no ladder, so
 // for Probe this is exactly "release the owner", which is all that timeout
 // needs -- it stores this transition rather than writing the field so that
 // the invariant "every mutation is a whole-state store of a transition's
@@ -463,9 +474,10 @@ inline TalkbackCreateDisposition talkback_create_disposition(TalkbackChannelOwne
 }
 
 // Reads and clears whichever cancellation flag belongs to `owner`, in one
-// step -- the pure decision behind the check-and-clear at the top of
-// onCreateChannelResponse's Session and Nomination branches (`cancelled =
-// m_*_create_cancelled; m_*_create_cancelled = false;`). Fix round 2 routed
+// step -- the pure decision behind the check-and-clear that
+// talkback_create_response() performs before any owner branch runs
+// (`cancelled = m_*_create_cancelled; m_*_create_cancelled = false;` in the
+// shape it had when it still lived in those branches). Fix round 2 routed
 // the SETTER (talkback_cancel()) and the EXPIRE clearer (talkback_expire())
 // through shared functions but left this, the RESPONSE clearer, as two
 // hand-written per-owner copies -- the round-2 re-review named this an

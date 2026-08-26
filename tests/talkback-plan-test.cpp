@@ -194,6 +194,70 @@ int main()
         check(private_count(p) == 2, "a duplicate nominee consumed a second private channel");
     }
 
+    // ── Selecting at key time: which channels serve a target (Task 3) ──────
+    //
+    // This is the whole of the new key path. Keying used to CREATE a channel
+    // and invite into it, which cost a create round trip plus an invite round
+    // trip before any audio could flow -- measured live on 2026-08-25 as
+    // buffers discarded on every press. Now a press is this lookup and a send,
+    // so what this function decides is what the director is heard on.
+    {
+        const TalkbackPlan p = talkback_plan(names(24));
+
+        // 24 nominees: 3 all-talent slices (ceil(24/10)) + 13 private.
+        // Keying "all" must select ALL THREE. Selecting only the first is the
+        // failure this fan-out exists to prevent: the director talks, the
+        // first ten hear it, the other fourteen hear silence, and nothing
+        // anywhere says so.
+        uint32_t all_selected = 0;
+        for (const auto &c : p.channels)
+            if (talkback_channel_serves_target(c.is_all_talent, c.members,
+                                               kTalkbackAllTalentTarget))
+                ++all_selected;
+        check(all_selected == 3,
+              "keying the all-talent target did not select every all-talent channel");
+
+        // Keying one person selects exactly their private channel -- not the
+        // all-talent slice that also contains them. Selecting that slice would
+        // put a private aside on air to nine other people.
+        uint32_t sarah_selected = 0;
+        bool selected_an_all_talent_slice = false;
+        const std::string one = "Talent 7";   // in all-talent slice 1 and privately covered
+        for (const auto &c : p.channels) {
+            if (!talkback_channel_serves_target(c.is_all_talent, c.members, one)) continue;
+            ++sarah_selected;
+            if (c.is_all_talent) selected_an_all_talent_slice = true;
+        }
+        check(sarah_selected == 1, "keying one nominee did not select exactly one channel");
+        check(!selected_an_all_talent_slice,
+              "keying one nominee selected an all-talent channel -- a private aside would "
+              "have gone out to everyone in that slice");
+
+        // A name nobody nominated selects nothing, so session_start() refuses
+        // rather than creating one on the spot -- creating on the key is the
+        // behaviour this milestone removes.
+        uint32_t stranger_selected = 0;
+        for (const auto &c : p.channels)
+            if (talkback_channel_serves_target(c.is_all_talent, c.members, "Nobody At All"))
+                ++stranger_selected;
+        check(stranger_selected == 0, "an unnominated target selected a channel");
+    }
+
+    // ── An 11th nominee is why the fan-out is not one channel ──────────────
+    // The 10-user cap means all-talent is two channels at N=11, and both must
+    // be selected by one press. This is the smallest case where "send to the
+    // channel" and "send to the target" differ.
+    {
+        const TalkbackPlan p = talkback_plan(names(11));
+        uint32_t all_selected = 0;
+        for (const auto &c : p.channels)
+            if (talkback_channel_serves_target(c.is_all_talent, c.members,
+                                               kTalkbackAllTalentTarget))
+                ++all_selected;
+        check(all_selected == 2,
+              "at 11 nominees the all-talent target did not select both of its channels");
+    }
+
     if (failures == 0)
         std::cout << "talkback-plan: all tests passed\n";
     return failures == 0 ? 0 : 1;

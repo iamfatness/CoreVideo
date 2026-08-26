@@ -96,15 +96,36 @@ public:
     void drain_audio();
     void close_audio();
 
-    // ── Persistent talkback session (Milestone 5) ──────────────────────────
+    // ── Persistent talkback session (Milestone 5; SELECT-ONLY since Task 3) ─
     // Deliberately NOT part of the probe's Phase machine: that machine exists
     // to tear itself down after one tone, which is the opposite of what a key
-    // held down needs. The session owns its OWN channel, so tick() -- which
-    // destroys the PROBE's channel from a separate thread -- can never touch
-    // it. That separation is the fix for the probe-thread race, and it is
-    // structural rather than a lock.
-    bool session_start(ZOOMSDK::IMeetingService *svc,
-                       const std::string &participant_name);
+    // held down needs. The session never touches the PROBE's channel
+    // (m_channel_id_z), which tick() destroys from a separate thread, so that
+    // race stays structurally impossible rather than lock-avoided.
+    //
+    // TASK 3 (2026-08-25) IS THE POINT OF THIS MILESTONE: session_start()
+    // SELECTS, it does not create. It looks `target` up in
+    // m_provisioned_channels (filled at nomination time) and points
+    // drain_audio() at every channel serving it. No CreateChannel, no invite,
+    // no round trip -- those two round trips are what discarded the start of
+    // every key press (measured live 2026-08-25 as no_channel_drops on every
+    // press). An unprovisioned target is REFUSED with a specific reason and
+    // never provisioned on demand: creating on the key is the exact behaviour
+    // this milestone removes, so a fallback would silently restore the defect
+    // for whichever target the operator forgot to nominate -- the one case
+    // where it matters most.
+    //
+    // `target` is the operator's target string, not a channel: either
+    // kTalkbackAllTalentTarget or a nominee's name (src/talkback-plan.h's
+    // talkback_channel_serves_target() owns the matching, and is the only part
+    // of the key path a test can reach).
+    //
+    // session_stop() STOPS SENDING. It does not destroy anything: the channels
+    // stand for the next press, which is what makes the next press instant
+    // too. Destruction belongs to nominate()'s replace path, nomination_reset()
+    // (Leave/quit) and the failure paths in the create ladder -- never to a key
+    // release. Idempotent: Leave and quit both call it unconditionally.
+    bool session_start(ZOOMSDK::IMeetingService *svc, const std::string &target);
     void session_stop();
     bool session_live() const;
 
@@ -130,10 +151,18 @@ public:
     // Returns false when nothing was queued at all: no meeting service, no
     // controller, the meeting does not support talkback, the probe's driving
     // thread or a live session already hold the arbiter (same R1 mutual
-    // exclusion session_start() enforces -- nomination must not break it),
-    // or an earlier nominate() call's channels are still provisioned (this
-    // task adds no un-nominate; a second call while the first is still
-    // standing is refused rather than silently leaking the first set).
+    // exclusion session_start() enforces -- nomination must not break it), or
+    // a create is still outstanding.
+    //
+    // Task 3 decides what a RE-nomination does, which Task 2 deliberately left
+    // open (its already_provisioned refusal has a comment saying so). It
+    // REPLACES: the standing set is destroyed and the new plan provisioned in
+    // its place. Task 2's refusal was correct while nothing owned the
+    // decision, but pre-provisioning turns it into a trap -- the talent list
+    // is now fixed for the rest of the meeting after the first nominate(), and
+    // the only escape is a Leave. Replacing is safe here specifically because
+    // the two states that make destroying wrong are already refused above: a
+    // live key press (m_session_live) and an outstanding create.
     // Returns true once the first CreateChannel of the plan is in flight (or
     // immediately, if the plan needed zero channels) -- true is not a
     // promise every channel will finish provisioning, only that a queue
@@ -288,21 +317,26 @@ private:
     // preference. Command-loop thread only, and only from probe().
     bool probe_refused_without_ladder();
 
-    // Follow-up to the F1 review-round fix, extended for Task 2: lazily
-    // expires a stale Session- or Nomination-owned m_pending_create -- see
-    // m_session_create_deadline's and m_nomination_create_deadline's doc
-    // comments below for why this exists. MUST be called with m_chan_mtx
-    // already held (every call site -- probe()'s, session_start()'s, and
+    // Follow-up to the F1 review-round fix: lazily expires a stale
+    // Nomination-owned m_pending_create -- see m_nomination_create_deadline's
+    // doc comment below for why this exists. MUST be called with m_chan_mtx
+    // already held (every call site -- probe()'s, session_start()'s and
     // nomination_create_next()'s gate checks -- already locks it to read
     // m_pending_create, so this adds no new critical section). Returns which
     // owner it expired (TalkbackChannelOwner::None if nothing was stale), so
     // the caller can report it AFTER releasing the lock, same discipline as
-    // every other report() call in this file, and report it under the right
-    // cmd tag (report_session() for Session, report_nomination() for
-    // Nomination). Probe needs no branch here: its pending create already
-    // has a clearer of its own (tick()'s AwaitingChannel timeout, running on
-    // the driving thread) -- a stale Probe entry would be a bug in that
-    // machinery, not something this function should paper over.
+    // every other report() call in this file.
+    //
+    // NOMINATION IS THE ONLY OWNER WITH AN ARM HERE, and as of Task 3 it is
+    // the only owner that can be pending at all. Probe has a clearer of its
+    // own (tick()'s AwaitingChannel timeout, on the driving thread), so a
+    // stale Probe entry would be a bug in that machinery rather than something
+    // to paper over here. Session had an arm until Task 3 and no longer needs
+    // one: session_start() issues no CreateChannel, so nothing in this engine
+    // ever claims the arbiter for Session, and there is no Session-owned
+    // create left to go stale. Returning None for it is therefore the honest
+    // answer, not an omission -- and it is what makes the parked "Session-side
+    // expire-path race" unreachable rather than fixed (see session_start()).
     TalkbackChannelOwner expire_stale_pending_create_locked();
 
     // Fix round 4: what every caller of expire_stale_pending_create_locked()
@@ -313,7 +347,11 @@ private:
     // site (nominate()) plus a new action to the Nomination arm, which is
     // precisely when that shape goes wrong. MUST be called with m_chan_mtx
     // NOT held: the Nomination arm calls nomination_destroy_provisioned(),
-    // which calls the SDK.
+    // which calls the SDK. One arm since Task 3, for the reason on
+    // expire_stale_pending_create_locked() above; it stays a function taking
+    // an owner rather than collapsing to "if expired" so that a second owner
+    // getting a create back gets a compile site to fill in, not a silent
+    // fall-through.
     //
     // The Nomination arm destroys whatever the expired ladder had already
     // provisioned. Without that, a ladder whose channel-k create response
@@ -378,14 +416,16 @@ private:
     // grown to four hand-copied loops. Extracted so a future change to the
     // retry bound or the sequence itself cannot apply to three of them and
     // miss the fourth, the exact shape of duplication this task's own review
-    // history keeps finding. FIVE call sites today, counted from the .cpp in
-    // fix round 4: onCreateChannelResponse's session-cancelled,
-    // nomination-stale, nomination-cancelled and nomination-untracked
-    // branches, plus nomination_destroy_provisioned()'s loop -- so this is
-    // not Nomination-only, as the round-3 wording said. Two hand-written
-    // copies of the same sequence remain outside it (drain_stray_channels()
-    // and tick()'s Destroying phase, both on the probe's driving thread) and
-    // one in session_stop(); the inventory at the top of tick() is the map.
+    // history keeps finding. FOUR call sites, re-counted from the .cpp in
+    // Task 3: onCreateChannelResponse's nomination-stale,
+    // nomination-cancelled and nomination-untracked branches, plus
+    // nomination_destroy_provisioned()'s loop. They are all Nomination's now
+    // -- the session-cancelled branch went with the session's CreateChannel
+    // -- which is not the same statement as the round-3 wording that this
+    // helper is Nomination-only BY DESIGN; it is a fact about today's
+    // callers. Two hand-written copies of the same sequence remain outside it
+    // (drain_stray_channels() and tick()'s Destroying phase, both on the
+    // probe's driving thread); the inventory at the top of tick() is the map.
     // Never called with m_chan_mtx held (dereferences m_ctrl); *attempts (if
     // non-null) receives how many tries it took, for callers that report it.
     ZOOMSDK::SDKError destroy_channel_retrying(const zchar_t *channelID, uint32_t *attempts);
@@ -552,16 +592,17 @@ private:
     //
     // Guarded by m_chan_mtx -- NOT command-loop-thread-only, despite an
     // earlier version of this comment claiming otherwise. Every WRITER but
-    // one is the command-loop thread; the full list, re-derived from the
-    // .cpp in fix round 4 rather than copied from the previous version of
-    // this paragraph (which named four of the seven): probe(),
-    // session_start() and nomination_create_next() CLAIM it after their
-    // CreateChannel returns SDKERR_SUCCESS (nominate() itself never writes
-    // it -- only the function it calls does); onCreateChannelResponse
-    // CLEARS it for whichever owner it claimed the response for;
-    // session_stop()'s main teardown path CLEARS it when the pending owner
-    // is Session; and expire_stale_pending_create_locked() CLEARS it for a
-    // stale Session or Nomination. That callback is safe on the
+    // one is the command-loop thread. Re-derive the list from the .cpp with
+    // the grep in src/talkback-channel-owner.h rather than trusting a
+    // paragraph -- that header's own inventory has been caught wrong about
+    // itself four times, and this one enumerated seven sites and named
+    // session_start() among the claimers, which Task 3 made false by removing
+    // the session's CreateChannel. What is stable and worth stating: writers
+    // are the two functions that CLAIM after a CreateChannel returns
+    // SDKERR_SUCCESS (probe(), nomination_create_next()), the response
+    // callback that releases, the teardown that CANCELS without releasing
+    // (nomination_reset()), the lazy expiry, and tick()'s AwaitingChannel
+    // timeout. That callback is safe on the
     // command-loop thread for the same reason
     // open_audio/drain_audio/close_audio are (see the THREADING comment
     // above the audio path below): on Windows this engine's main loop is
@@ -590,66 +631,71 @@ private:
     // `==` and told the reader to expect four extra "writes").
     //
     // Its fields, and the defect each one exists because of:
-    //   * owner -- who owns the outstanding create. F1/C1: session_stop()'s
-    //     early branch and nomination_reset() must NOT clear it (the create
-    //     already went to Zoom; forgetting it strands the response on a
-    //     stray queue nothing drains, which wedged the whole feature).
+    //   * owner -- who owns the outstanding create. F1/C1: nomination_reset()
+    //     must NOT clear it (the create already went to Zoom; forgetting it
+    //     strands the response on a stray queue nothing drains, which wedged
+    //     the whole feature). session_stop()'s early branch was the other
+    //     half of that pair until Task 3 removed the session's create.
     //   * session_cancelled / nomination_cancelled -- that owner tore down
     //     while its create was in flight, so the response destroys instead
     //     of adopting. N1: both must be cleared by BOTH clearers (the
     //     response and the expiry) or a stale flag destroys the next
-    //     create's channel.
+    //     create's channel. As of Task 3 nothing in this engine SETS
+    //     session_cancelled -- session_start() issues no CreateChannel, so
+    //     there is no Session-owned create to cancel. The field and its
+    //     transitions stay modelled and tested in
+    //     src/talkback-channel-owner.h; they are simply not reached from
+    //     here. Do not read that as "Session is impossible in principle" --
+    //     read it as "no call site in this file claims Session", which is a
+    //     property of the .cpp that a grep for TalkbackChannelOwner::Session
+    //     confirms in one line.
     //   * generation -- which ladder issued the outstanding Nomination
     //     create, so a response for one the ladder gave up on is not
     //     mistaken for the one it is waiting on. Round 3 carried this as a
     //     FIFO and wedged the feature permanently the first time an entry
     //     went unmatched.
     TalkbackCreateState        m_pending_create;
-    std::basic_string<zchar_t> m_session_channel_z;   // guarded by m_chan_mtx
-    std::string                m_session_channel;     // UTF-8, reporting only
-    std::string                m_session_participant; // by NAME, re-resolved
-    unsigned int               m_session_user_id = 0;
-    bool                       m_session_live    = false;
 
-    // F1 review-round fix (CRITICAL), now m_pending_create.session_cancelled
-    // above: set when session_stop() ran while a Session-owned CreateChannel
-    // was still outstanding. session_stop() used to clear the owner in that
-    // situation and return -- but the CreateChannel had already gone to
-    // Zoom. When its response arrived, the arbiter saw None, the id matched
-    // neither m_channel_id_z nor m_session_channel_z, and it was queued onto
-    // m_stray_channels -- which nothing drains without a probe's driving
-    // thread running. Reachable on ordinary paths: a push-to-talk tap
-    // released before the create round-trip returns, a dead-man close inside
-    // that window, key_on()'s tap-open failure path, Leave, quit.
-    // session_stop() now leaves the owner AS Session (so the eventual
-    // response is still routed to the Session branch in
-    // onCreateChannelResponse, not lost to "owner == None") and sets the
-    // flag instead; that branch destroys the channel immediately on arrival
-    // rather than adopting it as live or queuing it as a stray.
-
-    // Follow-up to the F1 review-round fix above (CRITICAL): the ONLY
-    // clearer of m_pending_create == Session is the response landing in
-    // onCreateChannelResponse. Unlike Probe, which gets a timeout-based
-    // clearer too (tick()'s AwaitingChannel handling, see
-    // src/talkback-channel-owner.h's THREADING section: "to stop a
-    // swallowed CreateChannel response from wedging the arbiter forever"),
-    // Session had none -- so a swallowed response after a cancellation
-    // would wedge m_pending_create at Session forever, and
-    // talkback_may_request_create() would then refuse every future probe()
-    // and session_start() for the life of the process. Total talkback
-    // outage, recoverable only by restarting.
+    // The channels the CURRENT key press is talking on -- copied out of
+    // m_provisioned_channels by session_start() and read by drain_audio().
+    // Guarded by m_chan_mtx, like every other channel-id state here.
     //
-    // Same representation and memory-ordering pattern as m_phase_deadline
-    // below (steady_clock rep, not the time_point itself, for the same
-    // trivial-atomicity reason). Deliberately NOT a new thread or timer --
-    // see probe()/session_start()/nomination_create_next()'s gate checks,
-    // the only places this is read: each already locks m_chan_mtx to
-    // evaluate talkback_may_request_create(m_pending_create), so checking-
-    // and-clearing an expired deadline there is free. The existing entry
-    // points self-heal on the next attempt; that is what makes this cheap
-    // and is why it mirrors tick()'s AwaitingChannel timeout instead of
-    // inventing a new mechanism.
-    std::atomic<std::chrono::steady_clock::rep> m_session_create_deadline{0};
+    // A VECTOR, not one id, and that is Task 3's second half: an all-talent
+    // target with more than 10 people owns ceil(n/10) channels (the SDK caps a
+    // channel at 10 users), so the same PCM has to go to all of them in one
+    // drain pass or the eleventh person hears nothing while the operator has
+    // no way to know. Panel size stops being a special case: a private target
+    // is simply the one-channel case of the same loop.
+    //
+    // Copies of the ids rather than indices into m_provisioned_channels: the
+    // table can be destroyed and rebuilt by a re-nomination, and an index
+    // would then point at a different channel rather than at nothing.
+    // nominate()'s replace path and nomination_reset() both clear THIS too,
+    // so a destroyed channel can never still be selected -- drain_audio()
+    // then counts no_channel_drops loudly instead of sending into a channel
+    // Zoom no longer has.
+    std::vector<std::basic_string<zchar_t>> m_session_channels;
+    std::string                m_session_target;  // UTF-8, reporting only
+    bool                       m_session_live = false;
+
+    // WHAT USED TO BE HERE, and why its absence is the fix rather than an
+    // omission (Task 3): m_session_channel_z / m_session_channel /
+    // m_session_participant / m_session_user_id / m_session_create_deadline,
+    // plus the F1 cancellation machinery around them, all existed to manage
+    // ONE thing -- a CreateChannel the session issued on the key press and
+    // then had to reconcile with a response that might arrive after the key
+    // was already released. Milestone 5 needed three fix rounds for that
+    // reconciliation, and the round-6 review still parked a Major on it: two
+    // presses in quick succession could have the first press's late response
+    // adopted as live while the second's real response reached
+    // m_stray_channels, which nothing drains -- has_pending_work() true
+    // forever (the C1 wedge by another door) plus a channel orphaned on Zoom.
+    //
+    // Task 3 does not fix that race; it deletes the create that makes it
+    // expressible. session_start() now only reads a table, so there is no
+    // session-owned create, no response to arrive late, no deadline to expire
+    // and no cancellation to remember. If a future change gives the session a
+    // create back, it inherits ALL of that history, not just the code.
 
     // ── Pre-provisioned channels (Task 2, 2026-08-25) ───────────────────────
     // Fix round 1, C1: this is now a SECONDARY backstop, not the fix for a
@@ -660,10 +706,15 @@ private:
     // otherwise leave m_pending_create stuck at Nomination forever, refusing
     // every later probe()/session_start()/nominate() for the life of the
     // process. Read and lazily cleared by expire_stale_pending_create_locked(),
-    // called from the same three gate checks as m_session_create_deadline.
-    // Reuses kAwaitTimeout, same reasoning as the session's copy: both bound
-    // the same underlying wait (a Zoom CreateChannel response), so there is
-    // no reason for a third constant.
+    // called from the three gate checks that evaluate the arbiter: probe(),
+    // nominate(), and nomination_create_next(). session_start() is NOT one of
+    // them any more and must not become one again: it issues no create, so it
+    // has no gate to evaluate -- and handle_expired_create()'s Nomination arm
+    // DESTROYS the provisioned set, which is the one thing a key press must
+    // never do to the channel it is about to talk on.
+    // Reuses kAwaitTimeout, the same bound tick()'s AwaitingChannel timeout
+    // uses: both bound the same underlying wait (a Zoom CreateChannel
+    // response), so there is no reason for a second constant.
     std::atomic<std::chrono::steady_clock::rep> m_nomination_create_deadline{0};
 
     // Fix round 1, C1 (CRITICAL): true when nomination_reset() (called from
@@ -750,6 +801,11 @@ private:
     // other channel-id state") so a future reader that is NOT the command
     // loop -- a talkback_status query, say -- does not have to re-derive
     // whether this table is safe to read from elsewhere.
+    //
+    // Task 3 added the reader this table exists for: session_start() copies
+    // the ids serving a target out of here under the lock. THE ID COPY IS
+    // WHAT MAKES A KEY PRESS INSTANT -- there is no SDK call between the key
+    // and the first buffer any more, which is the whole milestone.
     struct TalkbackProvisionedChannel {
         std::basic_string<zchar_t> channel_id_z;
         std::string channel_id;              // UTF-8, reporting only

@@ -141,3 +141,44 @@ inline TalkbackPlan talkback_plan(const std::vector<std::string> &nominees)
 
     return plan;
 }
+
+// ── Selecting a provisioned channel at key time (Task 3, 2026-08-25) ────────
+//
+// The planner above decides which channels exist. This decides which of them a
+// key press talks on, and it lives here rather than in the engine for the same
+// reason the planner does: it is the whole of the new key-path decision, it
+// needs no SDK, and the engine is the one layer this feature's tests cannot
+// reach (three review rounds have now named that gap). Keying is meant to be
+// nothing but this lookup plus a send -- the create+invite round trip that used
+// to sit here is exactly what clipped the director's first words.
+//
+// A TARGET is what the operator keys: either the all-talent target (the
+// sentinel below) or one nominee's name. It is NOT a channel: an all-talent
+// target with more than 10 people owns ceil(n/10) channels and the same PCM
+// goes to all of them, so this answers "does this channel serve that target",
+// once per channel, rather than returning a single id.
+//
+// The sentinel is a plain name-space collision risk and there is no way around
+// it -- the control API's target argument is one string (Task 5: `"all"` or a
+// nominee's name). A participant genuinely displaying as "all" would key the
+// whole panel instead of themselves; that is stated here rather than papered
+// over, because the alternative (a second "kind" field on every wire message
+// and every Companion button) costs more than the collision does.
+constexpr const char *kTalkbackAllTalentTarget = "all";
+
+inline bool talkback_channel_serves_target(bool is_all_talent,
+                                           const std::vector<std::string> &members,
+                                           const std::string &target)
+{
+    if (target == kTalkbackAllTalentTarget) return is_all_talent;
+    // A private channel is matched by MEMBERSHIP, not by "members[0] == target":
+    // talkback_plan() gives every private channel exactly one member today, and
+    // matching by membership keeps this correct if that ever stops being true
+    // (a two-person aside, say) instead of silently selecting nothing. An
+    // all-talent slice is deliberately never matched by a person's name -- it
+    // contains them, but keying their name must not put the director on air to
+    // nine other people.
+    if (is_all_talent) return false;
+    for (const auto &m : members) if (m == target) return true;
+    return false;
+}

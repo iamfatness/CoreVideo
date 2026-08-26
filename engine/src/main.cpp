@@ -1557,7 +1557,20 @@ int main()
             // driving thread here too, BEFORE ever calling session_start(),
             // so no probe ladder can still be ticking when a session starts.
             if (talkback_thread.joinable()) talkback_thread.join();
-            talkback.session_start(meeting_svc, json_str(line, "participant"));
+            // Task 3: a key press names a TARGET (kTalkbackAllTalentTarget or
+            // a nominee's name), not a participant to open a channel for --
+            // session_start() now selects an already-provisioned channel.
+            // "participant" is accepted as a fallback because the plugin
+            // still sends that key until Task 5 changes it (the plan's own
+            // pre-flight scan flagged this T3->T5 seam: a target valid on one
+            // side and not the other is invisible until a live show). The
+            // fallback is a compatibility shim with a known end date, not a
+            // second supported spelling -- delete it once Task 5 ships, and
+            // note that it is only ever a NAME, so an operator on the old
+            // wire can key a person but not "all".
+            std::string target = json_str(line, "target");
+            if (target.empty()) target = json_str(line, "participant");
+            talkback.session_start(meeting_svc, target);
 
         } else if (command == IpcCommand::TalkbackStop) {
             talkback.session_stop();

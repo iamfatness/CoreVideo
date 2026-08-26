@@ -2065,6 +2065,19 @@ void EngineTalkback::resolve_roster_change(ZOOMSDK::IMeetingService *svc)
         //     trigger (a response for an id that no longer exists cannot
         //     mean anything useful) and fires immediately rather than after
         //     up to kAwaitTimeout.
+        //
+        // Blast radius, accepted rather than hidden (re-review residual 3):
+        // a TRANSIENT empty roster (current_roster() returning {} because
+        // GetMeetingParticipantsController()/GetParticipantsList() answered
+        // null for one call -- the same convention the diff loop below
+        // already treats as "everybody left") makes uid_in_roster() false
+        // for every outstanding uid, pruning the WHOLE pending table in one
+        // pass. This is intentional, not a gap: the consequence is one round
+        // of re-invites on the next good roster event, answered
+        // TALKBACK_ERROR_ALREADY_EXIST for anyone genuinely still present
+        // (see that error's handling above -- treated as success, deduped by
+        // name), so it self-heals rather than losing or double-counting
+        // anyone.
         const auto now = std::chrono::steady_clock::now();
         for (auto it = m_nomination_pending_invites.begin();
              it != m_nomination_pending_invites.end(); ) {
@@ -2566,22 +2579,34 @@ void EngineTalkback::drain_audio()
 // it faster but to have already done it, at nomination time.
 bool EngineTalkback::session_live() const { return m_session_live; }
 
+void EngineTalkback::members_present_locked(const std::string &target,
+                                             std::size_t *present,
+                                             std::size_t *total) const
+{
+    std::size_t p = 0, t = 0;
+    for (const auto &pc : m_provisioned_channels) {
+        if (!talkback_channel_serves_target(pc.is_all_talent, pc.members, target))
+            continue;
+        t += pc.members.size();
+        p += pc.present.size();
+    }
+    if (present) *present = p;
+    if (total) *total = t;
+}
+
 void EngineTalkback::members_present_for_target(const std::string &target,
                                                  std::size_t *present,
                                                  std::size_t *total) const
 {
-    std::size_t p = 0, t = 0;
-    {
-        std::lock_guard<std::mutex> lock(m_chan_mtx);
-        for (const auto &pc : m_provisioned_channels) {
-            if (!talkback_channel_serves_target(pc.is_all_talent, pc.members, target))
-                continue;
-            t += pc.members.size();
-            p += pc.present.size();
-        }
-    }
-    if (present) *present = p;
-    if (total) *total = t;
+    std::lock_guard<std::mutex> lock(m_chan_mtx);
+    members_present_locked(target, present, total);
+}
+
+void EngineTalkback::debug_expire_pending_invites_for_test()
+{
+    std::lock_guard<std::mutex> lock(m_chan_mtx);
+    const auto past = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+    for (auto &pi : m_nomination_pending_invites) pi.deadline = past;
 }
 
 bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
@@ -2690,23 +2715,24 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
     // believes are actually in their channel(s), versus how many are
     // nominated for it in total -- "3 of 4 present" in the session_live line
     // below. Task 3 deliberately left this out: the provisioned entry did
-    // not track membership at all, only the plan. Summed across every
-    // channel `selected` matches, exactly like `selected_ids` above, so an
-    // all-talent target's count spans its whole ceil(n/10) fan-out.
+    // not track membership at all, only the plan. Fix round 2: computed by
+    // members_present_locked(), the SAME loop members_present_for_target()
+    // calls -- previously a second, hand-copied traversal of this same
+    // table, which the re-review flagged as exactly the kind of duplication
+    // that lets the operator's report and a test's accessor drift apart.
     std::size_t members_present = 0;
     std::size_t members_total = 0;
     const char *reason = nullptr;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
         provisioned_total = m_provisioned_channels.size();
+        members_present_locked(target, &members_present, &members_total);
         for (const auto &pc : m_provisioned_channels) {
             if (!talkback_channel_serves_target(pc.is_all_talent, pc.members, target))
                 continue;
             selected.push_back(pc.channel_id_z);
             if (!selected_ids.empty()) selected_ids += ",";
             selected_ids += pc.channel_id;
-            members_total   += pc.members.size();
-            members_present += pc.present.size();
         }
         // Fix round 1, M2 (Major): the provisioned table answers "how many
         // channels does this target own SO FAR", and nothing distinguished

@@ -137,13 +137,26 @@ public:
     // this file merely stopped retrying after a permanent gate
     // (TalkbackProvisionedChannel::failed) -- both suppress re-invites
     // identically, so neither the ALREADY_EXIST-is-success test nor a future
-    // one could tell "present" from "gated" by invite count alone. Sums
-    // across every provisioned channel matching `target`
-    // (talkback_channel_serves_target()), same as session_start(); takes
-    // m_chan_mtx like every other read of this table. `*present`/`*total`
-    // are left at 0 if `target` matches no provisioned channel.
+    // one could tell "present" from "gated" by invite count alone.
+    // `*present`/`*total` are left at 0 if `target` matches no provisioned
+    // channel. Locks and delegates to members_present_locked() below --
+    // fix round 2 (re-review residual 1): session_start() computed the
+    // identical sum with a second, hand-written copy of the same loop, so
+    // the test's accessor and the operator's report line could drift apart
+    // silently. One source of truth now; both callers read it.
     void members_present_for_target(const std::string &target,
                                     std::size_t *present, std::size_t *total) const;
+
+    // Fix round 2: pins the deadline sweep for a test without sleeping
+    // kAwaitTimeout (10s) for real. TEST-ONLY -- no production call site
+    // exists or should ever exist; a real caller has no legitimate reason to
+    // want every pending invite to look 10s older than it is. Guarded by
+    // m_chan_mtx like every other access to m_nomination_pending_invites.
+    // See resolve_roster_change()'s test coverage for why this exists: the
+    // re-review proved (mutation: disable ONLY the timed-out trigger, keep
+    // the uid-left prune) that the deadline half of C1's fix was otherwise
+    // unpinned -- 65/65 stayed green with it silently doing nothing.
+    void debug_expire_pending_invites_for_test();
 
     // ── Pre-provisioned channels (Task 2, 2026-08-25) ───────────────────────
     // Computes talkback_plan(nominees) (src/talkback-plan.h) and provisions
@@ -446,6 +459,18 @@ private:
     // questions; this does not add a second walk beyond what the old
     // name-only version already did.
     std::vector<TalkbackRosterEntry> current_roster() const;
+
+    // Fix round 2 (re-review residual 1): the "N of M present" sum, factored
+    // out so members_present_for_target() and session_start() share ONE
+    // implementation instead of two hand-copied loops that could silently
+    // drift (the re-review's own finding: the test asserted the accessor,
+    // the operator read session_start()'s inline copy, and nothing kept them
+    // equal). CALLER MUST HOLD m_chan_mtx -- m_chan_mtx is non-recursive and
+    // session_start() already holds it in the scope where it wants these
+    // counts, so this cannot lock internally the way the public
+    // members_present_for_target() wrapper does.
+    void members_present_locked(const std::string &target,
+                                std::size_t *present, std::size_t *total) const;
 
     // Drains m_stray_channels and destroys each one. The caller must be the
     // only batch-destroy caller alive at that moment; the two callers that

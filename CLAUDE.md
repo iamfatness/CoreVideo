@@ -222,7 +222,18 @@ Every one of these is documented at length where it lives; the list is the map.
   `GetMeetingTalkbackController()` would otherwise null `m_ctrl` for the rest
   of the press. `onChannelUserLeaveResponse` decrements `present` for a
   CHANNEL-side removal (host action, Zoom-side eviction) — the mirror image
-  of the join correlation, and previously an empty stub.
+  of the join correlation, and previously an empty stub. **The deadline half
+  of C1 needed its own test** (fix round 2, 2026-08-26): disabling only the
+  timeout trigger (leaving the uid-left prune intact) left the suite green,
+  because every other test happened to exercise expiry via a departure —
+  the exact "unpinned backstop" shape that had already regressed twice in
+  this milestone. Closed with a TEST-ONLY hook
+  (`debug_expire_pending_invites_for_test()`, guarded by `m_chan_mtx` like
+  everything else in that table) rather than sleeping `kAwaitTimeout` for
+  real, and a scenario where the uid never leaves the roster so only a real
+  timeout can free the name. `members_present_for_target()` and
+  `session_start()` now share one `members_present_locked()` implementation
+  instead of two hand-copied loops that could drift silently.
 - **Engine teardown**: never let SDK callbacks race teardown; `set_terminate`
   is a bare `_exit(5)` (code 5 maps to EngineCrash recovery; no pipe writes,
   no locks, no allocation in the handler).

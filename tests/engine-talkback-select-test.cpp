@@ -995,6 +995,72 @@ int main()
               "CONFUSED THE PENDING TABLE");
     }
 
+    // -- Fix round 2 (re-review residual 2): the DEADLINE half of C1, pinned
+    // in isolation from the uid-left trigger -------------------------------
+    // The re-review mutant-proved this gap: disabling ONLY the timed-out
+    // check (keeping the uid-left prune) left 65/65 green, because every
+    // other test that exercises expiry does so via a departure. This block
+    // is the one case the review specified to close it: the uid NEVER
+    // leaves the roster and no roster event ever reports it gone -- so only
+    // a real deadline can ever free this name for re-invite.
+    // debug_expire_pending_invites_for_test() (TEST-ONLY, guarded by
+    // m_chan_mtx like every other access to the table it mutates) stands in
+    // for "sleep 10 seconds", which no unit test should do for real.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);   // all-talent
+        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);   // Sarah private
+
+        svc.participants.users.push_back(make_user(8001, "Sarah"));
+        tb.resolve_roster_change(&svc);
+        check(svc.ctrl.invited.size() == 2, "Sarah's join did not invite her");
+
+        // Neither response ever arrives -- the two pending entries are still
+        // outstanding, and Sarah stays in the meeting throughout (uid 8001
+        // never leaves the roster; no roster event ever reports her gone).
+        tb.debug_expire_pending_invites_for_test();
+
+        // A NO-CHANGE roster event -- same roster, nothing added or removed
+        // -- is what must trigger the sweep: this pins THAT the sweep runs
+        // inside resolve_roster_change() itself, not on some separate timer
+        // this file does not have.
+        tb.resolve_roster_change(&svc);
+        check(svc.ctrl.invited.size() == 4,
+              "THE DEADLINE-EXPIRED ENTRY WAS NEVER RE-INVITED -- with the "
+              "uid still in the roster and no departure ever reported, ONLY "
+              "a real timeout can free this name for re-invite, and a "
+              "no-change roster event must be what runs that sweep");
+
+        // The late responses for the ORIGINAL (now-expired-and-replaced)
+        // entries finally arrive, under the SAME uid -- Sarah never
+        // rejoined, so there is no "new id" to distinguish them from a
+        // response to the fresh invite issued above. This is the self-heal
+        // the review described (a false expiry costs one extra invite,
+        // never a miscount, never a crash): the response is genuinely
+        // indistinguishable from one answering the fresh invite, so it
+        // legitimately confirms it -- present must land at exactly one
+        // entry per channel, not zero (lost) and not two (double-counted).
+        tb.onChannelUserJoinResponse(chan_id(1).c_str(), 8001, kOk);
+        tb.onChannelUserJoinResponse(chan_id(2).c_str(), 8001, kOk);
+        check(svc.ctrl.invited.size() == 4,
+              "A LATE RESPONSE FOR AN EXPIRED ENTRY CAUSED AN EXTRA INVITE");
+        std::size_t present = 0, total = 0;
+        tb.members_present_for_target("Sarah", &present, &total);
+        check(present == 1 && total == 1,
+              "A LATE RESPONSE FOR AN EXPIRED-AND-REPLACED ENTRY WAS LOST OR "
+              "DOUBLE-COUNTED -- expiry must cost at most one extra invite, "
+              "never a miscount");
+
+        // Re-resolving again with nothing changed must still be idempotent
+        // -- the healed state must not itself become a source of repeated
+        // invites.
+        tb.resolve_roster_change(&svc);
+        check(svc.ctrl.invited.size() == 4,
+              "THE POST-EXPIRY HEALED STATE WAS NOT IDEMPOTENT");
+    }
+
     // -- Fix round 1, M1 (Major): a permanently-failing invite is attempted
     // exactly once per presence stint, and retried only on that person's
     // next join transition -------------------------------------------------

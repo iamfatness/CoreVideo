@@ -21,20 +21,35 @@
 // failure: loud, immediate, and fixed by re-running the generator recorded in
 // task-3-report.md. Do not "fix" it by weakening the fake some other way.
 //
-// WHAT IS DELIBERATELY NOT FAKED: IMeetingParticipantsController (56 pure
-// virtuals) and IUserInfo (38). GetMeetingParticipantsController() returns
-// nullptr, so resolve_participant() finds nobody and every invite is skipped
-// and reported -- exactly the "nominee not currently in the meeting" path,
-// which is a normal one. Nothing below asserts anything about invites, because
-// with no participants controller the engine cannot issue one; a test that
-// checked invite counts here would be asserting the fake, not the engine.
+// IMeetingParticipantsController (56 pure virtuals) and IUserInfo (38) were
+// deliberately NOT faked through Task 3: GetMeetingParticipantsController()
+// returned nullptr, so resolve_participant() found nobody and every invite
+// was skipped and reported -- exactly the "nominee not currently in the
+// meeting" path, and nothing in that era's tests asserted anything about
+// invites, because with no participants controller the engine could not
+// issue one.
+//
+// Task 4 (roster re-resolution) is precisely the feature that needs a real
+// roster to react to, so FakeParticipantsController/FakeUserInfo below now
+// exist -- minimal fakes, generated the same way FakeMeetingService's block
+// was (see above): every real SDK getter that carries state a test sets
+// (name, id, IsSupportTalkback()) is hand-written, everything else is a
+// default stub. FakeMeetingService's own controller starts with an EMPTY
+// roster, so every test written before Task 4 is unaffected -- resolve_
+// participant() still finds nobody unless a test explicitly adds someone.
 //
 // WHAT IT PINS: that a nomination issues exactly ONE CreateChannel at a time
 // and claims the arbiter when it does; that keying issues NONE; that releasing
-// a key destroys NOTHING; and that a create cancelled by Leave is destroyed on
-// arrival rather than adopted. Those are engine-wiring facts. The pure state
-// machine underneath them is tested separately in talkback-create-state-test.cpp,
-// which is the layer that CAN be driven exhaustively.
+// a key destroys NOTHING; that a create cancelled by Leave is destroyed on
+// arrival rather than adopted; and, as of Task 4, that a roster change invites
+// a newly-present nominee into every channel their name is planned for, does
+// so exactly once per join (idempotent under a burst of re-resolutions),
+// treats TALKBACK_ERROR_ALREADY_EXIST as success rather than a reason to
+// retry, and re-invites a talent who leaves and rejoins under a brand new
+// user id. Those are engine-wiring facts. The pure state machine underneath
+// the create/arbiter half is tested separately in
+// talkback-create-state-test.cpp, which is the layer that CAN be driven
+// exhaustively.
 #include "engine-talkback.h"
 #include "talkback-ring.h"   // the tap side of the ring, so drain_audio() has real audio
 
@@ -85,6 +100,17 @@ static std::string utf8_of(const zchar_t *z)
     return s;
 }
 
+// Task 4's roster-driven re-resolution needs real display names to match
+// against, and this file's zchar_t is wchar_t on Windows -- the same reason
+// chan_id()/utf8_of() above build strings a character at a time rather than
+// with a literal.
+static std::basic_string<zchar_t> zstr_of(const std::string &s)
+{
+    std::basic_string<zchar_t> z;
+    for (char c : s) z.push_back(static_cast<zchar_t>(c));
+    return z;
+}
+
 // -- The fake talkback controller: a call log ------------------------------
 // Records what the engine asked Zoom to do. Everything returns success, so a
 // test that sees no call cannot be excused by a failure the engine handled.
@@ -119,14 +145,33 @@ public:
     { return ZOOMSDK::SDKERR_SUCCESS; }
     ZOOMSDK::SDKError ExecuteBatchDestroyChannels() override
     { return ZOOMSDK::SDKERR_SUCCESS; }
-    ZOOMSDK::SDKError BeginBatchInviteUsers(const zchar_t *) override
-    { return ZOOMSDK::SDKERR_SUCCESS; }
-    ZOOMSDK::SDKError AddUserToInvite(unsigned int) override
-    { return ZOOMSDK::SDKERR_SUCCESS; }
+    // Task 4: BEGIN/ADD/EXECUTE recorded as committed (channel, user_id)
+    // pairs in `invited` -- the same Begin/Add/Execute shape `destroyed`
+    // above records for the destroy side, so the roster re-resolution tests
+    // can assert on invites the same way the existing tests assert on
+    // destroys: by counting real SDK calls, never by parsing report output.
+    std::basic_string<zchar_t> invite_channel_in_progress;
+    std::vector<unsigned int> invite_users_in_progress;
+    std::vector<std::pair<std::string, unsigned int> > invited;
+    ZOOMSDK::SDKError BeginBatchInviteUsers(const zchar_t *channelID) override
+    {
+        invite_channel_in_progress = channelID;
+        invite_users_in_progress.clear();
+        return ZOOMSDK::SDKERR_SUCCESS;
+    }
+    ZOOMSDK::SDKError AddUserToInvite(unsigned int userID) override
+    {
+        invite_users_in_progress.push_back(userID);
+        return ZOOMSDK::SDKERR_SUCCESS;
+    }
     ZOOMSDK::SDKError RemoveUserFromInvite(unsigned int) override
     { return ZOOMSDK::SDKERR_SUCCESS; }
     ZOOMSDK::SDKError ExecuteBatchInviteUsers() override
-    { return ZOOMSDK::SDKERR_SUCCESS; }
+    {
+        for (unsigned int uid : invite_users_in_progress)
+            invited.push_back(std::make_pair(utf8_of(invite_channel_in_progress.c_str()), uid));
+        return ZOOMSDK::SDKERR_SUCCESS;
+    }
     ZOOMSDK::SDKError BeginBatchRemoveUsers(const zchar_t *) override
     { return ZOOMSDK::SDKERR_SUCCESS; }
     ZOOMSDK::SDKError AddUserToRemove(unsigned int) override
@@ -154,15 +199,161 @@ public:
     bool IsMeetingSupportTalkBack() override { return supported; }
 };
 
+// -- The fake participants list/user info (Task 4) -------------------------
+// Only GetCount/GetItem/AddItem (IList<unsigned int>), and GetUserName/
+// GetUserID/IsSupportTalkback (IUserInfo) carry real state. Everything else
+// is a default stub, same convention as FakeMeetingService's generated
+// block: this fake exists to drive resolve_participant() and
+// resolve_roster_change(), not to be a faithful participants controller.
+class FakeUIntList : public ZOOMSDK::IList<unsigned int> {
+public:
+    std::vector<unsigned int> items;
+    int GetCount() override { return static_cast<int>(items.size()); }
+    unsigned int GetItem(int index) override { return items[static_cast<size_t>(index)]; }
+    void AddItem(unsigned int item) override { items.push_back(item); }
+};
+
+class FakeUserInfo : public ZOOMSDK::IUserInfo {
+public:
+    unsigned int id = 0;
+    std::basic_string<zchar_t> name_z;
+    bool supports_talkback = true;
+
+    const zchar_t* GetUserName() override { return name_z.c_str(); }
+    unsigned int GetUserID() override { return id; }
+    bool IsSupportTalkback() override { return supports_talkback; }
+
+    // -- stubs: this fake never exercises these --
+    bool IsHost() override { return {}; }
+    const zchar_t* GetAvatarPath() override { return {}; }
+    const zchar_t* GetPersistentId() override { return {}; }
+    const zchar_t* GetCustomerKey() override { return {}; }
+    bool IsVideoOn() override { return {}; }
+    bool IsAudioMuted() override { return {}; }
+    ZOOMSDK::AudioType GetAudioJoinType() override { return {}; }
+    bool IsMySelf() override { return {}; }
+    bool IsInWaitingRoom() override { return {}; }
+    bool IsRaiseHand() override { return {}; }
+    ZOOMSDK::UserRole GetUserRole() override { return {}; }
+    bool IsPurePhoneUser() override { return {}; }
+    int GetAudioVoiceLevel() override { return {}; }
+    bool IsClosedCaptionSender() override { return {}; }
+    bool IsTalking() override { return {}; }
+    bool IsH323User() override { return {}; }
+    ZOOMSDK::WebinarAttendeeStatus* GetWebinarAttendeeStatus() override { return {}; }
+    bool IsInterpreter() override { return {}; }
+    bool IsSignLanguageInterpreter() override { return {}; }
+    const zchar_t* GetInterpreterActiveLanguage() override { return {}; }
+    ZOOMSDK::SDKEmojiFeedbackType GetEmojiFeedbackType() override { return {}; }
+    bool IsCompanionModeUser() override { return {}; }
+    ZOOMSDK::RecordingStatus GetLocalRecordingStatus() override { return {}; }
+    bool IsRawLiveStreaming() override { return {}; }
+    bool HasRawLiveStreamPrivilege() override { return {}; }
+    bool HasCamera() override { return {}; }
+    bool IsProductionStudioUser() override { return {}; }
+    bool IsInWebinarBackstage() override { return {}; }
+    unsigned int GetProductionStudioParent() override { return {}; }
+    bool IsBotUser() override { return {}; }
+    const zchar_t* GetBotAppName() override { return {}; }
+    bool IsVirtualNameTagEnabled() override { return {}; }
+    ZOOMSDK::IList<ZOOMSDK::ZoomSDKVirtualNameTag>* GetVirtualNameTagList() override { return {}; }
+    ZOOMSDK::IList<ZOOMSDK::GrantCoOwnerAssetsInfo>* GetGrantCoOwnerAssetsInfo() override { return {}; }
+    bool IsAudioOnlyUser() override { return {}; }
+};
+
+// -- The fake participants controller (Task 4) ------------------------------
+// The roster this fake presents -- tests add/remove FakeUserInfo entries in
+// `users` directly to simulate joins, leaves, and renames (a rename is just
+// mutating name_z on an existing entry's name, exercised via remove+re-add
+// below since that is how resolve_roster_change()'s generic diff sees it
+// too: the old name disappears, the new one may or may not appear).
+class FakeParticipantsController : public ZOOMSDK::IMeetingParticipantsController {
+public:
+    std::vector<FakeUserInfo> users;
+    FakeUIntList ids;   // rebuilt from `users` on every GetParticipantsList()
+
+    IList<unsigned int>* GetParticipantsList() override
+    {
+        ids.items.clear();
+        for (auto &u : users) ids.items.push_back(u.id);
+        return &ids;
+    }
+    IUserInfo* GetUserByUserID(unsigned int userid) override
+    {
+        for (auto &u : users) if (u.id == userid) return &u;
+        return nullptr;
+    }
+
+    // -- stubs: this fake exists only to drive resolve_participant() and
+    // resolve_roster_change() --
+    SDKError SetEvent(IMeetingParticipantsCtrlEvent*) override { return {}; }
+    IUserInfo* GetMySelfUser() override { return {}; }
+    IUserInfo* GetBotAuthorizedUserInfoByUserID(unsigned int) override { return {}; }
+    IList<unsigned int>* GetAuthorizedBotListByUserID(unsigned int) override { return {}; }
+    SDKError RequestAvatarForUser(unsigned int) override { return {}; }
+    IUserInfo* GetCompanionParentUser(unsigned int) override { return {}; }
+    IList<unsigned int>* GetCompanionChildList(unsigned int) override { return {}; }
+    SDKError LowerAllHands(bool) override { return {}; }
+    SDKError ChangeUserName(const unsigned int, const zchar_t*, bool) override { return {}; }
+    SDKError LowerHand(unsigned int) override { return {}; }
+    SDKError RaiseHand() override { return {}; }
+    SDKError MakeHost(unsigned int) override { return {}; }
+    SDKError CanbeCohost(unsigned int) override { return {}; }
+    SDKError AssignCoHost(unsigned int) override { return {}; }
+    SDKError RevokeCoHost(unsigned int) override { return {}; }
+    SDKError ExpelUser(unsigned int) override { return {}; }
+    bool IsSelfOriginalHost() override { return {}; }
+    SDKError ReclaimHost() override { return {}; }
+    SDKError CanReclaimHost(bool&) override { return {}; }
+    SDKError ReclaimHostByHostKey(const zchar_t*) override { return {}; }
+    SDKError AllowParticipantsToRename(bool) override { return {}; }
+    bool IsParticipantsRenameAllowed() override { return {}; }
+    SDKError AllowParticipantsToUnmuteSelf(bool) override { return {}; }
+    bool IsParticipantsUnmuteSelfAllowed() override { return {}; }
+    SDKError AskAllToUnmute() override { return {}; }
+    SDKError AllowParticipantsToStartVideo(bool) override { return {}; }
+    bool IsParticipantsStartVideoAllowed() override { return {}; }
+    SDKError AllowParticipantsToShareWhiteBoard(bool) override { return {}; }
+    bool IsParticipantsShareWhiteBoardAllowed() override { return {}; }
+    SDKError AllowParticipantsToChat(bool) override { return {}; }
+    bool IsParticipantAllowedToChat() override { return {}; }
+    bool IsParticipantRequestLocalRecordingAllowed() override { return {}; }
+    SDKError AllowParticipantsToRequestLocalRecording(bool) override { return {}; }
+    bool IsAutoAllowLocalRecordingRequest() override { return {}; }
+    SDKError AutoAllowLocalRecordingRequest(bool) override { return {}; }
+    SDKError CanHideParticipantProfilePictures() override { return {}; }
+    bool IsParticipantProfilePicturesHidden() override { return {}; }
+    SDKError HideParticipantProfilePictures(bool) override { return {}; }
+    bool IsFocusModeEnabled() override { return {}; }
+    bool IsFocusModeOn() override { return {}; }
+    SDKError TurnFocusModeOn(bool) override { return {}; }
+    FocusModeShareType GetFocusModeShareType() override { return {}; }
+    SDKError SetFocusModeShareType(FocusModeShareType) override { return {}; }
+    bool CanEnableParticipantRequestCloudRecording() override { return {}; }
+    bool IsParticipantRequestCloudRecordingAllowed() override { return {}; }
+    SDKError AllowParticipantsToRequestCloudRecording(bool) override { return {}; }
+    bool IsSupportVirtualNameTag() override { return {}; }
+    SDKError EnableVirtualNameTag(bool) override { return {}; }
+    SDKError CreateVirtualNameTagRosterInfoBegin() override { return {}; }
+    bool AddVirtualNameTagRosterInfoToList(ZoomSDKVirtualNameTag) override { return {}; }
+    SDKError CreateVirtualNameTagRosterInfoCommit() override { return {}; }
+    bool CanBeCoOwner(unsigned int) override { return {}; }
+    SDKError AssignCoHostWithAssetsPrivilege(unsigned int, IList<GrantCoOwnerAssetsInfo>*) override { return {}; }
+    SDKError MakeHostWithAssetsPrivilege(unsigned int, IList<GrantCoOwnerAssetsInfo>*) override { return {}; }
+};
+
 // -- The fake meeting service ----------------------------------------------
-// Only GetMeetingTalkbackController() is written by hand. The rest is the
-// generated block described at the top of this file: 57 overrides that exist
-// solely so this class is concrete.
+// Only GetMeetingTalkbackController() and GetMeetingParticipantsController()
+// are written by hand. The rest is the generated block described at the top
+// of this file: 57 overrides that exist solely so this class is concrete.
 class FakeMeetingService : public ZOOMSDK::IMeetingService {
 public:
     FakeTalkbackController ctrl;
+    FakeParticipantsController participants;
     ZOOMSDK::IMeetingTalkbackController *GetMeetingTalkbackController() override
     { return &ctrl; }
+    ZOOMSDK::IMeetingParticipantsController *GetMeetingParticipantsController() override
+    { return &participants; }
 
     // -- generated from meeting_service_interface.h (see the file comment) --
     SDKError SetEvent(IMeetingServiceEvent* pEvent) override { return {}; }
@@ -190,7 +381,6 @@ public:
     IMeetingAudioController* GetMeetingAudioController() override { return {}; }
     IMeetingRecordingController* GetMeetingRecordingController() override { return {}; }
     IMeetingWaitingRoomController* GetMeetingWaitingRoomController() override { return {}; }
-    IMeetingParticipantsController* GetMeetingParticipantsController() override { return {}; }
     IMeetingWebinarController* GetMeetingWebinarController() override { return {}; }
     IMeetingRawArchivingController* GetMeetingRawArchivingController() override { return {}; }
     IMeetingReminderController* GetMeetingReminderController() override { return {}; }
@@ -223,6 +413,21 @@ public:
     IMeetingEncryptionController* GetInMeetingEncryptionController() override { return {}; }
     IListFactory* GetListFactory() override { return {}; }
 };
+
+// Builds a roster entry for FakeParticipantsController::users. Every test
+// below that simulates a join pushes one of these; a leave is simulated by
+// removing it, and a rejoin under a NEW id (the realistic case -- ids are
+// meeting-scoped and Zoom does not promise to reuse them) by pushing a fresh
+// one with the same name.
+static FakeUserInfo make_user(unsigned int id, const std::string &name,
+                              bool supports_talkback = true)
+{
+    FakeUserInfo u;
+    u.id = id;
+    u.name_z = zstr_of(name);
+    u.supports_talkback = supports_talkback;
+    return u;
+}
 
 int main()
 {
@@ -574,6 +779,121 @@ int main()
               "the rest of the meeting");
         check(svc.ctrl.destroyed.size() == 2,
               "a re-nomination did not destroy the channels it replaced");
+    }
+
+    // -- Task 4: a rejoin is invited automatically, idempotently, and
+    // TALKBACK_ERROR_ALREADY_EXIST is success, not failure ------------------
+    // A single private nominee plans to TWO channels (one all-talent slice
+    // that always exists for n>=1, plus her own private channel) -- so one
+    // real join invites her into both, and `invited.size()` is the whole
+    // observable signal this block needs: it must grow by exactly 2 on a
+    // genuine join, stay flat across a burst of re-resolutions with nothing
+    // changed, stay flat again after a mixed OK/ALREADY_EXIST confirmation,
+    // and grow by another 2 on a leave-then-rejoin under a DIFFERENT user id
+    // -- names, never ids, is the entire point of this milestone.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);   // all-talent
+        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);   // Sarah private
+
+        // Sarah is not in the meeting yet at provisioning time -- both of
+        // the initial invite attempts (in onCreateChannelResponse's own
+        // invite loop) find nobody and issue no SDK call.
+        check(svc.ctrl.invited.empty(),
+              "an invite was issued for a nominee who was not yet in the meeting");
+
+        // Sarah joins. This is what main.cpp's onUserJoin (etc.) calls on
+        // the engine's behalf after rebuild_roster()/send_roster().
+        svc.participants.users.push_back(make_user(1001, "Sarah"));
+        tb.resolve_roster_change(&svc);
+        check(svc.ctrl.invited.size() == 2,
+              "SARAH'S JOIN DID NOT INVITE HER INTO BOTH HER CHANNELS -- "
+              "all-talent and her own private channel");
+
+        // Zoom fires several of the five roster callbacks in a row for one
+        // underlying change (e.g. onUserJoin then onUserAudioStatusChange).
+        // Nothing changed since the last resolution -- this must invite
+        // nobody again.
+        tb.resolve_roster_change(&svc);
+        tb.resolve_roster_change(&svc);
+        check(svc.ctrl.invited.size() == 2,
+              "RE-RESOLVING WITH NOTHING CHANGED RE-INVITED -- a burst of "
+              "roster callbacks for one join must do the work once, not once "
+              "per callback");
+
+        // Zoom's real answer to those two invites: ALREADY_EXIST for one
+        // channel, OK for the other. TALKBACK_ERROR_ALREADY_EXIST literally
+        // means "the invited user is already in the channel" -- both must be
+        // treated as confirmed presence, never as a failure to retry.
+        static const IMeetingTalkbackCtrlEvent::TalkbackError kAlreadyExist =
+            IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_ALREADY_EXIST;
+        tb.onChannelUserJoinResponse(chan_id(1).c_str(), 1001, kAlreadyExist);
+        tb.onChannelUserJoinResponse(chan_id(2).c_str(), 1001, kOk);
+        tb.resolve_roster_change(&svc);
+        check(svc.ctrl.invited.size() == 2,
+              "TALKBACK_ERROR_ALREADY_EXIST WAS TREATED AS A FAILURE -- Sarah "
+              "was re-invited into a channel the SDK already says she is in");
+
+        // Sarah drops (onUserLeft) and rejoins under a NEW session id
+        // (onUserJoin) -- the realistic case, since ids are meeting-scoped
+        // and nothing promises Zoom reuses them. She must be invited again,
+        // with no operator action, resolved by NAME alone.
+        svc.participants.users.clear();
+        tb.resolve_roster_change(&svc);   // onUserLeft
+        svc.participants.users.push_back(make_user(1002, "Sarah"));
+        tb.resolve_roster_change(&svc);   // onUserJoin
+        check(svc.ctrl.invited.size() == 4,
+              "A REJOIN UNDER A NEW USER ID WAS NOT RE-INVITED -- resolving "
+              "by name, not id, is the whole point of storing nominations as "
+              "names");
+    }
+
+    // -- Task 4: a rejoiner whose client fails IsSupportTalkback() is still
+    // resolved, never silently skipped ---------------------------------------
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        check(tb.nominate(&svc, {"Ivan"}), "nominate refused a one-name plan");
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+
+        svc.participants.users.push_back(
+            make_user(2001, "Ivan", /*supports_talkback=*/false));
+        tb.resolve_roster_change(&svc);
+        check(svc.ctrl.invited.size() == 2,
+              "A REJOINER WHOSE CLIENT FAILS IsSupportTalkback() WAS SILENTLY "
+              "SKIPPED -- the gate is reported (resolve_participant()'s "
+              "existing participant_talkback_support line), never used to "
+              "quietly drop the invite");
+    }
+
+    // -- Task 4: roster re-resolution never creates, and defers to a busy
+    // probe instead of racing its driving thread's SDK calls -----------------
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+
+        check(tb.probe(&svc, "Someone"), "the probe refused to start");
+        const int creates_before_roster_event = svc.ctrl.creates;
+
+        svc.participants.users.push_back(make_user(3001, "Sarah"));
+        tb.resolve_roster_change(&svc);
+        check(svc.ctrl.creates == creates_before_roster_event,
+              "ROSTER RE-RESOLUTION ISSUED A CreateChannel -- the ruling is "
+              "invite-only; a channel must already exist from nomination "
+              "time, and CreateChannel is command-loop-thread-only under the "
+              "arbiter's single-outstanding-create rule");
+        check(svc.ctrl.invited.empty(),
+              "roster re-resolution invited while the probe's ladder was "
+              "still live -- Begin/Add/Execute sequences on two threads is "
+              "the exact hazard tick()'s own inventory documents");
+
+        tb.tick();   // settle the probe so the object can be destroyed cleanly
     }
 
     if (failures == 0)

@@ -5,6 +5,7 @@
 #include "engine-json.h"     // zchar_to_utf8 / json_escape / json_str (Step 3a)
 #include "talkback-ring.h"   // talkback_ring_drain / TalkbackRingSlotFn (Milestone 2)
 
+#include <algorithm>          // std::find / std::remove (Task 4 roster diffing)
 #include <chrono>
 #include <string>
 #include <thread>
@@ -1252,6 +1253,85 @@ void EngineTalkback::onChannelUserJoinResponse(const zchar_t *channelID,
            R"("channel":")" + json_escape(zchar_to_utf8(channelID)) +
            R"(","user_id":)" + std::to_string(userID) +
            R"(,"error":)" + std::to_string(static_cast<int>(error)));
+
+    // Task 4: nomination-issued invites -- both the initial provisioning
+    // loop's (onCreateChannelResponse's Nomination branch, above) and
+    // resolve_roster_change()'s later re-invites -- are correlated HERE,
+    // unconditionally, before the PROBE's own m_phase check below even runs.
+    // m_phase belongs to the probe's ladder and has no idea a nomination
+    // invite ever happened; before this task every response to one landed
+    // in that check's early return and was silently discarded, including
+    // TALKBACK_ERROR_ALREADY_EXIST, which this file must treat as success,
+    // not failure, and had nowhere to do that. Checked by (channel, user id)
+    // against m_nomination_pending_invites, which can never collide with the
+    // probe's own AwaitingInvite wait: a probe and a nomination never share
+    // a channel id.
+    bool nomination_handled = false;
+    if (channelID) {
+        std::string resolved_name;
+        std::string channel_id_utf8;
+        bool matched = false;
+        bool confirmed = false;
+        {
+            std::lock_guard<std::mutex> lock(m_chan_mtx);
+            for (auto it = m_nomination_pending_invites.begin();
+                 it != m_nomination_pending_invites.end(); ++it) {
+                if (it->channel_id_z != channelID || it->user_id != userID) continue;
+                resolved_name = it->name;
+                matched = true;
+                m_nomination_pending_invites.erase(it);
+                break;
+            }
+            if (matched) {
+                // TALKBACK_ERROR_ALREADY_EXIST IS SUCCESS, not a failure. The
+                // SDK documents it as "the invited user is already in the
+                // channel" -- exactly the outcome a roster-driven re-invite
+                // (a burst of the five roster callbacks racing this same
+                // response, or Zoom's own state already reflecting an
+                // earlier invite) is expected to produce. Treating it as a
+                // failure here would under-count presence and could drive
+                // resolve_roster_change() to keep retrying an invite that
+                // already succeeded. Any OTHER non-OK error is a real gate
+                // (e.g. IsSupportTalkback() == false surfacing as a rejected
+                // invite) and must be reported as a failure, never swallowed.
+                if (error == TALKBACK_ERROR_OK || error == TALKBACK_ERROR_ALREADY_EXIST) {
+                    confirmed = true;
+                    for (auto &pc : m_provisioned_channels) {
+                        if (pc.channel_id_z != channelID) continue;
+                        bool already = false;
+                        for (const auto &n : pc.present)
+                            if (n == resolved_name) { already = true; break; }
+                        if (!already) pc.present.push_back(resolved_name);
+                        channel_id_utf8 = pc.channel_id;
+                        break;
+                    }
+                }
+            }
+        }
+        if (matched) {
+            nomination_handled = true;
+            if (confirmed) {
+                report_nomination("member_invited",
+                                  R"("name":")" + json_escape(resolved_name) +
+                                  R"(","channel":")" + json_escape(channel_id_utf8) +
+                                  R"(","user_id":)" + std::to_string(userID) +
+                                  R"(,"already_member":)" +
+                                  (error == TALKBACK_ERROR_ALREADY_EXIST ? "true" : "false"));
+            } else {
+                // Gates are surfaced, never swallowed: a rejected nomination
+                // invite (e.g. IsSupportTalkback() == false rendered as
+                // TALKBACK_ERROR_NOPERMISSION/REJECTED by the SDK) is
+                // reported by name here rather than left as an unexplained
+                // gap in who is actually reachable.
+                report_nomination("member_invite_failed",
+                                  R"("name":")" + json_escape(resolved_name) +
+                                  R"(","user_id":)" + std::to_string(userID) +
+                                  R"(,"error":)" + std::to_string(static_cast<int>(error)));
+            }
+        }
+    }
+    if (nomination_handled) return;
+
     if (m_phase.load(std::memory_order_acquire) != Phase::AwaitingInvite) return;
 
     if (!channelID) {
@@ -1649,6 +1729,11 @@ void EngineTalkback::nomination_destroy_provisioned()
         ids.reserve(m_provisioned_channels.size());
         for (auto &pc : m_provisioned_channels) ids.push_back(std::move(pc.channel_id_z));
         m_provisioned_channels.clear();
+        // Task 4: any invite this ladder is still waiting to hear back about
+        // belongs to a channel that no longer exists in a moment -- forget
+        // it, same reasoning as m_session_channels.clear() just below: a
+        // pending invite must never outlive the channel it names.
+        m_nomination_pending_invites.clear();
         // Task 3: a selection must never outlive the channels it names. Every
         // caller of this function has already ruled out a live key press (a
         // failing ladder cannot run while m_session_live, and nominate()
@@ -1699,6 +1784,19 @@ void EngineTalkback::invite_nominee(const std::basic_string<zchar_t> &channel_id
                       std::to_string(uid) + R"(,"channel":")" +
                       json_escape(channel_id_utf8) + R"(","code":)" +
                       std::to_string(static_cast<int>(e)));
+    if (e != ZOOMSDK::SDKERR_SUCCESS) return;
+
+    // Task 4: ExecuteBatchInviteUsers is asynchronous -- its own SDK doc
+    // comment says the synchronous SDKERR_SUCCESS above is only "the batch
+    // call was accepted", never "the user is in the channel". Track this so
+    // onChannelUserJoinResponse's eventual response -- including
+    // TALKBACK_ERROR_ALREADY_EXIST, which this file treats as success, never
+    // a failure -- can be attributed back to this NAME (never an id, same
+    // rule as everywhere else in this file) and update this channel's
+    // `present` set, which is what session_start()'s "N of M present" line
+    // and resolve_roster_change()'s own idempotence both read.
+    std::lock_guard<std::mutex> lock(m_chan_mtx);
+    m_nomination_pending_invites.push_back({channel_id_z, uid, name});
 }
 
 void EngineTalkback::nomination_reset()
@@ -1748,6 +1846,10 @@ void EngineTalkback::nomination_reset()
     m_pending_create = talkback_cancel(m_pending_create, TalkbackChannelOwner::Nomination);
     m_nomination_pending.clear();
     m_provisioned_channels.clear();
+    // Task 4: same reasoning as nomination_destroy_provisioned() -- a
+    // pending invite naming a channel that no longer exists (meeting-scoped,
+    // like everything else this function forgets) must not outlive it.
+    m_nomination_pending_invites.clear();
     // Task 3: the key press's selection is made of ids from the table above,
     // so it is forgotten in the same breath -- same reasoning as
     // nomination_destroy_provisioned(). main.cpp's Leave path calls
@@ -1756,6 +1858,128 @@ void EngineTalkback::nomination_reset()
     // pointing into a table it just emptied, whatever order a future caller
     // uses.
     m_session_channels.clear();
+}
+
+// ── Roster re-resolution (Task 4, 2026-08-25) ───────────────────────────────
+std::vector<std::string> EngineTalkback::current_roster_names() const
+{
+    std::vector<std::string> names;
+    if (!m_svc) return names;
+    auto *part = m_svc->GetMeetingParticipantsController();
+    if (!part) return names;
+    ZOOMSDK::IList<unsigned int> *ids = part->GetParticipantsList();
+    if (!ids) return names;
+    names.reserve(static_cast<std::size_t>(ids->GetCount()));
+    for (int i = 0; i < ids->GetCount(); ++i) {
+        ZOOMSDK::IUserInfo *u = part->GetUserByUserID(ids->GetItem(i));
+        if (!u) continue;
+        names.push_back(zchar_to_utf8(u->GetUserName()));
+    }
+    return names;
+}
+
+void EngineTalkback::resolve_roster_change(ZOOMSDK::IMeetingService *svc)
+{
+    if (!svc) return;
+
+    // THE RULING THIS FUNCTION EXISTS UNDER (see the header comment): invite
+    // only, NEVER create. Every provisioned channel already exists from
+    // nomination time; a name with nowhere to go is a planning gap for the
+    // operator to fix with nominate(), not something this function may fix
+    // by calling CreateChannel -- CreateChannel is command-loop-thread-only
+    // under the arbiter's single-outstanding-create rule
+    // (src/talkback-channel-owner.h), and nothing below calls it.
+
+    // Gated exactly like nominate()/session_start(): this reassigns
+    // m_svc/m_ctrl and, when it invites, runs the same kind of
+    // Begin/Add/Execute sequence tick()'s own inventory documents as unsafe
+    // to interleave, on different threads, with the probe's driving thread.
+    // A refusal here costs nothing but a delay -- nothing below is marked
+    // resolved until an invite actually goes out, so the next roster event
+    // (onUserJoin etc. keep coming) tries again.
+    if (has_pending_work()) {
+        report_nomination("roster_resolve", R"("ok":false,"reason":"probe_busy")");
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        if (m_provisioned_channels.empty()) return;   // nothing nominated yet
+    }
+
+    m_svc  = svc;
+    m_ctrl = m_svc->GetMeetingTalkbackController();
+    if (!m_ctrl) return;
+
+    const std::vector<std::string> present_now = current_roster_names();
+    auto is_present_now = [&present_now](const std::string &name) {
+        return std::find(present_now.begin(), present_now.end(), name) != present_now.end();
+    };
+
+    // Snapshot the work under the lock -- the SDK is never called while
+    // holding m_chan_mtx, same discipline as everywhere else in this file.
+    // Departures are applied to `pc.present` in THIS scope (so a concurrent
+    // reader, e.g. session_start()'s own present-count read, never sees a
+    // half-updated table); invites happen AFTER the lock is released, below.
+    struct ChannelInvites {
+        std::basic_string<zchar_t> channel_id_z;
+        std::string channel_id;
+        std::vector<std::string> names;
+    };
+    std::vector<ChannelInvites> to_invite;
+    std::vector<std::pair<std::string, std::string> > left;   // (name, channel)
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        for (auto &pc : m_provisioned_channels) {
+            ChannelInvites work;
+            for (const auto &name : pc.members) {
+                const bool was_present =
+                    std::find(pc.present.begin(), pc.present.end(), name) != pc.present.end();
+                const bool present_here = is_present_now(name);
+                if (present_here && !was_present) {
+                    // Idempotence: skip a name that already has an invite
+                    // outstanding. A burst of the five roster callbacks for
+                    // the SAME join must issue ONE ExecuteBatchInviteUsers,
+                    // not one per callback -- TALKBACK_ERROR_ALREADY_EXIST
+                    // covers Zoom's side of a redundant invite, this covers
+                    // ours, and "make the work proportional to what actually
+                    // changed" means not relying on Zoom's answer alone.
+                    bool already_pending = false;
+                    for (const auto &pi : m_nomination_pending_invites) {
+                        if (pi.channel_id_z == pc.channel_id_z && pi.name == name) {
+                            already_pending = true;
+                            break;
+                        }
+                    }
+                    if (!already_pending) work.names.push_back(name);
+                } else if (!present_here && was_present) {
+                    // A talent renaming themselves is a LEAVE of the old
+                    // name (handled here, generically -- no special case)
+                    // and possibly a JOIN of a nominated new name, handled
+                    // by the `present_here && !was_present` branch above on
+                    // this SAME pass, for whichever channel plans the new
+                    // name.
+                    pc.present.erase(std::remove(pc.present.begin(), pc.present.end(), name),
+                                     pc.present.end());
+                    left.emplace_back(name, pc.channel_id);
+                }
+            }
+            if (!work.names.empty()) {
+                work.channel_id_z = pc.channel_id_z;
+                work.channel_id = pc.channel_id;
+                to_invite.push_back(std::move(work));
+            }
+        }
+    }
+
+    for (const auto &l : left)
+        report_nomination("member_left",
+                          R"("name":")" + json_escape(l.first) + R"(","channel":")" +
+                          json_escape(l.second) + "\"");
+
+    for (const auto &work : to_invite)
+        for (const auto &name : work.names)
+            invite_nominee(work.channel_id_z, work.channel_id, name);
 }
 
 // ── Talkback audio path (Milestone 2) ───────────────────────────────────────
@@ -2270,6 +2494,15 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
     std::string selected_ids;   // UTF-8, reporting only
     std::size_t provisioned_total = 0;
     std::size_t still_coming = 0;   // channels for THIS target not created yet
+    // Task 4: how many of the target's nominated members this file currently
+    // believes are actually in their channel(s), versus how many are
+    // nominated for it in total -- "3 of 4 present" in the session_live line
+    // below. Task 3 deliberately left this out: the provisioned entry did
+    // not track membership at all, only the plan. Summed across every
+    // channel `selected` matches, exactly like `selected_ids` above, so an
+    // all-talent target's count spans its whole ceil(n/10) fan-out.
+    std::size_t members_present = 0;
+    std::size_t members_total = 0;
     const char *reason = nullptr;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
@@ -2280,6 +2513,8 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
             selected.push_back(pc.channel_id_z);
             if (!selected_ids.empty()) selected_ids += ",";
             selected_ids += pc.channel_id;
+            members_total   += pc.members.size();
+            members_present += pc.present.size();
         }
         // Fix round 1, M2 (Major): the provisioned table answers "how many
         // channels does this target own SO FAR", and nothing distinguished
@@ -2400,8 +2635,15 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
     // in the log instead of leaving the operator to infer it from silence. A
     // FAILED open is a different matter and is refused above; this only
     // distinguishes open from not-yet.
+    // Task 4: "members_present"/"members_total" -- the director should see
+    // "live, 3 of 4 present", not just channel counts. `counts` above answers
+    // "how many CHANNELS", which says nothing when a single provisioned
+    // channel is short a member who has not rejoined yet; this answers the
+    // question the operator is actually asking with a key press.
     report_session("session_live", R"("target":")" + json_escape(target) +
                    R"(",)" + counts +
+                   R"(,"members_present":)" + std::to_string(members_present) +
+                   R"(,"members_total":)" + std::to_string(members_total) +
                    R"(,"audio_path":")" + (m_audio_open ? "open" : "not_open") +
                    R"(","channel_ids":")" + json_escape(selected_ids) + "\"");
     report_session_state(true, "live");

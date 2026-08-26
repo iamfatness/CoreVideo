@@ -188,6 +188,23 @@ Every one of these is documented at length where it lives; the list is the map.
   PCM out to all (`talkback_channel_serves_target`). Milestone incomplete
   until the Task 6 live gate: the first-syllable claim is measured on the old
   path, not yet re-measured on the new one.
+- **Talkback roster re-resolution** (`resolve_roster_change()` in
+  `engine/src/engine-talkback.cpp`, called from `roster_changed()` in
+  `engine/src/main.cpp`'s five roster SDK callbacks): a rejoin has to rebuild
+  membership with no operator action, because nominations store names, never
+  ids. This function may INVITE into a channel that already exists; it must
+  NEVER call `CreateChannel` — that stays command-loop-thread-only under the
+  arbiter's single-outstanding-create rule, and a roster burst has no way to
+  serialize a create against one issued from `nominate()`. Presence is
+  tracked per provisioned channel (`TalkbackProvisionedChannel::present`,
+  confirmed by `onChannelUserJoinResponse`) so a burst of the five callbacks
+  for one join invites exactly once — and `TALKBACK_ERROR_ALREADY_EXIST`
+  (which can only ever arrive on that async callback, never on
+  `ExecuteBatchInviteUsers`'s synchronous return) is treated as confirmed
+  presence, not a failure to retry. `session_start()`'s `session_live` report
+  now carries `members_present`/`members_total` for the keyed target — Task 3
+  deliberately left this out because the provisioned entry didn't track
+  membership at all.
 - **Engine teardown**: never let SDK callbacks race teardown; `set_terminate`
   is a bare `_exit(5)` (code 5 maps to EngineCrash recovery; no pipe writes,
   no locks, no allocation in the handler).

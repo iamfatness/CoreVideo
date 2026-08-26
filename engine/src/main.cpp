@@ -420,6 +420,19 @@ class EngineParticipants : public ZOOMSDK::IMeetingParticipantsCtrlEvent,
 public:
     explicit EngineParticipants(IpcFd e2p) : m_e2p(e2p) {}
 
+    // Task 4: wires the roster-change path to EngineTalkback's re-resolution
+    // without giving this class its own copy of the meeting-service pointer.
+    // `meeting_svc_ptr` mirrors EngineMeetingEvent's `&meeting_svc` pattern
+    // (main()'s local is reassigned across Join calls; storing the address
+    // rather than a snapshot keeps this reading whatever is current). Called
+    // once from main() right after both `talkback` and `meeting_svc` exist.
+    void attach_talkback(EngineTalkback *talkback,
+                         ZOOMSDK::IMeetingService * const *meeting_svc_ptr)
+    {
+        m_talkback = talkback;
+        m_meeting_svc_ptr = meeting_svc_ptr;
+    }
+
     void attach(ZOOMSDK::IMeetingParticipantsController *part_ctrl,
                 ZOOMSDK::IMeetingAudioController *audio_ctrl,
                 ZOOMSDK::IMeetingVideoController *video_ctrl)
@@ -468,10 +481,10 @@ public:
         send_roster();
     }
 
-    void onUserJoin(ZOOMSDK::IList<unsigned int> *, const zchar_t *) override { rebuild_roster(); send_roster(); }
-    void onUserLeft(ZOOMSDK::IList<unsigned int> *, const zchar_t *) override { rebuild_roster(); send_roster(); }
-    void onUserNamesChanged(ZOOMSDK::IList<unsigned int> *) override { rebuild_roster(); send_roster(); }
-    void onUserAudioStatusChange(ZOOMSDK::IList<ZOOMSDK::IUserAudioStatus *> *, const zchar_t *) override { rebuild_roster(); send_roster(); }
+    void onUserJoin(ZOOMSDK::IList<unsigned int> *, const zchar_t *) override { roster_changed(); }
+    void onUserLeft(ZOOMSDK::IList<unsigned int> *, const zchar_t *) override { roster_changed(); }
+    void onUserNamesChanged(ZOOMSDK::IList<unsigned int> *) override { roster_changed(); }
+    void onUserAudioStatusChange(ZOOMSDK::IList<ZOOMSDK::IUserAudioStatus *> *, const zchar_t *) override { roster_changed(); }
 
     void onUserActiveAudioChange(ZOOMSDK::IList<unsigned int> *lst) override
     {
@@ -499,7 +512,7 @@ public:
         send_roster();
     }
 
-    void onUserVideoStatusChange(unsigned int, ZOOMSDK::VideoStatus) override { rebuild_roster(); send_roster(); }
+    void onUserVideoStatusChange(unsigned int, ZOOMSDK::VideoStatus) override { roster_changed(); }
     void onActiveSpeakerVideoUserChanged(unsigned int userId) override
     {
         {
@@ -563,6 +576,26 @@ private:
         return info;
     }
 
+    // Task 4: the single entry point for all five roster-change SDK
+    // callbacks (onUserJoin, onUserLeft, onUserNamesChanged,
+    // onUserAudioStatusChange, onUserVideoStatusChange). Collapsing the
+    // previous "rebuild_roster(); send_roster();" pair each callback wrote
+    // by hand into one place is what makes adding the talkback re-resolution
+    // a one-line change here instead of five. resolve_roster_change() reads
+    // the roster itself (via the participants controller, same as
+    // rebuild_roster() above) rather than being handed this class's
+    // ParticipantInfo list -- EngineTalkback has no reason to depend on this
+    // class's roster shape, and the two already agree on the only fact that
+    // matters (who is in the meeting, by name) because both ask the same SDK
+    // controller.
+    void roster_changed()
+    {
+        rebuild_roster();
+        send_roster();
+        if (m_talkback && m_meeting_svc_ptr)
+            m_talkback->resolve_roster_change(*m_meeting_svc_ptr);
+    }
+
     void rebuild_roster()
     {
         // Call SDK getters outside our mutex to avoid re-entrant deadlock:
@@ -622,6 +655,12 @@ private:
     std::vector<ParticipantInfo> m_roster;
     uint32_t m_active_speaker = 0;
     std::atomic<uint32_t> m_active_share_user{0};
+    // Task 4: set once by attach_talkback() after both `talkback` and
+    // `meeting_svc` exist in main(). Never owned here -- see
+    // attach_talkback()'s own comment for why a pointer-to-pointer instead
+    // of a snapshot.
+    EngineTalkback *m_talkback = nullptr;
+    ZOOMSDK::IMeetingService * const *m_meeting_svc_ptr = nullptr;
 };
 
 // ── Auth event handler ────────────────────────────────────────────────────────
@@ -1232,6 +1271,13 @@ int main()
     // duration means the object outlives that, so the driving thread can
     // never dangle a reference to it (Ruling B, task-5-brief).
     static EngineTalkback talkback;
+    // Task 4: wire the roster-change path (EngineParticipants' five SDK
+    // callbacks) to EngineTalkback's re-resolution. Deferred until here
+    // because it needs `talkback`, which is declared on this line -- and
+    // `&meeting_svc` rather than its current value, since Join reassigns it
+    // and this must always see the meeting the roster events belong to (same
+    // pattern as EngineMeetingEvent's own `&meeting_svc` above).
+    participants.attach_talkback(&talkback, &meeting_svc);
     // The thread is kept joinable (never detached) and joined explicitly --
     // both before starting a fresh one and, critically, before any SDK
     // teardown call at process exit (see the Quit path below). talkback.tick()

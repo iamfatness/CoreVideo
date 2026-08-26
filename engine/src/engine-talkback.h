@@ -181,6 +181,59 @@ public:
     // in this task, and none is needed here for the same reason.
     void nomination_reset();
 
+    // ── Roster re-resolution (Task 4, 2026-08-25) ───────────────────────────
+    // Nominations store NAMES, never Zoom user ids, because ids are
+    // meeting-scoped: an id points at nobody after a rejoin and at the wrong
+    // person once ids are recycled. This function is the other half of that
+    // rule. Every time the roster changes -- five SDK callbacks in
+    // engine/src/main.cpp (onUserJoin, onUserLeft, onUserNamesChanged,
+    // onUserAudioStatusChange, onUserVideoStatusChange) all funnel here --
+    // re-resolve every nominated name against who is actually in the meeting
+    // right now: invite anyone newly present into the channels their name is
+    // planned for, and report anyone whose name dropped out of a channel's
+    // roster. A talent who drops and rejoins therefore ends up back in their
+    // channels with no operator action -- that is the entire point of
+    // storing names instead of ids, finished.
+    //
+    // A RENAME (onUserNamesChanged) needs no special case: it is the SAME
+    // generic diff. The old name disappears from the roster (a LEAVE) and the
+    // new name may or may not match a nominated name (a JOIN if it does).
+    //
+    // THE RULING THIS FUNCTION EXISTS UNDER: it may INVITE, and must NEVER
+    // CREATE. Channels are provisioned once, at nomination time
+    // (nominate()/nomination_create_next()), specifically so nothing on this
+    // path ever needs a create -- CreateChannel is command-loop-thread-only
+    // under the arbiter's single-outstanding-create rule
+    // (src/talkback-channel-owner.h), and while this function happens to also
+    // run on the command-loop thread (see the THREADING comment on the audio
+    // path below -- the roster callbacks are SDK callbacks, and on Windows
+    // this engine's main loop is the SDK's message-pump thread), the
+    // arbiter's one-outstanding-create invariant has no way to serialize a
+    // create issued from a roster burst against one issued from a nominate()
+    // command, and this function must never need to try. If a name has no
+    // channel to join, that is a planning gap for the operator to fix with a
+    // fresh nominate() -- report it, never create one here.
+    //
+    // Idempotent: presence is tracked per provisioned channel
+    // (TalkbackProvisionedChannel::present, updated here and by the async
+    // invite responses onChannelUserJoinResponse now correlates -- see
+    // TALKBACK_ERROR_ALREADY_EXIST's handling there), so re-running this with
+    // nothing changed invites nobody twice and reports nothing again. A burst
+    // of the five callbacks for the SAME underlying change re-derives the
+    // same "nothing new" answer every time.
+    //
+    // Gated on has_pending_work(), same as nominate()/session_start(): this
+    // reassigns m_svc/m_ctrl and, when it invites, runs
+    // BeginBatchInviteUsers/AddUserToInvite/ExecuteBatchInviteUsers -- the
+    // same shape of Begin/Add/Execute sequence tick()'s own inventory
+    // documents as unsafe to interleave, on different threads, with the
+    // probe's driving thread. Unlike nominate()/session_start(), a refusal
+    // here is not reported back to an operator waiting on a command response
+    // -- it costs nothing but a delay, because nothing is marked resolved
+    // when it refuses: the next roster event (there is always another one
+    // eventually) gets another chance.
+    void resolve_roster_change(ZOOMSDK::IMeetingService *svc);
+
     // True once the ladder is quiescent: Idle before the first probe() ever
     // runs, Done after one finishes (success, failure, or abandoned
     // destroy). Task 5's driving thread uses this to stop ticking as soon as
@@ -302,6 +355,18 @@ private:
     enum class ReportSink { Probe, Nomination };
     unsigned int resolve_participant(const std::string &name,
                                      ReportSink sink = ReportSink::Probe) const;
+
+    // Task 4: every display name currently in the meeting, via the same
+    // participants controller resolve_participant() uses one name at a time.
+    // resolve_roster_change() needs the whole roster to diff against, not a
+    // single lookup. Empty if there is no meeting service, no controller, or
+    // no participants list -- callers treat that the same as "nobody is
+    // present" rather than an error, same null-safety resolve_participant()
+    // already has. const for the same reason resolve_participant() is: both
+    // only read m_svc, and command-loop-thread-only convention (not a lock)
+    // is what makes that safe -- see m_pending_create's header comment for
+    // why that convention is stated once there rather than re-argued here.
+    std::vector<std::string> current_roster_names() const;
 
     // Drains m_stray_channels and destroys each one. The caller must be the
     // only batch-destroy caller alive at that moment; the two callers that
@@ -912,8 +977,58 @@ private:
         std::string channel_id;              // UTF-8, reporting only
         std::vector<std::string> members;    // by NAME, see above
         bool is_all_talent = false;
+        // Task 4: the subset of `members` this file currently believes are
+        // actually in the channel -- populated by onChannelUserJoinResponse
+        // when a nomination invite is confirmed (TALKBACK_ERROR_OK or
+        // TALKBACK_ERROR_ALREADY_EXIST, both treated as success), and pruned
+        // by resolve_roster_change() when a member drops out of the meeting
+        // roster entirely. NOT the same fact as "is in `members`" -- that is
+        // the PLAN, this is what Zoom has actually confirmed -- and not the
+        // same fact as "is in the meeting" either: being in the meeting and
+        // being in THIS channel are different things, and only the invite
+        // response confirms the second one. This is what session_start()'s
+        // "N of M present" report line counts, and what
+        // resolve_roster_change() reads to decide who still needs inviting
+        // (present_here && !was_present) and who has left
+        // (!present_here && was_present) -- see that function's own comment.
+        std::vector<std::string> present;
     };
     std::vector<TalkbackProvisionedChannel> m_provisioned_channels;
+
+    // Task 4: a nomination invite this file is waiting on Zoom to confirm or
+    // refuse via onChannelUserJoinResponse. Needed because
+    // ExecuteBatchInviteUsers is asynchronous -- its own SDK doc comment
+    // says so -- and its SYNCHRONOUS return value is only "the batch call
+    // was accepted", never "the user is in the channel". Without this
+    // correlation there is nowhere for TALKBACK_ERROR_ALREADY_EXIST (which
+    // can ONLY ever arrive via this async response, never synchronously) to
+    // land, and before this task every nomination invite response was
+    // silently discarded by onChannelUserJoinResponse's own m_phase ==
+    // AwaitingInvite guard, which belongs to the PROBE's ladder and has no
+    // idea a nomination invite happened at all.
+    //
+    // Guarded by m_chan_mtx, like every other channel-id/membership state in
+    // this class. Writers: invite_nominee() pushes an entry after a
+    // synchronously-successful ExecuteBatchInviteUsers (called from both the
+    // initial provisioning loop in onCreateChannelResponse and from
+    // resolve_roster_change()); onChannelUserJoinResponse erases the
+    // matching entry when its response arrives. Bounded by the number of
+    // outstanding invites -- resolve_roster_change() will not issue a
+    // second invite for a name that already has one pending, see its own
+    // comment -- so this never grows past the size of the nomination plan.
+    // An entry whose response never arrives at all (the SDK simply never
+    // calls back) is left here permanently; unlike m_pending_create's single
+    // outstanding-create slot, there is no lazy-expiry sweep for this today
+    // -- the cost of that gap is a few stray bytes per orphaned entry
+    // (bounded by the plan size), not a wedge of the feature the way a
+    // stuck arbiter slot would be, so it is accepted rather than built.
+    struct TalkbackPendingInvite {
+        std::basic_string<zchar_t> channel_id_z;
+        unsigned int user_id = 0;
+        std::string name;   // for reporting only -- never compared against
+                             // the SDK, same rule as every name in this file
+    };
+    std::vector<TalkbackPendingInvite> m_nomination_pending_invites;
 
     // Channels talkback_plan() decided on that have not been created yet,
     // in plan order; the front entry is whichever CreateChannel is either

@@ -23,16 +23,36 @@ constexpr std::chrono::milliseconds kAwaitTimeout{10000};
 // times instead.
 constexpr uint32_t kMaxDestroyAttempts = 5;
 
-// Final-review C1 (CRITICAL): the ",\"attempt\":N" suffix every TERMINAL
-// nomination report carries, so the plugin can tell which nominate attempt a
-// report belongs to instead of assuming it is the one currently staged. 0
-// means the requester did not identify its attempt (a raw-pipe caller, or a
-// plugin older than this fix) and emits NOTHING -- such a report is then
-// byte-identical to what a pre-C1 engine emitted, which is exactly what the
-// plugin's tolerant "no attempt field means it matches" path expects. Only
-// terminal reports carry it: a stage line the plugin merely logs gains
-// nothing from an id, and the mapping in src/talkback-nomination-dispatch.h
-// ignores unmatched stage lines anyway.
+// Final-review C1 (CRITICAL): the ",\"attempt\":N" suffix that identifies
+// which nominate attempt a report belongs to, so the plugin can match it to
+// the staging slot it came from instead of assuming it is whatever is staged
+// when it arrives. 0 means the requester did not identify its attempt (a
+// raw-pipe caller, or a plugin older than this fix) and emits NOTHING -- such
+// a report is then byte-identical to what a pre-C1 engine emitted, which is
+// exactly what the plugin's tolerant "no attempt field means it matches" path
+// expects.
+//
+// WHICH REPORTS CARRY IT (verification round: the first version of this
+// comment justified omitting it from stage lines by saying the plugin's
+// mapping ignores unmatched stage lines -- circular, since no stage line
+// COULD be unmatched while this function was the reason none carried an id).
+// The real rule is what the plugin's state machine CONSUMES
+// (src/talkback-nomination-dispatch.h): the three STAGING stages
+// (uncovered_private, unreachable, plan) and every TERMINAL. Staging stages
+// need it as much as terminals do and for the same reason -- two nominates
+// can sit in the pipe before this engine reads the first, so the plugin can
+// already have staged the SECOND when the first's stage lines arrive, and
+// unidentified they would fold one attempt's shortfall names into the other
+// attempt's record. uncovered_private is read by
+// talkback_target_known_unprovisioned() (src/talkback-plan.h), so a spurious
+// name there is a key refused on a channel that is standing: F1's symptom,
+// one door further in.
+//
+// Everything else this file reports (channel_created, replacing,
+// create_channel, member_invited, channel_destroyed, ...) is a log-only trace
+// line the dispatcher never dispatches on -- it matches by stage name, and
+// those names are not in its table at all -- so an id there would be bytes
+// with no consumer.
 std::string attempt_field(uint32_t attempt)
 {
     if (attempt == 0) return std::string();
@@ -1695,12 +1715,12 @@ bool EngineTalkback::nominate(ZOOMSDK::IMeetingService *svc,
     // something later fails. See src/talkback-plan.h for what each list
     // means.
     for (const auto &name : plan.uncovered_private)
-        report_nomination("uncovered_private", R"("name":")" + json_escape(name) + "\"");
+        report_nomination("uncovered_private", R"("name":")" + json_escape(name) + "\"" + att);
     for (const auto &name : plan.unreachable)
-        report_nomination("unreachable", R"("name":")" + json_escape(name) + "\"");
+        report_nomination("unreachable", R"("name":")" + json_escape(name) + "\"" + att);
     report_nomination("plan", R"("channels":)" + std::to_string(plan.channels.size()) +
                       R"(,"all_talent_complete":)" +
-                      (plan.all_talent_complete ? "true" : "false"));
+                      (plan.all_talent_complete ? "true" : "false") + att);
 
     if (plan.channels.empty()) {
         // Nothing to provision (e.g. an empty nominee list) -- not a
@@ -2292,6 +2312,24 @@ void EngineTalkback::resolve_roster_change(ZOOMSDK::IMeetingService *svc)
             // TRANSIENT empty roster prunes everyone and costs one round of
             // re-invites, answered TALKBACK_ERROR_ALREADY_EXIST for anyone
             // genuinely still there.
+            //
+            // WHERE THE MIRROR STOPS, stated so the next reader does not
+            // assume coverage that is not here (verification round). `present`
+            // and m_nomination_pending_invites both carry a user_id, so both
+            // can be pruned by one. `pc.failed` carries NAMES ONLY -- it is
+            // the "this person was invited once this presence stint and
+            // permanently refused" list (fix round 1, M1) -- so it cannot be
+            // uid-pruned, and the departure branch below, which is the only
+            // thing that clears it, needs the NAME to be absent. A talent
+            // whose invite failed permanently and who then rejoins under a new
+            // uid WITHOUT any resolution observing them gone therefore keeps
+            // their `failed` entry and is not retried for the rest of the
+            // meeting. That is bounded and it stays HONEST, which is why it is
+            // documented rather than fixed here: they were pruned out of
+            // `present` by the loop above, so the count reads "0 of 1" -- a
+            // shortfall the operator is shown, not a claim of presence for
+            // someone who hears nothing, which is the failure M1 was actually
+            // about. Recovery is a re-nomination (which rebuilds the table).
             for (auto it = pc.present.begin(); it != pc.present.end(); ) {
                 if (uid_in_roster(it->user_id)) { ++it; continue; }
                 left.emplace_back(it->name, pc.channel_id);

@@ -1371,6 +1371,21 @@ int main()
               "plugin cannot tell it apart from a terminal for the ladder that "
               "is still running");
 
+        // The STAGING stage lines carry it too, not just the terminals: two
+        // nominates can sit in the pipe before this engine reads the first,
+        // so the plugin can already have staged the second when the first's
+        // stage lines arrive. Unidentified, those fold one attempt's
+        // shortfall names into the other attempt's record -- and
+        // uncovered_private is read by talkback_target_known_unprovisioned(),
+        // so a spurious name there refuses a key on a standing channel.
+        bool plan_tagged_99 = false;
+        for (const auto &l : lines)
+            if (line_has(l, "\"stage\":\"plan\"") && line_has(l, "\"attempt\":99"))
+                plan_tagged_99 = true;
+        check(plan_tagged_99,
+              "C1: a STAGING stage line carried no attempt id -- the plugin "
+              "stages it into whatever slot happens to be current");
+
         // Ladder A finishes. nominate_done must still be tagged 99.
         tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
         bool done_tagged_99 = false;

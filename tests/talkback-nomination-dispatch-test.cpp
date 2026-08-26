@@ -187,7 +187,17 @@ int main()
     // pre-check, and A's shortfall names gone from talkback_status.
     {
         TalkbackNominationPending pending;
-        TalkbackNominationPlan confirmed;
+        // A PREVIOUSLY CONFIRMED plan, not a default-constructed one, and that
+        // is load-bearing rather than scene-setting (verification round): with
+        // an empty `confirmed`, `requested` is already empty and `done`
+        // already false, so every assertion below passes on the early return
+        // ALONE and deleting talkback_nomination_note_superseded() left the
+        // whole suite green. The superseded-ABORT case further down was pinned
+        // because committed_baseline() gave it something to destroy; this one
+        // was not. It needs one too -- and it is also the realistic state: an
+        // operator re-nominating mid-ladder has, by definition, nominated
+        // before.
+        TalkbackNominationPlan confirmed = committed_baseline();
 
         // Attempt 1 -- ladder A, in flight, with a real shortfall reported.
         talkback_nomination_begin(pending, {"Sarah", "Tom"}, 1);
@@ -218,6 +228,12 @@ int main()
               "C1: A SUPERSEDED LADDER'S nominate_done COMMITTED THE NEWER "
               "ATTEMPT'S NOMINEE LIST -- key_on() would now refuse a standing "
               "channel and pass an unprovisioned name");
+        check(confirmed.requested != std::vector<std::string>({"Sarah", "Luis"}),
+              "C1: THE PREVIOUSLY CONFIRMED PLAN SURVIVED A SUPERSEDED "
+              "nominate_done -- the ladder that completed had already "
+              "destroyed those channels unconditionally on its replace path, "
+              "so key_on()'s pre-check is now trusting a set Zoom no longer "
+              "has");
         check(confirmed.requested.empty() && !confirmed.done,
               "C1: a superseded nominate_done must leave NOTHING confirmed "
               "(fail closed: the ladder it superseded destroyed whatever the "

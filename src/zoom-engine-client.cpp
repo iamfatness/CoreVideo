@@ -981,6 +981,17 @@ void ZoomEngineClient::talkback_nominate(const std::vector<std::string> &nominee
     // the failure mode is a refusal or a coverage mismatch, not data
     // corruption. A real fix means teaching the engine's decoder actual JSON
     // escape semantics.
+    // KEY ORDER IS LOAD-BEARING: "attempt" comes BEFORE "nominees". The
+    // engine's json_uint() (engine/src/main.cpp) is a first-match scan for
+    // "\"attempt\":", not a real JSON parser, so a nominee display name is
+    // the only thing that could shadow this field -- and only if it reached
+    // the wire with an UNESCAPED quote before it, which json_escape() below
+    // prevents (an escaped one reads as \" and does not match the needle).
+    // Emitting the id ahead of the participant-controlled array means the
+    // right value is found first even if that ever stops being true. Same
+    // reasoning json_str_array()'s own header comment gives for treating this
+    // decoder's limits as a constraint to design around rather than an
+    // assumption to rely on.
     std::string json = R"({"cmd":"talkback_nominate","attempt":)" +
                        std::to_string(attempt) + R"(,"nominees":[)";
     for (std::size_t i = 0; i < deduped.size(); ++i) {

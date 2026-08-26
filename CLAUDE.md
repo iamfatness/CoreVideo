@@ -494,6 +494,35 @@ Every one of these is documented at length where it lives; the list is the map.
   fixes mutation-proved: dropping the id check in `apply_report()`, removing
   the un-live step from the teardown, and removing the uid prune each fail
   their own test deterministically.
+- **...and its verification round**: one real finding, and it was a test that
+  could not fail. The superseded-`nominate_done` case fed a
+  DEFAULT-CONSTRUCTED plan, so `requested` was already empty and `done`
+  already false -- every assertion passed on the early return alone, and
+  deleting `talkback_nomination_note_superseded()` left 67/67 green. The
+  superseded-ABORT case beside it was genuinely pinned only because
+  `committed_baseline()` gave it something to destroy. Same shape as the
+  round-2 deadline backstop and the round-3 "nothing pins the engine side":
+  **a fail-closed invalidation is unpinnable against an already-empty
+  record** -- give it something to invalidate or it asserts nothing. Also
+  this round: the staging stage lines (`uncovered_private`, `unreachable`,
+  `plan`) now carry the attempt id too, not just the terminals. The first
+  version omitted them behind a circular justification ("the mapping ignores
+  unmatched stage lines anyway" -- no stage line COULD be unmatched, because
+  that decision was why none carried an id), and the omission was a real if
+  narrow hole: two nominates can sit in the pipe before the engine reads the
+  first, so the plugin can already have staged the second when the first's
+  stage lines arrive, folding one attempt's shortfall names into the other's
+  record -- and `uncovered_private` is read by
+  `talkback_target_known_unprovisioned()`, so a spurious name there refuses a
+  key on a standing channel. The real rule is now stated: the id goes on
+  everything the plugin's state machine CONSUMES (three staging stages + all
+  terminals) and nothing else. Two limits documented rather than fixed:
+  `pc.failed` holds NAMES with no uid, so the M1 uid prune cannot mirror into
+  it -- a permanently-failed invite whose talent rejoins under a new uid with
+  no observed absence is not retried for the rest of the meeting, which stays
+  HONEST ("0 of 1", since they were pruned out of `present`) and is
+  recoverable by re-nominating; and `"attempt"` is emitted BEFORE `"nominees"`
+  because `json_uint()` is a first-match scan, not a parser.
 
 ## Live testing against a real meeting
 

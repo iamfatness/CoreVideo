@@ -74,15 +74,28 @@ inline void talkback_nomination_apply_report(TalkbackNominationPlan &confirmed,
         static_cast<uint32_t>(obj.value("attempt").toInt(0));
     if (report_identifies_attempt && report_attempt != pending.attempt) {
         // A SUPERSEDED attempt's report. It can never commit -- its staging
-        // was overwritten by the attempt currently in the slot -- but the two
-        // shapes that prove the engine's channel set MOVED still have to
-        // invalidate the confirmed plan, or key_on()'s pre-check keeps
-        // trusting a set that no longer exists (F2's symptom, permanently).
-        // Everything else (a superseded refusal that destroyed nothing, any
-        // stage line) is inert: last_attempt_ok/last_attempt_reason describe
-        // the attempt currently staged, and letting an older attempt's
-        // outcome overwrite them would make talkback_status report the wrong
-        // attempt's verdict.
+        // was overwritten by the attempt currently in the slot.
+        //
+        // THE TEST IS NOT WHOSE VERDICT IS NEWER, it is whether this report
+        // PROVES THE ENGINE'S CHANNEL SET MOVED:
+        //
+        //   * It does (a completed ladder, or an abort carrying
+        //     channels_destroyed) -> invalidate the confirmed plan, and carry
+        //     the reason with it. Both branches below DO overwrite
+        //     last_attempt_ok/last_attempt_reason, deliberately: an operator
+        //     whose nomination has just ceased to exist needs to be told why
+        //     that happened far more than they need the in-flight attempt's
+        //     verdict, and the in-flight attempt's own terminal will overwrite
+        //     these fields again when it lands. Leaving the plan standing
+        //     instead is what key_on()'s pre-check would then trust -- a set
+        //     Zoom no longer has, permanently. That is F2's symptom.
+        //
+        //   * It does not (a superseded refusal that destroyed nothing, any
+        //     stage line) -> FULLY inert, diagnostics included. There is
+        //     nothing to invalidate, so the only thing such a report could do
+        //     is replace the staged attempt's verdict with an older and less
+        //     relevant one, and make talkback_status describe the wrong
+        //     attempt.
         if (stage == QLatin1String("nominate_done")) {
             talkback_nomination_note_superseded(confirmed, "superseded_nomination_completed");
         } else if (stage == QLatin1String("nominate") &&

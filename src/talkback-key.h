@@ -102,3 +102,32 @@ inline TalkbackKeyAction talkback_key_evaluate(const TalkbackKeyState &s,
 
     return TalkbackKeyAction::None;
 }
+
+// Does the ENGINE's own confirmed session state force this key closed?
+//
+// The dead-man switch above cannot answer this. It sees local intent and the
+// tap's liveness, and the tap keeps publishing into the ring whether or not
+// anything on the far end can hear it -- so a key whose Zoom channel never
+// came up, or (final review, C2) whose channels were destroyed underneath it
+// by a failing nomination ladder, looks perfectly healthy from here. Only the
+// engine's own report_session_state() line knows.
+//
+// Two closing conditions, both requiring live == false:
+//   * an EXPLICIT failure -- a non-empty reason. ZoomEngineClient::
+//     talkback_start() resets the engine-side status to (false, "") at the
+//     moment THIS session is requested, so a non-empty reason can only ever
+//     belong to the current key, never to a previous one.
+//   * SILENCE past the grace period -- the engine never answered at all.
+//
+// Extracted from TalkbackController::evaluate() by the final review (C2) so
+// this decision can be pinned by a host test: the plugin half of C2 is
+// entirely "does reason='channels_destroyed' route into the close path", and
+// nothing could assert that while the rule lived inline in a file that needs
+// libobs, Qt and a running engine to compile.
+inline bool talkback_session_state_closes_key(bool engine_live,
+                                              bool engine_reason_present,
+                                              bool grace_expired)
+{
+    if (engine_live) return false;
+    return engine_reason_present || grace_expired;
+}

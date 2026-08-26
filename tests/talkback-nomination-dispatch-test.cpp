@@ -48,7 +48,7 @@ int main()
     {
         TalkbackNominationPending pending;
         TalkbackNominationPlan confirmed;
-        talkback_nomination_begin(pending, {"Sarah", "Luis", "Ana"});
+        talkback_nomination_begin(pending, {"Sarah", "Luis", "Ana"}, 1);
 
         talkback_nomination_apply_report(confirmed, pending, "uncovered_private",
             QJsonObject{{"stage", "uncovered_private"}, {"name", "Ana"}});
@@ -80,7 +80,7 @@ int main()
     auto committed_baseline = []() {
         TalkbackNominationPending pending;
         TalkbackNominationPlan confirmed;
-        talkback_nomination_begin(pending, {"Sarah", "Luis"});
+        talkback_nomination_begin(pending, {"Sarah", "Luis"}, 1);
         talkback_nomination_apply_report(confirmed, pending, "plan",
             QJsonObject{{"stage", "plan"}, {"channels", 3}, {"all_talent_complete", true}});
         talkback_nomination_apply_report(confirmed, pending, "nominate_done",
@@ -95,7 +95,7 @@ int main()
     {
         TalkbackNominationPlan confirmed = committed_baseline();
         TalkbackNominationPending pending;
-        talkback_nomination_begin(pending, {"Ana", "Tom"});
+        talkback_nomination_begin(pending, {"Ana", "Tom"}, 1);
 
         talkback_nomination_apply_report(confirmed, pending, "nominate",
             QJsonObject{{"stage", "nominate"}, {"ok", false}, {"reason", "create_busy"}});
@@ -116,7 +116,7 @@ int main()
     {
         TalkbackNominationPlan confirmed = committed_baseline();
         TalkbackNominationPending pending;
-        talkback_nomination_begin(pending, {"Ana", "Tom"});
+        talkback_nomination_begin(pending, {"Ana", "Tom"}, 1);
 
         talkback_nomination_apply_report(confirmed, pending, "nominate",
             QJsonObject{{"stage", "nominate"}, {"ok", false},
@@ -141,7 +141,7 @@ int main()
     {
         TalkbackNominationPlan confirmed = committed_baseline();
         TalkbackNominationPending pending;
-        talkback_nomination_begin(pending, {"Ana"});
+        talkback_nomination_begin(pending, {"Ana"}, 1);
 
         talkback_nomination_apply_report(confirmed, pending, "nominate",
             QJsonObject{{"stage", "nominate"}, {"ok", false},
@@ -160,7 +160,7 @@ int main()
     {
         TalkbackNominationPlan confirmed = committed_baseline();
         TalkbackNominationPending pending;
-        talkback_nomination_begin(pending, {"Ana"});
+        talkback_nomination_begin(pending, {"Ana"}, 1);
         const TalkbackNominationPlan before = confirmed;
 
         talkback_nomination_apply_report(confirmed, pending, "replacing",
@@ -172,6 +172,114 @@ int main()
               confirmed.done == before.done &&
               confirmed.last_attempt_ok == before.last_attempt_ok,
               "a diagnostic-only stage mutated the confirmed plan");
+    }
+
+    // ── C1 (CRITICAL, final whole-branch review): a terminal report for a
+    // SUPERSEDED attempt must never commit the staged attempt's list ───────
+    //
+    // The exact interleaving the review proved: nominate A while nothing is
+    // running (ladder A starts, seconds long), nominate B mid-ladder (the
+    // engine refuses it with "create_busy" and leaves ladder A alone -- its
+    // documented, correct behaviour), then ladder A finishes. Before the
+    // attempt id, B's begin() had wiped A's staging and A's nominate_done
+    // committed B's ["Dave"] against A's three channels: Sarah's standing
+    // channel refused locally, Dave's non-existent one passing the
+    // pre-check, and A's shortfall names gone from talkback_status.
+    {
+        TalkbackNominationPending pending;
+        TalkbackNominationPlan confirmed;
+
+        // Attempt 1 -- ladder A, in flight, with a real shortfall reported.
+        talkback_nomination_begin(pending, {"Sarah", "Tom"}, 1);
+        talkback_nomination_apply_report(confirmed, pending, "plan",
+            QJsonObject{{"stage", "plan"}, {"channels", 3},
+                        {"all_talent_complete", true}, {"attempt", 1}});
+
+        // Attempt 2 -- sent mid-ladder, staged over attempt 1's slot, and
+        // refused by the engine WITHOUT destroying anything.
+        talkback_nomination_begin(pending, {"Dave"}, 2);
+        talkback_nomination_apply_report(confirmed, pending, "nominate",
+            QJsonObject{{"stage", "nominate"}, {"ok", false},
+                        {"reason", "create_busy"}, {"attempt", 2}});
+
+        // A late stage line from ladder A must not pollute attempt 2's
+        // staging either -- reports for a superseded attempt are inert.
+        talkback_nomination_apply_report(confirmed, pending, "uncovered_private",
+            QJsonObject{{"stage", "uncovered_private"}, {"name", "Tom"}, {"attempt", 1}});
+        check(pending.uncovered_private.empty(),
+              "C1: a stage report from a SUPERSEDED attempt was staged into "
+              "the current attempt's slot");
+
+        // Ladder A completes. This is the commit that used to write ["Dave"].
+        talkback_nomination_apply_report(confirmed, pending, "nominate_done",
+            QJsonObject{{"stage", "nominate_done"}, {"channels", 3}, {"attempt", 1}});
+
+        check(confirmed.requested != std::vector<std::string>({"Dave"}),
+              "C1: A SUPERSEDED LADDER'S nominate_done COMMITTED THE NEWER "
+              "ATTEMPT'S NOMINEE LIST -- key_on() would now refuse a standing "
+              "channel and pass an unprovisioned name");
+        check(confirmed.requested.empty() && !confirmed.done,
+              "C1: a superseded nominate_done must leave NOTHING confirmed "
+              "(fail closed: the ladder it superseded destroyed whatever the "
+              "old record described, and this plugin cannot reconstruct what "
+              "the completed one built)");
+        check(!confirmed.last_attempt_ok && !confirmed.last_attempt_reason.empty(),
+              "C1: a superseded terminal left no diagnostic for the operator");
+    }
+
+    // The matching attempt still commits -- the id check must not turn every
+    // report into a no-op (the other direction of the same mutation).
+    {
+        TalkbackNominationPending pending;
+        TalkbackNominationPlan confirmed;
+        talkback_nomination_begin(pending, {"Sarah"}, 7);
+        talkback_nomination_apply_report(confirmed, pending, "plan",
+            QJsonObject{{"stage", "plan"}, {"channels", 2},
+                        {"all_talent_complete", true}, {"attempt", 7}});
+        talkback_nomination_apply_report(confirmed, pending, "nominate_done",
+            QJsonObject{{"stage", "nominate_done"}, {"channels", 2}, {"attempt", 7}});
+
+        check(confirmed.done && confirmed.channels == 2 &&
+              confirmed.requested == std::vector<std::string>({"Sarah"}),
+              "C1: a report whose attempt MATCHES the staged one did not commit");
+    }
+
+    // MIXED VERSIONS: an engine that predates the attempt id emits no
+    // "attempt" field at all, and a DLL-only install (CLAUDE.md's canonical
+    // mistake) is exactly how that pairing reaches an operator. A report with
+    // no attempt is treated as matching -- the pre-C1 behaviour, which is
+    // right for a peer that only ever runs one attempt's reports past us in
+    // order anyway.
+    {
+        TalkbackNominationPending pending;
+        TalkbackNominationPlan confirmed;
+        talkback_nomination_begin(pending, {"Sarah"}, 5);
+        talkback_nomination_apply_report(confirmed, pending, "plan",
+            QJsonObject{{"stage", "plan"}, {"channels", 2}, {"all_talent_complete", true}});
+        talkback_nomination_apply_report(confirmed, pending, "nominate_done",
+            QJsonObject{{"stage", "nominate_done"}, {"channels", 2}});
+
+        check(confirmed.done && confirmed.requested == std::vector<std::string>({"Sarah"}),
+              "C1: a report from an OLD ENGINE (no \"attempt\" field) was "
+              "treated as superseded -- a mixed-version pair must still be "
+              "able to confirm a nomination");
+    }
+
+    // A superseded terminal that DID destroy channels still has to invalidate
+    // the confirmed plan: the channels are gone whichever attempt owned them.
+    {
+        TalkbackNominationPlan confirmed = committed_baseline();
+        TalkbackNominationPending pending;
+        talkback_nomination_begin(pending, {"Ana"}, 9);
+
+        talkback_nomination_apply_report(confirmed, pending, "nominate",
+            QJsonObject{{"stage", "nominate"}, {"ok", false},
+                        {"reason", "channel_failed"},
+                        {"channels_destroyed", true}, {"attempt", 8}});
+
+        check(confirmed.requested.empty() && !confirmed.done,
+              "C1: a SUPERSEDED abort carrying channels_destroyed:true left "
+              "the confirmed plan describing channels the engine has destroyed");
     }
 
     if (failures == 0)

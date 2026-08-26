@@ -208,8 +208,21 @@ public:
     // promise every channel will finish provisioning, only that a queue
     // started; report_nomination()'s "nominate_done" line is what confirms
     // completion.
+    //
+    // `attempt` is the plugin's own identity for THIS request, echoed back in
+    // every TERMINAL report this attempt produces -- the seven early
+    // refusals, nomination_abort_ladder()'s report, and "nominate_done" (see
+    // m_nomination_attempt). Final-review C1 (CRITICAL): the plugin stages an
+    // in-flight nomination in ONE slot, so a re-nomination sent while this
+    // ladder is still provisioning re-stages that slot, and without an id the
+    // earlier ladder's "nominate_done" committed the LATER attempt's nominee
+    // list against the earlier ladder's channels. 0 means "the requester did
+    // not identify this attempt" (a raw-pipe caller, or an older plugin) and
+    // suppresses the field entirely, so those reports look exactly like a
+    // pre-C1 engine's and the plugin's tolerant path handles them.
     bool nominate(ZOOMSDK::IMeetingService *svc,
-                  const std::vector<std::string> &nominees);
+                  const std::vector<std::string> &nominees,
+                  uint32_t attempt = 0);
 
     // Bookkeeping-only reset for the nomination table/queue -- never calls
     // the SDK. Called from Leave/quit in engine/src/main.cpp because
@@ -421,10 +434,18 @@ private:
 
     // F2 review-round fix (CRITICAL): the ONE engine->plugin line that
     // carries the session's CONFIRMED state, distinct from every stage
-    // trace above. Emitted when the session goes live (after the invite is
-    // accepted) and on every failure path in session_start()/
-    // onCreateChannelResponse()/open_audio() that ends the session before
-    // that point. Shape: {"cmd":"talkback_session","live":true|false,
+    // trace above.
+    //
+    // WHERE IT IS EMITTED, re-counted from the .cpp (final review, m2 -- the
+    // previous wording said "after the invite is accepted" and named
+    // onCreateChannelResponse(), which has emitted neither since Task 3
+    // deleted the Session branch and the invite on the key path; believing
+    // some other site drove "live" is what hid final-review C2):
+    //   * live:true  -- session_start()'s ONE success line, and nowhere else.
+    //   * live:false -- session_start()'s five early returns, open_audio()'s
+    //     five rejections, and nomination_abort_ladder() when a teardown
+    //     orphans a LIVE key (reason "channels_destroyed", final-review C2).
+    // Shape: {"cmd":"talkback_session","live":true|false,
     // "reason":"..."} -- see ZoomEngineClient::handle_event()'s
     // talkback_session branch (distinguishes this from a stage line by the
     // presence of "live") and TalkbackController::evaluate()/status_json()
@@ -645,6 +666,23 @@ private:
     // field, not the reason string, decides the plugin's response). Reported
     // AFTER the destroy, same discipline as every other report/SDK-call
     // ordering in this file: never under m_chan_mtx.
+    //
+    // FINAL REVIEW, C2 (CRITICAL) -- the THIRD responsibility: un-live a
+    // session this teardown just orphaned. A key press IS allowed while a
+    // ladder runs (session_start() gates only on `still_coming` for its own
+    // target, and refusing "all" because an unrelated private channel is
+    // still creating would deny a ready target for an unrelated reason), so
+    // "all" can be live when a later create fails. This function then
+    // batch-destroys every provisioned channel and empties the selection
+    // underneath that press. Nothing else reports post-live state, so before
+    // the fix the engine kept m_session_live true, the plugin kept
+    // TalkbackSessionStatus.live true, the tally stayed red, the OPEN cue had
+    // already played -- and nothing reached Zoom. The director believes they
+    // are on air: the worst failure this feature has. So this function stops
+    // the session (session_stop(), which restores the duck while the channels
+    // still exist) and emits report_session_state(false,
+    // "channels_destroyed"), which the plugin's evaluate() already treats as
+    // an explicit failure and closes the key on.
     void nomination_abort_ladder(const std::string &reason);
 
     // Fix round 3: the bounded Begin/Add/Execute destroy retry, which had
@@ -1244,4 +1282,19 @@ private:
     // timeout), and nomination_reset() (clears unconditionally on
     // Leave/quit).
     std::vector<TalkbackPlannedChannel> m_nomination_pending;
+
+    // Final-review C1 (CRITICAL): the attempt id of the ladder currently
+    // running -- claimed by nominate() at the same moment it claims the
+    // arbiter, and echoed by every TERMINAL report that ladder can still
+    // produce after nominate() has returned (nomination_abort_ladder()'s
+    // report from any of its five call sites, and "nominate_done" from
+    // onCreateChannelResponse). nominate()'s own early refusals do NOT read
+    // this: they belong to the attempt being refused, not to the ladder still
+    // running, and reporting the running ladder's id for a refusal is exactly
+    // the confusion the id exists to remove.
+    //
+    // Command-loop thread only, like the ladder itself -- not under
+    // m_chan_mtx, because it is not channel-id state and nothing off that
+    // thread reads it.
+    uint32_t m_nomination_attempt = 0;
 };

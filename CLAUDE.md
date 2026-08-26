@@ -409,6 +409,91 @@ Every one of these is documented at length where it lives; the list is the map.
   `session_start()`'s async refusal" claim, in `src/talkback-plan.h`'s own
   header comment (N3 had corrected CLAUDE.md and `talkback-controller.cpp`
   but missed this one, which the controller comment pointed straight at).
+- **The operator surface, Task 5 final whole-branch review (2026-08-26)**:
+  both Criticals lived in the SEAMS between tasks -- state each task got
+  right alone, wired together in an order no single task owned. **C1: a
+  nomination attempt had no identity on the wire.** The plugin stages an
+  in-flight attempt in ONE slot, reset at SEND time, so a re-nomination sent
+  while an earlier ladder was still provisioning wiped the earlier attempt's
+  staging -- and the earlier ladder's own `nominate_done` then committed the
+  LATER attempt's nominee list against the EARLIER ladder's channels. Not
+  exotic: the engine refuses the second attempt with `create_busy` and
+  correctly leaves the first ladder running, so EVERY mid-ladder
+  re-nomination took this path. Both directions of `key_on()`'s pre-check
+  failed at once (a standing channel refused locally -- F1's exact symptom
+  through a third door; an unprovisioned name passing the check, opening the
+  tap and retracting) and the first attempt's `uncovered_private`/
+  `unreachable` names silently vanished from the polled `talkback_status`
+  field. Fixed with an explicit echoed id, NOT an ordering argument: the
+  plugin stamps a process-wide monotonic `"attempt"` into every
+  `talkback_nominate` request (`ZoomEngineClient::m_talkback_nominate_attempt`
+  -- never reset by a world-reset, because a re-usable id is an id that can
+  match across one), the engine carries it in `m_nomination_attempt` and
+  echoes it in every TERMINAL report for that attempt (the seven early
+  refusals, `nomination_abort_ladder()`'s report, `nominate_done`,
+  `malformed_nominees`), and `talkback_nomination_apply_report()` acts only
+  on a matching attempt. A FIFO of staged attempts was rejected -- this
+  milestone already shipped a Critical out of an un-popped queue. Refusals
+  carry the id of the attempt BEING REFUSED, never the running ladder's.
+  Wire compatibility is a stated choice, not an accident: a report with NO
+  `"attempt"` field is treated as MATCHING, because an engine older than this
+  fix emits none and a DLL-only install is this project's canonical mistake;
+  attempt 0 (a raw-pipe caller) suppresses the field entirely so those
+  reports are byte-identical to a pre-fix engine's. A superseded terminal
+  never commits; the two shapes that PROVE the channel set moved
+  (`nominate_done`, and any abort carrying `channels_destroyed:true`)
+  invalidate the confirmed plan instead (`talkback_nomination_note_
+  superseded()`), which fails closed -- every target refused with "no one has
+  been nominated yet" until a re-nominate, recoverable in one command --
+  rather than leaving the record permanently describing channels the
+  superseded ladder's own replace step destroyed. **C2: a ladder abort
+  destroyed the channels a LIVE key was talking on and nothing un-lived the
+  session.** Keying `"all"` mid-ladder is legal by design (`session_start()`
+  gates only on `still_coming` for its OWN target), so a later
+  `channel_failed` -- the LIKELIER real-world failure -- reached
+  `nomination_abort_ladder()`, which batch-destroyed every channel and
+  cleared `m_session_channels` underneath the press. `report_session_state()`
+  had eleven call sites and every one was PRE-live, so `m_session_live`
+  stayed true, the plugin's `TalkbackSessionStatus.live` stayed true,
+  `evaluate()` saw nothing to close: key open, cue played, tally red, zero
+  audio. The indivisible teardown now has a THIRD responsibility -- decide
+  under `m_chan_mtx` (before the destroy, which clears the selection) whether
+  the live session's channels intersect what is about to go, then
+  `session_stop()` BEFORE the destroy (so the duck is restored on channels
+  that still exist) and `report_session_state(false, "channels_destroyed")`
+  after it, both outside the lock. The plugin half already existed: the
+  `explicit_failure` path in `evaluate()` closes any `live:false` with a
+  non-empty reason -- that rule is now
+  `talkback_session_state_closes_key()` in `src/talkback-key.h` so a host
+  test can actually pin it, which nothing could while it sat inline in a file
+  needing libobs and Qt to compile. **M1: `present` could hold a dead uid.**
+  `TalkbackProvisionedChannel::present` stores a `user_id` but the roster
+  diff matched by NAME only, so a leave+rejoin under a new id with no
+  resolution in between left `present_here` and `was_present` both true --
+  no departure, no re-invite, ever, while `members_present` counted the dead
+  id and told the director "1 of 1 present" for someone who hears nothing.
+  Now pruned by uid, mirroring the pending-invite prune, BEFORE the per-name
+  diff so the same pass re-invites the new id. The `has_pending_work()` gate
+  that used to drop the WHOLE resolution is **narrowed, not hoisted**: the
+  roster snapshot, both prunes and the departure diff now run regardless
+  (they touch only this file's tables and call no talkback SDK API; reading
+  the participants list is not new exposure -- `rebuild_roster()` already
+  does it on every one of the same callbacks), and only the invite issuance
+  is still gated. Its old comment ("a refusal here costs nothing but a delay
+  ... the next roster event gets another chance") was true of invites, whose
+  state persists, and FALSE of departures, which are edges against a live
+  snapshot: a refusal did not delay that edge, it destroyed it, for up to the
+  ~30s a probe runs. Three comment-lies fixed alongside (this feature is at
+  seventeen findings): the `channel_stale` directive that forbade touching
+  `m_provisioned_channels` three lines above a call that correctly does;
+  `report_session_state`'s doc in BOTH `engine-talkback.h` and the
+  `open_audio()` copy, which attributed session-state/"live" to
+  `onCreateChannelResponse` -- false since Task 3, and the belief that hid
+  C2; and `nomination_destroy_provisioned()`'s "every caller has already
+  ruled out a live key press", which was C2's enabling belief. All three
+  fixes mutation-proved: dropping the id check in `apply_report()`, removing
+  the un-live step from the teardown, and removing the uid prune each fail
+  their own test deterministically.
 
 ## Live testing against a real meeting
 

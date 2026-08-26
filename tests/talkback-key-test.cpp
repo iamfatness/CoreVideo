@@ -163,6 +163,46 @@ int main()
               "healthy key");
     }
 
+    // ── The engine's confirmed session state closes the key (final review,
+    // C2) ──────────────────────────────────────────────────────────────────
+    // The dead-man switch cannot see any of this: the tap keeps publishing
+    // into the ring whether or not anything on the far end can hear it, so
+    // every state below looks healthy to talkback_key_evaluate().
+    {
+        // Live with no reason: the normal open key. Nothing to do, grace
+        // period irrelevant.
+        check(!talkback_session_state_closes_key(true, false, false),
+              "a live session closed the key");
+        check(!talkback_session_state_closes_key(true, false, true),
+              "a live session closed the key once the grace period elapsed");
+
+        // Not live, no reason yet, inside the grace period: the engine has
+        // simply not answered. Closing here would kill every key before its
+        // own round trip could confirm it.
+        check(!talkback_session_state_closes_key(false, false, false),
+              "a key was closed before the engine had a chance to answer");
+
+        // Not live, still silent, grace expired.
+        check(talkback_session_state_closes_key(false, false, true),
+              "a session that never answered at all was left open");
+
+        // AN EXPLICIT FAILURE CLOSES IMMEDIATELY, inside the grace period.
+        // This is the shape every report_session_state(false, reason) takes:
+        // "layout_mismatch" from a half-applied install, "no_nomination",
+        // "provisioning_incomplete" -- and, as of final-review C2,
+        // "channels_destroyed": a session that WAS live whose channels a
+        // failing nomination ladder tore down mid-sentence. That last one is
+        // the whole plugin half of C2 -- the engine's report has to route
+        // into the SAME close path, or the key stays open, the tally stays
+        // red, and nothing reaches Zoom.
+        check(talkback_session_state_closes_key(false, true, false),
+              "AN EXPLICIT ENGINE FAILURE DID NOT CLOSE THE KEY -- the "
+              "director is left believing they are on air");
+        check(talkback_session_state_closes_key(false, true, true),
+              "an explicit engine failure past the grace period did not close "
+              "the key");
+    }
+
     if (failures == 0)
         std::cout << "talkback-key: all tests passed\n";
     return failures == 0 ? 0 : 1;

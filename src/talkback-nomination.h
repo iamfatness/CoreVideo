@@ -46,10 +46,38 @@
 #include <string>
 #include <vector>
 
+// C1 (CRITICAL, final whole-branch review 2026-08-26). The staging slot had
+// no ATTEMPT IDENTITY, and talkback_nominate() resets it at SEND time. A
+// second nominate sent while the first ladder was still provisioning
+// therefore wiped the first attempt's staging, and the first ladder's
+// eventual "nominate_done" committed the SECOND attempt's nominee list
+// against the FIRST ladder's channels: a standing channel refused locally
+// ("Sarah has no talkback channel" while Sarah's channel was up), an
+// unprovisioned name passing the pre-check and opening then retracting, and
+// the first attempt's uncovered_private/unreachable shortfalls vanishing out
+// of the polled talkback_status field. The interleaving is not exotic -- the
+// engine refuses the second attempt with "create_busy" and leaves the first
+// ladder running, which is its documented, correct behaviour.
+//
+// The fix is an explicit id, not an ordering argument: the plugin stamps a
+// monotonically increasing "attempt" into every talkback_nominate request,
+// the engine echoes it in every TERMINAL report for that attempt, and
+// talkback_nomination_apply_report() (src/talkback-nomination-dispatch.h)
+// acts only on reports whose attempt matches the one staged here. A FIFO of
+// staged attempts was considered and rejected: this milestone has already
+// shipped one Critical out of an un-popped queue, and an id makes the match
+// structural rather than positional.
+//
 // What the current, not-yet-confirmed nominate attempt has reported so far.
 // Discarded (never read again) once the attempt either commits or is
 // refused -- see talkback_nomination_commit()/_note_refused() below.
 struct TalkbackNominationPending {
+    // Which nominate attempt this slot stages. Assigned by
+    // talkback_nomination_begin() from ZoomEngineClient's process-wide
+    // monotonic counter; 0 means "nothing staged yet". Never reset by a
+    // world-reset to a value it has used before -- see that counter's
+    // comment in zoom-engine-client.h for why re-use would be the bug.
+    uint32_t attempt = 0;
     std::vector<std::string> requested; // this attempt's own nominee list
     uint32_t channels = 0;
     bool all_talent_complete = true;
@@ -81,10 +109,15 @@ struct TalkbackNominationPlan {
 // attempt's report. Does NOT touch `confirmed` -- see the header comment
 // above for why the confirmed plan must not move until (and unless) this
 // attempt is actually accepted.
+// `attempt` is this send's own identity (C1): the value stamped into the
+// wire request, and the only value a report may carry for its terminal to be
+// allowed to move `confirmed`.
 inline void talkback_nomination_begin(TalkbackNominationPending &pending,
-                                      const std::vector<std::string> &requested)
+                                      const std::vector<std::string> &requested,
+                                      uint32_t attempt)
 {
     pending = TalkbackNominationPending{};
+    pending.attempt   = attempt;
     pending.requested = requested;
 }
 
@@ -168,6 +201,34 @@ inline void talkback_nomination_note_failed_after_destroy(TalkbackNominationPlan
     confirmed = TalkbackNominationPlan{};
     confirmed.last_attempt_ok     = false;
     confirmed.last_attempt_reason = reason;
+}
+
+// C1 (Critical, final review): a TERMINAL report arrived for an attempt that
+// is no longer the one staged -- an earlier ladder finishing after a newer
+// nominate was sent. Its staged report is gone (one slot, deliberately: see
+// TalkbackNominationPending's comment), so there is nothing to commit and
+// nothing this plugin can reconstruct about what that ladder actually
+// provisioned.
+//
+// FAIL CLOSED rather than leave the old record standing. The superseded
+// ladder's own nominate() destroyed whatever the confirmed plan described
+// before it started building (nominate()'s replace path), so keeping that
+// record would leave key_on()'s pre-check permanently trusting a channel set
+// that no longer exists -- F2's exact symptom, on a trigger neither Leave nor
+// an engine restart covers. Resetting means every target is refused with "no
+// one has been nominated yet" until the operator re-nominates: recoverable in
+// one command, and the reason string says exactly that. The reason is kept as
+// a diagnostic for the same purpose talkback_nomination_note_failed_after_
+// destroy() keeps its own.
+inline void talkback_nomination_note_superseded(TalkbackNominationPlan &confirmed,
+                                                const std::string &reason)
+{
+    // Deliberately delegated, not hand-copied: the OUTCOME is identical to a
+    // ladder that aborted after destroying (reset to "nothing confirmed",
+    // keep the reason), only the cause differs, and two hand-written copies
+    // of the same three assignments is how this file's siblings have drifted
+    // before.
+    talkback_nomination_note_failed_after_destroy(confirmed, reason);
 }
 
 // F2: the confirmed plan describes a real channel set that a Leave or an

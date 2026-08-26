@@ -382,6 +382,19 @@ private:
     // leaves this field untouched).
     TalkbackNominationStatus m_talkback_nomination_status;
     TalkbackNominationPending m_talkback_nomination_pending;
+    // C1 (CRITICAL, final whole-branch review 2026-08-26): the identity
+    // stamped into each talkback_nominate request and echoed back in that
+    // attempt's terminal reports, so a report can be matched to the staging
+    // slot it belongs to instead of to whatever happens to be staged when it
+    // arrives. Guarded by m_mtx, like the two records above.
+    //
+    // PROCESS-WIDE MONOTONIC, deliberately NOT reset by any world-reset
+    // (Leave, engine restart) that resets the two records above: an id that
+    // can be re-used is an id that can make a report from before the reset
+    // match a staging slot from after it, which is the same class of bug the
+    // id exists to close. Pre-incremented, so live ids are always >= 1 and 0
+    // reads unambiguously as "nothing staged".
+    uint32_t m_talkback_nominate_attempt = 0;
     std::deque<DebugEvent> m_debug_events;
     // Tracks whether the user deliberately requested a leave/stop (suppresses recovery).
     std::atomic<bool> m_user_leaving{false};

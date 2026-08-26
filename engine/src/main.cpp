@@ -1651,10 +1651,24 @@ int main()
             bool nominees_ok = false;
             const std::vector<std::string> nominees =
                 json_str_array(line, "nominees", &nominees_ok);
+            // Final-review C1 (CRITICAL): the plugin's identity for THIS
+            // request, echoed back in every terminal report so a report can
+            // be matched to the staging slot it belongs to (see
+            // EngineTalkback::nominate()'s `attempt` parameter and
+            // src/talkback-nomination.h). Absent (0) for a raw-pipe caller or
+            // a plugin older than this fix, which suppresses the field
+            // entirely -- those reports then look exactly like a pre-C1
+            // engine's, which the plugin tolerates by design.
+            const uint32_t attempt = json_uint(line, "attempt");
             if (!nominees_ok) {
+                // Terminal for this attempt, so it carries the id too: the
+                // plugin staged the send, and a refusal it cannot match is a
+                // refusal it cannot clear.
                 EngineIpc::write(
                     R"({"cmd":"talkback_nominate","stage":"nominate","ok":false,)"
-                    R"("reason":"malformed_nominees"})");
+                    R"("reason":"malformed_nominees")" +
+                    (attempt ? R"(,"attempt":)" + std::to_string(attempt)
+                             : std::string()) + "}");
             } else {
                 // Fix round 2 (N1): this bool used to be discarded outright.
                 // nominate() reports its own terminal outcome on every
@@ -1669,7 +1683,7 @@ int main()
                 // participate in the plugin's nomination state machine, so
                 // it can never double up with report_nomination()'s own
                 // terminal line.
-                if (!talkback.nominate(meeting_svc, nominees)) {
+                if (!talkback.nominate(meeting_svc, nominees, attempt)) {
                     EngineIpc::write(
                         R"({"cmd":"debug","stage":"nominate_returned_false"})");
                 }

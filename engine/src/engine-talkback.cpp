@@ -22,6 +22,22 @@ constexpr std::chrono::milliseconds kAwaitTimeout{10000};
 // destroy" guarantee this file claims is false; retry a bounded number of
 // times instead.
 constexpr uint32_t kMaxDestroyAttempts = 5;
+
+// Final-review C1 (CRITICAL): the ",\"attempt\":N" suffix every TERMINAL
+// nomination report carries, so the plugin can tell which nominate attempt a
+// report belongs to instead of assuming it is the one currently staged. 0
+// means the requester did not identify its attempt (a raw-pipe caller, or a
+// plugin older than this fix) and emits NOTHING -- such a report is then
+// byte-identical to what a pre-C1 engine emitted, which is exactly what the
+// plugin's tolerant "no attempt field means it matches" path expects. Only
+// terminal reports carry it: a stage line the plugin merely logs gains
+// nothing from an id, and the mapping in src/talkback-nomination-dispatch.h
+// ignores unmatched stage lines anyway.
+std::string attempt_field(uint32_t attempt)
+{
+    if (attempt == 0) return std::string();
+    return R"(,"attempt":)" + std::to_string(attempt);
+}
 } // namespace
 
 void EngineTalkback::report(const std::string &stage, const std::string &fields) const
@@ -839,13 +855,22 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         // fail-closed FIFO did every time its queue desynchronised.
         if (freshness == TalkbackResponseFreshness::Stale) {
             // This response belongs to a create the ladder gave up on.
-            // Destroy the channel THIS RESPONSE NAMES if Zoom actually
-            // created one -- it is genuinely orphaned on Zoom's side and
-            // nothing else will ever clean it up -- and touch nothing else
-            // that is live: not m_provisioned_channels, not m_pending_create,
-            // and never nomination_create_next() (which would issue a second
-            // create while one may still be in flight, the one invariant the
-            // arbiter exists to hold).
+            //
+            // THE RULE THIS BRANCH FOLLOWS (rewritten, final review m1/N9 --
+            // the previous wording forbade touching m_provisioned_channels
+            // three lines above a call that correctly does, and had done
+            // since fix round 3 unified the teardown): destroy exactly the
+            // channel THIS RESPONSE NAMES -- it is genuinely orphaned on
+            // Zoom's side and nothing else will ever clean it up -- ADVANCE
+            // NOTHING (never nomination_create_next(), which would issue a
+            // second create while one may still be in flight, the one
+            // invariant the arbiter exists to hold; never re-claim
+            // m_pending_create, see below), and then END THE LADDER
+            // TERMINALLY through nomination_abort_ladder(). That last step is
+            // what tears down the rest of m_provisioned_channels and reports
+            // it, and it is deliberate: a ladder this file has given up on
+            // must not leave channels standing that no key can reach and no
+            // later nominate() can account for.
             //
             // Task 3 (parked ruling 3 from Task 2's close): the QUEUE is
             // cleared, which this branch did not do. The ladder that queued
@@ -1076,7 +1101,8 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
             nomination_create_next();
         else
             report_nomination("nominate_done",
-                              R"("channels":)" + std::to_string(provisioned_count));
+                              R"("channels":)" + std::to_string(provisioned_count) +
+                              attempt_field(m_nomination_attempt));
         return;
     }
     // owner == Probe was already cleared above; owner == None means nothing
@@ -1500,8 +1526,15 @@ void EngineTalkback::onInviterAudioLevel(unsigned int, unsigned int) {}
 // header declaration comment for the live-measured reason (buffers discarded
 // on every key press while the create+invite round trip was in flight).
 bool EngineTalkback::nominate(ZOOMSDK::IMeetingService *svc,
-                              const std::vector<std::string> &nominees)
+                              const std::vector<std::string> &nominees,
+                              uint32_t attempt)
 {
+    // Final-review C1: every refusal below reports THIS call's own attempt id
+    // -- never m_nomination_attempt, which belongs to whatever ladder is
+    // still running and is precisely what a refused re-nomination must not be
+    // confused with. m_nomination_attempt is claimed further down, at the
+    // moment this attempt claims the ladder.
+    const std::string att = attempt_field(attempt);
     // R1-style mutual exclusion, same reasoning as probe()'s and
     // session_start()'s matching guards: nominate() is about to reassign
     // m_svc/m_ctrl, the exact fields the probe's driving thread dereferences
@@ -1514,25 +1547,25 @@ bool EngineTalkback::nominate(ZOOMSDK::IMeetingService *svc,
     // subsystem's response is still in flight, the exact ambiguity the
     // arbiter exists to remove.
     if (m_session_live) {
-        report_nomination("nominate", R"("ok":false,"reason":"session_live")");
+        report_nomination("nominate", R"("ok":false,"reason":"session_live")" + att);
         return false;
     }
     if (has_pending_work()) {
-        report_nomination("nominate", R"("ok":false,"reason":"probe_busy")");
+        report_nomination("nominate", R"("ok":false,"reason":"probe_busy")" + att);
         return false;
     }
     if (!svc) {
-        report_nomination("nominate", R"("ok":false,"reason":"not_in_meeting")");
+        report_nomination("nominate", R"("ok":false,"reason":"not_in_meeting")" + att);
         return false;
     }
     m_svc  = svc;
     m_ctrl = m_svc->GetMeetingTalkbackController();
     if (!m_ctrl) {
-        report_nomination("nominate", R"("ok":false,"reason":"no_controller")");
+        report_nomination("nominate", R"("ok":false,"reason":"no_controller")" + att);
         return false;
     }
     if (!m_ctrl->IsMeetingSupportTalkBack()) {
-        report_nomination("nominate", R"("ok":false,"reason":"not_supported")");
+        report_nomination("nominate", R"("ok":false,"reason":"not_supported")" + att);
         return false;
     }
     m_ctrl->SetEvent(this);
@@ -1551,7 +1584,7 @@ bool EngineTalkback::nominate(ZOOMSDK::IMeetingService *svc,
         report_nomination("nominate",
                           R"("ok":false,"reason":"target_name_collision","name":")" +
                           json_escape(collision) + R"(","sentinel":")" +
-                          std::string(kTalkbackAllTalentTarget) + "\"");
+                          std::string(kTalkbackAllTalentTarget) + "\"" + att);
         return false;
     }
 
@@ -1605,9 +1638,18 @@ bool EngineTalkback::nominate(ZOOMSDK::IMeetingService *svc,
         if (create_gate_ok) m_pending_create = talkback_new_ladder(m_pending_create);
     }
     if (!create_gate_ok) {
-        report_nomination("nominate", R"("ok":false,"reason":"create_busy")");
+        report_nomination("nominate", R"("ok":false,"reason":"create_busy")" + att);
         return false;
     }
+
+    // Final-review C1: the ladder is now THIS attempt's, so every terminal
+    // report it can still produce after this function returns -- "nominate_
+    // done" from onCreateChannelResponse, nomination_abort_ladder()'s report
+    // from any of its call sites -- must carry this attempt's id. Assigned
+    // AFTER handle_expired_create() above, deliberately: the abort that
+    // self-heal may emit belongs to the PREVIOUS ladder and must still carry
+    // the previous ladder's id.
+    m_nomination_attempt = attempt;
 
     // RE-NOMINATION REPLACES (Task 3). Task 2 refused here with
     // "already_provisioned" and said in as many words that Task 3 -- which
@@ -1664,7 +1706,7 @@ bool EngineTalkback::nominate(ZOOMSDK::IMeetingService *svc,
         // Nothing to provision (e.g. an empty nominee list) -- not a
         // failure, just a plan with no channels. Report completion so a
         // caller waiting on "nominate_done" doesn't wait forever.
-        report_nomination("nominate_done", R"("channels":0)");
+        report_nomination("nominate_done", R"("channels":0)" + att);
         return true;
     }
 
@@ -1834,15 +1876,23 @@ void EngineTalkback::nomination_destroy_provisioned()
         // it, same reasoning as m_session_channels.clear() just below: a
         // pending invite must never outlive the channel it names.
         m_nomination_pending_invites.clear();
-        // Task 3: a selection must never outlive the channels it names. Every
-        // caller of this function has already ruled out a live key press (a
-        // failing ladder cannot run while m_session_live, and nominate()
-        // refuses then), so this is normally already empty -- but clearing it
-        // in the SAME lock scope that empties the table means "selected a
-        // destroyed channel" is not a state that exists, rather than one that
-        // is argued to be unreachable. drain_audio() then counts
-        // no_channel_drops, which is loud, instead of sending into a channel
-        // Zoom no longer has, which is silent.
+        // Task 3: a selection must never outlive the channels it names.
+        // Clearing it in the SAME lock scope that empties the table means
+        // "selected a destroyed channel" is not a state that exists, rather
+        // than one that is argued to be unreachable. drain_audio() would then
+        // count no_channel_drops, which is loud, instead of sending into a
+        // channel Zoom no longer has, which is silent.
+        //
+        // AND THE SELECTION CAN BE A LIVE ONE (final review, C2, CRITICAL).
+        // This comment used to read "every caller of this function has
+        // already ruled out a live key press ... so this is normally already
+        // empty", which was false and was the belief that hid the Critical:
+        // nominate()'s replace path does rule it out (nominate() refuses
+        // outright while m_session_live), but nomination_abort_ladder() does
+        // NOT -- its ladder started before the key and aborts after it. The
+        // live case is handled by that caller, which stops the session and
+        // reports live:false around this call. What this line owns is the
+        // structural guarantee, not a claim about who calls it.
         m_session_channels.clear();
     }
     for (const auto &channel_id_z : ids) {
@@ -1872,7 +1922,60 @@ void EngineTalkback::nomination_abort_ladder(const std::string &reason)
         std::lock_guard<std::mutex> lock(m_chan_mtx);
         m_nomination_pending.clear();
     }
+
+    // FINAL REVIEW, C2 (CRITICAL). A key may be LIVE right now: session_start()
+    // gates only on `still_coming` for ITS OWN target, so keying "all" while
+    // the private channels are still being created is legal and deliberate
+    // (see the argument at session_start()'s "NO ARBITER GATE HERE"). The
+    // destroy below takes down EVERY provisioned channel and empties the
+    // selection, so that press is about to be talking into nothing -- and
+    // nothing else in this file reports session state after a session has
+    // gone live, so before this fix m_session_live stayed true, the plugin's
+    // TalkbackSessionStatus.live stayed true, evaluate() saw no reason to
+    // close, the tally stayed red and the OPEN cue had already played. Zero
+    // audio, no signal at the desk.
+    //
+    // Decide it HERE, under m_chan_mtx and BEFORE the destroy, because
+    // nomination_destroy_provisioned() clears m_session_channels itself: after
+    // it runs there is nothing left to compare. The SDK calls and both reports
+    // stay outside the lock, per this file's standing discipline.
+    bool orphans_live_session = false;
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        if (m_session_live) {
+            for (const auto &sel : m_session_channels) {
+                for (const auto &pc : m_provisioned_channels) {
+                    if (pc.channel_id_z == sel) { orphans_live_session = true; break; }
+                }
+                if (orphans_live_session) break;
+            }
+        }
+    }
+    if (orphans_live_session) {
+        // BEFORE the destroy, so session_stop() restores the key-down duck on
+        // channels that still exist (SetChannelBackgroundVolume on a destroyed
+        // channel restores nothing, and the talent would be left hearing the
+        // meeting at 30% for the rest of the show), and so sending stops
+        // before the ids underneath it go away. session_stop() is the
+        // existing "stop sending, clear the selection, restore the duck, reset
+        // the flags" function -- reused rather than re-implemented, because a
+        // second hand-written copy of that teardown is how this file's
+        // siblings have drifted before.
+        session_stop();
+    }
+
     nomination_destroy_provisioned();
+
+    if (orphans_live_session) {
+        // The plugin's TalkbackController::evaluate() closes the key on any
+        // live:false carrying a non-empty reason (its `explicit_failure`
+        // path), plays the CLOSE cue on the live edge, and shuts the tap. A
+        // reason of its own, not a generic one: the operator needs to be able
+        // to tell "the channels you were talking on were destroyed by a
+        // failing nomination" from "your key never came up".
+        report_session_state(false, "channels_destroyed");
+    }
+
     // Reported AFTER the destroy above -- outside m_chan_mtx either way, but
     // this ordering means "channels_destroyed":true is "it's actually gone
     // now", not merely "about to be". `reason` is always an engine-authored
@@ -1880,7 +1983,8 @@ void EngineTalkback::nomination_abort_ladder(const std::string &reason)
     // nothing and keeps this call site honest if that ever stops being true.
     report_nomination("nominate",
                       R"("ok":false,"reason":")" + json_escape(reason) +
-                      R"(","channels_destroyed":true)");
+                      R"(","channels_destroyed":true)" +
+                      attempt_field(m_nomination_attempt));
 }
 
 void EngineTalkback::invite_nominee(const std::basic_string<zchar_t> &channel_id_z,
@@ -2030,17 +2134,37 @@ void EngineTalkback::resolve_roster_change(ZOOMSDK::IMeetingService *svc)
         if (m_provisioned_channels.empty()) return;   // nothing nominated yet
     }
 
-    // Gated exactly like nominate()/session_start(): when it invites, this
+    // Gated exactly like nominate()/session_start(): when it INVITES, this
     // runs the same kind of Begin/Add/Execute sequence tick()'s own
     // inventory documents as unsafe to interleave, on different threads,
-    // with the probe's driving thread. A refusal here costs nothing but a
-    // delay -- nothing below is marked resolved until an invite actually
-    // goes out, so the next roster event (onUserJoin etc. keep coming)
-    // tries again.
-    if (has_pending_work()) {
-        report_nomination("roster_resolve", R"("ok":false,"reason":"probe_busy")");
-        return;
-    }
+    // with the probe's driving thread.
+    //
+    // FINAL REVIEW, M1 (Major) -- THIS GATE IS NARROWED, not an early return
+    // any more, and the comment that used to sit here ("a refusal here costs
+    // nothing but a delay ... the next roster event gets another chance") was
+    // only ever true of the INVITE half. It is false of departures. An invite
+    // is a pending entry that persists, so a refused resolution genuinely
+    // does get another chance at it. A departure is an EDGE, detected by
+    // diffing this file's tables against a LIVE roster snapshot -- and the
+    // next roster event compares against the roster as it is THEN. So a
+    // refusal does not delay that edge, it destroys it: a talent who leaves
+    // and rejoins under a new user id during a talkback probe (up to ~30s of
+    // has_pending_work()) stayed "present" under their DEAD id for the rest
+    // of the meeting, never re-invited, while session_start() cheerfully
+    // reported "1 of 1 present" for someone who could hear nothing.
+    //
+    // So the roster snapshot, the pending-invite prune and the whole
+    // departure/presence diff below now run REGARDLESS -- they touch only
+    // this file's own tables under m_chan_mtx and call no talkback SDK API --
+    // and only the invite issuance is gated. Reading the participants list is
+    // not new exposure: main.cpp's rebuild_roster() already reads exactly
+    // that, on every one of the same roster callbacks, probe or no probe.
+    // Hoisting the prune above the gate instead would have left the
+    // FAILED-invite clear and the re-invite decision on the wrong side of it,
+    // which is the same edge in a different place.
+    const bool invites_allowed = !has_pending_work();
+    if (!invites_allowed)
+        report_nomination("roster_resolve", R"("ok":false,"reason":"probe_busy","pruned":true)");
 
     // Fix round 1, M3 (Major): m_svc/m_ctrl are reassigned ONLY when no
     // session is live. probe() and nominate() both refuse OUTRIGHT while
@@ -2058,8 +2182,15 @@ void EngineTalkback::resolve_roster_change(ZOOMSDK::IMeetingService *svc)
     // rest of the show. A live press already proved m_ctrl valid at
     // session_start() time; reusing it is strictly safer than re-querying it
     // here.
-    if (m_session_live) {
-        if (!m_ctrl) return;   // paranoia only -- session_start() would not
+    //
+    // M1: and ONLY when invites are allowed. The pointers belong to whatever
+    // subsystem has_pending_work() is reporting; the pruning half below needs
+    // neither of them (current_roster() reads the PARTICIPANTS controller,
+    // and every table it touches is ours), so a probe-busy pass must leave
+    // them exactly as it found them.
+    if (m_session_live || !invites_allowed) {
+        if (!m_ctrl && invites_allowed)
+            return;            // paranoia only -- session_start() would not
                                // have gone live without a valid m_ctrl
     } else {
         m_svc  = svc;
@@ -2138,6 +2269,35 @@ void EngineTalkback::resolve_roster_change(ZOOMSDK::IMeetingService *svc)
         }
 
         for (auto &pc : m_provisioned_channels) {
+            // FINAL REVIEW, M1 (Major): PRUNE `present` BY USER ID, mirroring
+            // the pending-invite prune above, and do it BEFORE the per-name
+            // diff so the same pass can re-invite.
+            //
+            // Channel membership is per user id: a talent who leaves and
+            // rejoins gets a NEW id and is NOT in the channel. The diff below
+            // matches by NAME only (`is_present_now(name)`), so if no
+            // resolution observed the roster while the name was absent --
+            // a fast rejoin between two events, or, before this round's other
+            // half, any departure during a ~30s probe -- then present_here
+            // and was_present were BOTH true, no departure fired, no
+            // re-invite was ever issued, and members_present_locked() counted
+            // a dead id for the rest of the meeting. "1 of 1 present" for
+            // someone who hears nothing is the exact failure this feature is
+            // written against.
+            //
+            // TalkbackPresentMember stores the id for precisely this reason
+            // (it is a per-stint correlation key, never persisted past the
+            // meeting); this is the check that was missing, not new state.
+            // Same accepted blast radius as the invite prune above: a
+            // TRANSIENT empty roster prunes everyone and costs one round of
+            // re-invites, answered TALKBACK_ERROR_ALREADY_EXIST for anyone
+            // genuinely still there.
+            for (auto it = pc.present.begin(); it != pc.present.end(); ) {
+                if (uid_in_roster(it->user_id)) { ++it; continue; }
+                left.emplace_back(it->name, pc.channel_id);
+                it = pc.present.erase(it);
+            }
+
             ChannelInvites work;
             for (const auto &name : pc.members) {
                 const auto present_it = std::find_if(
@@ -2210,9 +2370,15 @@ void EngineTalkback::resolve_roster_change(ZOOMSDK::IMeetingService *svc)
                           R"("name":")" + json_escape(l.first) + R"(","channel":")" +
                           json_escape(l.second) + "\"");
 
-    for (const auto &work : to_invite)
-        for (const auto &name : work.names)
-            invite_nominee(work.channel_id_z, work.channel_id, name);
+    // M1: the one half that is still gated on has_pending_work(). Nothing
+    // above marked any of these names as resolved, so a pass that skips this
+    // genuinely does get another chance at them on the next roster event --
+    // the claim the old early-return comment made about the whole function,
+    // which is true here and only here.
+    if (invites_allowed)
+        for (const auto &work : to_invite)
+            for (const auto &name : work.names)
+                invite_nominee(work.channel_id_z, work.channel_id, name);
 }
 
 // ── Talkback audio path (Milestone 2) ───────────────────────────────────────
@@ -2417,9 +2583,14 @@ bool EngineTalkback::open_audio(const std::string &region_name,
     m_audio_send_fail_count = 0; // F8: fresh session, fresh report budget
     report_session("audio_open", R"("ok":true,"rate":)" + std::to_string(m_audio_rate) +
                    R"(,"channels":)" + std::to_string(m_audio_channels));
-    // Not a report_session_state(true, ...) call: "live" is the Zoom
-    // channel's confirmed state (set in onCreateChannelResponse once the
-    // invite is accepted), not the audio path's. This session can be fully
+    // Not a report_session_state(true, ...) call: "live" is the SELECTION's
+    // confirmed state, not the audio path's. Final review, m2: this used to
+    // say "set in onCreateChannelResponse once the invite is accepted", which
+    // has been false since Task 3 deleted the session's own CreateChannel and
+    // the invite on the key path -- there is exactly ONE live:true in this
+    // file, session_start()'s success line, and believing otherwise is what
+    // hid C2 (nothing reported state after a session went live). This session
+    // can be fully
     // open_audio()-ready while the channel itself never came up, and vice
     // versa (channel live before the plugin ever calls talkback_open) --
     // conflating the two would let a working audio pipe into a nonexistent

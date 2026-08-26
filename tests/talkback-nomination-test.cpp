@@ -45,7 +45,7 @@ int main()
     {
         TalkbackNominationPending pending;
         TalkbackNominationPlan confirmed;
-        talkback_nomination_begin(pending, {"Sarah", "Luis"});
+        talkback_nomination_begin(pending, {"Sarah", "Luis"}, 1);
         talkback_nomination_note_plan(pending, /*channels=*/3, /*all_talent_complete=*/true);
         // Neither Sarah nor Luis is uncovered in this scenario.
         talkback_nomination_commit(confirmed, pending, /*final_channels=*/3);
@@ -74,13 +74,13 @@ int main()
         TalkbackNominationPlan confirmed;
 
         // First nomination: accepted.
-        talkback_nomination_begin(pending, {"Sarah", "Luis"});
+        talkback_nomination_begin(pending, {"Sarah", "Luis"}, 1);
         talkback_nomination_note_plan(pending, 3, true);
         talkback_nomination_commit(confirmed, pending, 3);
 
         // Second nomination: sent, then refused (session_live, probe_busy,
         // create_busy, target_name_collision, ... -- any of the seven).
-        talkback_nomination_begin(pending, {"Ana", "Tom"});
+        talkback_nomination_begin(pending, {"Ana", "Tom"}, 1);
         talkback_nomination_note_refused(confirmed, "session_live");
 
         check(confirmed.requested == std::vector<std::string>({"Sarah", "Luis"}),
@@ -111,7 +111,7 @@ int main()
     {
         TalkbackNominationPending pending;
         TalkbackNominationPlan confirmed; // never committed
-        talkback_nomination_begin(pending, {"Ana", "Tom"});
+        talkback_nomination_begin(pending, {"Ana", "Tom"}, 1);
         talkback_nomination_note_refused(confirmed, "not_in_meeting");
 
         check(!confirmed.done, "a refused first-ever nomination was marked done");
@@ -126,7 +126,7 @@ int main()
     {
         TalkbackNominationPending pending;
         TalkbackNominationPlan confirmed;
-        talkback_nomination_begin(pending, {"Sarah", "Luis"});
+        talkback_nomination_begin(pending, {"Sarah", "Luis"}, 1);
         talkback_nomination_note_plan(pending, 3, true);
         talkback_nomination_commit(confirmed, pending, 3);
         check(confirmed.done && confirmed.channels == 3,
@@ -156,7 +156,7 @@ int main()
         TalkbackNominationPlan confirmed;
         const std::vector<std::string> deduped =
             talkback_dedup_preserve_order({"Bob", "Bob", "Sue"});
-        talkback_nomination_begin(pending, deduped);
+        talkback_nomination_begin(pending, deduped, 1);
         talkback_nomination_note_plan(pending, 3, true); // 1 all-talent + Bob + Sue
         talkback_nomination_commit(confirmed, pending, 3);
         check(confirmed.requested.size() == 2,

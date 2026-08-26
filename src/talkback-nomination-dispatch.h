@@ -47,11 +47,53 @@
 // no-op here -- those are diagnostic-only trace lines handle_event() still
 // logs verbatim before calling this, but they carry nothing this state
 // machine needs to act on.
+//
+// C1 (CRITICAL, final whole-branch review 2026-08-26): every report is first
+// matched against the ATTEMPT it belongs to. See
+// TalkbackNominationPending::attempt -- a second nominate sent while an
+// earlier ladder is still provisioning re-stages this slot, and without the
+// id the earlier ladder's own nominate_done committed the LATER attempt's
+// nominee list against the earlier ladder's channels.
 inline void talkback_nomination_apply_report(TalkbackNominationPlan &confirmed,
                                               TalkbackNominationPending &pending,
                                               const QString &stage,
                                               const QJsonObject &obj)
 {
+    // WIRE COMPATIBILITY, stated deliberately: an engine built before this
+    // fix emits no "attempt" field at all, and a DLL-only install (CLAUDE.md
+    // calls that the canonical mistake here -- half the fixes in any release
+    // are engine-side) makes that pairing routine rather than theoretical. A
+    // report with NO attempt is therefore treated as matching, which is
+    // exactly the pre-C1 behaviour: such an engine cannot tell attempts
+    // apart, so neither can we, and refusing to act on its reports would
+    // break nomination outright against it. Presence, not value, is the test
+    // -- attempt ids are 1-based (ZoomEngineClient's counter pre-increments),
+    // so a literal 0 could only come from a raw-pipe caller that sent none.
+    const bool report_identifies_attempt = obj.contains(QLatin1String("attempt"));
+    const uint32_t report_attempt =
+        static_cast<uint32_t>(obj.value("attempt").toInt(0));
+    if (report_identifies_attempt && report_attempt != pending.attempt) {
+        // A SUPERSEDED attempt's report. It can never commit -- its staging
+        // was overwritten by the attempt currently in the slot -- but the two
+        // shapes that prove the engine's channel set MOVED still have to
+        // invalidate the confirmed plan, or key_on()'s pre-check keeps
+        // trusting a set that no longer exists (F2's symptom, permanently).
+        // Everything else (a superseded refusal that destroyed nothing, any
+        // stage line) is inert: last_attempt_ok/last_attempt_reason describe
+        // the attempt currently staged, and letting an older attempt's
+        // outcome overwrite them would make talkback_status report the wrong
+        // attempt's verdict.
+        if (stage == QLatin1String("nominate_done")) {
+            talkback_nomination_note_superseded(confirmed, "superseded_nomination_completed");
+        } else if (stage == QLatin1String("nominate") &&
+                   !obj.value("ok").toBool(true) &&
+                   obj.value("channels_destroyed").toBool(false)) {
+            talkback_nomination_note_failed_after_destroy(confirmed,
+                obj.value("reason").toString().toStdString());
+        }
+        return;
+    }
+
     if (stage == QLatin1String("uncovered_private")) {
         talkback_nomination_note_uncovered(pending,
             obj.value("name").toString().toStdString());

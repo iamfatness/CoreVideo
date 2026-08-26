@@ -111,6 +111,24 @@ static int count_abort_reports(const std::vector<std::string> &lines)
     return n;
 }
 
+// Final review, C2: counts the ONE line that tells the plugin a session it
+// believes is live is over -- report_session_state(false, reason). Shape-
+// matched the same low-tech way count_abort_reports() is: no "stage" key, a
+// top-level "live" key, which is exactly how ZoomEngineClient::handle_event()
+// tells this line from a session stage trace.
+static int count_session_dead_reports(const std::vector<std::string> &lines,
+                                      const std::string &reason)
+{
+    int n = 0;
+    for (const auto &l : lines) {
+        if (line_has(l, "\"cmd\":\"talkback_session\"") &&
+            line_has(l, "\"live\":false") &&
+            line_has(l, "\"reason\":\"" + reason + "\""))
+            ++n;
+    }
+    return n;
+}
+
 // zchar_t is wchar_t on Windows and char elsewhere, so channel ids are built a
 // character at a time rather than with a literal -- the same reason
 // engine-talkback.h stores them as basic_string<zchar_t>.
@@ -1316,6 +1334,259 @@ int main()
               "exactly one terminal abort report with channels_destroyed:true");
 
         EngineIpc::test_sink() = nullptr;
+    }
+
+    // -- FINAL REVIEW, C1 (CRITICAL): the attempt id an operator's request
+    // carries must survive the whole ladder, and a REFUSAL must carry its
+    // OWN id, not the running ladder's ------------------------------------
+    //
+    // This is the engine half of the fix. The plugin stages one attempt at a
+    // time (src/talkback-nomination.h); without an echoed id, a nomination
+    // sent mid-ladder overwrote the running ladder's staging and the running
+    // ladder's own nominate_done then committed the WRONG nominee list. The
+    // engine's job is to make the two attempts distinguishable on the wire.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        std::vector<std::string> lines;
+        EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
+
+        // Ladder A: attempt 99, two channels (all-talent + Sarah private).
+        check(tb.nominate(&svc, {"Sarah"}, 99), "nominate refused a one-name plan");
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+
+        // Attempt 100 arrives MID-LADDER and is refused at the arbiter gate
+        // with "create_busy" -- the engine's documented, correct behaviour,
+        // and the exact interleaving C1 rides in on. Its refusal must carry
+        // 100, never 99: reporting the running ladder's id for a refusal is
+        // the confusion the id exists to remove.
+        check(!tb.nominate(&svc, {"Dave"}, 100),
+              "a re-nomination mid-ladder was accepted");
+        bool refusal_tagged_100 = false;
+        for (const auto &l : lines)
+            if (line_has(l, "\"reason\":\"create_busy\"") && line_has(l, "\"attempt\":100"))
+                refusal_tagged_100 = true;
+        check(refusal_tagged_100,
+              "C1: a mid-ladder refusal did not carry ITS OWN attempt id -- the "
+              "plugin cannot tell it apart from a terminal for the ladder that "
+              "is still running");
+
+        // Ladder A finishes. nominate_done must still be tagged 99.
+        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+        bool done_tagged_99 = false;
+        for (const auto &l : lines)
+            if (line_has(l, "\"stage\":\"nominate_done\"") && line_has(l, "\"attempt\":99"))
+                done_tagged_99 = true;
+        check(done_tagged_99,
+              "C1: THE ATTEMPT ID DID NOT SURVIVE THE LADDER -- nominate_done "
+              "for attempt 99 arrived unidentified, so the plugin would commit "
+              "it against whatever attempt is staged now");
+
+        EngineIpc::test_sink() = nullptr;
+    }
+
+    // The id survives an ABORT too -- the terminal a failed ladder emits is
+    // the one the plugin acts on most destructively (it resets the confirmed
+    // plan), so it is the one that must not be attributed to the wrong
+    // attempt.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        std::vector<std::string> lines;
+        EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
+
+        check(tb.nominate(&svc, {"Sarah"}, 43), "nominate refused a one-name plan");
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+        tb.onCreateChannelResponse(chan_id(2).c_str(),
+            IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_NOPERMISSION);
+
+        check(count_abort_reports(lines) == 1,
+              "setup: the failing ladder did not emit its terminal abort report");
+        bool abort_tagged_43 = false;
+        for (const auto &l : lines)
+            if (line_has(l, "\"channels_destroyed\":true") && line_has(l, "\"attempt\":43"))
+                abort_tagged_43 = true;
+        check(abort_tagged_43,
+              "C1: the ladder's ABORT report lost the attempt id -- the plugin "
+              "would reset the confirmed plan on behalf of an attempt that may "
+              "already have been superseded");
+
+        EngineIpc::test_sink() = nullptr;
+    }
+
+    // -- FINAL REVIEW, C2 (CRITICAL): a ladder abort that destroys the
+    // channels a LIVE key is talking on must UN-LIVE that session ---------
+    //
+    // Keying "all" mid-ladder is legal and deliberate: session_start() gates
+    // only on `still_coming` for ITS OWN target, so once both all-talent
+    // slices exist the key goes live while the private channels are still
+    // being created. A later create failure -- CLAUDE.md's own "LIKELIER
+    // real-world failure ... budget past 16 channels, permission, transport"
+    // -- then batch-destroys every channel underneath that press. Before this
+    // fix nothing reported it: m_session_live stayed true, the plugin's
+    // session status stayed live, the tally stayed red, the OPEN cue had
+    // already played, and not one sample reached Zoom.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        std::vector<std::string> lines;
+        EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
+
+        std::vector<std::string> nominees;
+        for (int i = 0; i < 11; ++i) nominees.push_back("Talent " + std::to_string(i + 1));
+        check(tb.nominate(&svc, nominees), "nominate refused an 11-name plan");
+        // 2 all-talent slices + 11 privates = 13. Answer only the two slices:
+        // "all" is fully provisioned, the ladder is still running.
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+
+        ShmRegion region{};
+        const std::string region_name = "ZoomObsPluginTest_talkback_c2";
+        check(shm_region_create(region, region_name,
+                                shm_audio_region_bytes(kTalkbackSlotBytes)),
+              "the test could not create a talkback ring region");
+        talkback_ring_init(static_cast<ShmAudioHeader *>(region.ptr), 48000, 1);
+        check(tb.open_audio(region_name, 48000, 1),
+              "the engine refused to open the test's talkback ring");
+        check(tb.session_start(&svc, kTalkbackAllTalentTarget),
+              "keying a fully-provisioned all-talent target mid-ladder was "
+              "refused -- that refusal would deny a ready target for an "
+              "unrelated reason");
+        check(tb.session_live(), "setup: the key press did not report live");
+
+        int16_t pcm[480] = {0};
+        pcm[0] = 1234;
+        check(talkback_ring_publish(region.ptr, pcm, sizeof(pcm), 1),
+              "the test could not publish a buffer into the ring");
+        tb.drain_audio();
+        const std::size_t sends_while_live = svc.ctrl.sends.size();
+        check(sends_while_live == 2,
+              "setup: the live key did not fan out to both all-talent channels");
+
+        // Create #3 (the first private) is rejected by Zoom.
+        tb.onCreateChannelResponse(chan_id(3).c_str(),
+            IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_NOPERMISSION);
+
+        check(count_abort_reports(lines) == 1,
+              "the ladder abort did not emit exactly one terminal abort report");
+        check(count_session_dead_reports(lines, "channels_destroyed") == 1,
+              "C2: THE CHANNELS A LIVE KEY WAS TALKING ON WERE DESTROYED AND "
+              "NOTHING TOLD THE PLUGIN -- the key stays open, the tally stays "
+              "red, the OPEN cue already played, and the director is off air "
+              "believing they are on it");
+        check(!tb.session_live(),
+              "C2: the engine still believes the session is live after its "
+              "channels were destroyed");
+
+        // ...and it actually STOPPED. A session that reports dead but keeps
+        // sending would just be the same lie from the other end.
+        check(talkback_ring_publish(region.ptr, pcm, sizeof(pcm), 2),
+              "the test could not publish a second buffer");
+        tb.drain_audio();
+        check(svc.ctrl.sends.size() == sends_while_live,
+              "C2: audio was still sent after the session's channels were "
+              "destroyed");
+
+        tb.close_audio();
+        shm_region_destroy(region);
+        EngineIpc::test_sink() = nullptr;
+    }
+
+    // -- FINAL REVIEW, M1 (Major): `present` is pruned by USER ID, so a
+    // leave+rejoin under a new id is re-invited -----------------------------
+    //
+    // Channel membership is per user id; a rejoin gets a NEW one and is NOT
+    // in the channel. The roster diff matches by NAME, so if no resolution
+    // observes the roster while the name is absent -- a fast rejoin between
+    // two events -- present_here and was_present are BOTH true, no departure
+    // fires, no re-invite is ever issued, and members_present counts a dead
+    // id for the rest of the meeting. The director keys, is told "1 of 1
+    // present", and that person hears nothing.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);   // all-talent
+        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);   // Sarah private
+
+        svc.participants.users.push_back(make_user(8001, "Sarah"));
+        tb.resolve_roster_change(&svc);
+        check(svc.ctrl.invited.size() == 2, "setup: Sarah's join did not invite her");
+        tb.onChannelUserJoinResponse(chan_id(1).c_str(), 8001, kOk);
+        tb.onChannelUserJoinResponse(chan_id(2).c_str(), 8001, kOk);
+        std::size_t present = 0, total = 0;
+        tb.members_present_for_target("Sarah", &present, &total);
+        check(present == 1 && total == 1, "setup: Sarah was not counted as present");
+
+        // THE WINDOW: she leaves and rejoins under a new id with no
+        // resolution in between, so the very next snapshot shows the SAME
+        // NAME under a DIFFERENT uid.
+        svc.participants.users.clear();
+        svc.participants.users.push_back(make_user(9001, "Sarah"));
+        tb.resolve_roster_change(&svc);
+
+        check(svc.ctrl.invited.size() == 4,
+              "M1: A REJOIN UNDER A NEW USER ID WAS NEVER RE-INVITED -- the "
+              "name matched, so no departure was detected, and the stale entry "
+              "keeps claiming presence for an id that is not in the meeting");
+        check(svc.ctrl.invited.back().second == 9001,
+              "M1: the re-invite went to the OLD user id");
+        tb.members_present_for_target("Sarah", &present, &total);
+        check(present == 0 && total == 1,
+              "M1: the stale entry was still counted as present between the "
+              "prune and the new id's own join response -- \"1 of 1 present\" "
+              "for someone who hears nothing is the whole finding");
+
+        tb.onChannelUserJoinResponse(chan_id(1).c_str(), 9001, kOk);
+        tb.onChannelUserJoinResponse(chan_id(2).c_str(), 9001, kOk);
+        tb.members_present_for_target("Sarah", &present, &total);
+        check(present == 1 && total == 1,
+              "M1: the re-invited id's own join response did not restore the "
+              "presence count");
+
+        // Idempotent afterwards: the healed state must not itself become a
+        // source of repeated invites.
+        tb.resolve_roster_change(&svc);
+        check(svc.ctrl.invited.size() == 4, "M1: the healed state re-invited");
+    }
+
+    // ...and the departure edge must survive a resolution that REFUSES.
+    // has_pending_work() used to drop the whole resolution -- comment and
+    // all: "a refusal here costs nothing but a delay ... the next roster
+    // event gets another chance". True for invites, false for departures: a
+    // talkback probe runs up to ~30s, and the next roster event compares
+    // against the roster as it is THEN, so the edge is not delayed, it is
+    // destroyed.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+
+        svc.participants.users.push_back(make_user(8001, "Sarah"));
+        tb.resolve_roster_change(&svc);
+        tb.onChannelUserJoinResponse(chan_id(1).c_str(), 8001, kOk);
+        tb.onChannelUserJoinResponse(chan_id(2).c_str(), 8001, kOk);
+        const std::size_t invited_before = svc.ctrl.invited.size();
+
+        // A probe claims the arbiter: has_pending_work() is now true.
+        check(tb.probe(&svc, "Someone"), "setup: the probe refused to start");
+
+        svc.participants.users.clear();
+        svc.participants.users.push_back(make_user(9001, "Sarah"));
+        tb.resolve_roster_change(&svc);
+
+        std::size_t present = 0, total = 0;
+        tb.members_present_for_target("Sarah", &present, &total);
+        check(present == 0,
+              "M1: A DEPARTURE THAT LANDED INSIDE A PROBE WAS DROPPED "
+              "ENTIRELY -- the stale id claims presence for the rest of the "
+              "meeting, and no later roster event can rediscover the edge");
+        check(svc.ctrl.invited.size() == invited_before,
+              "M1: the invite half was NOT gated on the probe -- that is the "
+              "half the gate exists for (Begin/Add/Execute interleaving with "
+              "the probe's driving thread)");
     }
 
     if (failures == 0)

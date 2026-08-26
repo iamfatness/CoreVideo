@@ -273,14 +273,19 @@ void TalkbackController::evaluate()
             cue = talkback_cue_on_live_change(m_last_live, session.live);
             m_last_live = session.live;
 
-            if (!session.live) {
-                const bool explicit_failure = !session.reason.empty();
-                const bool grace_expired = talkback_elapsed_ms(
-                    now_ms(), m_session_opened_at_ms) > kTalkbackSessionGraceMs;
-                if (explicit_failure || grace_expired) {
-                    action = TalkbackKeyAction::Close;
-                    closed_by_session_state = true;
-                }
+            // Final review (C2): the rule itself lives in
+            // talkback_session_state_closes_key() (src/talkback-key.h) so a
+            // host test can drive it -- including the case this round added,
+            // reason "channels_destroyed", which is a session that WAS live
+            // and had its channels torn out from under it by a failing
+            // nomination ladder. Do not re-inline it here.
+            const bool grace_expired = talkback_elapsed_ms(
+                now_ms(), m_session_opened_at_ms) > kTalkbackSessionGraceMs;
+            if (talkback_session_state_closes_key(session.live,
+                                                  !session.reason.empty(),
+                                                  grace_expired)) {
+                action = TalkbackKeyAction::Close;
+                closed_by_session_state = true;
             }
         }
     }
@@ -298,10 +303,16 @@ void TalkbackController::evaluate()
     // the whole OBS UI. Do not fold this back into the block above.
     if (action == TalkbackKeyAction::Close) {
         if (closed_by_session_state) {
+            // Final review (C2): "never confirmed" was the only case when
+            // this message was written. It is not any more -- a session that
+            // WAS live can be closed here too, when the nomination ladder
+            // that owns its channels aborts and destroys them
+            // (reason "channels_destroyed"). Say both, and point at the line
+            // that distinguishes them.
             blog(LOG_WARNING,
-                 "[obs-zoom-plugin] talkback: key closed -- the engine never "
-                 "confirmed the Zoom channel opened (see the preceding "
-                 "talkback_session log line for the reason)");
+                 "[obs-zoom-plugin] talkback: key closed -- the engine either "
+                 "never confirmed the Zoom channel or reported it gone (see "
+                 "the preceding talkback_session log line for the reason)");
         } else {
             blog(LOG_WARNING, "[obs-zoom-plugin] talkback: key closed by the "
                               "dead-man switch (audio stopped, engine gone, or the "

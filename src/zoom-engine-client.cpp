@@ -952,9 +952,16 @@ void ZoomEngineClient::talkback_nominate(const std::vector<std::string> &nominee
     // whenever a re-nomination was refused. Scoped so the lock is released
     // before write_json() re-acquires it (m_mtx is not recursive), same
     // discipline as talkback_start() above.
+    // Task 5 final review (C1, CRITICAL): stamp this send with an attempt id
+    // and stage under it. Without it, a re-nomination sent while an earlier
+    // ladder was still provisioning wiped the earlier attempt's staging, and
+    // that ladder's own nominate_done committed THIS attempt's nominee list
+    // against the earlier ladder's channels -- see src/talkback-nomination.h.
+    uint32_t attempt = 0;
     {
         std::lock_guard<std::mutex> lk(m_mtx);
-        talkback_nomination_begin(m_talkback_nomination_pending, deduped);
+        attempt = ++m_talkback_nominate_attempt;
+        talkback_nomination_begin(m_talkback_nomination_pending, deduped, attempt);
     }
     // Task 5 fix round 1 (F5, documented not fixed): json_escape() below
     // escapes '\n'/'\r'/'\t' as two-character sequences ("\\n" etc.), but the
@@ -974,7 +981,8 @@ void ZoomEngineClient::talkback_nominate(const std::vector<std::string> &nominee
     // the failure mode is a refusal or a coverage mismatch, not data
     // corruption. A real fix means teaching the engine's decoder actual JSON
     // escape semantics.
-    std::string json = R"({"cmd":"talkback_nominate","nominees":[)";
+    std::string json = R"({"cmd":"talkback_nominate","attempt":)" +
+                       std::to_string(attempt) + R"(,"nominees":[)";
     for (std::size_t i = 0; i < deduped.size(); ++i) {
         if (i != 0) json += ",";
         json += "\"" + json_escape(deduped[i]) + "\"";

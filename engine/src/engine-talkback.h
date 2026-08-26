@@ -272,6 +272,27 @@ private:
     // machinery, not something this function should paper over.
     TalkbackChannelOwner expire_stale_pending_create_locked();
 
+    // Fix round 4: what every caller of expire_stale_pending_create_locked()
+    // must do with its return value, once the lock is released. Was three
+    // hand-written copies of the same if/else-if report (probe(),
+    // session_start(), nomination_create_next()) -- the exact per-owner
+    // duplication that produced N1 -- and round 4 had to add a fourth call
+    // site (nominate()) plus a new action to the Nomination arm, which is
+    // precisely when that shape goes wrong. MUST be called with m_chan_mtx
+    // NOT held: the Nomination arm calls nomination_destroy_provisioned(),
+    // which calls the SDK.
+    //
+    // The Nomination arm destroys whatever the expired ladder had already
+    // provisioned. Without that, a ladder whose channel-k create response
+    // was swallowed left channels 1..k-1 standing in m_provisioned_channels
+    // forever -- and nominate()'s already_provisioned gate refuses on that
+    // table, so ONE transient SDK hiccup disabled re-nomination for the rest
+    // of the meeting, recoverable only by a Leave. Same reasoning and same
+    // helper as fix round 1's M2 (an error response destroys the partial
+    // set so a retry can start clean); the expiry path had simply never
+    // been wired to it.
+    void handle_expired_create(TalkbackChannelOwner expired_owner);
+
     // Issues the CreateChannel for the front of m_nomination_pending and, on
     // synchronous success, claims the arbiter as Nomination. Called once
     // from nominate() (for the plan's first channel) and once more from
@@ -305,27 +326,35 @@ private:
     // Fix round 1, M2: destroys every channel currently in
     // m_provisioned_channels and forgets them. Called whenever provisioning
     // cannot continue -- a synchronous CreateChannel failure, an error
-    // response, or the arbiter refusing the next create -- so a transient
+    // response, the arbiter refusing the next create, or (fix round 4, via
+    // handle_expired_create()) a create whose response never arrived at all
+    // -- so a transient
     // failure on channel k of a plan does not strand the first k-1
     // already-created channels for the rest of the meeting: consuming
     // budget, unreachable by any key, and (before this fix) making every
     // later nominate() refuse with "already_provisioned" forever, since
     // nothing destroyed them to make room for a retry. Must run on the
-    // command-loop thread, same as create -- every call site is (nominate()/
-    // nomination_create_next() from a pipe command, onCreateChannelResponse
-    // from the SDK message pump on that same thread).
+    // command-loop thread, same as create -- every call site is
+    // (nominate()/nomination_create_next()/handle_expired_create() from a
+    // pipe command, onCreateChannelResponse from the SDK message pump on
+    // that same thread). Never call it with m_chan_mtx held; it takes the
+    // lock itself to copy the ids out, then calls the SDK after releasing.
     void nomination_destroy_provisioned();
 
-    // Fix round 3: the bounded Begin/Add/Execute destroy retry -- identical
-    // in the cancelled branch, the untracked branch, nomination_destroy_
-    // provisioned()'s loop, and the new stale-response branch below -- had
-    // grown to four hand-copied loops in this file's Nomination-related
-    // code alone. Extracted so a future change to the retry bound or the
-    // sequence itself cannot apply to three of the four and miss the
-    // fourth, the exact shape of duplication this task's own review history
-    // keeps finding. Never called with m_chan_mtx held (dereferences
-    // m_ctrl); *attempts (if non-null) receives how many tries it took, for
-    // callers that report it.
+    // Fix round 3: the bounded Begin/Add/Execute destroy retry, which had
+    // grown to four hand-copied loops. Extracted so a future change to the
+    // retry bound or the sequence itself cannot apply to three of them and
+    // miss the fourth, the exact shape of duplication this task's own review
+    // history keeps finding. FIVE call sites today, counted from the .cpp in
+    // fix round 4: onCreateChannelResponse's session-cancelled,
+    // nomination-stale, nomination-cancelled and nomination-untracked
+    // branches, plus nomination_destroy_provisioned()'s loop -- so this is
+    // not Nomination-only, as the round-3 wording said. Two hand-written
+    // copies of the same sequence remain outside it (drain_stray_channels()
+    // and tick()'s Destroying phase, both on the probe's driving thread) and
+    // one in session_stop(); the inventory at the top of tick() is the map.
+    // Never called with m_chan_mtx held (dereferences m_ctrl); *attempts (if
+    // non-null) receives how many tries it took, for callers that report it.
     ZOOMSDK::SDKError destroy_channel_retrying(const zchar_t *channelID, uint32_t *attempts);
 
     // Resolves `name` to a live user id and, if found, invites it into the
@@ -490,17 +519,25 @@ private:
     //
     // Guarded by m_chan_mtx -- NOT command-loop-thread-only, despite an
     // earlier version of this comment claiming otherwise. Every WRITER but
-    // one is the command-loop thread: probe(), session_start(), and
-    // nominate()/nomination_create_next() (all claim it before
-    // CreateChannel), and onCreateChannelResponse (which clears it) -- that
-    // callback is safe on the command-loop thread for the same reason
+    // one is the command-loop thread; the full list, re-derived from the
+    // .cpp in fix round 4 rather than copied from the previous version of
+    // this paragraph (which named four of the seven): probe(),
+    // session_start() and nomination_create_next() CLAIM it after their
+    // CreateChannel returns SDKERR_SUCCESS (nominate() itself never writes
+    // it -- only the function it calls does); onCreateChannelResponse
+    // CLEARS it for whichever owner it claimed the response for;
+    // session_stop()'s main teardown path CLEARS it when the pending owner
+    // is Session; and expire_stale_pending_create_locked() CLEARS it for a
+    // stale Session or Nomination. That callback is safe on the
+    // command-loop thread for the same reason
     // open_audio/drain_audio/close_audio are (see the THREADING comment
     // above the audio path below): on Windows this engine's main loop is
     // ALSO the SDK's message-pump thread, so every SDK callback, this one
     // included, runs there, not on some SDK-internal thread. The exception
     // is tick()'s AwaitingChannel-timeout clear (review-round R3 fix, see
     // tick()): that one genuinely runs on the probe's OWN separate driving
-    // thread, so this field needs the same cross-thread protection as the
+    // thread -- the seventh writer, and the only one off the command loop --
+    // so this field needs the same cross-thread protection as the
     // channel-id strings below rather than being lock-free. Never call the
     // SDK while holding m_chan_mtx for this field either -- same discipline
     // as everywhere else in this class.
@@ -622,15 +659,34 @@ private:
     // creates at once, the one thing the arbiter exists to prevent. See
     // src/talkback-channel-owner.h's "Generation tracking" section for the
     // full mechanism (mirrors src/shm-generation.h's fix for the same shape
-    // of problem). `m_nomination_generation` is bumped by nominate() (a
-    // fresh ladder) and by expire_stale_pending_create_locked()'s
-    // Nomination arm (an abandoned create); `m_nomination_outstanding_
-    // generations` is the FIFO queue nomination_create_next() pushes onto
-    // at issue time and onCreateChannelResponse's Nomination branch pops
-    // from at response time. Both guarded by m_chan_mtx, same discipline as
-    // every other nomination field in this class.
-    uint32_t m_nomination_generation = 0;
-    std::vector<uint32_t> m_nomination_outstanding_generations;
+    // of problem).
+    //
+    // Fix round 4 (CRITICAL, introduced by fix round 3): round 3 carried
+    // this as a counter PLUS a FIFO of outstanding generations, pushed once
+    // per successful CreateChannel and popped only by a response that
+    // reached onCreateChannelResponse's Nomination branch. Two ordinary
+    // paths push without ever popping -- a response that is never delivered
+    // at all (the exact case m_nomination_create_deadline above exists for)
+    // and a late response arriving while the owner is None/Probe/Session --
+    // and ONE orphaned entry desynchronised the FIFO permanently: every
+    // later response then compared an older entry, read Stale, destroyed the
+    // channel Zoom had just created for it, and provisioned zero, for the
+    // life of the process. It is now ONE state object holding one scalar
+    // slot (see that header for the full argument): the arbiter's promise is
+    // that exactly one create is outstanding at a time, so a queue modelled
+    // a state the arbiter forbids, and every issue simply overwrites the
+    // slot -- there is nothing to keep in step, so nothing can fall out of
+    // step.
+    //
+    // Written by exactly four sites, ALL command-loop thread and all under
+    // m_chan_mtx: nominate() and expire_stale_pending_create_locked()'s
+    // Nomination arm (talkback_generation_bump()), nomination_create_next()
+    // after a successful CreateChannel (talkback_generation_issue()), and
+    // onCreateChannelResponse's arbiter scope (talkback_generation_on_
+    // response(), which is called for EVERY response regardless of owner --
+    // that is deliberate: the round-3 Critical's second orphan path was a
+    // response under another owner silently skipping the update).
+    TalkbackGenerationState m_nomination_generation;
 
     // One entry per Zoom channel nominate() has successfully created --
     // populated by onCreateChannelResponse's Nomination branch, one at a

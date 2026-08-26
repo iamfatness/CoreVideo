@@ -6,7 +6,10 @@
 // flight (talkback_cancel()), what expire_stale_pending_create_locked() does
 // when a create's response never arrives at all (talkback_expire()), and
 // what onCreateChannelResponse does with a response once its owner is known
-// (talkback_create_disposition()). See src/talkback-channel-owner.h.
+// (talkback_create_disposition()), and -- fix round 4 -- how a response is
+// matched to the create it belongs to across expiries, swallowed responses
+// and other owners' responses (talkback_generation_*). See
+// src/talkback-channel-owner.h.
 //
 // Why this file exists, in one sentence: a Critical (C1, cancellation must
 // outlive a create across Leave() rather than dropping it) was found and
@@ -17,11 +20,22 @@
 // destroyed the NEXT nomination's first channel instead of adopting it. This
 // file exists so that class of asymmetry is caught by ctest, not by a third
 // review round.
+//
+// It did not go far enough. Fix round 3 added generation tracking to the
+// header and tested it -- but the ENGINE-side wiring (which sites bump, which
+// sites record an issued create, which responses update the state) stayed in
+// engine-talkback.cpp, untested, and that wiring is where round 3's own
+// Critical lived: a queue pushed on one path and popped on another, so one
+// unmatched push wedged every later nomination permanently. The round-4
+// cases below therefore drive the transitions in the ORDER THE ENGINE CALLS
+// THEM, across whole ladders, including the two paths that leak (a create
+// whose response never arrives, and a response claimed by another owner).
+// Extraction that stops short of the failing dimension is worse than none:
+// the next reader sees a tested state machine and trusts it.
 #include "talkback-channel-owner.h"
 
 #include <cstdint>
 #include <iostream>
-#include <vector>
 
 static int failures = 0;
 
@@ -210,99 +224,187 @@ int main()
               "talkback_check_and_clear_cancelled(Probe) touched a flag it has no business reading");
     }
 
-    // ── Generation tracking (fix round 3, "expire-path double create") ─────
+    // ── Generation tracking (fix round 3, rebuilt as a scalar in round 4) ──
     //
-    // Cover: issuing stamps the current generation; bumping does not touch
-    // the outstanding queue; a response pops FIFO and is Stale/Current
-    // exactly when its popped generation does/doesn't match `current`; an
-    // empty queue reads Unexpected, not Stale.
+    // Round 3 carried this as a FIFO of outstanding generations and shipped a
+    // CRITICAL with it: pushes happen on one path and pops on another, so one
+    // unmatched push desynchronised it permanently and every later response
+    // read Stale -- destroying its own freshly created channel, provisioning
+    // zero, forever. These cases exist to make that unrepresentable: the
+    // scalar transitions below are the ones the ENGINE calls, driven here in
+    // the same order the engine calls them, INCLUDING the two paths round 3's
+    // FIFO leaked on (a create whose response never arrives, and a response
+    // claimed by some other owner).
     {
         TalkbackGenerationState g;
-        g = talkback_issue_create(g);
-        check(g.outstanding.size() == 1 && g.outstanding.front() == 0,
-              "talkback_issue_create() did not stamp generation 0 for the first create");
+        g = talkback_generation_issue(g);
+        check(g.outstanding && g.outstanding_generation == 0,
+              "talkback_generation_issue() did not stamp generation 0 for the "
+              "first create");
     }
     {
         TalkbackGenerationState g;
         g.current = 5;
-        g = talkback_bump_generation(g);
-        check(g.current == 6, "talkback_bump_generation() did not increment current");
-        check(g.outstanding.empty(),
-              "talkback_bump_generation() touched the outstanding queue -- an "
-              "already-queued create's generation must survive a bump so its "
-              "eventual response can still be recognized as stale");
+        g.outstanding = true;
+        g.outstanding_generation = 5;
+        g = talkback_generation_bump(g);
+        check(g.current == 6, "talkback_generation_bump() did not increment current");
+        check(g.outstanding && g.outstanding_generation == 5,
+              "talkback_generation_bump() cleared the outstanding stamp -- an "
+              "abandoned create's stamp must survive the bump so ITS response "
+              "is what reads Stale");
+    }
+    // Nothing outstanding -> Unexpected, state untouched. This is the FAIL
+    // OPEN case: the engine treats it exactly like Current rather than
+    // destroying a channel it cannot explain.
+    {
+        TalkbackGenerationState g;
+        g.current = 3;
+        const auto r = talkback_generation_on_response(g, TalkbackChannelOwner::Nomination);
+        check(r.freshness == TalkbackResponseFreshness::Unexpected,
+              "a response with nothing outstanding did not read Unexpected");
+        check(!r.next.outstanding && r.next.current == 3,
+              "an Unexpected response mutated the generation state");
     }
     {
         TalkbackGenerationState g;
         g.current = 3;
-        const auto check_result = talkback_check_response_generation(g);
-        check(check_result.freshness == TalkbackResponseFreshness::Unexpected,
-              "an empty outstanding queue did not read Unexpected");
-    }
-    {
-        TalkbackGenerationState g;
-        g.current = 3;
-        g.outstanding = {3};
-        const auto check_result = talkback_check_response_generation(g);
-        check(check_result.freshness == TalkbackResponseFreshness::Current,
+        g.outstanding = true;
+        g.outstanding_generation = 3;
+        const auto r = talkback_generation_on_response(g, TalkbackChannelOwner::Nomination);
+        check(r.freshness == TalkbackResponseFreshness::Current,
               "a response matching the current generation was not Current");
-        check(check_result.next.outstanding.empty(),
-              "talkback_check_response_generation() did not pop the resolved entry");
+        check(!r.next.outstanding,
+              "a resolved response left a create recorded as still outstanding");
     }
     {
         TalkbackGenerationState g;
         g.current = 4; // bumped since generation 3's create was issued
-        g.outstanding = {3};
-        const auto check_result = talkback_check_response_generation(g);
-        check(check_result.freshness == TalkbackResponseFreshness::Stale,
+        g.outstanding = true;
+        g.outstanding_generation = 3;
+        const auto r = talkback_generation_on_response(g, TalkbackChannelOwner::Nomination);
+        check(r.freshness == TalkbackResponseFreshness::Stale,
               "a response for a superseded generation was not Stale");
+        check(r.next.outstanding && r.next.outstanding_generation == 3 &&
+                  r.next.current == 4,
+              "a Stale response mutated the generation state -- it must destroy "
+              "only the channel it names and change nothing, so a second late "
+              "response for the same abandoned create reaches the same verdict");
     }
 
-    // ── End-to-end: the exact "expire-path double create" sequence ─────────
-    // nominate() -> create#1 issued (gen 0) -> Leave, no response -> >10s
-    // later, EXPIRY bumps to gen 1 (create#1's entry stays queued) -> a
-    // FRESH nominate() bumps to gen 2 and issues create#2 (gen 2 pushed) ->
-    // create#1's stale response finally arrives: must read Stale, and MUST
-    // NOT consume create#2's slot -- create#2's own response, arriving
-    // after, must still read Current.
+    // ── The round-3 CRITICAL, end-to-end: a create whose response NEVER ────
+    // ── arrives must not poison the ladders that follow ─────────────────────
+    //
+    // The reachable sequence: nominate -> the response is swallowed -> a key
+    // press runs the gate check, which expires it -> nominate again. Under
+    // round 3's FIFO the first ladder's entry was pushed and never popped,
+    // so ladder 2's REAL response popped ladder 1's entry, compared it
+    // against the bumped `current`, read Stale, destroyed the channel Zoom
+    // had just created, and provisioned zero -- and every later ladder did
+    // the same, for the life of the process. Ten ladders in a row here: a
+    // scalar cannot accumulate, so the tenth must behave exactly like the
+    // first.
     {
         TalkbackGenerationState g;
-        g = talkback_issue_create(g); // create#1, gen 0
-        check(g.current == 0 && g.outstanding == std::vector<uint32_t>{0},
-              "setup: create#1 was not issued under generation 0");
+        for (int ladder = 0; ladder < 10; ++ladder) {
+            g = talkback_generation_bump(g);  // nominate()
+            g = talkback_generation_issue(g); // CreateChannel #1: swallowed, never answered
+            // The operator presses the talkback key; the gate check expires it.
+            g = talkback_generation_bump(g);  // expire_stale_pending_create_locked()
 
-        g = talkback_bump_generation(g); // expiry gives up on create#1
-        check(g.current == 1 && g.outstanding == std::vector<uint32_t>{0},
-              "setup: expiry did not bump generation while leaving create#1 queued");
+            g = talkback_generation_bump(g);  // nominate() again
+            g = talkback_generation_issue(g); // CreateChannel #2: this one WILL answer
+            const auto r = talkback_generation_on_response(g, TalkbackChannelOwner::Nomination);
+            check(r.freshness == TalkbackResponseFreshness::Current,
+                  "swallowed-response ladder: the NEXT nomination's own real "
+                  "create response was judged stale -- this is the round-3 "
+                  "Critical: it destroys the channel Zoom just created, "
+                  "provisions zero, and repeats for the life of the process");
+            g = r.next;
+            check(!g.outstanding,
+                  "swallowed-response ladder: a resolved response left the "
+                  "outstanding slot occupied, so the NEXT ladder's response "
+                  "would be judged against a create that is already answered");
+        }
+    }
 
-        g = talkback_bump_generation(g); // fresh nominate()
-        g = talkback_issue_create(g);    // create#2, gen 2
-        check(g.current == 2 && (g.outstanding == std::vector<uint32_t>{0, 2}),
-              "setup: create#2 was not queued behind the still-unresolved create#1");
+    // ── The other round-3 orphan path: a response claimed by some OTHER ────
+    // ── owner must leave this state completely alone ────────────────────────
+    //
+    // After a Nomination expiry the owner is None until someone re-claims it,
+    // and the other claimers are probe() and session_start(). Round 3 updated
+    // the generation state only from inside onCreateChannelResponse's
+    // Nomination branch, so a response landing under None/Probe/Session
+    // skipped the pop and left the FIFO one entry off -- permanently. The
+    // engine now calls talkback_generation_on_response() for EVERY response
+    // and passes the owner, so this is a case the function answers rather
+    // than one expressed by a call that isn't there.
+    {
+        const TalkbackChannelOwner others[] = {TalkbackChannelOwner::None,
+                                               TalkbackChannelOwner::Probe,
+                                               TalkbackChannelOwner::Session};
+        for (const auto other : others) {
+            TalkbackGenerationState g;
+            g = talkback_generation_bump(g);
+            g = talkback_generation_issue(g); // this ladder's create, genuinely in flight
 
-        // create#1's late response arrives first (FIFO) -- must be Stale,
-        // and create#2's entry (gen 2) must still be waiting afterward.
-        auto first = talkback_check_response_generation(g);
-        check(first.freshness == TalkbackResponseFreshness::Stale,
-              "expire-path double create: create#1's late response was not "
-              "recognized as Stale -- it would have been adopted as the "
-              "fresh nomination's channel 1 while create#2 was still "
-              "genuinely in flight, and the ladder would then issue a "
-              "THIRD create: two outstanding at once, the one thing the "
-              "arbiter exists to prevent");
-        check(first.next.outstanding == std::vector<uint32_t>{2},
-              "expire-path double create: create#2's entry did not survive "
-              "discarding create#1's stale response");
+            const auto foreign = talkback_generation_on_response(g, other);
+            check(foreign.freshness == TalkbackResponseFreshness::NotNomination,
+                  "a response claimed by another owner was judged as if it "
+                  "were Nomination's");
+            check(foreign.next.outstanding &&
+                      foreign.next.outstanding_generation == g.outstanding_generation &&
+                      foreign.next.current == g.current,
+                  "a response claimed by another owner mutated the nomination "
+                  "generation state -- that silent skip is exactly what "
+                  "desynchronised round 3's queue");
 
-        // create#2's real response arrives next -- must be Current.
-        auto second = talkback_check_response_generation(first.next);
-        check(second.freshness == TalkbackResponseFreshness::Current,
-              "expire-path double create: create#2's genuine response was "
-              "not recognized as Current after the stale one was discarded "
-              "-- discarding the wrong response would leave a legitimately "
-              "created channel forever unclaimed");
-        check(second.next.outstanding.empty(),
-              "create#2's response did not fully drain the outstanding queue");
+            // Our own response, arriving after the foreign one, must still be
+            // recognized as the one we are waiting for.
+            const auto ours = talkback_generation_on_response(foreign.next,
+                                                              TalkbackChannelOwner::Nomination);
+            check(ours.freshness == TalkbackResponseFreshness::Current,
+                  "after a response for another owner passed through, this "
+                  "ladder's own create response was no longer recognized as "
+                  "current");
+        }
+    }
+
+    // ── The accepted residual, pinned so it is a decision and not a ────────
+    // ── surprise ────────────────────────────────────────────────────────────
+    //
+    // create A expires; a later ladder issues create B, which overwrites the
+    // one outstanding slot; A's response (if it ever arrives, with the owner
+    // re-claimed by B) is then indistinguishable from B's and is adopted as
+    // B's. No scheme can do better -- Zoom provides no correlation id -- and
+    // failing OPEN here costs at most one extra create in flight, whose
+    // response finds the plan queue empty and is destroyed down the
+    // channel_untracked path. Failing CLOSED instead is what wedged round 3.
+    {
+        TalkbackGenerationState g;
+        g = talkback_generation_bump(g);
+        g = talkback_generation_issue(g); // create A
+        g = talkback_generation_bump(g);  // expiry abandons A
+        g = talkback_generation_bump(g);  // fresh nominate()
+        g = talkback_generation_issue(g); // create B overwrites the slot
+        const auto r = talkback_generation_on_response(g, TalkbackChannelOwner::Nomination);
+        check(r.freshness == TalkbackResponseFreshness::Current,
+              "the accepted residual changed shape: a response arriving while "
+              "a genuine create is outstanding must be adopted (fail open), "
+              "never destroyed");
+    }
+    // ...but between the expiry and the next issue, the abandoned create's
+    // own stamp is still what a response is judged against, so it destroys
+    // the orphan rather than adopting it.
+    {
+        TalkbackGenerationState g;
+        g = talkback_generation_bump(g);
+        g = talkback_generation_issue(g); // create A
+        g = talkback_generation_bump(g);  // expiry abandons A; nothing issued since
+        const auto r = talkback_generation_on_response(g, TalkbackChannelOwner::Nomination);
+        check(r.freshness == TalkbackResponseFreshness::Stale,
+              "an abandoned create's response, with nothing issued since, was "
+              "not recognized as stale");
     }
 
     if (failures == 0)

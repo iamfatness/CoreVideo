@@ -174,13 +174,7 @@ bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
         expired_owner = expire_stale_pending_create_locked();
         create_gate_ok = talkback_may_request_create(m_pending_create);
     }
-    if (expired_owner == TalkbackChannelOwner::Session) {
-        report_session("session_create_expired",
-                       R"("reason":"swallowed_create_response")");
-    } else if (expired_owner == TalkbackChannelOwner::Nomination) {
-        report_nomination("create_expired",
-                          R"("reason":"swallowed_create_response")");
-    }
+    handle_expired_create(expired_owner);
     if (!create_gate_ok) {
         report("busy", R"("reason":"create_busy")");
         m_phase.store(Phase::Done, std::memory_order_release);
@@ -364,30 +358,89 @@ TalkbackChannelOwner EngineTalkback::expire_stale_pending_create_locked()
 
         // Fix round 3, "expire-path double create": bump the nomination
         // generation too -- see src/talkback-channel-owner.h's "Generation
-        // tracking" section. This create's response, if it ever arrives,
-        // must be recognized as stale rather than confused with whatever
-        // create a later nominate() issues under the bumped generation.
-        // Deliberately does NOT touch m_nomination_outstanding_generations:
-        // this create's own entry stays queued so the comparison above has
-        // something to pop and reject when that response shows up.
-        TalkbackGenerationState g{m_nomination_generation, m_nomination_outstanding_generations};
-        g = talkback_bump_generation(g);
-        m_nomination_generation = g.current;
+        // tracking" section. This create's response, if it ever arrives
+        // before anything else is issued, must be recognized as stale
+        // rather than confused with whatever a later nominate() issues.
+        // Deliberately leaves the outstanding STAMP in place (fix round 4):
+        // that is what makes this abandoned create's own response read
+        // Stale, and the next talkback_generation_issue() overwrites the
+        // stamp rather than queuing behind it, so nothing can accumulate.
+        m_nomination_generation = talkback_generation_bump(m_nomination_generation);
+
+        // Fix round 4: m_provisioned_channels is NOT cleared here -- the
+        // caller destroys it via handle_expired_create() once the lock is
+        // released, because those are real Zoom channels and clearing the
+        // table without destroying them would leak channel budget for the
+        // rest of the meeting. See handle_expired_create()'s comment for
+        // why the expiry must not leave them standing either.
     }
     return expired;
 }
 
+void EngineTalkback::handle_expired_create(TalkbackChannelOwner expired_owner)
+{
+    // Fix round 4. Called by all four callers of
+    // expire_stale_pending_create_locked() AFTER they release m_chan_mtx --
+    // never with it held: the Nomination arm calls the SDK. See the
+    // declaration comment for why the Nomination arm destroys.
+    if (expired_owner == TalkbackChannelOwner::Session) {
+        report_session("session_create_expired",
+                       R"("reason":"swallowed_create_response")");
+    } else if (expired_owner == TalkbackChannelOwner::Nomination) {
+        report_nomination("create_expired",
+                          R"("reason":"swallowed_create_response")");
+        // The expiry has already forgotten the queue (m_nomination_pending)
+        // but the channels this ladder DID create are still standing on
+        // Zoom, still in m_provisioned_channels, and still refusing every
+        // later nominate() with "already_provisioned" -- a Major found by
+        // the round-3 re-review: one transient swallowed response cost the
+        // operator re-nomination for the rest of the meeting, recoverable
+        // only by a Leave. Destroy them so the next nominate() starts
+        // clean, exactly as fix round 1's M2 does for an error response.
+        // No-op when the table is empty, which is the common case.
+        nomination_destroy_provisioned();
+    }
+}
+
 void EngineTalkback::tick()
 {
-    // tick() is the ONLY caller of the batch-destroy API
-    // (BeginBatchDestroyChannels / AddChannelToDestroy /
-    // ExecuteBatchDestroyChannels). Callbacks that discover a channel
-    // needing cleanup queue it via m_stray_channels; they never call the
-    // API themselves. Two owners on two threads could interleave
-    // Begin/Add/Execute against each other and corrupt or merge batches,
-    // since the API shape implies the controller holds implicit per-batch
-    // state -- that is the whole reason this design is safe, and it is not
-    // visible anywhere else in the code.
+    // BATCH-DESTROY DISCIPLINE. The previous version of this comment said
+    // "tick() is the ONLY caller of the batch-destroy API ... Callbacks ...
+    // never call the API themselves". That stopped being true in Task 2 fix
+    // round 1 and was left standing through two more rounds. Counted from
+    // the code in fix round 4 (grep BeginBatchDestroyChannels), there are
+    // FOUR Begin/Add/Execute sequences in this file, on TWO threads:
+    //   * drain_stray_channels() (called only from here) and tick()'s own
+    //     Destroying phase -- the PROBE'S DRIVING THREAD;
+    //   * destroy_channel_retrying() -- five call sites: four branches of
+    //     onCreateChannelResponse (session-cancelled, nomination-stale,
+    //     nomination-cancelled, nomination-untracked) plus
+    //     nomination_destroy_provisioned() -- and session_stop()'s own copy
+    //     of the loop: the COMMAND-LOOP THREAD.
+    // The hazard the old comment named is real and unchanged: the API shape
+    // implies the controller holds implicit per-batch state, so two
+    // Begin/Add/Execute sequences interleaving on different threads could
+    // merge or corrupt batches. What keeps them apart is NOT a single-caller
+    // rule -- it is that the probe's driving thread only exists while a
+    // probe is running, and main.cpp joins it before session_start() and
+    // before nominate() (see session_stop()'s F3 comment, which already
+    // traced exactly this).
+    //
+    // That is not airtight, and the gap is recorded here rather than papered
+    // over a fourth time: probe() does NOT refuse while a Nomination create
+    // is outstanding -- it reports create_busy, stores Phase::Done and
+    // returns TRUE, so main.cpp spawns the driving thread anyway. If a stray
+    // is queued at that instant, that thread's drain_stray_channels() can be
+    // mid-Begin/Add/Execute while the Nomination create's response lands on
+    // the command loop and takes one of the destroy branches above. Narrow
+    // (it needs a queued stray inside a single tick's window) and never
+    // observed, but it is a live gap, not merely a stale comment. Do NOT
+    // close it by wrapping the SDK calls in a mutex: blocking the SDK's
+    // message-pump thread while the driving thread is inside an SDK call
+    // trades a rare batch corruption for a possible hard hang. The safe fix
+    // is at the entry point -- do not spawn a driving thread for a probe
+    // that was refused before it created anything -- and this round
+    // deliberately did not take it on.
     drain_stray_channels();
 
     const Phase phase = m_phase.load(std::memory_order_acquire);
@@ -478,9 +531,9 @@ void EngineTalkback::tick()
         // rather than abandoning the channel on the first failure -- giving
         // up immediately was exactly the leak this comment claims to
         // prevent. This call site and drain_stray_channels() above are the
-        // only two places in this file allowed to touch the batch-destroy
-        // API, and both run here, on tick()'s thread -- see the comment at
-        // the top of tick().
+        // only two batch-destroy sequences that run on THIS thread (the
+        // probe's driving thread); two more run on the command-loop thread
+        // -- see the corrected inventory at the top of tick().
         std::basic_string<zchar_t> channel_copy;
         std::string channel_copy_utf8;
         {
@@ -602,12 +655,28 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
     // response has been attributed to an owner, m_pending_create must not be
     // observable as still "theirs" by anyone else, even for the instant
     // between a separate claim and a separate clear.
+    //
+    // Fix round 4: the Nomination generation state is updated HERE, in the
+    // same scope, for EVERY response -- not inside the Nomination branch
+    // below. Round 3 updated it only when a response reached that branch,
+    // so a response claimed by None/Probe/Session silently skipped the
+    // update; with round 3's FIFO that was one of the two paths that
+    // desynchronised it permanently (see the field's comment in the
+    // header). talkback_generation_on_response() takes the owner and
+    // returns NotNomination-plus-unchanged-state for the others, so "what
+    // happens to this state when someone else's response arrives" is
+    // answered by one tested function instead of by a call that isn't
+    // there. Pure -- no SDK call under m_chan_mtx.
     TalkbackChannelOwner owner;
+    TalkbackResponseFreshness freshness;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
         owner = talkback_claim_create(m_pending_create);
         if (owner != TalkbackChannelOwner::None)
             m_pending_create = TalkbackChannelOwner::None;
+        const auto check = talkback_generation_on_response(m_nomination_generation, owner);
+        freshness = check.freshness;
+        m_nomination_generation = check.next;
     }
     if (owner == TalkbackChannelOwner::Session) {
         // F1 review-round fix (CRITICAL): session_stop() may have run while
@@ -710,39 +779,52 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
     }
     if (owner == TalkbackChannelOwner::Nomination) {
         // Fix round 3, "expire-path double create" (Major, found by the
-        // round-2 re-review): checked FIRST, before cancellation -- see
+        // round-2 re-review); mechanism rebuilt in fix round 4 -- see
         // src/talkback-channel-owner.h's "Generation tracking" section and
-        // m_nomination_generation's header comment for the full mechanism.
-        // A create that merely expired (nobody cancelled it) can still have
-        // its response arrive after a fresh nomination re-armed this same
-        // owner and issued a SECOND CreateChannel; Zoom's callback carries
-        // no id to tell the two responses apart, so identity has to be
-        // tracked here instead. Popping the oldest outstanding generation
-        // and comparing it to the current one is what answers "is this
-        // response for the create I am now waiting on."
-        TalkbackResponseFreshness freshness;
-        {
-            std::lock_guard<std::mutex> lock(m_chan_mtx);
-            TalkbackGenerationState g{m_nomination_generation, m_nomination_outstanding_generations};
-            const auto check = talkback_check_response_generation(g);
-            freshness = check.freshness;
-            m_nomination_outstanding_generations = check.next.outstanding;
-        }
+        // m_nomination_generation's header comment. A create that merely
+        // expired (nobody cancelled it) can still have its response arrive
+        // after a fresh nomination re-armed this same owner and issued a
+        // SECOND CreateChannel; Zoom's callback carries no id to tell the
+        // two responses apart, so identity is tracked here instead.
+        // `freshness` was computed in the arbiter scope above, in the same
+        // lock as the claim.
+        //
+        // Only `Stale` -- the state positively saying "the outstanding
+        // create was issued under a generation we have moved past" -- takes
+        // the destroy path. `Current` AND `Unexpected` both fall through to
+        // the ordinary handling below: fail OPEN. A wrongly-kept channel
+        // costs one of the meeting's 16; a wrongly-destroyed one costs the
+        // operator talkback mid-show, which is exactly what round 3's
+        // fail-closed FIFO did every time its queue desynchronised.
         if (freshness == TalkbackResponseFreshness::Stale) {
-            // This response belongs to a create the ladder has since moved
-            // past. Destroy it if Zoom actually created a channel (do NOT
-            // touch m_nomination_pending or m_provisioned_channels -- the
-            // CURRENT create's plan entry is still correctly waiting), and
-            // -- critically -- RE-CLAIM the owner rather than leaving it
-            // None: a second, genuinely outstanding create for THIS same
-            // ladder is still in flight, and its eventual response must
-            // still be routed here, not fall through to the generic stray
-            // path at the bottom of this function (which has no idea how
-            // to recognize a Nomination channel and would destroy it as
-            // untracked, losing a channel that could otherwise have been
-            // adopted). Never call nomination_create_next() here: doing so
-            // would issue a THIRD create while the second is still
-            // outstanding, exactly the invariant this fix exists to hold.
+            // This response belongs to a create the ladder gave up on.
+            // Destroy the channel THIS RESPONSE NAMES if Zoom actually
+            // created one -- it is genuinely orphaned on Zoom's side and
+            // nothing else will ever clean it up -- and change nothing
+            // else: not m_nomination_pending, not m_provisioned_channels,
+            // not m_pending_create, and never nomination_create_next()
+            // (which would issue a second create while one may still be in
+            // flight, the one invariant the arbiter exists to hold).
+            //
+            // Fix round 4 removed the re-CLAIM (m_pending_create =
+            // Nomination) round 3 did here. With the scalar it is both
+            // wrong and unreachable: Stale means the state has no record of
+            // a current outstanding create, so claiming the arbiter for one
+            // would wedge probe()/session_start()/nominate() until the
+            // deadline expired. It also silently falsified this file's own
+            // "onCreateChannelResponse claims-then-clears, regardless of
+            // what the branch then does" invariant, which
+            // src/talkback-channel-owner.h documents as load-bearing.
+            //
+            // Reachability, stated honestly because the previous version of
+            // this branch was written as if it were the common case: with
+            // one scalar slot, owner == Nomination implies the last
+            // talkback_generation_issue() stamped `current`, and both bump
+            // sites (nominate(), the Nomination expiry) can only run with
+            // the owner released -- so I could not construct a sequence
+            // that reaches here. It is a defensive branch with a defined,
+            // conservative disposition, not a path the engine is expected
+            // to take.
             if (error == TALKBACK_ERROR_OK && channelID != nullptr) {
                 uint32_t attempts = 0;
                 const ZOOMSDK::SDKError e = destroy_channel_retrying(channelID, &attempts);
@@ -759,8 +841,6 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
                                   R"("ok":true,"reason":"no_channel_to_destroy","error":)" +
                                   std::to_string(static_cast<int>(error)));
             }
-            std::lock_guard<std::mutex> lock(m_chan_mtx);
-            m_pending_create = TalkbackChannelOwner::Nomination;
             return;
         }
 
@@ -852,23 +932,20 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
             }
         }
         if (!have_planned) {
-            // Fix round 3: the two paths fix round 1's M5 named to prove
-            // this branch reachable -- a stale response claimed by a later
-            // re-armed nomination, and expiry clearing m_nomination_pending
-            // while a create was genuinely still in flight -- are both a
-            // generation MISMATCH by construction (this response's create
-            // was issued under an earlier generation than whatever is
-            // current), so the freshness check above now catches them
-            // before this point is ever reached; see that check's own
-            // comment. What is left is narrower: `have_planned` false while
-            // freshness read Current or Unexpected means the queue/owner
-            // invariant this class relies on (one push per issued create,
-            // one m_nomination_pending entry per queued channel, matched
-            // one-to-one) was violated somewhere else. Genuinely defensive
-            // now, not "believed unreachable" -- if it is ever hit, the
-            // channel Zoom just created is still real and still untracked,
-            // so destroy it the same way as before rather than assume the
-            // invariant holds. Queuing it onto m_stray_channels (the
+            // Fix round 4: this is where FAILING OPEN lands, and it is a
+            // genuinely reachable path -- not the "believed unreachable"
+            // branch fix round 1's M5 called out, and not the narrow
+            // invariant-violation branch fix round 3 rewrote it into (round
+            // 3 argued the freshness check would catch the stale cases
+            // first; with one scalar slot it deliberately does not, because
+            // a late response for an abandoned create is indistinguishable
+            // from the current one and is adopted rather than destroyed).
+            // What arrives here is the extra response that adoption
+            // produces: one more response than the plan has entries. The
+            // channel Zoom created for it is real and belongs to nobody, so
+            // destroy it. That -- one extra channel created and immediately
+            // destroyed -- is the whole bounded cost of failing open, versus
+            // the permanent feature wedge failing closed produced. Queuing it onto m_stray_channels (the
             // pre-fix-round-1 behaviour) would reproduce the exact
             // has_pending_work() wedge C1 was fixed for -- nothing drains
             // that queue without a probe's driving thread running.
@@ -949,12 +1026,23 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         // (now that tick() times AwaitingChannel out) a genuinely late
         // response that arrived after we already gave up on this rung and
         // moved on, in which case a real channel exists that our own ladder
-        // no longer tracks. tick() is the ONLY caller of the batch-destroy
-        // API (see the comment there) -- this callback runs on the SDK
-        // thread and must never call BeginBatchDestroyChannels/etc directly,
-        // even for cleanup, or it can interleave with tick()'s own
-        // Begin/Add/Execute sequence and corrupt or merge batches. So: queue,
-        // never call. The comparison against m_channel_id_z below is exactly
+        // no longer tracks.
+        //
+        // THIS path queues rather than destroying, and fix round 4 narrowed
+        // the reason to the one that is actually true. The old wording --
+        // "this callback ... must never call BeginBatchDestroyChannels/etc
+        // directly, even for cleanup" -- was contradicted by the callback
+        // itself: four of its branches above destroy directly, via
+        // destroy_channel_retrying(). The distinction is WHICH THREAD MAY BE
+        // MID-BATCH. Everything reachable here is reachable while the
+        // probe's driving thread is alive and may be inside its own
+        // Begin/Add/Execute (this is the probe's phase machine; we are here
+        // precisely because m_phase is not AwaitingChannel), so destroying
+        // from this branch could interleave with it and merge or corrupt
+        // batches. The Nomination/Session branches above are the paths where
+        // no probe ladder is running -- see the inventory and the recorded
+        // residual gap at the top of tick(). So: here, queue and never call.
+        // The comparison against m_channel_id_z below is exactly
         // the access that must go through m_chan_mtx -- reachable while
         // phase is Idle/Done, i.e. while a fresh probe() is allowed to be
         // clearing/reassigning that member on another thread right now; see
@@ -1165,28 +1253,6 @@ bool EngineTalkback::nominate(ZOOMSDK::IMeetingService *svc,
         report_nomination("nominate", R"("ok":false,"reason":"probe_busy")");
         return false;
     }
-    bool already_provisioned;
-    {
-        // No un-nominate in this task: a second nominate() call while an
-        // earlier one's channels are still standing would leak the earlier
-        // set (nothing here destroys them) rather than reconfigure
-        // anything. Refuse loudly instead of silently orphaning live Zoom
-        // channels -- Task 3, which reworks the session path against this
-        // table, owns deciding what a re-nomination should do.
-        std::lock_guard<std::mutex> lock(m_chan_mtx);
-        already_provisioned = !m_provisioned_channels.empty() || !m_nomination_pending.empty();
-    }
-    if (already_provisioned) {
-        // Fix round 1: found alongside m1 while re-checking the file for the
-        // same "report while holding m_chan_mtx" violation the review's m1
-        // finding cited at the (now rewritten) channel_untracked branch --
-        // this call site had the identical shape and was not called out by
-        // name, but the discipline it breaks is the same one, so it gets
-        // the same fix: read the decision out under the lock, release,
-        // THEN report.
-        report_nomination("nominate", R"("ok":false,"reason":"already_provisioned")");
-        return false;
-    }
     if (!svc) {
         report_nomination("nominate", R"("ok":false,"reason":"not_in_meeting")");
         return false;
@@ -1202,6 +1268,59 @@ bool EngineTalkback::nominate(ZOOMSDK::IMeetingService *svc,
         return false;
     }
     m_ctrl->SetEvent(this);
+
+    // Fix round 4 (Major, found by the round-3 re-review): run the lazy
+    // self-heal BEFORE the already_provisioned gate, not after it. The gate
+    // used to sit at the very top of this function and return, while the
+    // only call to expire_stale_pending_create_locked() on this path is
+    // inside nomination_create_next(), hundreds of lines later -- so a
+    // ladder whose channel-k create response was swallowed (no Leave, no
+    // cancellation: the SDK simply never called back) stayed refused with
+    // "already_provisioned" until some unrelated probe()/session_start()
+    // happened to run the expiry, and stayed refused EVEN THEN, because the
+    // expiry cleared only m_nomination_pending and left channels 1..k-1 in
+    // m_provisioned_channels forever. One transient SDK hiccup therefore
+    // cost the operator re-nomination for the rest of the show, recoverable
+    // only by a Leave. handle_expired_create() now destroys that partial
+    // set (see its comment), so the gate below sees a clean table.
+    //
+    // Deliberately placed AFTER m_ctrl is resolved above: the destroy it
+    // may perform needs a controller for the CURRENT meeting, and reaching
+    // for the previous ladder's m_ctrl would be exactly the stale-pointer
+    // shape this file's mutual-exclusion guards exist to avoid. That is why
+    // the gate moved down here rather than the expiry moving up. probe()
+    // and session_start() order their own expiry the same way.
+    TalkbackChannelOwner expired_owner;
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        expired_owner = expire_stale_pending_create_locked();
+    }
+    handle_expired_create(expired_owner);
+
+    bool already_provisioned;
+    {
+        // No un-nominate in this task: a second nominate() call while an
+        // earlier one's channels are still standing would leak the earlier
+        // set (nothing here destroys them) rather than reconfigure
+        // anything. Refuse loudly instead of silently orphaning live Zoom
+        // channels -- Task 3, which reworks the session path against this
+        // table, owns deciding what a re-nomination should do. This refuses
+        // a genuinely LIVE nomination; a DEAD one has just been cleaned up
+        // by the self-heal above.
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        already_provisioned = !m_provisioned_channels.empty() || !m_nomination_pending.empty();
+    }
+    if (already_provisioned) {
+        // Fix round 1: found alongside m1 while re-checking the file for the
+        // same "report while holding m_chan_mtx" violation the review's m1
+        // finding cited at the (now rewritten) channel_untracked branch --
+        // this call site had the identical shape and was not called out by
+        // name, but the discipline it breaks is the same one, so it gets
+        // the same fix: read the decision out under the lock, release,
+        // THEN report.
+        report_nomination("nominate", R"("ok":false,"reason":"already_provisioned")");
+        return false;
+    }
 
     const TalkbackPlan plan = talkback_plan(nominees);
 
@@ -1255,9 +1374,7 @@ bool EngineTalkback::nominate(ZOOMSDK::IMeetingService *svc,
     // be floating around unresolved.
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
-        TalkbackGenerationState g{m_nomination_generation, m_nomination_outstanding_generations};
-        g = talkback_bump_generation(g);
-        m_nomination_generation = g.current;
+        m_nomination_generation = talkback_generation_bump(m_nomination_generation);
     }
     if (!nomination_create_next())
         return false;
@@ -1286,13 +1403,7 @@ bool EngineTalkback::nomination_create_next()
         expired_owner = expire_stale_pending_create_locked();
         create_gate_ok = talkback_may_request_create(m_pending_create);
     }
-    if (expired_owner == TalkbackChannelOwner::Session) {
-        report_session("session_create_expired",
-                       R"("reason":"swallowed_create_response")");
-    } else if (expired_owner == TalkbackChannelOwner::Nomination) {
-        report_nomination("create_expired",
-                          R"("reason":"swallowed_create_response")");
-    }
+    handle_expired_create(expired_owner);
     if (!create_gate_ok) {
         // The probe or the session is mid-create. Refuse rather than wait:
         // there is no sensible way to hold this queue open across an
@@ -1329,12 +1440,11 @@ bool EngineTalkback::nomination_create_next()
             std::memory_order_release);
         // Fix round 3: stamp this create with the CURRENT generation --
         // see src/talkback-channel-owner.h's "Generation tracking" section.
-        // Whichever response arrives first for Nomination pops this entry;
-        // if it does not match m_nomination_generation at that point, it is
-        // a stale response, not this create's.
-        TalkbackGenerationState g{m_nomination_generation, m_nomination_outstanding_generations};
-        g = talkback_issue_create(g);
-        m_nomination_outstanding_generations = g.outstanding;
+        // Fix round 4: this OVERWRITES the one outstanding slot rather than
+        // pushing onto a queue. Anything already stamped there belonged to
+        // a create the ladder abandoned, so there is nothing to reconcile
+        // -- and nothing that can desynchronise.
+        m_nomination_generation = talkback_generation_issue(m_nomination_generation);
     }
     return true;
 }
@@ -1856,13 +1966,7 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
         expired_owner = expire_stale_pending_create_locked();
         create_gate_ok = talkback_may_request_create(m_pending_create);
     }
-    if (expired_owner == TalkbackChannelOwner::Session) {
-        report_session("session_create_expired",
-                       R"("reason":"swallowed_create_response")");
-    } else if (expired_owner == TalkbackChannelOwner::Nomination) {
-        report_nomination("create_expired",
-                          R"("reason":"swallowed_create_response")");
-    }
+    handle_expired_create(expired_owner);
     if (!create_gate_ok) {
         // The probe is mid-create. Refuse rather than queue: a queued create
         // would arrive with the other subsystem's response still in flight,
@@ -1976,8 +2080,10 @@ void EngineTalkback::session_stop()
 
     // The session destroys its OWN channel here, on the command-loop thread.
     // This is NOT the batch-destroy path tick() owns for the probe's stray
-    // queue -- keeping them separate is what keeps "tick() is the sole
-    // caller of the batch-destroy API for the probe's stray queue" true.
+    // queue -- keeping them separate is what keeps the probe's stray queue
+    // drained by exactly one thread. It is one of the four Begin/Add/Execute
+    // sequences inventoried at the top of tick(); read that before adding a
+    // fifth.
     //
     // F3 review-round fix: this comment used to claim that R1's mutual
     // exclusion (probe() refuses while m_session_live, session_start()

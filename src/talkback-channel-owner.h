@@ -28,26 +28,29 @@
 // on the engine's single command-loop thread, so the field "costs nothing"
 // and needs none. That was true until review-round R3 added a driving-thread
 // writer, and is no longer true as written -- do not restore it. This
-// paragraph has ALREADY been caught stale twice by undercounting write sites
-// (once pre-Task-2, once in Task 2's own first pass, which also asserted a
-// write site -- session_stop()'s early branch clearing the field -- that the
-// F1 fix had removed). Do not trust the count below either without
-// re-deriving it from the actual code; the discipline that matters is
-// "verify the thread each writer runs on, from the code, every time this
-// paragraph is touched," not the specific number that follows.
+// paragraph has ALREADY been caught stale THREE times by miscounting write
+// sites (once pre-Task-2; once in Task 2's own first pass, which also
+// asserted a write site -- session_stop()'s early branch clearing the field
+// -- that the F1 fix had removed; and once in fix round 3, which said SEVEN
+// while round 3's own new Stale branch had made it EIGHT). Do not trust the
+// count below either without re-deriving it from the actual code; the
+// discipline that matters is "verify the thread each writer runs on, from
+// the code, every time this paragraph is touched," not the specific number
+// that follows.
 //
-// As of Task 2 fix round 2 (2026-08-25), SEVEN write STATEMENTS, in SEVEN
+// As of Task 2 fix round 4 (2026-08-25), SEVEN write STATEMENTS, in SEVEN
 // distinct functions, write m_pending_create, on TWO different threads --
-// counted by grepping every `m_pending_create = ` assignment in
-// engine-talkback.cpp and naming the enclosing function for each one, not by
-// counting bullets in this paragraph (the previous version of this count,
-// "five", counted bullets -- one of which named three functions -- and
-// separately misnamed nominate() as a writer when only the function it
-// calls, nomination_create_next(), actually assigns the field; that was
-// itself found and fixed in round 2, i.e. THIS exact paragraph was wrong
-// about the field it exists to describe, one round after being rewritten
-// for the same defect class). Plus two call sites that deliberately do NOT
-// write it despite looking like they should:
+// re-counted in round 4 with `grep -nE "^[^/]*m_pending_create +="` over
+// engine-talkback.cpp, naming the enclosing function for each hit, not by
+// counting bullets in this paragraph. Use that regex, not the literal
+// `m_pending_create = `: expire_stale_pending_create_locked()'s write is
+// column-aligned (`m_pending_create           = state.owner;`) and a
+// fixed-space grep silently misses it, which is one way a previous count
+// went wrong. (An older version of the count, "five", counted bullets -- one
+// of which named three functions -- and separately misnamed nominate() as a
+// writer when only the function it calls, nomination_create_next(), actually
+// assigns the field.) Plus two call sites that deliberately do NOT write it
+// despite looking like they should:
 //   * probe() and session_start() (engine-talkback.cpp) CLAIM it (None ->
 //     Probe / None -> Session). nomination_create_next() (same file) CLAIMS
 //     it the same way (None -> Nomination) -- called from nominate() (which
@@ -66,10 +69,16 @@
 //   * onCreateChannelResponse (same file) CLAIMS-then-CLEARS it (-> None) in
 //     the same lock scope, for whichever owner is currently pending,
 //     regardless of what that owner's branch then does with the response
-//     (adopts it, destroys it as cancelled, or reports a failure) -- the
-//     clear happens before any of those branches run. Also the command-loop
-//     thread -- SDK callbacks run there for the same message-pump reason as
-//     above.
+//     (adopts it, destroys it as cancelled, destroys it as stale, or reports
+//     a failure) -- the clear happens before any of those branches run, and
+//     no branch re-claims it afterwards. That last clause is load-bearing
+//     and was FALSE for one round: round 3's Stale branch re-claimed the
+//     owner (m_pending_create = Nomination) after the clear, so a
+//     maintainer reasoning about the arbiter from this sentence got the
+//     wrong answer. Round 4 removed that re-claim -- if you add a branch
+//     here that writes this field, this sentence and the count above are
+//     both wrong again. Also the command-loop thread -- SDK callbacks run
+//     there for the same message-pump reason as above.
 //   * session_stop()'s MAIN teardown path (same file) CLEARS it (-> None,
 //     only when the pending owner is Session and there is a channel/session
 //     to actually tear down). Command-loop thread, same as every write site
@@ -115,13 +124,15 @@
 // comment's old claim; verify the thread each writer runs on first, and
 // recount the write sites. A queue instead of a single outstanding slot
 // would buy nothing here and would add a way for the probe, the session, and
-// nomination to interleave.
+// nomination to interleave -- fix round 3 proved that the expensive way, by
+// tracking outstanding creates in a FIFO one layer up (see "Generation
+// tracking" below) and wedging the feature permanently the first time an
+// entry went unmatched.
 //
 // Free of Qt / OBS / Zoom SDK dependencies so the routing can be pinned by a
 // test with no engine and no meeting.
 //
 #include <cstdint>
-#include <vector>
 
 enum class TalkbackChannelOwner {
     // Nothing outstanding.
@@ -279,7 +290,7 @@ inline TalkbackCreateCheckResult talkback_check_and_clear_cancelled(TalkbackCrea
     return TalkbackCreateCheckResult{cancelled, state};
 }
 
-// ── Generation tracking (Task 2 fix round 3) ────────────────────────────────
+// ── Generation tracking (Task 2 fix round 3; REBUILT in fix round 4) ────────
 //
 // C1/N1 fixed the CANCELLATION half of "a create outstanding across
 // Leave()/expiry must not be misattributed". This is the other half, found
@@ -296,82 +307,152 @@ inline TalkbackCreateCheckResult talkback_check_and_clear_cancelled(TalkbackCrea
 // monotonically increasing generation carried alongside the state and
 // checked when the ambiguous event resolves; this follows that precedent.
 //
-// `current` is bumped on every nominate() (a fresh ladder must not be
-// confused with an older one) and on every Nomination expiry (an abandoned
-// create's eventual response must not be confused with whatever comes
-// after it) -- both call talkback_bump_generation(). Every CreateChannel a
-// ladder issues is stamped with `current` AT ITS OWN issue time
-// (talkback_issue_create(), pushed onto `outstanding`) and responses are
-// assumed to resolve in the order their creates were issued: Zoom's
-// callbacks for one controller are not reordered relative to the calls
-// that triggered them, the same assumption "exactly one create outstanding"
-// already rests on everywhere else in this file. Popping the FRONT of
-// `outstanding` and comparing it against `current`
-// (talkback_check_response_generation()) is what answers "is this response
-// for the create I am now waiting on, or for one I gave up on" without
-// needing an id the SDK never provides.
+// WHY THIS IS ONE SCALAR AND NOT A QUEUE -- read this before "improving" it.
+// Fix round 3 shipped the same generation idea carried in a FIFO: one push
+// per successful CreateChannel, one pop per response that reached the
+// Nomination branch. That modelled a state THE ARBITER FORBIDS -- more than
+// one create outstanding at a time -- and it turned into a permanent feature
+// wedge the first time a push went unmatched, which two entirely ordinary
+// paths do:
+//   * a response that is never delivered at all -- the exact case
+//     m_nomination_create_deadline exists for (engine-talkback.h says so in
+//     as many words), and
+//   * a late response arriving while the owner is None/Probe/Session, which
+//     never reaches the Nomination branch and so never pops.
+// One orphaned entry left the FIFO permanently off by one; because `current`
+// is bumped between ladders, every later response then compared an OLDER
+// entry, read Stale, destroyed the channel Zoom had just created for it,
+// provisioned zero channels, and repeated for the life of the process --
+// reachable by `nominate -> swallowed response -> key press (expiry) ->
+// nominate`. That was strictly worse than the rare, transient
+// misattribution it replaced. The lesson is not "the counter was wrong": it
+// is that a container whose entries are added and removed on different
+// paths can DESYNCHRONISE, and a single slot cannot.
+//
+// So: one scalar. `outstanding` says whether a create is outstanding at all,
+// `outstanding_generation` says which generation issued it, and every issue
+// OVERWRITES both. There is nothing to keep in step, so nothing can fall out
+// of step, and a CURRENT response can never be judged Stale -- the stamp is
+// written by the very create whose response this is, and only a bump (which
+// only ever happens with the owner released) can separate them.
+//
+// FAIL OPEN, deliberately. Where the state cannot explain a response
+// (`Unexpected`), engine-talkback.cpp treats it as Current and lets the
+// ladder keep moving rather than destroying anything: a wrongly-KEPT channel
+// costs one leaked channel out of the meeting's 16, while a wrongly-
+// DESTROYED one costs the operator the whole talkback feature mid-show. Only
+// `Stale` -- a create we positively know we gave up on -- destroys, and it
+// destroys ONLY the channel that response names, touching no current state
+// and never advancing the ladder.
+//
+// The residual this accepts, knowingly: when create A's response is never
+// delivered, is expired, and a later ladder's create B overwrites the stamp,
+// A's response (if it ever does arrive, with the owner re-claimed by B) is
+// indistinguishable from B's and is adopted as B's. No scheme can do better
+// -- Zoom gives no correlation id -- and the cost is bounded and self-
+// limiting: the ladder may end up with one extra create in flight, whose
+// response finds m_nomination_pending empty and is destroyed down the
+// `channel_untracked` path. That is the round-2 Major, and accepting it is
+// the deliberate price of never wedging.
 //
 // No wraparound handling: realistic usage is dozens of nominate() calls and
 // expiries in a show, not the four billion `current` would need to wrap --
 // unlike src/shm-generation.h's counter (bumped per resubscribe, which CAN
 // run into the tens of thousands over a long process lifetime), saturating
-// this one would be solving a problem this feature does not have.
+// this one would be solving a problem this feature does not have. The
+// comparison is `==`/`!=`, never `<`, so even a wrap could only cost one
+// misjudged response rather than inverting the ordering forever.
 struct TalkbackGenerationState {
+    // Bumped by a fresh nominate() and by a Nomination expiry.
     uint32_t current = 0;
-    std::vector<uint32_t> outstanding; // FIFO: front = oldest still-unresolved
+    // Is exactly one Nomination create outstanding right now, and under
+    // which generation was it issued? A bool rather than a sentinel
+    // generation value so 0 never has to double as "none" -- the first
+    // create a process ever issues is stamped 0.
+    bool     outstanding = false;
+    uint32_t outstanding_generation = 0;
 };
 
 enum class TalkbackResponseFreshness {
-    // The oldest outstanding create's generation does not match `current`
-    // -- this response is for a create the ladder has since moved past.
+    // A create IS recorded as outstanding, but it was issued under a
+    // generation the ladder has since moved past -- this response belongs to
+    // a create we gave up on. The ONLY verdict that destroys.
     Stale,
-    // The oldest outstanding create's generation matches `current` --
-    // this is the response the ladder is actually waiting on.
+    // The outstanding create's generation matches `current`: this is the
+    // response the ladder is actually waiting on.
     Current,
-    // Nothing was recorded as outstanding at all. Reachable only if this
-    // class's own invariant (one `talkback_issue_create()` per successful
-    // CreateChannel, one pop per response for that owner) is violated --
-    // engine-talkback.cpp treats this the same as `Current` (fails open)
-    // rather than risk destroying a channel it cannot explain.
+    // Nothing was recorded as outstanding at all -- e.g. a redelivered
+    // response for a create that already resolved. Ambiguous, so it fails
+    // OPEN: engine-talkback.cpp treats this exactly like `Current`. See the
+    // FAIL OPEN paragraph above for why that is the cheaper mistake.
     Unexpected,
+    // The response was not claimed by Nomination at all (owner was None,
+    // Probe or Session), so this state has no opinion about it and -- the
+    // load-bearing half -- was NOT mutated. Round 3's FIFO desynchronised
+    // permanently precisely because this case silently skipped its pop; a
+    // scalar has nothing to skip, and this value exists so a test can say so
+    // out loud.
+    NotNomination,
 };
 
-// Bumps the generation -- the pure decision behind nominate() (a fresh
-// ladder) and expire_stale_pending_create_locked()'s Nomination arm (an
-// abandoned create). Does NOT touch `outstanding`: an entry already queued
-// under an EARLIER generation must stay queued so its eventual response is
-// still recognized -- and correctly discarded -- by the comparison below;
-// bumping only changes what counts as "current" going forward.
-inline TalkbackGenerationState talkback_bump_generation(TalkbackGenerationState state)
+// Bumps the generation: everything issued before this instant is now stale.
+// The pure decision behind BOTH of engine-talkback.cpp's bump sites --
+// nominate() (a fresh ladder must not be confused with an older one) and
+// expire_stale_pending_create_locked()'s Nomination arm (an abandoned create
+// must not be confused with whatever comes after it). One function for both
+// because they are the same transition; naming them separately would be the
+// per-owner-copy shape this file's own history keeps getting caught by.
+//
+// Deliberately does NOT clear `outstanding`: leaving the abandoned create's
+// stamp in place is what makes ITS response read Stale if it arrives before
+// anything else is issued. The stamp is overwritten (not queued behind) by
+// the next talkback_generation_issue(), so it can never accumulate.
+inline TalkbackGenerationState talkback_generation_bump(TalkbackGenerationState state)
 {
     ++state.current;
     return state;
 }
 
-// Records that a new create was issued under the current generation -- the
+// Records that a create was just issued under the current generation -- the
 // pure decision behind nomination_create_next() stamping a CreateChannel
-// call right after it returns SDKERR_SUCCESS.
-inline TalkbackGenerationState talkback_issue_create(TalkbackGenerationState state)
+// call right after it returns SDKERR_SUCCESS. Overwrites unconditionally:
+// the arbiter's promise is that only ONE create is outstanding at a time, so
+// anything already stamped here belonged to a create that was abandoned, and
+// there is nothing to reconcile with it. This unconditional overwrite is the
+// whole reason a desynchronisation is not expressible.
+inline TalkbackGenerationState talkback_generation_issue(TalkbackGenerationState state)
 {
-    state.outstanding.push_back(state.current);
+    state.outstanding = true;
+    state.outstanding_generation = state.current;
     return state;
 }
 
-// Pops the oldest outstanding generation (if any) and reports whether it
-// matches `state.current`. See TalkbackResponseFreshness::Unexpected for
-// why an empty queue is not treated as Stale.
+// Judges a create response, given the owner the arbiter just claimed it for.
+// Takes `owner` (rather than being called only from inside the Nomination
+// branch) so that "a response arrived under some OTHER owner" is a case this
+// pure function answers -- and a test can pin -- instead of a case the engine
+// expresses by not calling anything. That silent non-call was half of the
+// round-3 Critical.
 struct TalkbackResponseCheck {
     TalkbackResponseFreshness freshness;
     TalkbackGenerationState next;
 };
-inline TalkbackResponseCheck talkback_check_response_generation(TalkbackGenerationState state)
+inline TalkbackResponseCheck talkback_generation_on_response(TalkbackGenerationState state,
+                                                             TalkbackChannelOwner owner)
 {
-    if (state.outstanding.empty())
+    if (owner != TalkbackChannelOwner::Nomination)
+        return TalkbackResponseCheck{TalkbackResponseFreshness::NotNomination, state};
+    if (!state.outstanding)
         return TalkbackResponseCheck{TalkbackResponseFreshness::Unexpected, state};
-    const uint32_t resolved = state.outstanding.front();
-    state.outstanding.erase(state.outstanding.begin());
-    return TalkbackResponseCheck{
-        resolved == state.current ? TalkbackResponseFreshness::Current
-                                   : TalkbackResponseFreshness::Stale,
-        state};
+    if (state.outstanding_generation != state.current) {
+        // Stale: leave the state exactly as it is. The caller destroys the
+        // channel this response names and returns without advancing
+        // anything, so the stamp must survive -- a second late response for
+        // the same abandoned create must reach the same verdict.
+        return TalkbackResponseCheck{TalkbackResponseFreshness::Stale, state};
+    }
+    // Current: the create we were waiting on has now resolved, so nothing is
+    // outstanding until the next issue.
+    state.outstanding = false;
+    return TalkbackResponseCheck{TalkbackResponseFreshness::Current, state};
 }

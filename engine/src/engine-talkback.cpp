@@ -2853,6 +2853,36 @@ void send_one(const void *pcm, uint32_t byte_len, uint64_t, void *ctx)
         ++c->no_channel_drops;
         return;
     }
+    // LIVE GATE RUN 2 (2026-08-26): SEND MONO, ALWAYS. The M1 probe's mono
+    // tone was heard by the invited guest; this path's stereo voice was NOT,
+    // with every SendAudioDataToChannel returning SDKERR_SUCCESS -- the ring
+    // probe showed real voice (peak ~4900) flowing tap -> ring -> drain, and
+    // the guest heard silence. The SDK header ("mono or stereo",
+    // meeting_talkback_ctrl_interface.h:264-266) says stereo is accepted;
+    // live reality is that it is accepted and never heard. Same
+    // docs-vs-reality class as IsLimitedI420 (the gamma flash) and
+    // -use_wallclock_as_timestamps (ISO timing): trust the measurement, not
+    // the comment. So the boundary downmixes interleaved stereo to mono
+    // here, at the one place PCM meets the SDK; everything upstream (tap,
+    // ring, reports) keeps the source's true layout.
+    const char *send_ptr = static_cast<const char *>(pcm);
+    uint32_t    send_len = byte_len;
+    auto        send_chan = c->chan;
+    int16_t     mono[kTalkbackSlotBytes / (2 * sizeof(int16_t))];
+    if (c->chan == ZOOMSDK::ZoomSDKAudioChannel_Stereo) {
+        const auto *in = static_cast<const int16_t *>(pcm);
+        const uint32_t frames = byte_len / (2 * sizeof(int16_t));
+        for (uint32_t i = 0; i < frames; ++i) {
+            // Average, not sum: summing full-scale correlated L+R clips.
+            mono[i] = static_cast<int16_t>(
+                (static_cast<int32_t>(in[2 * i]) +
+                 static_cast<int32_t>(in[2 * i + 1])) / 2);
+        }
+        send_ptr  = reinterpret_cast<const char *>(mono);
+        send_len  = frames * sizeof(int16_t);
+        send_chan = ZOOMSDK::ZoomSDKAudioChannel_Mono;
+    }
+
     // THE SAME PCM TO EVERY CHANNEL OF THE TARGET, in one pass. An all-talent
     // target with more than 10 people owns ceil(n/10) channels because the SDK
     // caps a channel at 10 users; sending to only the first would leave
@@ -2862,7 +2892,7 @@ void send_one(const void *pcm, uint32_t byte_len, uint64_t, void *ctx)
     // silence the others.
     for (const zchar_t *channel : *c->channels) {
         const ZOOMSDK::SDKError e = c->ctrl->SendAudioDataToChannel(
-            channel, static_cast<const char *>(pcm), byte_len, c->rate, c->chan);
+            channel, send_ptr, send_len, c->rate, send_chan);
         if (e != ZOOMSDK::SDKERR_SUCCESS) {
             c->last_err = static_cast<int>(e);
             ++c->failed;

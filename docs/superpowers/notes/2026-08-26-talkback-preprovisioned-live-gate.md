@@ -158,3 +158,47 @@ never got past the first nomination. Add two:
 8. **Time a big plan.** 11 nominees = 13 channels ≈ 4 s of provisioning. That is paid once,
    at nomination, never at key time — but confirm the operator is not tempted to key during
    it (a key mid-ladder is refused `provisioning_incomplete`, by design).
+
+## Gate run 2 — 2026-08-26 20:25-21:02 (real meeting) — **PASSED**
+
+Setup that finally worked: engine joined the PMI via control API as "OBS" (own OAuth
+ZAK), operator's phone as guest "Random User" (not signed in). One nominee → plan of 2
+channels (all-talent + private), provisioned by the PACED ladder — the run-1
+`TOO_FREQUENT_CALL` fix held: `channels:2, done:true, has_private_channel:["Random User"]`.
+
+**The core measurement: PASSED.** Operator spoke "ONE, two, three, four" from silence on
+a fresh key press; the invited guest heard **"ONE" clearly, nothing clipped**. Baseline
+2026-08-25: the start of every press was lost. Then three rapid key cycles: all three
+words heard, each keyed onto the SAME standing channel (`F147F48D…` in all three
+`session_live` lines) — select-on-key working end to end.
+
+**Second product defect found and fixed live: stereo is silently discarded** (commit
+`0589d29`). The mono probe tone was heard; the stereo session voice was not, with every
+`SendAudioDataToChannel` returning `SDKERR_SUCCESS` — proven by the ring probe
+(`peek-talkback.py`: voice at peak ~4900 against a ~10 noise floor flowing tap → ring →
+drain while the guest heard silence). The SDK header says "mono or stereo"; reality is
+stereo-accepted-never-heard. The engine now downmixes at the SDK boundary.
+
+**Operational truths learned at the desk (they cost ~30 min of debugging):**
+- **The tap's source must sit on ≥1 mixer track.** Setting all six tracks off stopped
+  libobs's audio-capture callbacks instantly (dead-man closed the key at the moment the
+  tracks went off — measured, not inferred). The working setup: a DEDICATED
+  `Talkback Mic` source on an otherwise-unused track (track 6 here), keeping talkback
+  off program structurally while callbacks still flow.
+- **Studio Mode duplicates the program scene at transition time** — a source added to
+  the live scene object is NOT in the program's copy until the next transition, and
+  `open()`'s obs_source_active refusal fires (correctly). Transition once after adding.
+- The dead-man switch caught every real dead-path (hardware-muted GoXLR, zero-track
+  source, OBS still settling) exactly as designed; every "mystery" close was it working.
+- The probe's tone warble/cutouts ("it cuts out") = the KNOWN deferred 94.9%%-of-real-time
+  probe pacing defect, probe-only; the session path (clocked by OBS delivery) had no
+  dropouts across ~15 s of continuous speech.
+- GoXLR rigs: the mic lives on "Chat Mic (TC-HELICON GoXLR)", and the GoXLR's hardware
+  mute silences it while WASAPI keeps the stream alive (delivering zeros) — a key can
+  hold open on silence, which is correct fail-open behaviour for a mute (publish
+  silence, keep the path alive).
+
+**NOT tested, carried forward:** exclusivity (no third uninvited device was available)
+— still the one untested promise; first item next session. The adversarial probes
+(re-nominate mid-ladder, forced create failure under a live "all" key, drop/rejoin
+during a probe) also remain for a longer session.

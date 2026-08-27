@@ -111,6 +111,39 @@ static int count_abort_reports(const std::vector<std::string> &lines)
     return n;
 }
 
+// LIVE GATE RUN 1: the same shape as count_abort_reports() but pinned to one
+// reason string, so "the ladder aborted" and "the ladder aborted FOR THE
+// REASON THE OPERATOR NEEDS TO SEE" are separate assertions. The rate-limit
+// abort exists precisely because a generic create failure sent the first live
+// gate hunting permissions and channel budget for a problem that was neither.
+static int count_abort_reports_because(const std::vector<std::string> &lines,
+                                       const std::string &reason)
+{
+    int n = 0;
+    for (const auto &l : lines) {
+        if (line_has(l, "\"cmd\":\"talkback_nominate\"") &&
+            line_has(l, "\"stage\":\"nominate\"") &&
+            line_has(l, "\"ok\":false") &&
+            line_has(l, "\"channels_destroyed\":true") &&
+            line_has(l, "\"reason\":\"" + reason + "\""))
+            ++n;
+    }
+    return n;
+}
+
+// LIVE GATE RUN 1: the ladder's SUCCESSFUL terminal. Needed to prove a
+// rate-limited ladder does not merely avoid aborting but actually finishes --
+// "no abort" alone is also true of a ladder that quietly stopped.
+static int count_done_reports(const std::vector<std::string> &lines)
+{
+    int n = 0;
+    for (const auto &l : lines)
+        if (line_has(l, "\"cmd\":\"talkback_nominate\"") &&
+            line_has(l, "\"stage\":\"nominate_done\""))
+            ++n;
+    return n;
+}
+
 // Final review, C2: counts the ONE line that tells the plugin a session it
 // believes is live is over -- report_session_state(false, reason). Shape-
 // matched the same low-tech way count_abort_reports() is: no "stage" key, a
@@ -184,10 +217,23 @@ public:
     // mutant (c), "nothing pins the engine side". 1-based index of the
     // `creates` call to fail; -1 (default) never fails.
     int fail_create_call = -1;
+    // LIVE GATE RUN 1 (2026-08-26): the rate limit a real Zoom has and this
+    // fake never did. `rate_limit_next` is how many UPCOMING CreateChannel
+    // calls answer SDKERR_TOO_FREQUENT_CALL (18) -- the code the live gate saw
+    // when the ladder issued channel 2 from inside channel 1's response, 0ms
+    // apart. `rate_limited` counts how many actually were, so a test cannot
+    // mistake "the engine never called" for "the call was refused".
+    int rate_limit_next = 0;
+    int rate_limited = 0;
     ZOOMSDK::SDKError CreateChannel(unsigned int) override
     {
         ++creates;
         if (creates == fail_create_call) return ZOOMSDK::SDKERR_UNKNOWN;
+        if (rate_limit_next > 0) {
+            --rate_limit_next;
+            ++rate_limited;
+            return ZOOMSDK::SDKERR_TOO_FREQUENT_CALL;
+        }
         return ZOOMSDK::SDKERR_SUCCESS;
     }
     ZOOMSDK::IMeetingTalkbackChannel *GetChannelByID(const zchar_t *) override
@@ -492,6 +538,31 @@ static FakeUserInfo make_user(unsigned int id, const std::string &name,
     return u;
 }
 
+// LIVE GATE RUN 1 (2026-08-26): delivers a create response the way the ENGINE
+// now sees one, and every existing test in this file calls it instead of
+// onCreateChannelResponse directly.
+//
+// Why it exists: the ladder no longer issues channel N+1 from inside channel
+// N's response -- Zoom refused that with SDKERR_TOO_FREQUENT_CALL (18) in the
+// live gate -- it schedules it kNominationCreateSpacing (300ms) later and
+// nomination_tick() issues it from the command loop. A test that only
+// delivered responses would provision channel 1 and then stop. The two extra
+// calls here are the test's stand-in for 300ms of command-loop idle time:
+// expire the spacing deadline, then pump. Both are no-ops when nothing is
+// scheduled, which is why the non-ladder call sites (probe responses,
+// redelivered duplicates, untracked extras) can use this helper unchanged.
+//
+// Tests that assert on the PACING ITSELF deliberately do NOT use this -- they
+// call onCreateChannelResponse and nomination_tick() separately, because the
+// fact being pinned is precisely that the create does not happen in between.
+static void respond(EngineTalkback &tb, const zchar_t *id,
+                    IMeetingTalkbackCtrlEvent::TalkbackError err)
+{
+    tb.onCreateChannelResponse(id, err);
+    tb.debug_expire_create_spacing_for_test();
+    tb.nomination_tick();
+}
+
 int main()
 {
     // -- One CreateChannel at a time, and the arbiter is claimed -----------
@@ -521,7 +592,7 @@ int main()
         // Drive the ladder to completion: one create per response, and not
         // one more once the plan is exhausted.
         for (int i = 1; i <= 3; ++i)
-            tb.onCreateChannelResponse(chan_id(i).c_str(), kOk);
+            respond(tb, chan_id(i).c_str(), kOk);
         check(svc.ctrl.creates == 3,
               "the nomination ladder did not issue exactly one CreateChannel per "
               "planned channel");
@@ -541,7 +612,7 @@ int main()
         check(tb.nominate(&svc, nominees), "nominate refused an 11-name plan");
         // 2 all-talent + 11 private = 13 channels.
         for (int i = 1; i <= 13; ++i)
-            tb.onCreateChannelResponse(chan_id(i).c_str(), kOk);
+            respond(tb, chan_id(i).c_str(), kOk);
         const int creates_after_provisioning = svc.ctrl.creates;
         check(creates_after_provisioning == 13,
               "the 11-name plan did not provision 13 channels");
@@ -653,8 +724,8 @@ int main()
         FakeMeetingService svc;
         EngineTalkback tb;
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
-        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+        respond(tb, chan_id(1).c_str(), kOk);
+        respond(tb, chan_id(2).c_str(), kOk);
 
         ShmRegion bad{};
         const std::string bad_name = "ZoomObsPluginTest_talkback_badlayout";
@@ -710,7 +781,7 @@ int main()
         for (int i = 0; i < 11; ++i) nominees.push_back("Talent " + std::to_string(i + 1));
         check(tb.nominate(&svc, nominees), "nominate refused an 11-name plan");
         // Answer ONE create: all-talent slice 1 of 2 exists, slice 2 does not.
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+        respond(tb, chan_id(1).c_str(), kOk);
 
         check(!tb.session_start(&svc, kTalkbackAllTalentTarget),
               "keying a HALF-PROVISIONED all-talent target was accepted -- the "
@@ -721,8 +792,8 @@ int main()
         // refusal must be about THIS target's fan-out, not about the ladder
         // being busy. Talent 1's private channel is created second in plan
         // order (all-talent slices first, then privates).
-        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);   // all-talent 2/2
-        tb.onCreateChannelResponse(chan_id(3).c_str(), kOk);   // Talent 1 private
+        respond(tb, chan_id(2).c_str(), kOk);   // all-talent 2/2
+        respond(tb, chan_id(3).c_str(), kOk);   // Talent 1 private
         check(tb.session_start(&svc, "Talent 1"),
               "keying a fully-provisioned private target was refused just because "
               "OTHER channels were still being created");
@@ -739,13 +810,13 @@ int main()
         FakeMeetingService svc;
         EngineTalkback tb;
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
-        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+        respond(tb, chan_id(1).c_str(), kOk);
+        respond(tb, chan_id(2).c_str(), kOk);
 
         check(tb.probe(&svc, "Someone"), "the probe refused to start after a nomination");
         // The SDK redelivers the response for a PROVISIONED channel while the
         // probe is waiting for its own.
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+        respond(tb, chan_id(1).c_str(), kOk);
         // With the defect, the probe has adopted chan-1, failed to resolve a
         // participant (no participants controller), moved to Destroying, and
         // this tick() destroys a live talent channel.
@@ -774,8 +845,8 @@ int main()
 
         // ...and the refusal leaves an existing nomination untouched.
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a clean plan");
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
-        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+        respond(tb, chan_id(1).c_str(), kOk);
+        respond(tb, chan_id(2).c_str(), kOk);
         check(!tb.nominate(&svc, {"ALL"}), "a colliding re-nomination was accepted");
         check(svc.ctrl.destroyed.empty(),
               "a REFUSED nomination destroyed the standing channels anyway");
@@ -794,7 +865,7 @@ int main()
 
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         for (int i = 1; i <= 2; ++i)
-            tb.onCreateChannelResponse(chan_id(i).c_str(), kOk);
+            respond(tb, chan_id(i).c_str(), kOk);
         const int creates_after_provisioning = svc.ctrl.creates;
         check(!tb.session_start(&svc, "Someone Else"),
               "keying a name nobody nominated was accepted");
@@ -815,7 +886,7 @@ int main()
         check(svc.ctrl.creates == 1, "nominate did not issue its first create");
 
         tb.nomination_reset();                        // what Leave/quit do
-        tb.onCreateChannelResponse(chan_id(9).c_str(), kOk);
+        respond(tb, chan_id(9).c_str(), kOk);
         check(svc.ctrl.destroyed.size() == 1 && svc.ctrl.destroyed[0] == "chan-9",
               "a create cancelled by Leave was not destroyed when its response "
               "arrived -- it is orphaned on Zoom and the arbiter is wedged");
@@ -834,7 +905,7 @@ int main()
         EngineTalkback tb;
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         for (int i = 1; i <= 2; ++i)
-            tb.onCreateChannelResponse(chan_id(i).c_str(), kOk);
+            respond(tb, chan_id(i).c_str(), kOk);
         check(svc.ctrl.destroyed.empty(), "a clean ladder destroyed something");
 
         check(tb.nominate(&svc, {"Ivan"}),
@@ -858,8 +929,8 @@ int main()
         FakeMeetingService svc;
         EngineTalkback tb;
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);   // all-talent
-        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);   // Sarah private
+        respond(tb, chan_id(1).c_str(), kOk);   // all-talent
+        respond(tb, chan_id(2).c_str(), kOk);   // Sarah private
 
         // Sarah is not in the meeting yet at provisioning time -- both of
         // the initial invite attempts (in onCreateChannelResponse's own
@@ -934,8 +1005,8 @@ int main()
         FakeMeetingService svc;
         EngineTalkback tb;
         check(tb.nominate(&svc, {"Ivan"}), "nominate refused a one-name plan");
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
-        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+        respond(tb, chan_id(1).c_str(), kOk);
+        respond(tb, chan_id(2).c_str(), kOk);
 
         svc.participants.users.push_back(
             make_user(2001, "Ivan", /*supports_talkback=*/false));
@@ -954,8 +1025,8 @@ int main()
         FakeMeetingService svc;
         EngineTalkback tb;
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
-        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+        respond(tb, chan_id(1).c_str(), kOk);
+        respond(tb, chan_id(2).c_str(), kOk);
 
         check(tb.probe(&svc, "Someone"), "the probe refused to start");
         const int creates_before_roster_event = svc.ctrl.creates;
@@ -987,8 +1058,8 @@ int main()
         FakeMeetingService svc;
         EngineTalkback tb;
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
-        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+        respond(tb, chan_id(1).c_str(), kOk);
+        respond(tb, chan_id(2).c_str(), kOk);
         const int creates_before_resolution = svc.ctrl.creates;
 
         svc.participants.users.push_back(make_user(3101, "Sarah"));
@@ -1015,8 +1086,8 @@ int main()
         FakeMeetingService svc;
         EngineTalkback tb;
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
-        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+        respond(tb, chan_id(1).c_str(), kOk);
+        respond(tb, chan_id(2).c_str(), kOk);
 
         svc.participants.users.push_back(make_user(4001, "Sarah"));
         tb.resolve_roster_change(&svc);
@@ -1067,8 +1138,8 @@ int main()
         FakeMeetingService svc;
         EngineTalkback tb;
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);   // all-talent
-        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);   // Sarah private
+        respond(tb, chan_id(1).c_str(), kOk);   // all-talent
+        respond(tb, chan_id(2).c_str(), kOk);   // Sarah private
 
         svc.participants.users.push_back(make_user(8001, "Sarah"));
         tb.resolve_roster_change(&svc);
@@ -1125,8 +1196,8 @@ int main()
         FakeMeetingService svc;
         EngineTalkback tb;
         check(tb.nominate(&svc, {"Ivan"}), "nominate refused a one-name plan");
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
-        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+        respond(tb, chan_id(1).c_str(), kOk);
+        respond(tb, chan_id(2).c_str(), kOk);
 
         svc.participants.users.push_back(make_user(5001, "Ivan"));
         tb.resolve_roster_change(&svc);
@@ -1165,8 +1236,8 @@ int main()
         FakeMeetingService svc;
         EngineTalkback tb;
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
-        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+        respond(tb, chan_id(1).c_str(), kOk);
+        respond(tb, chan_id(2).c_str(), kOk);
 
         ShmRegion region{};
         const std::string region_name = "ZoomObsPluginTest_talkback_m3";
@@ -1215,8 +1286,8 @@ int main()
         FakeMeetingService svc;
         EngineTalkback tb;
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);   // all-talent
-        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);   // Sarah private
+        respond(tb, chan_id(1).c_str(), kOk);   // all-talent
+        respond(tb, chan_id(2).c_str(), kOk);   // Sarah private
 
         svc.participants.users.push_back(make_user(7001, "Sarah"));
         tb.resolve_roster_change(&svc);
@@ -1272,6 +1343,211 @@ int main()
               "a synchronous CreateChannel() failure did not emit exactly one "
               "terminal abort report with channels_destroyed:true");
 
+        // LIVE GATE RUN 1, test (d): the rate-limit retry added below must not
+        // swallow the OTHER synchronous failures. Only SDKERR_TOO_FREQUENT_CALL
+        // is a "not yet"; SDKERR_UNKNOWN and everything like it still end the
+        // ladder on the first try, with the generic reason. Pumping afterwards
+        // proves no retry was quietly armed for the pump to pick up.
+        check(count_abort_reports_because(lines, "create_channel_failed") == 1,
+              "a non-rate-limit CreateChannel() failure did not abort with its "
+              "own reason");
+        for (int i = 0; i < 5; ++i) {
+            tb.debug_expire_create_spacing_for_test();
+            tb.nomination_tick();
+        }
+        check(svc.ctrl.creates == 1,
+              "A NON-RATE-LIMIT CreateChannel() FAILURE WAS RETRIED -- the "
+              "backoff is for SDKERR_TOO_FREQUENT_CALL and nothing else");
+        check(count_abort_reports(lines) == 1,
+              "the pump produced a second terminal report for a ladder that had "
+              "already aborted");
+
+        EngineIpc::test_sink() = nullptr;
+    }
+
+    // -- LIVE GATE RUN 1 (2026-08-26): THE LADDER IS PACED, AND A RATE-LIMIT
+    // REFUSAL IS A WAIT, NOT A FAILURE ------------------------------------
+    //
+    // In the first live gate against a real meeting, a one-nominee nomination
+    // planned 2 channels. Channel 1 was created and its nominee invited; then
+    // the ladder issued channel 2's CreateChannel synchronously from inside
+    // channel 1's onCreateChannelResponse -- both lines timestamped
+    // 20:04:37.291, a 0ms gap -- and Zoom answered SDKERR_TOO_FREQUENT_CALL
+    // (18). The ladder aborted terminally, correctly by its own rules and
+    // uselessly in practice: every real talent list plans more than one
+    // channel, so NO nomination could ever have succeeded live. Nothing in
+    // this suite could have caught it -- the fake controller had no rate limit
+    // and no notion of elapsed time between calls.
+    //
+    // (a) The spacing itself: create N+1 is not issued from inside channel N's
+    // response, and not before its deadline either. This is the one test in
+    // the file that must NOT use respond() -- the fact being pinned is
+    // precisely what happens in between.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        // "Sarah" plans 2 channels: all-talent + her private.
+        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        check(svc.ctrl.creates == 1, "setup: the first create was not issued");
+
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+        check(svc.ctrl.creates == 1,
+              "THE LIVE GATE DEFECT: channel 2's CreateChannel was issued from "
+              "inside channel 1's onCreateChannelResponse, 0ms after it -- Zoom "
+              "refuses that with SDKERR_TOO_FREQUENT_CALL");
+
+        // The pump runs constantly (every ~50ms of command-loop idle); it must
+        // do nothing until the spacing deadline has actually passed.
+        tb.nomination_tick();
+        check(svc.ctrl.creates == 1,
+              "the pump issued the next create before its spacing deadline -- "
+              "the deadline is the whole mechanism");
+
+        tb.debug_expire_create_spacing_for_test();
+        tb.nomination_tick();
+        check(svc.ctrl.creates == 2,
+              "the pump never issued the next create once its deadline passed "
+              "-- the ladder would stall forever after channel 1");
+    }
+
+    // (b) A code-18 refusal backs off and retries THE SAME CHANNEL, and the
+    // ladder completes on the retry. This is the mutation-proved one: make the
+    // 18 branch fall through to the generic abort (i.e. delete the retry) and
+    // the "no abort" and "completed" checks below both fail.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        std::vector<std::string> lines;
+        EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
+
+        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);   // schedules channel 2
+
+        // Zoom refuses exactly the next create -- the live gate's shape, only
+        // now with 300ms of spacing already spent and Zoom still saying "not
+        // yet". That is the case the backoff exists for.
+        svc.ctrl.rate_limit_next = 1;
+        tb.debug_expire_create_spacing_for_test();
+        tb.nomination_tick();
+        check(svc.ctrl.rate_limited == 1,
+              "setup: the fake never refused a create, so this test proves "
+              "nothing about the rate limit");
+        check(count_abort_reports(lines) == 0,
+              "A RATE-LIMITED CREATE ENDED THE LADDER -- this is the live gate "
+              "defect itself: SDKERR_TOO_FREQUENT_CALL is Zoom saying 'not "
+              "yet', and treating it as a failure means no multi-channel "
+              "nomination can ever succeed");
+
+        // The retry, after the backoff. Same channel: the plan's front was
+        // never popped, so this is channel 2 again, not channel 3.
+        tb.debug_expire_create_spacing_for_test();
+        tb.nomination_tick();
+        check(svc.ctrl.creates == 3,
+              "the rate-limited create was never retried -- the ladder is "
+              "stalled with no terminal report at all, the worst of both");
+
+        respond(tb, chan_id(2).c_str(), kOk);
+        check(count_done_reports(lines) == 1,
+              "the ladder did not reach its ONE successful terminal after "
+              "riding out a rate limit");
+        check(count_abort_reports(lines) == 0,
+              "a ladder that completed on a retry also reported an abort -- "
+              "every ladder exit must reach exactly one terminal");
+        check(svc.ctrl.destroyed.empty(),
+              "a ladder that completed on a retry still tore its channels down");
+
+        EngineIpc::test_sink() = nullptr;
+    }
+
+    // (c) Retries exhausted: exactly one terminal abort, and its reason names
+    // the rate limit rather than blaming CreateChannel generically -- the
+    // operator has to learn the true cause from the log, which is the whole
+    // reason this reason string exists.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        std::vector<std::string> lines;
+        EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
+
+        svc.ctrl.rate_limit_next = 100;   // Zoom never lets up
+        // TRUE, not false: a rate-limited FIRST create leaves the ladder alive
+        // with a retry armed, so nominate() must still assign its plan -- see
+        // nomination_create_next()'s declaration comment. A false here would
+        // mean the retry fires against an empty queue.
+        check(tb.nominate(&svc, {"Sarah"}),
+              "nominate() gave up on the first create instead of arming a retry");
+
+        // More pumps than the cap, so "stopped retrying" is observable rather
+        // than merely "ran out of test".
+        for (int i = 0; i < 12; ++i) {
+            tb.debug_expire_create_spacing_for_test();
+            tb.nomination_tick();
+        }
+        // kMaxNominationCreateRetries is 4 (file-local to engine-talkback.cpp),
+        // so: the initial create plus four retries, then the abort.
+        check(svc.ctrl.creates == 5,
+              "the rate-limit retry is not capped at kMaxNominationCreateRetries "
+              "-- an unbounded retry is a ladder that never reports at all");
+        check(count_abort_reports(lines) == 1,
+              "exhausted rate-limit retries did not emit EXACTLY ONE terminal "
+              "abort with channels_destroyed:true");
+        check(count_abort_reports_because(lines, "create_rate_limited") == 1,
+              "the exhausted-retry abort did not name the rate limit -- a "
+              "generic create failure sends the operator hunting permissions "
+              "and channel budget for a problem that is neither");
+
+        EngineIpc::test_sink() = nullptr;
+    }
+
+    // (e) THE WINDOW THE PACING OPENS, and the gate that closes it. Found by
+    // mutation, not by review: deleting the scheduled-create half of
+    // nominate()'s gate left every test above green.
+    //
+    // Before the ladder was paced, "the arbiter is free" and "no ladder is
+    // mid-provisioning" were the same fact -- the next create left from inside
+    // the previous response, so there was no instant in between, and
+    // nominate()'s arbiter gate refused every mid-ladder re-nomination for
+    // free. kNominationCreateSpacing opens ~300ms per rung where the arbiter
+    // is genuinely free and a ladder is genuinely still running. A
+    // re-nomination landing there would pass the gate, run its replace path,
+    // destroy the running ladder's channels and start a second ladder over the
+    // top -- and the FIRST ladder would end with no terminal report of its
+    // own, which is the one rule this feature's whole abort machinery exists
+    // to hold (Task 5 fix rounds 2 and 3 are both about exactly that).
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        std::vector<std::string> lines;
+        EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
+
+        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        // Channel 1 lands: the arbiter is released by the response, and
+        // channel 2 is scheduled but not yet issued. This is the window.
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+
+        check(!tb.nominate(&svc, {"Ivan"}),
+              "A RE-NOMINATION INSIDE THE LADDER'S SPACING WINDOW WAS ACCEPTED "
+              "-- it would destroy the running ladder's channels and leave that "
+              "ladder with no terminal report at all");
+        check(svc.ctrl.creates == 1,
+              "the refused re-nomination still issued a CreateChannel");
+        check(svc.ctrl.destroyed.empty(),
+              "the refused re-nomination tore down the running ladder's "
+              "channels -- nominate()'s early gate must destroy nothing");
+
+        // ...and the original ladder is untouched: it resumes on the next pump
+        // and reaches exactly one terminal, its own.
+        tb.debug_expire_create_spacing_for_test();
+        tb.nomination_tick();
+        check(svc.ctrl.creates == 2,
+              "the refused re-nomination stalled the ladder it was refused for");
+        respond(tb, chan_id(2).c_str(), kOk);
+        check(count_done_reports(lines) == 1,
+              "the ladder that survived a refused re-nomination did not reach "
+              "exactly one successful terminal");
+        check(count_abort_reports(lines) == 0,
+              "a refused re-nomination made the running ladder abort");
+
         EngineIpc::test_sink() = nullptr;
     }
 
@@ -1288,10 +1564,10 @@ int main()
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+        respond(tb, chan_id(1).c_str(), kOk);
         check(svc.ctrl.destroyed.empty(),
               "setup: channel 1 was destroyed before the failure even arrived");
-        tb.onCreateChannelResponse(chan_id(2).c_str(),
+        respond(tb, chan_id(2).c_str(),
             IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_NOPERMISSION);
 
         check(count_abort_reports(lines) == 1,
@@ -1353,7 +1629,7 @@ int main()
 
         // Ladder A: attempt 99, two channels (all-talent + Sarah private).
         check(tb.nominate(&svc, {"Sarah"}, 99), "nominate refused a one-name plan");
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+        respond(tb, chan_id(1).c_str(), kOk);
 
         // Attempt 100 arrives MID-LADDER and is refused at the arbiter gate
         // with "create_busy" -- the engine's documented, correct behaviour,
@@ -1387,7 +1663,7 @@ int main()
               "stages it into whatever slot happens to be current");
 
         // Ladder A finishes. nominate_done must still be tagged 99.
-        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+        respond(tb, chan_id(2).c_str(), kOk);
         bool done_tagged_99 = false;
         for (const auto &l : lines)
             if (line_has(l, "\"stage\":\"nominate_done\"") && line_has(l, "\"attempt\":99"))
@@ -1411,8 +1687,8 @@ int main()
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
         check(tb.nominate(&svc, {"Sarah"}, 43), "nominate refused a one-name plan");
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
-        tb.onCreateChannelResponse(chan_id(2).c_str(),
+        respond(tb, chan_id(1).c_str(), kOk);
+        respond(tb, chan_id(2).c_str(),
             IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_NOPERMISSION);
 
         check(count_abort_reports(lines) == 1,
@@ -1452,8 +1728,8 @@ int main()
         check(tb.nominate(&svc, nominees), "nominate refused an 11-name plan");
         // 2 all-talent slices + 11 privates = 13. Answer only the two slices:
         // "all" is fully provisioned, the ladder is still running.
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
-        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+        respond(tb, chan_id(1).c_str(), kOk);
+        respond(tb, chan_id(2).c_str(), kOk);
 
         ShmRegion region{};
         const std::string region_name = "ZoomObsPluginTest_talkback_c2";
@@ -1479,7 +1755,7 @@ int main()
               "setup: the live key did not fan out to both all-talent channels");
 
         // Create #3 (the first private) is rejected by Zoom.
-        tb.onCreateChannelResponse(chan_id(3).c_str(),
+        respond(tb, chan_id(3).c_str(),
             IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_NOPERMISSION);
 
         check(count_abort_reports(lines) == 1,
@@ -1521,8 +1797,8 @@ int main()
         FakeMeetingService svc;
         EngineTalkback tb;
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);   // all-talent
-        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);   // Sarah private
+        respond(tb, chan_id(1).c_str(), kOk);   // all-talent
+        respond(tb, chan_id(2).c_str(), kOk);   // Sarah private
 
         svc.participants.users.push_back(make_user(8001, "Sarah"));
         tb.resolve_roster_change(&svc);
@@ -1576,8 +1852,8 @@ int main()
         FakeMeetingService svc;
         EngineTalkback tb;
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
-        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+        respond(tb, chan_id(1).c_str(), kOk);
+        respond(tb, chan_id(2).c_str(), kOk);
 
         svc.participants.users.push_back(make_user(8001, "Sarah"));
         tb.resolve_roster_change(&svc);

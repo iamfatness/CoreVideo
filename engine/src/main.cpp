@@ -45,6 +45,7 @@
 #include <exception>
 #include <cstdlib>
 #include <chrono>
+#include <functional>   // ipc_read_line_with_message_pump()'s on_idle hook
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -163,7 +164,17 @@ static void pump_windows_messages()
     }
 }
 
+// `on_idle` (LIVE GATE RUN 1, 2026-08-26) runs on every turn this function
+// spends WAITING rather than reading -- i.e. on the 50ms
+// MsgWaitForMultipleObjects timeout and on every message-available wake, right
+// after the SDK's messages have been pumped. That makes it the engine's only
+// periodic hook that runs on the COMMAND-LOOP THREAD, which is what the
+// nomination ladder's create pacing needs and what tick() (probe-driving
+// thread, and only alive during a probe) cannot provide. Keep whatever runs
+// here cheap and non-blocking: this thread is also the SDK's message pump, so
+// anything slow here delays every callback in the engine.
 static bool ipc_read_line_with_message_pump(IpcFd fd, std::string &out,
+                                            const std::function<void()> &on_idle = {},
                                             size_t max_len = 65536)
 {
     out.clear();
@@ -186,6 +197,12 @@ static bool ipc_read_line_with_message_pump(IpcFd fd, std::string &out,
                 }
                 if (wait == WAIT_OBJECT_0 + 1 || wait == WAIT_TIMEOUT) {
                     pump_windows_messages();
+                    // AFTER the pump, never before: an SDK callback dispatched
+                    // by that pump (onCreateChannelResponse) is what arms the
+                    // deadline this hook then checks, so pumping first costs
+                    // nothing and saves a whole 50ms turn on every rung of the
+                    // nomination ladder.
+                    if (on_idle) on_idle();
                     continue;
                 }
                 CancelIo(fd);
@@ -1331,7 +1348,14 @@ int main()
 
     while (running) {
 #if defined(WIN32)
-        if (!ipc_read_line_with_message_pump(p2e, line)) break;
+        // LIVE GATE RUN 1 (2026-08-26): the nomination ladder's create pacing
+        // runs here, on the command-loop thread, because CreateChannel may run
+        // nowhere else -- see EngineTalkback::nomination_tick()'s comment on
+        // why tick() cannot host it. No-op (one mutex acquire) whenever no
+        // ladder is mid-provisioning, which is almost always.
+        if (!ipc_read_line_with_message_pump(
+                p2e, line, []() { talkback.nomination_tick(); }))
+            break;
 #else
         if (!ipc_read_line(p2e, line)) break; // EOF or connection closed
 #endif

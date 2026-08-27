@@ -186,8 +186,40 @@ Every one of these is documented at length where it lives; the list is the map.
   failure mode this whole feature is written against. A target is not a channel — all-talent
   past 10 people owns `ceil(n/10)` of them and one drain pass fans the same
   PCM out to all (`talkback_channel_serves_target`). Milestone incomplete
-  until the Task 6 live gate: the first-syllable claim is measured on the old
-  path, not yet re-measured on the new one.
+  until the live gate passes: the first-syllable claim is measured on the old
+  path, not yet re-measured on the new one. **Gate run 1 (2026-08-26) failed
+  before it could measure anything** — see the create-pacing entry below and
+  `docs/superpowers/notes/2026-08-26-talkback-preprovisioned-live-gate.md`.
+- **The nomination ladder must be PACED, and code 18 is a wait not a failure**
+  (`kNominationCreateSpacing` / `nomination_tick()` in
+  `engine/src/engine-talkback.cpp`, live gate run 1, 2026-08-26 20:04): Zoom
+  rate-limits back-to-back `CreateChannel` calls. The ladder used to issue
+  channel N+1 synchronously from inside channel N's `onCreateChannelResponse`
+  — a 0 ms gap — and Zoom refused it with `SDKERR_TOO_FREQUENT_CALL` (enum
+  position 18), so **no nomination with more than one channel could ever
+  succeed live**, which is every real talent list. No unit test could catch it:
+  the fake controller has no rate limit. The create is now scheduled 300 ms
+  after the previous response and issued by `nomination_tick()`; a code-18
+  refusal backs off (500 ms doubling, 4 retries per channel) and retries the
+  SAME channel, and only cap exhaustion is terminal — with reason
+  `create_rate_limited`, never the generic `create_channel_failed`, because
+  run 1 spent its first pass suspecting permissions and channel budget.
+  **`nomination_tick()` is not `tick()` and must never be folded into it**:
+  `tick()` has exactly one driver, the thread `main.cpp` spawns when `probe()`
+  returns true, which by construction does not exist during a nomination — a
+  create scheduled there would never be issued, and if it were it would run on
+  the probe's thread, breaking both the command-loop-thread rule `CreateChannel`
+  lives under and fact 2 of `tick()`'s batch-destroy chain. The pump rides the
+  command loop's own 50 ms idle turn instead (`on_idle` in
+  `ipc_read_line_with_message_pump()`). The arbiter claim is taken at ISSUE,
+  not held across the wait — a scheduled create is not outstanding, and
+  claiming early would arm `kAwaitTimeout` against a request Zoom has never
+  seen, so the spacing wait would self-expire the ladder it is pacing. The
+  ~300 ms window that opens is closed where it matters: `nominate()` refuses
+  `create_busy` while a create is *scheduled* as well as outstanding, or a
+  re-nomination landing in that window would destroy a running ladder's
+  channels and leave it with no terminal report — the one rule the whole abort
+  machinery exists to hold. That gate was found by mutation, not by review.
 - **Talkback roster re-resolution** (`resolve_roster_change()` in
   `engine/src/engine-talkback.cpp`, called from `roster_changed()` in
   `engine/src/main.cpp`'s five roster SDK callbacks): a rejoin has to rebuild

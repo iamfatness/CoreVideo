@@ -23,6 +23,38 @@ constexpr std::chrono::milliseconds kAwaitTimeout{10000};
 // times instead.
 constexpr uint32_t kMaxDestroyAttempts = 5;
 
+// LIVE GATE RUN 1 (2026-08-26, real meeting, 20:04:37). ZOOM RATE-LIMITS
+// BACK-TO-BACK CreateChannel CALLS. A two-channel plan issued channel 2's
+// create synchronously from inside channel 1's onCreateChannelResponse -- the
+// log shows both at 20:04:37.291, a 0ms gap -- and Zoom returned
+// SDKERR_TOO_FREQUENT_CALL (enum position 18 in zoom_sdk_def.h). The ladder
+// aborted terminally, correctly and uselessly: every real talent list plans
+// more than one channel, so no nomination could ever have succeeded live.
+//
+// kNominationCreateSpacing: the minimum gap between one create's RESPONSE and
+// the next create's ISSUE. 300ms is six turns of the command loop's 50ms idle
+// pump (ipc_read_line_with_message_pump's MsgWaitForMultipleObjects timeout in
+// main.cpp), so the pump's granularity cannot round it down to something near
+// the 0ms Zoom refused; and it keeps a big plan tolerable -- the 13-channel
+// 11-nominee case provisions in ~4s of otherwise idle wall time, once, at
+// nomination rather than at key time. Zoom documents no rate for this, so the
+// value is an engineering guess with margin, not a published limit; if a later
+// gate still sees 18 at 300ms, raise this rather than leaning on the retry.
+constexpr std::chrono::milliseconds kNominationCreateSpacing{300};
+
+// The first backoff after an actual SDKERR_TOO_FREQUENT_CALL, doubled per
+// retry: 500 / 1000 / 2000 / 4000ms. Starts above kNominationCreateSpacing
+// because the spacing already proved insufficient by the time this fires.
+constexpr std::chrono::milliseconds kNominationRateLimitBackoff{500};
+
+// Per-channel cap on those retries. Four gives 7.5s of total backoff for one
+// channel -- long enough to ride out a burst, short enough that an operator
+// who nominated during a Zoom-side problem gets a terminal answer rather than
+// a ladder that looks alive forever. Exhausting it aborts with reason
+// "create_rate_limited" (not the generic create failure) so the log names the
+// true cause.
+constexpr uint32_t kMaxNominationCreateRetries = 4;
+
 // Final-review C1 (CRITICAL): the ",\"attempt\":N" suffix that identifies
 // which nominate attempt a report belongs to, so the plugin can match it to
 // the staging slot it came from instead of assuming it is whatever is staged
@@ -785,9 +817,6 @@ unsigned int EngineTalkback::resolve_participant(const std::string &name,
 void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackError error)
 {
     const std::string id = zchar_to_utf8(channelID);
-    report("create_channel_response",
-           R"("channel":")" + json_escape(id) + R"(","error":)" +
-           std::to_string(static_cast<int>(error)));
 
     // Route by who asked. See src/talkback-channel-owner.h: the response
     // carries no indication of its requester, so the arbiter is the only
@@ -825,6 +854,24 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
     const TalkbackChannelOwner owner = claimed.owner;
     const bool cancelled = claimed.cancelled;
     const TalkbackResponseFreshness freshness = claimed.freshness;
+
+    // LIVE GATE RUN 1, cosmetic finding: this raw trace line used to be the
+    // FIRST statement of this function, before the arbiter claim, and so had
+    // no way to know who the response belonged to -- it always went through
+    // report(), i.e. "cmd":"talkback_probe", and the gate log shows it doing
+    // exactly that in the middle of a nomination ladder. Moved below the
+    // claim and routed by owner, the same ReportSink split resolve_participant()
+    // already does for participant_talkback_support (fix round 1, M3). Nothing
+    // reports between the old position and this one, so the only observable
+    // change is the "cmd" field -- and no consumer keys on this stage name
+    // (it is a log-only trace line; see attempt_field()'s inventory).
+    const std::string response_fields =
+        R"("channel":")" + json_escape(id) + R"(","error":)" +
+        std::to_string(static_cast<int>(error));
+    if (owner == TalkbackChannelOwner::Nomination)
+        report_nomination("create_channel_response", response_fields);
+    else
+        report("create_channel_response", response_fields);
     // NO SESSION BRANCH ANY MORE (Task 3). It used to sit here and was the
     // most delicate code in this file: session_start() issued a CreateChannel
     // on the key press, so this callback had to decide, with no correlation
@@ -1054,6 +1101,12 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
             if (have_planned) {
                 planned = m_nomination_pending.front();
                 m_nomination_pending.erase(m_nomination_pending.begin());
+                // LIVE GATE RUN 1: the front just advanced, so the rate-limit
+                // retry budget belongs to a new channel. Reset it HERE, in the
+                // same lock scope as the pop, so the two cannot drift -- the
+                // budget is defined as "consecutive retries for the channel at
+                // the front", and this is the only place the front advances.
+                m_nomination_create_retries = 0;
                 TalkbackProvisionedChannel pc;
                 pc.channel_id_z.assign(channelID);
                 pc.channel_id = id;
@@ -1118,7 +1171,16 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
             if (!more) provisioned_count = m_provisioned_channels.size();
         }
         if (more)
-            nomination_create_next();
+            // LIVE GATE RUN 1 (2026-08-26): this used to be a direct
+            // nomination_create_next() -- channel N+1's CreateChannel issued
+            // synchronously from inside channel N's response, a 0ms gap, which
+            // Zoom refuses with SDKERR_TOO_FREQUENT_CALL (18). The create is
+            // now SCHEDULED and nomination_tick() issues it from the command
+            // loop once kNominationCreateSpacing has passed. Same thread
+            // either way (this callback and the pump both run on the command
+            // loop -- see assert_command_loop_thread()); what changes is only
+            // that the create no longer leaves from inside the callback.
+            nomination_schedule_create(kNominationCreateSpacing);
         else
             report_nomination("nominate_done",
                               R"("channels":)" + std::to_string(provisioned_count) +
@@ -1651,10 +1713,27 @@ bool EngineTalkback::nominate(ZOOMSDK::IMeetingService *svc,
     // this function never destroys a standing nomination it then has to
     // refuse to replace. Order matters in one direction only: check the
     // arbiter, claim the ladder, THEN tear down and rebuild.
+    //
+    // LIVE GATE RUN 1 (2026-08-26): the gate now also refuses while a create
+    // is merely SCHEDULED. Before the ladder was paced, "the arbiter is free"
+    // and "no ladder is mid-provisioning" were the same fact -- the next
+    // create was issued from inside the previous response, so there was no
+    // instant in between. kNominationCreateSpacing opens a ~300ms window where
+    // the arbiter is genuinely free and a ladder is genuinely still running,
+    // and a re-nomination landing in it would have started a second ladder
+    // over the top of the first: the first's channels destroyed by the
+    // replace path with no terminal report of its own, which is the one rule
+    // this feature's whole abort machinery exists to hold. Both halves are
+    // read in ONE lock scope for the same reason they are refused together.
+    // Reported as "create_busy" like the arbiter half, and correctly so: this
+    // is nominate()'s early gate, which destroys nothing and leaves the
+    // running ladder alone -- exactly what "create_busy" without
+    // "channels_destroyed" already means to the plugin.
     bool create_gate_ok;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
-        create_gate_ok = talkback_may_request_create(m_pending_create.owner);
+        create_gate_ok = !m_nomination_create_scheduled &&
+                         talkback_may_request_create(m_pending_create.owner);
         if (create_gate_ok) m_pending_create = talkback_new_ladder(m_pending_create);
     }
     if (!create_gate_ok) {
@@ -1777,6 +1856,12 @@ bool EngineTalkback::nomination_create_next()
     TalkbackChannelOwner expired_owner;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
+        // LIVE GATE RUN 1: whatever was scheduled, THIS call is it. Disarm
+        // here rather than only in nomination_tick(), so the direct callers
+        // (nominate() for the plan's first channel) cannot leave a stale
+        // schedule armed behind them, and so a scheduled create can never be
+        // issued twice.
+        m_nomination_create_scheduled = false;
         expired_owner = expire_stale_pending_create_locked();
         create_gate_ok = talkback_may_request_create(m_pending_create.owner);
     }
@@ -1805,6 +1890,49 @@ bool EngineTalkback::nomination_create_next()
 
     const ZOOMSDK::SDKError e = m_ctrl->CreateChannel(1);
     report_nomination("create_channel", R"("code":)" + std::to_string(static_cast<int>(e)));
+
+    // LIVE GATE RUN 1 (2026-08-26): SDKERR_TOO_FREQUENT_CALL is the ONE
+    // synchronous failure that is not a reason to end the ladder. It is Zoom
+    // saying "not yet", which is a wait, not a refusal -- and the live gate
+    // proved it is the failure this ladder actually hits. Back off and retry
+    // the SAME channel (m_nomination_pending's front is untouched: nothing
+    // popped it, and only a successful response does). Every OTHER
+    // synchronous failure keeps the terminal abort below, unchanged.
+    if (e == ZOOMSDK::SDKERR_TOO_FREQUENT_CALL) {
+        uint32_t retry;
+        {
+            std::lock_guard<std::mutex> lock(m_chan_mtx);
+            retry = ++m_nomination_create_retries;
+        }
+        if (retry > kMaxNominationCreateRetries) {
+            // Terminal, through the same funnel as every other abort -- but
+            // with a reason that names the rate limit. A generic
+            // "create_channel_failed" here would have sent the operator
+            // looking at permissions and channel budget for a problem that is
+            // neither (the live gate spent its first pass doing exactly that).
+            nomination_abort_ladder("create_rate_limited");
+            return false;
+        }
+        const std::chrono::milliseconds delay =
+            kNominationRateLimitBackoff * (1u << (retry - 1));
+        // Stage name deliberately distinct from the terminal abort's
+        // "create_rate_limited" REASON: one says "waiting, will retry", the
+        // other says "gave up". A log where those two read the same is a log
+        // that cannot answer the only question the operator has.
+        report_nomination("create_rate_limited_retry",
+                          R"("retry":)" + std::to_string(retry) +
+                          R"(,"max_retries":)" + std::to_string(kMaxNominationCreateRetries) +
+                          R"(,"backoff_ms":)" + std::to_string(delay.count()));
+        nomination_schedule_create(delay);
+        // TRUE, not false: the ladder is alive and a retry is armed. This is
+        // the one return path where true does not mean "a create is
+        // outstanding" -- see the declaration comment. nominate() relies on
+        // it: a first create that is merely rate-limited must still let
+        // nominate() assign the plan into m_nomination_pending, or the retry
+        // would fire against an empty queue.
+        return true;
+    }
+
     if (e != ZOOMSDK::SDKERR_SUCCESS) {
         // Fix round 2 (N1, Major), unified in fix round 3 (N6): this branch
         // used to report ONLY the "create_channel" diagnostic line above,
@@ -1831,6 +1959,50 @@ bool EngineTalkback::nomination_create_next()
             std::memory_order_release);
     }
     return true;
+}
+
+void EngineTalkback::nomination_schedule_create(std::chrono::milliseconds delay)
+{
+    // See the declaration comment for the live failure this exists for, and
+    // for why arming this deadline is deliberately NOT an arbiter claim.
+    std::lock_guard<std::mutex> lock(m_chan_mtx);
+    m_nomination_create_scheduled = true;
+    m_nomination_next_create_at = std::chrono::steady_clock::now() + delay;
+}
+
+void EngineTalkback::nomination_tick()
+{
+    // The whole pump. Deliberately tiny: everything about WHICH channel and
+    // WHETHER the arbiter allows it already lives in nomination_create_next(),
+    // and duplicating any of it here is how the two would drift.
+    //
+    // Consume the schedule under the lock BEFORE issuing, never after: the
+    // issue path calls the SDK (which must not happen under m_chan_mtx) and
+    // can itself re-arm the schedule on a rate-limit retry. Clearing after
+    // would wipe that fresh arm and stall the ladder silently.
+    bool due;
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        due = m_nomination_create_scheduled &&
+              std::chrono::steady_clock::now() >= m_nomination_next_create_at;
+        if (due) m_nomination_create_scheduled = false;
+    }
+    if (!due) return;
+    // Return value deliberately unused: every false path inside has already
+    // emitted its own terminal report through nomination_abort_ladder(), and
+    // there is no caller here to tell -- unlike main.cpp's nominate() call
+    // site, which keeps a diagnostic backstop for exactly that reason.
+    (void)nomination_create_next();
+}
+
+void EngineTalkback::debug_expire_create_spacing_for_test()
+{
+    // TEST-ONLY, no production call site. Only moves the deadline into the
+    // past -- nomination_tick() is what issues, exactly as the real pump
+    // would. Same discipline as debug_expire_pending_create_for_test() and
+    // debug_expire_pending_invites_for_test().
+    std::lock_guard<std::mutex> lock(m_chan_mtx);
+    m_nomination_next_create_at = std::chrono::steady_clock::now();
 }
 
 void EngineTalkback::assert_command_loop_thread(const char *where) const
@@ -1941,6 +2113,14 @@ void EngineTalkback::nomination_abort_ladder(const std::string &reason)
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
         m_nomination_pending.clear();
+        // LIVE GATE RUN 1: disarm the pacing schedule in the same breath as
+        // the queue it paces. Every terminal abort funnels through here (that
+        // is this function's entire reason to exist), so a dead ladder's
+        // scheduled create cannot fire into whatever comes next -- which,
+        // after an abort, is usually the operator's re-nomination. Retries go
+        // with it: a fresh ladder starts with a full budget.
+        m_nomination_create_scheduled = false;
+        m_nomination_create_retries = 0;
     }
 
     // FINAL REVIEW, C2 (CRITICAL). A key may be LIVE right now: session_start()
@@ -2099,6 +2279,15 @@ void EngineTalkback::nomination_reset()
     std::lock_guard<std::mutex> lock(m_chan_mtx);
     m_pending_create = talkback_cancel(m_pending_create, TalkbackChannelOwner::Nomination);
     m_nomination_pending.clear();
+    // LIVE GATE RUN 1: the pacing schedule is forgotten alongside the queue it
+    // paces, for the same reason everything else here is -- this runs on
+    // Leave/quit, and a create scheduled against a meeting we have left must
+    // never be issued. Unlike an OUTSTANDING create (which is cancelled rather
+    // than forgotten, because Zoom will still answer it -- see the long
+    // comment above), a scheduled one has not reached Zoom at all, so
+    // dropping it really is the end of it.
+    m_nomination_create_scheduled = false;
+    m_nomination_create_retries = 0;
     m_provisioned_channels.clear();
     // Task 4: same reasoning as nomination_destroy_provisioned() -- a
     // pending invite naming a channel that no longer exists (meeting-scoped,

@@ -80,3 +80,81 @@ measurement, not automatically a fault.
   auto-retried (`failed` is name-keyed); count stays honest, re-nominate recovers.
 - A participant literally named "all" (exact, case-insensitive) is refused at nomination.
 - Control characters in display names: refused, documented at the emit site.
+
+## Gate run 1 — 2026-08-26 20:04 (real meeting) — FAILED, fixed, re-gate required
+
+**Finding: Zoom rate-limits back-to-back `CreateChannel` calls, and the ladder had no
+spacing at all.** One nominee plans 2 channels (all-talent + private). Channel 1 was
+created and its nominee invited; then the ladder issued channel 2's `CreateChannel`
+**synchronously from inside channel 1's `onCreateChannelResponse`** — both log lines
+stamped `20:04:37.291`, a 0 ms gap — and Zoom refused it with code **18 =
+`SDKERR_TOO_FREQUENT_CALL`** (verified as enum position 18 in `zoom_sdk_def.h`). The
+ladder then aborted terminally and correctly (`channels_destroyed:true` — the Task 5
+teardown/report machinery all worked, which is the one good news in the trace):
+
+```
+20:04:37.193 stage=plan channels=2 all_talent_complete=true attempt=1
+20:04:37.193 stage=create_channel code=0
+20:04:37.291 stage=channel_created channel=727C... is_all_talent=true members=1
+20:04:37.291 stage=invite name="Random User" code=0
+20:04:37.291 stage=create_channel code=18        <-- TOO_FREQUENT_CALL, 0ms after response
+20:04:37.291 stage=channel_destroyed
+20:04:37.291 stage=nominate ok=false reason=create_channel_failed channels_destroyed=true
+```
+
+Every real talent list plans more than one channel, so **no nomination could ever have
+succeeded live**. No unit test could have caught it: the fake controller has no rate limit
+and no notion of elapsed time between calls. This is exactly the class of finding a live
+gate exists for.
+
+**Fix (same day, on `feat/talkback`):**
+
+- The ladder is **paced**. `onCreateChannelResponse` no longer calls
+  `nomination_create_next()`; it arms a not-before deadline
+  (`kNominationCreateSpacing = 300 ms`) and `EngineTalkback::nomination_tick()` issues the
+  create when it comes due.
+- `nomination_tick()` is **not** `tick()`, and cannot be. `tick()` has exactly one driver:
+  the thread `main.cpp` spawns when `probe()` returns true. During a nomination that thread
+  does not exist (`main.cpp` joins it before `nominate()`, and `nominate()` refuses while
+  `has_pending_work()`), so a create scheduled into `tick()` would never be issued — and if
+  it were, it would be issued off the **probe's** thread, breaking both
+  "CreateChannel is command-loop-thread-only" and fact 2 of `tick()`'s batch-destroy chain.
+  The pump instead rides the command loop's existing 50 ms idle turn: the
+  `MsgWaitForMultipleObjects` timeout inside `ipc_read_line_with_message_pump()`, which now
+  takes an `on_idle` callback. 50 ms granularity against 300 ms spacing.
+- **Code 18 is a wait, not a failure.** It backs off and retries the SAME channel
+  (`kNominationRateLimitBackoff = 500 ms`, doubling: 500/1000/2000/4000) with a per-channel
+  cap of `kMaxNominationCreateRetries = 4`. Every other synchronous failure keeps the
+  terminal abort. Cap exhaustion is terminal with reason **`create_rate_limited`**, not the
+  generic `create_channel_failed` — run 1 spent its first pass suspecting permissions and
+  channel budget for a problem that was neither.
+- The arbiter claim is **taken at issue, not held across the wait**: a scheduled create is
+  not outstanding (Zoom has never seen it), and claiming early would arm
+  `m_nomination_create_deadline` (`kAwaitTimeout`) against a request never issued, so a
+  spacing wait would self-expire the ladder it is pacing. The ~300 ms window that opens is
+  closed on the one path that could abuse it — `nominate()` now refuses `create_busy` while
+  a create is *scheduled* as well as while one is outstanding, the same non-destructive
+  early refusal — and left open on the other (a probe taking the arbiter ends the ladder
+  through the existing, tested `nomination_abort_ladder("create_busy")` path).
+- Cosmetic, from the same log: the raw `create_channel_response` trace line reported under
+  `"cmd":"talkback_probe"` during a nomination ladder. Moved below the arbiter claim and
+  routed by owner (the same `ReportSink` split `resolve_participant()` already does).
+
+**New tests** in `tests/engine-talkback-select-test.cpp` (engine TU): spacing is not issued
+inside the response nor before its deadline; code-18 retries the same channel and the
+ladder completes; retries exhausted gives exactly one terminal abort naming the rate limit;
+a non-18 failure still aborts immediately with no retry; and — found by mutation, not by
+review — a re-nomination inside the spacing window is refused without touching the running
+ladder. Four mutants proved: unpace the ladder, delete the 18 retry, delete the retry cap,
+delete the scheduled-create half of `nominate()`'s gate. All four fail deterministically.
+
+**What run 2 must re-test.** Everything in "Adversarial probes" above is untested: run 1
+never got past the first nomination. Add two:
+
+7. **Watch the gaps.** A multi-channel nomination should now show ~300 ms between
+   consecutive `create_channel` lines. If any `code=18` still appears at that spacing,
+   **raise `kNominationCreateSpacing`** rather than leaning on the retry — Zoom publishes no
+   rate for this and 300 ms is an engineering guess with margin, not a known limit.
+8. **Time a big plan.** 11 nominees = 13 channels ≈ 4 s of provisioning. That is paid once,
+   at nomination, never at key time — but confirm the operator is not tempted to key during
+   it (a key mid-ladder is refused `provisioning_incomplete`, by design).

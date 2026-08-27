@@ -90,6 +90,32 @@ public:
     // in progress, then destroys the channel.
     void tick();
 
+    // ── The nomination ladder's pacing pump (LIVE GATE RUN 1, 2026-08-26) ───
+    // Issues the nomination ladder's next CreateChannel once its not-before
+    // deadline has passed, and nothing else. Called from main.cpp's command
+    // loop on every idle turn of ipc_read_line_with_message_pump() -- which
+    // wakes on a 50ms MsgWaitForMultipleObjects timeout, so the pump's
+    // granularity is 50ms against a 300ms spacing. Cheap and safe to call on
+    // every turn: with nothing scheduled it is one mutex acquire and a
+    // compare.
+    //
+    // WHY THIS IS NOT tick(), which is this file's other deadline-driven pump
+    // and the obvious place to put it. tick() has exactly one driver: the
+    // dedicated thread main.cpp spawns when probe() returns true, and only
+    // then (see probe()'s return-value contract above and the batch-destroy
+    // inventory at the top of tick()). During a nomination ladder that thread
+    // does not exist -- main.cpp JOINS it before calling nominate(), and
+    // nominate() refuses outright while has_pending_work() -- so a create
+    // scheduled into tick() would never be issued at all. Worse, if one ever
+    // were, it would be issued from the PROBE'S DRIVING THREAD, breaking both
+    // the "CreateChannel is command-loop-thread-only" rule the arbiter is
+    // built on and fact 2 of tick()'s batch-destroy chain. The two pumps run
+    // on two different threads and must stay separate functions; naming this
+    // one after tick() is as close as that gets.
+    //
+    // Command-loop thread only (nomination_create_next() asserts it).
+    void nomination_tick();
+
     // ── Talkback audio path (Milestone 2) ──────────────────────────────────
     bool open_audio(const std::string &region_name, uint32_t sample_rate,
                     uint16_t channels);
@@ -168,6 +194,15 @@ public:
     // which call expire_stale_pending_create_locked() before anything else)
     // is what actually fires it, exactly as a real timeout would.
     void debug_expire_pending_create_for_test();
+
+    // LIVE GATE RUN 1 (2026-08-26): the third TEST-ONLY deadline hook, and the
+    // sibling of the two above. Forces the nomination ladder's create-SPACING
+    // deadline (m_nomination_next_create_at) into the past so a test can drive
+    // the pacing without sleeping kNominationCreateSpacing per channel -- a
+    // 13-channel plan would otherwise cost ~4s of real time in the suite. Like
+    // its siblings it only moves the deadline; nomination_tick() is what
+    // actually issues, exactly as the command loop's own pump would.
+    void debug_expire_create_spacing_for_test();
 
     // ── Pre-provisioned channels (Task 2, 2026-08-25) ───────────────────────
     // Computes talkback_plan(nominees) (src/talkback-plan.h) and provisions
@@ -610,10 +645,55 @@ private:
     // is sequential rather than issuing the whole plan at once. Must run on
     // the command-loop thread, same as every other CreateChannel call in
     // this file. Returns false (and empties m_nomination_pending) when the
-    // gate refuses or the SDK call itself fails synchronously -- there is no
-    // retry queue for this in Task 2; a stalled ladder is reported, not
-    // silently abandoned.
+    // gate refuses or the SDK call itself fails synchronously -- a stalled
+    // ladder is reported, not silently abandoned.
+    //
+    // LIVE GATE RUN 1 (2026-08-26) changed two things about that last
+    // sentence. (a) The second and later calls now come from nomination_tick()
+    // rather than directly from onCreateChannelResponse -- see
+    // nomination_schedule_create() below for the live failure that forced it.
+    // (b) There IS a retry queue now, for exactly one synchronous failure:
+    // SDKERR_TOO_FREQUENT_CALL. That one schedules a backed-off retry of the
+    // SAME channel and returns TRUE (the ladder is still alive, just not yet
+    // in flight -- the one case where a true return does not mean "a create
+    // is outstanding"); every other synchronous failure keeps the terminal
+    // abort. Retries are capped at kMaxNominationCreateRetries per channel,
+    // and exhausting them aborts with reason "create_rate_limited" so the
+    // operator's log says why rather than blaming CreateChannel generically.
     bool nomination_create_next();
+
+    // LIVE GATE RUN 1 (2026-08-26): arms the not-before deadline
+    // nomination_tick() issues against. Two callers, both in this file:
+    // onCreateChannelResponse's Nomination branch (kNominationCreateSpacing,
+    // for the next channel of the plan) and nomination_create_next() itself
+    // (a doubling kNominationRateLimitBackoff, retrying the SAME channel).
+    //
+    // WHY THE LADDER IS PACED AT ALL. In the first live gate (2026-08-26
+    // 20:04, real meeting, two-channel plan) the ladder issued channel 2's
+    // CreateChannel synchronously from inside channel 1's
+    // onCreateChannelResponse -- a 0ms gap -- and Zoom refused it with
+    // SDKERR_TOO_FREQUENT_CALL (18). The ladder then correctly aborted
+    // terminally, which meant NO nomination with more than one channel could
+    // ever succeed live: every real talent list is more than one channel.
+    // Zoom rate-limits back-to-back creates; no unit test could have caught
+    // that, because the fake controller has no rate limit.
+    //
+    // WHY THE ARBITER CLAIM IS NOT HELD ACROSS THE WAIT. A scheduled create is
+    // not an OUTSTANDING create -- Zoom has never seen it -- and the arbiter's
+    // single-outstanding-create rule is about responses that cannot be told
+    // apart. Claiming early would also arm m_nomination_create_deadline
+    // (kAwaitTimeout) against a request that was never issued, so a spacing
+    // wait would eventually read as a swallowed response and self-expire the
+    // ladder it is pacing. The claim is therefore taken at ISSUE time, in
+    // nomination_create_next(), exactly as it always was; the ~300ms window
+    // where the arbiter is free is closed on the one path that could abuse it
+    // (nominate() refuses with "create_busy" while a create is scheduled, the
+    // same non-destructive early refusal it already gives while one is
+    // outstanding), and left open on the other (a probe may take the arbiter,
+    // and nomination_create_next()'s gate check then ends the ladder
+    // terminally via nomination_abort_ladder("create_busy") -- the existing,
+    // tested mid-ladder path, not a new one).
+    void nomination_schedule_create(std::chrono::milliseconds delay);
 
     // Fix round 1, m6: nomination_create_next() is the first call in this
     // file to issue CreateChannel from inside a callback dispatch
@@ -1282,6 +1362,35 @@ private:
     // timeout), and nomination_reset() (clears unconditionally on
     // Leave/quit).
     std::vector<TalkbackPlannedChannel> m_nomination_pending;
+
+    // LIVE GATE RUN 1 (2026-08-26): the not-before deadline for the ladder's
+    // NEXT CreateChannel, and whether one is armed at all. See
+    // nomination_schedule_create()'s comment for why the ladder is paced and
+    // why this is deliberately NOT an arbiter claim.
+    //
+    // Guarded by m_chan_mtx, NOT atomic like m_nomination_create_deadline --
+    // and that is the point, not an inconsistency: nominate()'s refusal gate
+    // has to read this in the SAME lock scope as the arbiter check, or a
+    // re-nomination could slip between "no create outstanding" and "no create
+    // scheduled" and start a second ladder over the top of a running one.
+    // The pair is written and read together everywhere for that reason;
+    // treat them as one field with two halves.
+    //
+    // Writers, all command-loop thread: nomination_schedule_create() (arms),
+    // nomination_tick() (disarms as it issues), nomination_create_next()
+    // (disarms on entry -- it IS the scheduled create, however it was
+    // reached), nomination_abort_ladder() and nomination_reset() (disarm, so
+    // a dead ladder's scheduled create can never fire into a live one).
+    bool m_nomination_create_scheduled = false;
+    std::chrono::steady_clock::time_point m_nomination_next_create_at{};
+
+    // Consecutive SDKERR_TOO_FREQUENT_CALL retries for the channel currently
+    // at the front of m_nomination_pending. Reset to 0 whenever that front
+    // advances (onCreateChannelResponse's successful pop), so the budget is
+    // PER CHANNEL rather than per ladder -- a plan that trips the rate limit
+    // once on channel 2 should not arrive at channel 12 with nothing left.
+    // Bounded by kMaxNominationCreateRetries; exhausting it is terminal.
+    uint32_t m_nomination_create_retries = 0;
 
     // Final-review C1 (CRITICAL): the attempt id of the ladder currently
     // running -- claimed by nominate() at the same moment it claims the

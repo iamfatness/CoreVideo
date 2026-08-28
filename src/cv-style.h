@@ -151,6 +151,19 @@ QLabel#speakerValue { color: #999999; font-style: italic; }
 QLabel#errorLabel   { color: #ee5555; font-size: 11px; }
 QLabel[role="muted"] { color: #8a8a8a; font-size: 11px; }
 
+/* Talkback (Milestone 7). Each pair is a calm default plus one flagged state,
+   switched by a dynamic property from zoom-dock.cpp's set_style_flag(). Amber
+   is "you should look at this" (the same #f0b429 the output table uses for a
+   below-requested signal); red is reserved for a key that is actually live to
+   talent, because that is the one state where the director is audible. */
+QLabel#talkbackTrackWarning              { color: #8a8a8a; font-size: 11px; }
+QLabel#talkbackTrackWarning[risk="true"] { color: #f0b429; }
+QLabel#talkbackPlan                      { color: #b0b0b0; font-size: 11px; }
+QLabel#talkbackPlan[warn="true"]         { color: #f0b429; }
+QLabel#talkbackTally                     { color: #a0a0a0; font-weight: 600; }
+QLabel#talkbackTally[alert="true"]       { color: #f0b429; }
+QLabel#talkbackTally[live="true"]        { color: #ff5555; }
+
 QFrame#recoveryPanel {
     background-color: rgba(240,160,0,0.10);
     border: 1px solid rgba(240,160,0,0.40);

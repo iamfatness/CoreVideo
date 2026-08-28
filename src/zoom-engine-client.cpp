@@ -1390,6 +1390,35 @@ void ZoomEngineClient::handle_event(const std::string &line)
             return;
         }
         blog(LOG_INFO, "[obs-zoom-plugin] talkback_session: %s", line.c_str());
+        // Milestone 7 (the dock): two of these stage lines carry operator-
+        // facing detail the confirmed-state line above does not have, and the
+        // dock has nowhere else to get it. Everything else on this shape stays
+        // log-only, exactly as before.
+        //
+        // "session_live" carries the keyed target's membership
+        // (members_present/members_total, engine-talkback.cpp's
+        // session_start()); the refusal line carries the engine's own recovery
+        // hint ("recover":"re-nominate" for provisioning_incomplete). Both are
+        // emitted BEFORE the report_session_state() line that sets `live`/
+        // `reason` on the same path, so by the time the dock sees a reason the
+        // hint that goes with it is already stored. Ordering is not relied on
+        // for correctness though: talkback_start() clears this whole struct at
+        // the start of every press, so the worst a re-ordering could do is
+        // show a count one line late.
+        const QString stage = obj.value("stage").toString();
+        if (stage == QLatin1String("session_live")) {
+            std::lock_guard<std::mutex> lk(m_mtx);
+            m_talkback_session_status.members_known = true;
+            m_talkback_session_status.members_present =
+                static_cast<uint32_t>(obj.value("members_present").toInt(0));
+            m_talkback_session_status.members_total =
+                static_cast<uint32_t>(obj.value("members_total").toInt(0));
+        } else if (stage == QLatin1String("session_start") &&
+                   obj.contains("recover")) {
+            std::lock_guard<std::mutex> lk(m_mtx);
+            m_talkback_session_status.recover =
+                obj.value("recover").toString().toStdString();
+        }
         return;
     }
     if (cmd == "talkback_nominate") {

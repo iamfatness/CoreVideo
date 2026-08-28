@@ -1,12 +1,16 @@
 #pragma once
 
+#include "talkback-dock-state.h"
+
 #include <QFrame>
 #include <QString>
 #include <QWidget>
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <thread>
+#include <vector>
 
 class QLabel;
 class QLineEdit;
@@ -41,6 +45,20 @@ private:
     void on_launch_sidecar_clicked();
     void on_cancel_recovery_clicked();
     void update_state_indicator();
+    // Milestone 7. Everything the Talkback group polls, driven from the
+    // existing 100ms refresh tick -- deliberately NOT a second timer: this
+    // dock already has three (refresh, health retry, countdown) and the
+    // engine-confirmed talkback state is polled exactly the way
+    // last_error()/roster()/talkback_probe_status() already are.
+    void refresh_talkback();
+    void rebuild_talkback_key_buttons(
+        const std::vector<TalkbackDockKeyButton> &buttons);
+    void on_talkback_nominate_clicked();
+    // `latch` is captured at PRESS time, not read at release: an operator who
+    // toggles the Latch box while holding a button must not have the release
+    // reinterpreted underneath them.
+    void talkback_key_pressed(const std::string &target, bool latch);
+    void talkback_key_released(const std::string &target);
     void apply_speaker_director_settings();
     void update_recovery_panel();
     void update_credentials_banner();
@@ -101,6 +119,41 @@ private:
     QComboBox   *m_talkback_participant_combo = nullptr;
     QPushButton *m_talkback_probe_btn         = nullptr;
     QLabel      *m_talkback_status_label      = nullptr;
+
+    // Talkback (Milestone 7): the operator surface proper -- source choice and
+    // its program-track warning, nomination and its budget outcome, and the
+    // key buttons. Dock keying is a deliberate, owner-approved deviation from
+    // the spec, which locked keying to Companion/control API/hotkey and
+    // explicitly not the dock; see src/talkback-dock-state.h.
+    QComboBox   *m_talkback_source_combo   = nullptr;
+    QLabel      *m_talkback_track_label    = nullptr;
+    QListWidget *m_talkback_nominee_list   = nullptr;
+    QPushButton *m_talkback_nominate_btn   = nullptr;
+    QLabel      *m_talkback_plan_label     = nullptr;
+    QWidget     *m_talkback_key_row        = nullptr;
+    QCheckBox   *m_talkback_latch_cb       = nullptr;
+    QLabel      *m_talkback_tally_label    = nullptr;
+    QLabel      *m_talkback_notice        = nullptr;
+    std::vector<QPushButton *> m_talkback_key_buttons;
+    // What the last rebuild of the key buttons was built from. The buttons are
+    // rebuilt only when this changes: the tick runs ten times a second, and
+    // deleting the widget the operator is holding is not a refresh, it is a
+    // lost release (see talkback_dock_release_lost()).
+    std::string m_talkback_key_signature;
+    // Which roster names the nominee list was last built from, for the same
+    // reason -- a rebuild loses the tick-boxes the operator has just set.
+    std::string m_talkback_roster_signature;
+    // The target THIS dock currently has keyed, empty when it has none. A key
+    // opened over the control API is visible in the tally but is not ours to
+    // close, so the dock's own release/backstop paths key off this rather than
+    // off the controller's "open" flag.
+    std::string m_talkback_dock_target;
+    bool        m_talkback_dock_latched = false;
+    // The dock's own last refusal -- one the engine never sees (no source
+    // chosen, the source is not in the current scene, OBS is at a sample rate
+    // the Zoom talkback API will not take, a nominee named "all"). Cleared by
+    // the next attempt that gets past it.
+    QString     m_talkback_notice_text;
 
     // Recovery status panel (shown only while Recovering)
     QFrame      *m_recovery_frame  = nullptr;

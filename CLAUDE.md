@@ -555,6 +555,26 @@ Every one of these is documented at length where it lives; the list is the map.
   HONEST ("0 of 1", since they were pruned out of `present`) and is
   recoverable by re-nominating; and `"attempt"` is emitted BEFORE `"nominees"`
   because `json_uint()` is a first-match scan, not a parser.
+- **The dock keys, by owner decision (Milestone 7)**: the spec
+  (`docs/superpowers/specs/2026-08-24-zoom-talkback-design.md`) locks keying to
+  Companion/control API/hotkey and says "**Not** the dock"; the owner has since
+  asked for a drivable dock, so `src/zoom-dock.cpp`'s Talkback group nominates
+  and keys — a deliberate, approved spec deviation, with everything else
+  unchanged (identity by display name, keying SELECTS a provisioned channel,
+  every refusal fails closed). Its decisions live in the Qt/OBS-free
+  `src/talkback-dock-state.h` (pinned by `CoreVideoTalkbackDockState`) because
+  the two Majors this feature shipped both lived in wiring no test could reach.
+  Dock keys pass **`needs_renewal = false`** — `src/talkback-key.h`'s rule for
+  a surface whose release is in-process and reliable: press/release are Qt
+  signals on the same main thread the controller's `QTimer` runs `evaluate()`/
+  `key_off()` on, with no transport to drop them, and demanding a heartbeat
+  from a UI-thread timer instead would close a genuinely held key on any ~1s
+  OBS UI stall. The one in-process way a release still vanishes — a held
+  `QPushButton` being disabled, which clears `down` without emitting
+  `released()` — is closed twice: the dock never disables a held button, and
+  `talkback_dock_release_lost()` closes any dock-owned PTT key whose button is
+  no longer down, read from the widget on the existing 100 ms tick (no second
+  timer) so a stalled UI cannot false-close.
 
 ## Live testing against a real meeting
 

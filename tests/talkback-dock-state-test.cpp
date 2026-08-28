@@ -1,0 +1,338 @@
+// tests/talkback-dock-state-test.cpp
+//
+// Milestone 7: the decisions the Talkback dock group makes, pinned away from
+// the QWidget that renders them.
+//
+// Every claim in here is one an operator acts on mid-show -- "this button is
+// safe to press", "this person hears nothing", "this source is on air" -- and
+// none of them could be exercised at all while they lived inside dock code
+// that needs libobs, a Qt event loop and a running engine to construct. The
+// two Majors this milestone has already shipped (F1, N1) both lived in
+// exactly that kind of untestable wiring; see
+// src/talkback-nomination-dispatch.h's header comment.
+//
+// The load-bearing one is the FIRST cluster: a button the dock shows as
+// enabled must be one TalkbackController::key_on() would not refuse on the
+// nomination check. The dock delegates to talkback_target_known_unprovisioned()
+// for that instead of re-deriving the rule, and this drives both against the
+// same plans so a re-derivation would show up as a disagreement here.
+#include "talkback-dock-state.h"
+
+#include <iostream>
+#include <string>
+#include <vector>
+
+static int failures = 0;
+
+static void check(bool ok, const char *message)
+{
+    if (!ok) {
+        std::cerr << "FAIL: " << message << "\n";
+        ++failures;
+    }
+}
+
+static bool contains(const std::string &haystack, const std::string &needle)
+{
+    return haystack.find(needle) != std::string::npos;
+}
+
+static const TalkbackDockKeyButton *find_button(
+    const std::vector<TalkbackDockKeyButton> &buttons, const std::string &target)
+{
+    for (const auto &b : buttons)
+        if (b.target == target) return &b;
+    return nullptr;
+}
+
+// A plan the engine confirmed: Sarah and Luis nominated, both privately
+// covered.
+static TalkbackNominationPlan confirmed_plan()
+{
+    TalkbackNominationPlan p;
+    p.done = true;
+    p.channels = 3;
+    p.requested = {"Sarah", "Luis"};
+    return p;
+}
+
+static TalkbackDockKeyContext ready_context()
+{
+    TalkbackDockKeyContext ctx;
+    ctx.engine_running = true;
+    ctx.in_meeting = true;
+    return ctx;
+}
+
+int main()
+{
+    // ── Buttons agree with key_on()'s own refusal rule ─────────────────────
+    {
+        const auto plan = confirmed_plan();
+        const auto buttons = talkback_dock_key_buttons(plan, ready_context());
+        check(buttons.size() == 3,
+              "expected one All button plus one per nominee");
+        check(buttons.front().target == kTalkbackAllTalentTarget &&
+                  buttons.front().all_talent,
+              "the all-talent button is not first, or is not flagged as such");
+        for (const auto &b : buttons) {
+            const bool known_unprovisioned = talkback_target_known_unprovisioned(
+                b.target, plan.requested, plan.uncovered_private);
+            check(b.enabled == !known_unprovisioned,
+                  "a button's enabled state disagrees with the predicate "
+                  "key_on() refuses on");
+            check(b.enabled == b.reason.empty(),
+                  "a button carries both an enabled state and a refusal reason");
+        }
+    }
+
+    // A nominee with no private channel: the dock must not offer their button,
+    // and must say the thing that actually works instead (key All).
+    {
+        auto plan = confirmed_plan();
+        plan.uncovered_private = {"Luis"};
+        const auto buttons = talkback_dock_key_buttons(plan, ready_context());
+        const auto *luis = find_button(buttons, "Luis");
+        const auto *all  = find_button(buttons, kTalkbackAllTalentTarget);
+        check(luis && !luis->enabled,
+              "a nominee with no private channel was offered a key button");
+        check(luis && contains(luis->reason, "All"),
+              "the uncovered-nominee reason does not name the way that works");
+        check(all && all->enabled,
+              "all-talent was refused even though someone was nominated");
+    }
+
+    // Unreachable is strictly worse than uncovered and must not be described
+    // as "key All instead" -- All does not reach them either.
+    {
+        auto plan = confirmed_plan();
+        plan.uncovered_private = {"Luis"};
+        plan.unreachable = {"Luis"};
+        plan.all_talent_complete = false;
+        const auto buttons = talkback_dock_key_buttons(plan, ready_context());
+        const auto *luis = find_button(buttons, "Luis");
+        check(luis && !luis->enabled, "an unreachable nominee was keyable");
+        check(luis && contains(luis->reason, "no channel"),
+              "the unreachable reason does not say they are on no channel");
+        check(luis && !contains(luis->reason, "key All"),
+              "an unreachable nominee was told to key All, which does not "
+              "reach them either");
+    }
+
+    // Nothing confirmed yet: every target refused, including all-talent --
+    // the same fail-closed state talkback_nomination_reset() leaves behind.
+    {
+        TalkbackNominationPlan empty;
+        const auto buttons = talkback_dock_key_buttons(empty, ready_context());
+        check(buttons.size() == 1, "an unnominated plan produced nominee buttons");
+        check(!buttons.front().enabled,
+              "all-talent was keyable with nothing nominated");
+        check(contains(buttons.front().reason, "nominated"),
+              "the no-nomination reason does not mention nominating");
+    }
+
+    // Engine/meeting preconditions, and the one-key-at-a-time rule.
+    {
+        const auto plan = confirmed_plan();
+        auto ctx = ready_context();
+        ctx.engine_running = false;
+        for (const auto &b : talkback_dock_key_buttons(plan, ctx))
+            check(!b.enabled, "a key button was live with the engine stopped");
+
+        ctx = ready_context();
+        ctx.in_meeting = false;
+        for (const auto &b : talkback_dock_key_buttons(plan, ctx))
+            check(!b.enabled, "a key button was live outside a meeting");
+
+        ctx = ready_context();
+        ctx.key_open = true;
+        ctx.open_target = "Sarah";
+        const auto buttons = talkback_dock_key_buttons(plan, ctx);
+        const auto *sarah = find_button(buttons, "Sarah");
+        const auto *luis  = find_button(buttons, "Luis");
+        // The held button must stay enabled: disabling a pressed QPushButton
+        // is how its released() signal gets lost, which would strand the key
+        // open. See talkback_dock_release_lost()'s comment.
+        check(sarah && sarah->enabled,
+              "the button for the currently open key was disabled");
+        check(luis && !luis->enabled,
+              "a second key button was live while a key was already open");
+    }
+
+    // ── The nomination outcome ────────────────────────────────────────────
+    {
+        auto plan = confirmed_plan();
+        plan.channels = 3;
+        const auto report = talkback_dock_nomination_report(plan);
+        check(!report.warn, "a fully covered nomination was reported as a problem");
+        check(contains(report.headline, "3 channels"),
+              "the headline does not report the channel count");
+        check(contains(report.headline, "16"),
+              "the headline does not report the channel budget");
+        check(contains(report.headline, "2 nominees"),
+              "the headline does not report the nominee count");
+        bool named_both = false;
+        for (const auto &line : report.lines)
+            if (contains(line, "Sarah") && contains(line, "Luis")) named_both = true;
+        check(named_both, "the private-channel line does not name who has one");
+    }
+
+    // Shortfalls are NAMED. This is the reporting chain's whole purpose: a
+    // count tells the operator that someone is short, not who.
+    {
+        auto plan = confirmed_plan();
+        plan.requested = {"Sarah", "Luis", "Dana"};
+        plan.uncovered_private = {"Dana"};
+        const auto report = talkback_dock_nomination_report(plan);
+        check(report.warn, "a nomination with a shortfall was not flagged");
+        bool named = false;
+        for (const auto &line : report.lines)
+            if (contains(line, "Dana") && contains(line, "All")) named = true;
+        check(named, "the uncovered nominee was not named with their remedy");
+    }
+    {
+        auto plan = confirmed_plan();
+        plan.requested = {"Sarah", "Luis", "Dana"};
+        plan.uncovered_private = {"Dana"};
+        plan.unreachable = {"Dana"};
+        plan.all_talent_complete = false;
+        const auto report = talkback_dock_nomination_report(plan);
+        check(report.warn, "an unreachable nominee was not flagged");
+        bool hears_nothing = false, fanout = false;
+        for (const auto &line : report.lines) {
+            if (contains(line, "Dana") && contains(line, "hear nothing"))
+                hears_nothing = true;
+            if (contains(line, "All talent does not reach everyone"))
+                fanout = true;
+        }
+        check(hears_nothing,
+              "an unreachable nominee was not reported as hearing nothing");
+        check(fanout, "an incomplete all-talent fan-out was not reported");
+    }
+
+    // A refused attempt is diagnostic: it must be SHOWN, and it must not
+    // erase the standing plan's own report (F1's symptom, at the UI).
+    {
+        auto plan = confirmed_plan();
+        talkback_nomination_note_refused(plan, "create_busy");
+        const auto report = talkback_dock_nomination_report(plan);
+        check(report.warn, "a refused nominate attempt was not flagged");
+        bool refused_line = false;
+        for (const auto &line : report.lines)
+            if (contains(line, "create_busy")) refused_line = true;
+        check(refused_line, "the refusal reason was not shown");
+        check(contains(report.headline, "3 channels"),
+              "a refused attempt erased the standing plan from the report");
+    }
+
+    // A ladder that aborted after destroying the standing set, and a
+    // superseded one, both reset `done` while keeping the reason. The report
+    // must show that as "no channels, and here is why", never as silence.
+    {
+        TalkbackNominationPlan plan = confirmed_plan();
+        talkback_nomination_note_failed_after_destroy(plan, "create_rate_limited");
+        const auto report = talkback_dock_nomination_report(plan);
+        check(contains(report.headline, "No talkback channels"),
+              "a destroyed channel set was still reported as provisioned");
+        bool why = false;
+        for (const auto &line : report.lines)
+            if (contains(line, "create_rate_limited")) why = true;
+        check(why, "a destroyed channel set was reported with no reason");
+    }
+
+    // ── The program-track warning ─────────────────────────────────────────
+    {
+        const auto w = talkback_dock_track_warning("Talkback Mic", 0);
+        check(!w.on_air_risk, "a source on no track was flagged as on air");
+        check(w.tracks.empty(), "a source on no track listed tracks");
+        check(contains(w.text, "dedicated"),
+              "the safe-pattern text does not name the safe pattern");
+    }
+    {
+        // Tracks 1 and 3 (bits 0 and 2) -- 1-based numbering, as OBS's
+        // Advanced Audio Properties shows them.
+        const auto w = talkback_dock_track_warning("Host Mic", 0b101u);
+        check(w.on_air_risk, "a source on program tracks was not flagged");
+        check(w.tracks == "1, 3",
+              "the enabled tracks were not listed as OBS numbers them");
+        check(contains(w.text, "Host Mic") && contains(w.text, "1, 3"),
+              "the warning names neither the source nor its tracks");
+    }
+    {
+        const auto w = talkback_dock_track_warning("", 0);
+        check(!w.on_air_risk, "no chosen source was flagged as on air");
+        check(contains(w.text, "No talkback source"),
+              "an unchosen source did not say so");
+    }
+
+    // ── Live tally ────────────────────────────────────────────────────────
+    // The tally follows the ENGINE's confirmed state, never the plugin's
+    // intent -- the spec's own requirement, and the F2 Critical that made it
+    // one.
+    {
+        TalkbackDockSessionView s;
+        s.key_open = true;
+        s.target = "Sarah";
+        const auto t = talkback_dock_tally(s);
+        check(!t.live, "an unconfirmed key was shown as live");
+        check(!t.alert, "waiting for confirmation was shown as a failure");
+        check(contains(t.text, "waiting"), "a pending key did not say so");
+    }
+    {
+        TalkbackDockSessionView s;
+        s.key_open = true;
+        s.target = "Sarah";
+        s.engine_live = true;
+        s.members_known = true;
+        s.members_present = 2;
+        s.members_total = 3;
+        const auto t = talkback_dock_tally(s);
+        check(t.live, "a confirmed key was not shown as live");
+        check(contains(t.text, "Sarah"), "the live tally does not name the target");
+        check(contains(t.text, "2 of 3 present"),
+              "the live tally does not report membership");
+    }
+    {
+        // Refused mid-ladder: the engine's own recovery hint is echoed, not
+        // inferred -- the plugin never invents a remedy the engine did not
+        // name.
+        TalkbackDockSessionView s;
+        s.key_open = true;
+        s.target = "Sarah";
+        s.engine_reason = "provisioning_incomplete";
+        s.engine_recover = "re-nominate";
+        const auto t = talkback_dock_tally(s);
+        check(!t.live, "a refused key was shown as live");
+        check(t.alert, "a refused key was not flagged");
+        check(contains(t.text, "provisioning_incomplete"),
+              "the refusal reason was not shown");
+        check(contains(t.text, "re-nominate"),
+              "the engine's recovery hint was not surfaced");
+    }
+    {
+        // A closed key keeps the last verdict visible, said as history.
+        TalkbackDockSessionView s;
+        s.engine_reason = "channels_destroyed";
+        const auto t = talkback_dock_tally(s);
+        check(!t.live, "a closed key was shown as live");
+        check(contains(t.text, "Not keyed"), "a closed key did not say so");
+        check(contains(t.text, "channels_destroyed"),
+              "the last key's failure reason was dropped once it closed");
+    }
+
+    // ── The dock's lost-release backstop ──────────────────────────────────
+    {
+        check(talkback_dock_release_lost(true, true, false),
+              "a held PTT key whose button is no longer down was not closed");
+        check(!talkback_dock_release_lost(true, true, true),
+              "a genuinely held PTT key was closed");
+        check(!talkback_dock_release_lost(true, false, false),
+              "a latch was closed for not being held -- nothing is held in "
+              "latch mode");
+        check(!talkback_dock_release_lost(false, true, false),
+              "a key this dock does not own was closed by the dock");
+    }
+
+    if (failures == 0) std::cout << "talkback-dock-state-test: all checks passed\n";
+    return failures == 0 ? 0 : 1;
+}

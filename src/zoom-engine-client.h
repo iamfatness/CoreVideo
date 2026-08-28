@@ -50,6 +50,30 @@ public:
     struct TalkbackSessionStatus {
         bool live = false;
         std::string reason;
+
+        // Milestone 7 (the dock). The three fields below come from the OTHER
+        // shape on this cmd -- report_session()'s stage lines -- not from
+        // report_session_state()'s confirmed-state line above, so they are
+        // written by a different branch of handle_event() and can lag or lead
+        // `live` by one line. All three are cleared with the rest of this
+        // struct at talkback_start(), so nothing here can describe a previous
+        // key.
+        //
+        // members_present/members_total are the keyed target's membership AS
+        // OF THE MOMENT THE KEY OPENED: the engine reports them once, in its
+        // "session_live" stage line, and does not re-report them while the key
+        // is held. A talent who rejoins mid-press is therefore not counted
+        // until the next press. members_known distinguishes "0 of 0" from
+        // "no session_live has arrived", which is not the same thing.
+        bool members_known = false;
+        uint32_t members_present = 0;
+        uint32_t members_total = 0;
+        // The engine's own recovery hint for a refusal, echoed rather than
+        // inferred: session_start's refusal line carries
+        // "recover":"re-nominate" for provisioning_incomplete, and nothing at
+        // all for the other reasons. The plugin never invents a remedy the
+        // engine did not name.
+        std::string recover;
     };
 
     // Task 5: the plugin's own record of the last CONFIRMED talkback_nominate()

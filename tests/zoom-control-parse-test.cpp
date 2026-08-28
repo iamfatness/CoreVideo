@@ -134,16 +134,26 @@ static void test_known_commands()
     expect("known commands: recovery_cancel", is_known_control_command("recovery_cancel"));
     expect("known commands: list_audio_sources",
            is_known_control_command("list_audio_sources"));
+    expect("known commands: talkback_probe",
+           is_known_control_command("talkback_probe"));
+    expect("known commands: talkback_key",
+           is_known_control_command("talkback_key"));
+    expect("known commands: talkback_renew",
+           is_known_control_command("talkback_renew"));
+    expect("known commands: talkback_status",
+           is_known_control_command("talkback_status"));
+    expect("known commands: talkback_nominate",
+           is_known_control_command("talkback_nominate"));
     expect("unknown command is rejected", !is_known_control_command("totally_bogus_cmd"));
     expect("empty command is rejected", !is_known_control_command(""));
     expect("known commands are case sensitive", !is_known_control_command("HELP"));
     // Intentional regression guard -- known_control_commands() is a fixed
-    // literal list, so cppcheck correctly proves the count is 20 today.
+    // literal list, so cppcheck correctly proves the count is 25 today.
     // That's the point of this assertion: it forces this test to be updated
     // whenever a command is added or removed.
     expect("known command list has no duplicates and no gaps",
            // cppcheck-suppress knownConditionTrueFalse
-           known_control_commands().size() == 20);
+           known_control_commands().size() == 25);
 }
 
 // ── parse_control_request: JSON validity + auth ──────────────────────────

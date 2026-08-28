@@ -264,6 +264,9 @@ if(COREVIDEO_BUILD_PLUGIN)
     add_library(obs-zoom-plugin MODULE
         src/plugin-main.cpp
         src/zoom-source.cpp
+        src/talkback-tap.cpp
+        src/talkback-controller.cpp
+        src/talkback-cue.cpp
         src/zoom-participant-audio-source.cpp
         src/zoom-supersource.cpp
         src/zoom-tiles-background.cpp
@@ -309,7 +312,9 @@ if(COREVIDEO_BUILD_PLUGIN)
         Qt6::Widgets
     )
     if(WIN32)
-        target_link_libraries(obs-zoom-plugin PRIVATE crypt32)
+        # winmm: talkback-cue.cpp's PlaySound(SND_MEMORY | SND_ASYNC) call --
+        # see that file's header comment for why it was chosen over WASAPI.
+        target_link_libraries(obs-zoom-plugin PRIVATE crypt32 winmm)
         add_executable(CoreVideoOAuthCallback src/oauth-callback-helper.cpp)
         target_link_libraries(CoreVideoOAuthCallback PRIVATE ws2_32 shell32 ole32)
         install(TARGETS CoreVideoOAuthCallback
@@ -388,6 +393,7 @@ set(ENGINE_SOURCES
     engine/src/engine-video.cpp
     engine/src/engine-share.cpp
     engine/src/engine-audio.cpp
+    engine/src/engine-talkback.cpp
 )
 set(ENGINE_INCLUDES src engine/src ${ZOOM_SDK_INCLUDE_DIR})
 
@@ -395,6 +401,16 @@ if(BUILD_ZOOM_ENGINE)
     if(WIN32)
         add_executable(ZoomObsEngine ${ENGINE_SOURCES})
         target_include_directories(ZoomObsEngine PRIVATE ${ENGINE_INCLUDES})
+        # NOMINMAX: engine-talkback.cpp/main.cpp now pull in
+        # src/talkback-plan.h (Task 2, provisioning at nomination), which
+        # calls std::min/std::max. Without this, windows.h's min/max macros
+        # (pulled in transitively via zoom_sdk_def.h's HWND usage) rewrite
+        # `std::min(a, b)` into `std::(((a) < (b)) ? (a) : (b))` and the
+        # engine fails to compile with "illegal token on right side of
+        # '::'" -- discovered building this target for the first time with
+        # talkback-plan.h included. Mirrors the same definition already
+        # applied to obs-zoom-plugin above, for the same reason.
+        target_compile_definitions(ZoomObsEngine PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
         target_link_libraries(ZoomObsEngine PRIVATE
             ws2_32 crypt32 winhttp shlwapi
             ${ZOOM_SDK_LIBRARY}
@@ -965,6 +981,193 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoJoinWatchdog
              COMMAND CoreVideoJoinWatchdogTest)
 
+    # The talkback probe's test tone. Phase must carry across buffers: a restart
+    # every buffer is an audible click that would be misread as a transport
+    # fault. See src/talkback-tone.h.
+    add_executable(CoreVideoTalkbackToneTest
+        tests/talkback-tone-test.cpp
+    )
+    target_include_directories(CoreVideoTalkbackToneTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTalkbackTone
+             COMMAND CoreVideoTalkbackToneTest)
+
+    # libobs planar float -> Zoom interleaved int16. Every failure mode here is
+    # silent (noise or silence, never an error), so both the clamp and the
+    # channel order are pinned. See src/talkback-pcm.h.
+    add_executable(CoreVideoTalkbackPcmTest
+        tests/talkback-pcm-test.cpp
+    )
+    target_include_directories(CoreVideoTalkbackPcmTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTalkbackPcm
+             COMMAND CoreVideoTalkbackPcmTest)
+
+    # The talkback ring, driven in reverse (plugin writes, engine reads).
+    # Uses real concurrency to prove the seqlock and the free-running indices
+    # hold with the roles swapped. See src/talkback-ring.h.
+    add_executable(CoreVideoTalkbackRingTest
+        tests/talkback-ring-test.cpp
+    )
+    target_include_directories(CoreVideoTalkbackRingTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    target_link_libraries(CoreVideoTalkbackRingTest PRIVATE Threads::Threads)
+    add_test(NAME CoreVideoTalkbackRing
+             COMMAND CoreVideoTalkbackRingTest)
+
+    # When a talkback key may stay open, and every way it must close. Talkback
+    # is the one feature where a bug is heard outside the control room, so the
+    # closing direction is pinned exhaustively. See src/talkback-key.h.
+    add_executable(CoreVideoTalkbackKeyTest
+        tests/talkback-key-test.cpp
+    )
+    target_include_directories(CoreVideoTalkbackKeyTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTalkbackKey
+             COMMAND CoreVideoTalkbackKeyTest)
+
+    # Talkback audio must never reach program or ISO. Source-level invariant:
+    # the tap may observe, never route. See tests/talkback-isolation-test.cpp
+    # for why this is a source scan rather than a runtime test.
+    add_executable(CoreVideoTalkbackIsolationTest
+        tests/talkback-isolation-test.cpp
+    )
+    add_test(NAME CoreVideoTalkbackIsolation
+             COMMAND CoreVideoTalkbackIsolationTest
+                     "${CMAKE_CURRENT_SOURCE_DIR}/src/talkback-tap.cpp")
+
+    # Which subsystem a CreateChannel response belongs to. Three now ask (the
+    # probe, the talkback session, and nomination) and the response carries no
+    # clue; routing it wrong cuts the director off mid-sentence, hands the
+    # session a channel tick() is about to destroy, or corrupts a still-
+    # provisioning plan. See src/talkback-channel-owner.h.
+    add_executable(CoreVideoTalkbackChannelOwnerTest
+        tests/talkback-channel-owner-test.cpp
+    )
+    target_include_directories(CoreVideoTalkbackChannelOwnerTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTalkbackChannelOwner
+             COMMAND CoreVideoTalkbackChannelOwnerTest)
+
+    # The cancellation/ownership decisions layered on top of the arbiter
+    # above: what session_stop()'s early branch and nomination_reset() do
+    # when they must tear down while a create is still outstanding
+    # (talkback_cancel()), what a create that never gets a response does
+    # (talkback_expire()), and what a response's disposition is once its
+    # owner is known (talkback_create_disposition()). Added in Task 2 fix
+    # round 2 after N1: a Critical (C1) was found and fixed by review-trace
+    # with no test, and the very next round introduced a Major regression in
+    # the same state machine (a cancellation flag that outlived the create it
+    # was recorded for). See src/talkback-channel-owner.h.
+    add_executable(CoreVideoTalkbackCreateStateTest
+        tests/talkback-create-state-test.cpp
+    )
+    target_include_directories(CoreVideoTalkbackCreateStateTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTalkbackCreateState
+             COMMAND CoreVideoTalkbackCreateStateTest)
+
+    # When the talkback open/close audio cue fires: a pure edge-detector over
+    # the engine's own confirmed `live` state, so the cue marks the moment
+    # the Zoom channel's create/invite round trip actually finishes rather
+    # than the key press (which would clip the director's own first words
+    # underneath a cue claiming it's already safe to talk). See
+    # src/talkback-cue.h.
+    add_executable(CoreVideoTalkbackCueTest
+        tests/talkback-cue-test.cpp
+    )
+    target_include_directories(CoreVideoTalkbackCueTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTalkbackCue
+             COMMAND CoreVideoTalkbackCueTest)
+
+    # The talkback cue must never reach program or ISO, same guarantee as the
+    # tap (CoreVideoTalkbackIsolation above), enforced separately because
+    # talkback-cue.cpp is a second independent place audio-shaped code lives
+    # in this plugin. See tests/talkback-cue-isolation-test.cpp.
+    add_executable(CoreVideoTalkbackCueIsolationTest
+        tests/talkback-cue-isolation-test.cpp
+    )
+    add_test(NAME CoreVideoTalkbackCueIsolation
+             COMMAND CoreVideoTalkbackCueIsolationTest
+                     "${CMAKE_CURRENT_SOURCE_DIR}/src/talkback-cue.cpp")
+
+    # How nominated talent maps onto Zoom's 16-channel / 10-user budget. Neither
+    # cap degrades gracefully, and a silently-dropped nominee is invisible from
+    # the control room. See src/talkback-plan.h.
+    add_executable(CoreVideoTalkbackPlanTest
+        tests/talkback-plan-test.cpp
+    )
+    target_include_directories(CoreVideoTalkbackPlanTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTalkbackPlan
+             COMMAND CoreVideoTalkbackPlanTest)
+
+    # Task 5 fix round 1 (F1/F2): the plugin's own record of a nomination's
+    # outcome must track what the engine CONFIRMED, never what was merely
+    # sent or refused -- a refused re-nomination must not falsely refuse a
+    # key on a still-standing channel (F1), and a Leave/engine-restart world
+    # reset must not leave the record advertising a plan that no longer
+    # exists (F2). See src/talkback-nomination.h.
+    add_executable(CoreVideoTalkbackNominationTest
+        tests/talkback-nomination-test.cpp
+    )
+    target_include_directories(CoreVideoTalkbackNominationTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTalkbackNomination
+             COMMAND CoreVideoTalkbackNominationTest)
+
+    # THE FIRST TEST TARGET THAT COMPILES AN ENGINE TRANSLATION UNIT.
+    #
+    # Every other talkback test above compiles a pure header with src/ on the
+    # include path, so engine-talkback.cpp's own call sites -- which SDK calls
+    # it makes, in what order, and what it stores in the arbiter afterwards --
+    # were covered by nothing at all. Three consecutive review rounds named
+    # that gap, and Task 2's last Major lived in it: a reviewer deleted the
+    # engine's generation-stamp line and the whole 64-test suite stayed green.
+    # This target links the real engine TU and drives it through fakes for the
+    # two Zoom interfaces it touches (both pure-abstract, so no SDK LIBRARY is
+    # linked -- only ZOOM_SDK_INCLUDE_DIR).
+    #
+    # Guarded on the SDK headers being present for the same reason
+    # ZoomObsEngine is: without them this file cannot compile at all. NOMINMAX
+    # /WIN32_LEAN_AND_MEAN mirror the engine target's, and for the same reason
+    # -- talkback-plan.h calls std::min, and windows.h arrives transitively via
+    # zoom_sdk_def.h's HWND use.
+    # WIN32 gate, not just SDK-present: this target compiles the real
+    # engine/src/engine-talkback.cpp, and the engine is Windows-only (zchar_t
+    # = wchar_t, HWND via zoom_sdk_def.h). Linux CI carries a partial SDK
+    # include dir where zoom_sdk.h EXISTS but the meeting_service_components
+    # tree does not, so the SDK-present check alone let this target register
+    # there and fail at #include (PR #231 CI, 2026-08-27).
+    if(WIN32 AND EXISTS "${ZOOM_SDK_INCLUDE_DIR}/meeting_service_components/meeting_talkback_ctrl_interface.h")
+        add_executable(CoreVideoEngineTalkbackSelectTest
+            tests/engine-talkback-select-test.cpp
+            engine/src/engine-talkback.cpp
+        )
+        target_include_directories(CoreVideoEngineTalkbackSelectTest PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${CMAKE_CURRENT_SOURCE_DIR}/engine/src"
+            "${ZOOM_SDK_INCLUDE_DIR}"
+        )
+        if(WIN32)
+            target_compile_definitions(CoreVideoEngineTalkbackSelectTest PRIVATE
+                NOMINMAX WIN32_LEAN_AND_MEAN)
+        endif()
+        target_link_libraries(CoreVideoEngineTalkbackSelectTest PRIVATE Threads::Threads)
+        add_test(NAME CoreVideoEngineTalkbackSelect
+                 COMMAND CoreVideoEngineTalkbackSelectTest)
+    endif()
+
     # The master clock every audio buffer is stamped from. Wall-clock arrival
     # stamps let IPC jitter reach OBS, which resampled continuously — the
     # 2026-08-16 "audio is very bad" report.
@@ -1136,11 +1339,31 @@ if(BUILD_TESTING)
         add_test(NAME CoreVideoControlParse
                  COMMAND CoreVideoControlParseTest)
 
+        # Task 5 fix round 2 (N5): the stage-report-to-transition MAPPING for
+        # a talkback nomination -- where both F1 and N1 actually lived, per
+        # the round 1/round 2 reviews -- factored out to depend on nothing
+        # but Qt Core's JSON types (same bar as the two targets above) so it
+        # can be driven directly, instead of only through the pure state
+        # machine underneath it (CoreVideoTalkbackNomination) or the whole
+        # OBS plugin. See src/talkback-nomination-dispatch.h.
+        add_executable(CoreVideoTalkbackNominationDispatchTest
+            tests/talkback-nomination-dispatch-test.cpp
+        )
+        target_include_directories(CoreVideoTalkbackNominationDispatchTest PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        )
+        target_link_libraries(CoreVideoTalkbackNominationDispatchTest PRIVATE Qt6::Core)
+        add_test(NAME CoreVideoTalkbackNominationDispatch
+                 COMMAND CoreVideoTalkbackNominationDispatchTest)
+
         if(WIN32 AND _qt_bin_dir)
             set_tests_properties(CoreVideoOscWire PROPERTIES
                 ENVIRONMENT_MODIFICATION
                     "PATH=path_list_prepend:${_qt_bin_dir}")
             set_tests_properties(CoreVideoControlParse PROPERTIES
+                ENVIRONMENT_MODIFICATION
+                    "PATH=path_list_prepend:${_qt_bin_dir}")
+            set_tests_properties(CoreVideoTalkbackNominationDispatch PROPERTIES
                 ENVIRONMENT_MODIFICATION
                     "PATH=path_list_prepend:${_qt_bin_dir}")
         endif()

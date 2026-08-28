@@ -17,6 +17,13 @@
 #define IPC_CMD_START_MEDIA "start_media"
 #define IPC_CMD_STOP_MEDIA  "stop_media"
 #define IPC_CMD_QUIT        "quit"
+#define IPC_CMD_TALKBACK_PROBE "talkback_probe"
+#define IPC_CMD_TALKBACK_OPEN  "talkback_open"
+#define IPC_CMD_TALKBACK_AUDIO "talkback_audio"
+#define IPC_CMD_TALKBACK_CLOSE "talkback_close"
+#define IPC_CMD_TALKBACK_START "talkback_start"
+#define IPC_CMD_TALKBACK_STOP  "talkback_stop"
+#define IPC_CMD_TALKBACK_NOMINATE "talkback_nominate"
 #define IPC_EVT_READY       "ready"
 #define IPC_EVT_AUTH_OK     "auth_ok"
 #define IPC_EVT_AUTH_FAIL   "auth_fail"
@@ -129,6 +136,14 @@ struct ShmFrameHeader {
 // reader keeping up sees about one slot of delay, and the depth is only spent
 // while absorbing a stall.
 static constexpr uint32_t kAudioRingSlots = 8;
+
+// Talkback's slot size. OBS delivers AUDIO_OUTPUT_FRAMES (1024) frames per
+// callback; 1024 frames of stereo int16 is 4096 bytes, so 8192 leaves headroom
+// for a larger buffer without a resize. Talkback deliberately never resizes:
+// a resize means a new _gN region name (a Windows section cannot grow while
+// mapped), and re-handshaking a live talk key mid-sentence is worse than
+// refusing one oversized buffer.
+static constexpr uint32_t kTalkbackSlotBytes = 8192;
 
 struct ShmAudioSlot {
     // Even and unchanged across a read = the payload was stable. Odd = a write

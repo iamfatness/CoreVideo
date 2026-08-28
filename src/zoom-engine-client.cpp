@@ -1,5 +1,7 @@
 #include "zoom-engine-client.h"
 #include "speaker-director.h"
+#include "talkback-nomination-dispatch.h" // Task 5 fix round 2, N5
+#include "talkback-plan.h" // talkback_dedup_preserve_order() -- Task 5 fix round 1, F4
 #include "zoom-join-decision.h"
 #include "zoom-reconnect.h"
 #include "zoom-sdk-init-retry.h"
@@ -477,9 +479,42 @@ bool ZoomEngineClient::start(const std::string &jwt_token,
     m_authenticated.store(false, std::memory_order_release);
     m_media_active.store(false, std::memory_order_release);
     m_awaiting_admission.store(false, std::memory_order_release);
+    // Task 5 fix round 2 (N2): a nomination-record reset used to live HERE,
+    // before the joins immediately below -- reachable on the crash path
+    // (monitor_loop() clears m_running without joining the reader, then
+    // recovery calls start()), where a dead engine's already-queued
+    // "nominate_done" could still be handled by the not-yet-joined reader and
+    // commit AFTER a reset run this early, leaving a freshly restarted engine
+    // with zero channels holding a stale confirmed plan. That bug was the
+    // POSITION, not the existence of a reset here -- see the one after the
+    // joins below, and stop_for_reconnect()'s own copy, for fix round 3 (N7)
+    // restoring it correctly.
     // Join threads from any previous session (e.g. after a crash).
     if (m_reader.joinable())  m_reader.join();
     if (m_monitor.joinable()) m_monitor.join();
+
+    // Task 5 fix round 3 (N7): a SECOND world-reset of the nomination record,
+    // alongside stop_for_reconnect()'s (below). Both are needed, and both are
+    // plain `= TalkbackNominationPlan{}`, so having both costs nothing:
+    // stop_for_reconnect() is NOT on every path to a fresh start() --
+    // monitor_loop() clears m_running directly (without calling it) when
+    // recovery is DECLINED (policy disabled, auth failure, max attempts, no
+    // stored session, or the m_user_leaving race), and so does
+    // fail_after_init_retries_exhausted() (its own comment: clearing
+    // m_running first is what "makes a subsequent start() work"). On both,
+    // the operator's next action is a manual dock Join, which calls start()
+    // directly -- no stop()/stop_for_reconnect() in between -- and round 2's
+    // fix left exactly that path holding the dead engine's confirmed plan
+    // again (N7, the same F2/N1 symptom on a third trigger). Placed AFTER the
+    // joins above, unlike round 1's original mistake at this same call site:
+    // the previous session's reader thread owns this field and can still be
+    // inside handle_event() committing a queued "nominate_done" until it is
+    // joined.
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        talkback_nomination_reset(m_talkback_nomination_status);
+        m_talkback_nomination_pending = TalkbackNominationPending{};
+    }
 
     // Fresh engine session: no init retry is owed. This must come AFTER the
     // joins above — the previous session's reader thread owns these fields and
@@ -600,6 +635,27 @@ void ZoomEngineClient::stop_for_reconnect()
     m_media_active.store(false, std::memory_order_release);
     m_awaiting_admission.store(false, std::memory_order_release);
     m_state.store(MeetingState::Idle, std::memory_order_release);
+    // Task 5 fix round 2 (N2/N4): the third world-reset point, alongside the
+    // per-session fields above -- covers an engine restart (crash recovery's
+    // execute_retry() calls this before the next start()) AND the window
+    // between an operator stop()/leave and the next start(), where
+    // talkback_status would otherwise keep advertising a plan whose engine
+    // process no longer exists. Placed AFTER the joins above (not before,
+    // where round 1 had the equivalent block in start() -- see the comment
+    // there): the previous session's reader thread owns this field and can
+    // still be inside handle_event() committing a queued "nominate_done"
+    // until it is joined. Fix round 3 (N7): start() ALSO resets this, after
+    // its own joins -- not every path to a fresh start() passes through here
+    // first (monitor_loop() declining recovery, or
+    // fail_after_init_retries_exhausted(), both clear m_running directly),
+    // and a manual dock Join calls start() with nothing in between. Both
+    // resets are idempotent plain `= TalkbackNominationPlan{}`, so keeping
+    // both costs nothing and covers every trigger.
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        talkback_nomination_reset(m_talkback_nomination_status);
+        m_talkback_nomination_pending = TalkbackNominationPending{};
+    }
 }
 
 void ZoomEngineClient::monitor_loop()
@@ -848,6 +904,135 @@ void ZoomEngineClient::stop_media()
     m_media_active.store(false, std::memory_order_release);
 }
 
+void ZoomEngineClient::talkback_probe(const std::string &participant_name)
+{
+    if (!m_running.load(std::memory_order_acquire)) return;
+    write_json(R"({"cmd":"talkback_probe","participant":")" +
+               json_escape(participant_name) + "\"}");
+}
+
+void ZoomEngineClient::talkback_start(const std::string &target)
+{
+    if (!m_running.load(std::memory_order_acquire)) return;
+    // F2 review-round fix: reset the engine-confirmed session state at the
+    // moment a NEW session is requested, so TalkbackController::evaluate()'s
+    // grace period (see there) starts from a known "not yet answered"
+    // baseline (live=false, reason empty) instead of a stale live/reason
+    // left over from a PREVIOUS key's session -- without this, a key closed
+    // for cause and then immediately reopened would inherit the old
+    // session's failure reason and get closed again before the new
+    // session's own CreateChannel round-trip ever had a chance to answer.
+    // Scoped so the lock is released before write_json() re-acquires it
+    // (m_mtx is not recursive).
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        m_talkback_session_status = TalkbackSessionStatus{};
+    }
+    // Task 5: "target", not "participant" -- see this method's header
+    // comment. main.cpp still accepts the old field as a fallback, but this
+    // plugin only ever sends the new one.
+    write_json(R"({"cmd":"talkback_start","target":")" +
+               json_escape(target) + "\"}");
+}
+
+void ZoomEngineClient::talkback_nominate(const std::vector<std::string> &nominees)
+{
+    if (!m_running.load(std::memory_order_acquire)) return;
+    // Task 5 fix round 1 (F4): dedupe here, matching talkback_plan()'s own
+    // collapsing of duplicate nominees (src/talkback-plan.h) -- the engine
+    // reports `channels` post-dedup, so recording the raw list here would
+    // inflate the plugin's own has_private_channel count against it.
+    const std::vector<std::string> deduped = talkback_dedup_preserve_order(nominees);
+    // Task 5 fix round 1 (F1): stage this attempt in the PENDING record only
+    // -- m_talkback_nomination_status (the CONFIRMED plan) must not move
+    // until the engine actually accepts it. See src/talkback-nomination.h's
+    // header comment: a refused nomination leaves the engine's standing
+    // channel set untouched, so overwriting the confirmed plan at send time
+    // (the old behaviour) falsely refused a key on a still-standing channel
+    // whenever a re-nomination was refused. Scoped so the lock is released
+    // before write_json() re-acquires it (m_mtx is not recursive), same
+    // discipline as talkback_start() above.
+    // Task 5 final review (C1, CRITICAL): stamp this send with an attempt id
+    // and stage under it. Without it, a re-nomination sent while an earlier
+    // ladder was still provisioning wiped the earlier attempt's staging, and
+    // that ladder's own nominate_done committed THIS attempt's nominee list
+    // against the earlier ladder's channels -- see src/talkback-nomination.h.
+    uint32_t attempt = 0;
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        attempt = ++m_talkback_nominate_attempt;
+        talkback_nomination_begin(m_talkback_nomination_pending, deduped, attempt);
+    }
+    // Task 5 fix round 1 (F5, documented not fixed): json_escape() below
+    // escapes '\n'/'\r'/'\t' as two-character sequences ("\\n" etc.), but the
+    // engine's line-oriented parser (json_str/json_str_array,
+    // engine/src/main.cpp) is not a real JSON decoder -- it only knows
+    // "a backslash means take the NEXT BYTE literally", so it decodes "\\n"
+    // to a literal 'n' character, not a newline. '"' and '\\' happen to
+    // round-trip correctly under that rule (escaped-quote and
+    // escaped-backslash both collapse to the original byte), but a nominee
+    // display name containing an actual control character would not: the
+    // engine would plan around a different string than `requested` holds,
+    // silently desyncing uncovered_private/has_private_channel and letting a
+    // key by the real name be locally allowed then engine-refused (or vice
+    // versa). Not fixed here: the decoder is shared by every P2E command,
+    // not something to change opportunistically for one caller, and display
+    // names containing control characters are exceedingly rare in practice --
+    // the failure mode is a refusal or a coverage mismatch, not data
+    // corruption. A real fix means teaching the engine's decoder actual JSON
+    // escape semantics.
+    // KEY ORDER IS LOAD-BEARING: "attempt" comes BEFORE "nominees". The
+    // engine's json_uint() (engine/src/main.cpp) is a first-match scan for
+    // "\"attempt\":", not a real JSON parser, so a nominee display name is
+    // the only thing that could shadow this field -- and only if it reached
+    // the wire with an UNESCAPED quote before it, which json_escape() below
+    // prevents (an escaped one reads as \" and does not match the needle).
+    // Emitting the id ahead of the participant-controlled array means the
+    // right value is found first even if that ever stops being true. Same
+    // reasoning json_str_array()'s own header comment gives for treating this
+    // decoder's limits as a constraint to design around rather than an
+    // assumption to rely on.
+    std::string json = R"({"cmd":"talkback_nominate","attempt":)" +
+                       std::to_string(attempt) + R"(,"nominees":[)";
+    for (std::size_t i = 0; i < deduped.size(); ++i) {
+        if (i != 0) json += ",";
+        json += "\"" + json_escape(deduped[i]) + "\"";
+    }
+    json += "]}";
+    write_json(json);
+}
+
+void ZoomEngineClient::talkback_stop()
+{
+    if (!m_running.load(std::memory_order_acquire)) return;
+    write_json(R"({"cmd":"talkback_stop"})");
+}
+
+void ZoomEngineClient::talkback_open(const std::string &region, uint32_t rate,
+                                     uint16_t channels)
+{
+    if (!m_running.load(std::memory_order_acquire)) return;
+    write_json(R"({"cmd":"talkback_open","region":")" + json_escape(region) +
+               R"(","rate":)" + std::to_string(rate) +
+               R"(,"channels":)" + std::to_string(channels) + "}");
+}
+
+void ZoomEngineClient::talkback_audio()
+{
+    // Fires once per empty->non-empty ring edge -- see the call site in
+    // talkback-tap.cpp's on_audio() for why sending on every buffer instead
+    // would recreate the message-storm shape this codebase already has a
+    // live incident about.
+    if (!m_running.load(std::memory_order_acquire)) return;
+    write_json(R"({"cmd":"talkback_audio"})");
+}
+
+void ZoomEngineClient::talkback_close()
+{
+    if (!m_running.load(std::memory_order_acquire)) return;
+    write_json(R"({"cmd":"talkback_close"})");
+}
+
 void ZoomEngineClient::subscribe(const std::string &source_uuid,
                                  uint32_t participant_id,
                                  bool isolate_audio,
@@ -1009,6 +1194,24 @@ void ZoomEngineClient::set_last_error(const std::string &message)
     m_last_error = message;
 }
 
+std::string ZoomEngineClient::talkback_probe_status() const
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    return m_talkback_probe_status;
+}
+
+ZoomEngineClient::TalkbackSessionStatus ZoomEngineClient::talkback_session_status() const
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    return m_talkback_session_status;
+}
+
+ZoomEngineClient::TalkbackNominationStatus ZoomEngineClient::talkback_nomination_status() const
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    return m_talkback_nomination_status;
+}
+
 void ZoomEngineClient::fail_after_init_retries_exhausted()
 {
     // Monitor thread only.
@@ -1145,6 +1348,66 @@ void ZoomEngineClient::handle_event(const std::string &line)
             m_media_active.store(false, std::memory_order_release);
         return;
     }
+    if (cmd == "talkback_probe") {
+        // Milestone 1's entire deliverable is these stage reports reaching
+        // the operator -- verbatim, no filtering/summarising/pretty-printing,
+        // because a stage that doesn't reach the log may as well not have
+        // been reported.
+        blog(LOG_INFO, "[obs-zoom-plugin] talkback_probe: %s", line.c_str());
+        // Also stash the raw line for the dock's status label so the operator
+        // isn't required to tail the log to use the probe button. Lock scope
+        // is kept to the copy alone -- never held across the blog() above or
+        // any Qt call the dock might make when it later reads this back.
+        {
+            std::lock_guard<std::mutex> lk(m_mtx);
+            m_talkback_probe_status = line;
+        }
+        return;
+    }
+    if (cmd == "talkback_session") {
+        // F6 review-round fix: the session-side counterpart to
+        // talkback_probe above -- engine/src/engine-talkback.cpp's
+        // report_session()/report_session_state() tag every session/audio-
+        // path line "cmd":"talkback_session" instead of "talkback_probe"
+        // precisely so it stops overwriting the probe's status label and
+        // logging as "talkback_probe: ..." when nothing to do with a probe
+        // is happening. Log it under its own tag here.
+        //
+        // F2 review-round fix (CRITICAL): two distinct shapes share this
+        // cmd -- report_session_state()'s confirmed-state line (has a
+        // top-level "live" key, no "stage") and report_session()'s stage
+        // trace lines (have "stage", never "live"). Tell them apart by the
+        // presence of "live" rather than by ordering.
+        if (obj.contains("live")) {
+            const bool live = obj.value("live").toBool();
+            const std::string reason = obj.value("reason").toString().toStdString();
+            blog(LOG_INFO,
+                 "[obs-zoom-plugin] talkback_session: live=%s reason=%s",
+                 live ? "true" : "false", reason.c_str());
+            std::lock_guard<std::mutex> lk(m_mtx);
+            m_talkback_session_status.live   = live;
+            m_talkback_session_status.reason = reason;
+            return;
+        }
+        blog(LOG_INFO, "[obs-zoom-plugin] talkback_session: %s", line.c_str());
+        return;
+    }
+    if (cmd == "talkback_nominate") {
+        // Task 5: mirrors talkback_probe's handling exactly -- log every
+        // stage line verbatim (see the comment on the talkback_probe branch
+        // above). Fix round 2 (N5): the stage-to-transition MAPPING (which
+        // pure talkback-nomination.h function each report shape calls) is
+        // factored into talkback_nomination_apply_report()
+        // (src/talkback-nomination-dispatch.h) precisely so that mapping --
+        // where both F1 and N1 actually lived -- can be driven by a host
+        // test without the rest of this class. Do not inline stage-handling
+        // logic back here; extend the dispatcher and its test instead.
+        blog(LOG_INFO, "[obs-zoom-plugin] talkback_nominate: %s", line.c_str());
+        std::lock_guard<std::mutex> lk(m_mtx);
+        talkback_nomination_apply_report(m_talkback_nomination_status,
+            m_talkback_nomination_pending, obj.value("stage").toString(), obj);
+        return;
+    }
     if (cmd == "awaiting_admission") {
         // Sent on every meeting-status change, so this is a plain assignment
         // and never needs an edge to clear it. See is_awaiting_admission().
@@ -1170,6 +1433,16 @@ void ZoomEngineClient::handle_event(const std::string &line)
             m_roster.clear();
             m_active_speaker_id = 0;
             SpeakerDirector::instance().reset();
+            // Task 5 fix round 1 (F2): the engine's own Leave path calls
+            // nomination_reset() (engine/src/main.cpp) and destroys every
+            // provisioned channel. This is the plugin-side world-reset that
+            // already exists for exactly this moment -- join it here rather
+            // than inventing a new hook. Without this, talkback_status kept
+            // advertising the last meeting's plan after a Leave/rejoin, and
+            // key_on()'s pre-check kept passing for targets that would now
+            // refuse with "no_nomination".
+            talkback_nomination_reset(m_talkback_nomination_status);
+            m_talkback_nomination_pending = TalkbackNominationPending{};
             keep_failed = !m_last_error.empty() &&
                 !m_user_leaving.load(std::memory_order_acquire);
         }

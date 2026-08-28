@@ -1,6 +1,8 @@
 #include "zoom-control-server.h"
 #include "obs-utils.h"
 #include "speaker-director.h"
+#include "talkback-controller.h"
+#include "talkback-key.h"
 #include "zoom-control-parse.h"
 #include "zoom-engine-client.h"
 #include "zoom-iso-recorder.h"
@@ -401,6 +403,50 @@ static QJsonObject speaker_director_to_json()
     return obj;
 }
 
+// Task 5: the last CONFIRMED talkback_nominate() plan, in the shape the
+// brief asks the operator to be able to learn AT NOMINATION TIME -- how many
+// channels, who is uncovered, who is unreachable. "who has a private
+// channel" is not a field the engine ever reports by name (only shortfalls
+// are named -- see src/talkback-plan.h's header comment on why); it is the
+// requested list minus uncovered_private, computed here rather than
+// duplicating that arithmetic in ZoomEngineClient.
+//
+// Fix round 1 (F1/F3): `n` is always the CONFIRMED plan
+// (src/talkback-nomination.h) -- it is only ever written by a "nominate_done"
+// the engine actually accepted, never by a refused or in-flight attempt. So
+// `requested`/`uncovered_private` here can never contradict each other the
+// way F3 found (an ok:false report claiming full private coverage):
+// `last_attempt_ok`/`last_attempt_reason` describe the most recent ATTEMPT,
+// which may be newer than and disagree with the confirmed fields above (a
+// refused re-nomination, say), and are purely diagnostic -- never a comment
+// on whether `has_private_channel` below is trustworthy.
+static QJsonObject talkback_nomination_to_json(
+    const ZoomEngineClient::TalkbackNominationStatus &n)
+{
+    QJsonObject obj;
+    obj["done"] = n.done;
+    obj["channels"] = static_cast<double>(n.channels);
+    obj["all_talent_complete"] = n.all_talent_complete;
+    QJsonArray uncovered, unreachable, has_private_channel;
+    for (const auto &name : n.uncovered_private)
+        uncovered.append(QString::fromStdString(name));
+    for (const auto &name : n.unreachable)
+        unreachable.append(QString::fromStdString(name));
+    for (const auto &name : n.requested) {
+        const bool is_uncovered =
+            std::find(n.uncovered_private.begin(), n.uncovered_private.end(), name) !=
+            n.uncovered_private.end();
+        if (!is_uncovered) has_private_channel.append(QString::fromStdString(name));
+    }
+    obj["uncovered_private"] = uncovered;
+    obj["unreachable"] = unreachable;
+    obj["has_private_channel"] = has_private_channel;
+    obj["last_attempt_ok"] = n.last_attempt_ok;
+    if (!n.last_attempt_ok)
+        obj["last_attempt_reason"] = QString::fromStdString(n.last_attempt_reason);
+    return obj;
+}
+
 void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
 {
     const ParsedControlRequest parsed = parse_control_request(line, m_token);
@@ -791,6 +837,198 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
     if (cmd == "stop_engine") {
         ZoomEngineClient::instance().stop_media();
         write_response(socket, {{"ok", true}});
+        return;
+    }
+
+    // Milestone 1: fires the talkback probe against one named participant.
+    // The probe itself is async and reports its stages as OBS log lines
+    // ("talkback_probe" events in ZoomEngineClient::handle_event), not over
+    // this connection -- this response only confirms the trigger was
+    // accepted.
+    if (cmd == "talkback_probe") {
+        const QString participant = req.value("participant").toString();
+        if (participant.isEmpty()) {
+            write_response(socket, {
+                {"ok", false},
+                {"error", "participant_required"},
+                {"message", "participant name required"},
+            });
+            return;
+        }
+        if (ZoomEngineClient::instance().state() != MeetingState::InMeeting) {
+            write_response(socket, {
+                {"ok", false},
+                {"error", "not_in_meeting"},
+                {"message", "Join the meeting before running the talkback probe."},
+            });
+            return;
+        }
+        blog(LOG_INFO, "[obs-zoom-plugin] Control API: talkback_probe participant=%s",
+             participant.toStdString().c_str());
+        ZoomEngineClient::instance().talkback_probe(participant.toStdString());
+        write_response(socket, {
+            {"ok", true},
+            {"note", "probe started; watch the OBS log for talkback_probe stages"},
+        });
+        return;
+    }
+
+    // Task 5: provisions channels for a list of nominees, mirroring
+    // talkback_probe's shape -- async, fire-and-acknowledge. The plan outcome
+    // (how many channels, who is uncovered, who is unreachable) is NOT
+    // returned here: it arrives as "talkback_nominate" stage lines in the OBS
+    // log (ZoomEngineClient::handle_event(), same pattern as talkback_probe's
+    // stages) and is summarised for polling in talkback_status's "nomination"
+    // field below -- that IS the point of this command, per the brief: the
+    // operator must learn the budget outcome now, not when a key press fails
+    // mid-show.
+    if (cmd == "talkback_nominate") {
+        if (!req.value("nominees").isArray()) {
+            write_response(socket, {
+                {"ok", false},
+                {"error", "nominees_required"},
+                {"message", "nominees must be an array of display names"},
+            });
+            return;
+        }
+        const QJsonArray arr = req.value("nominees").toArray();
+        std::vector<std::string> nominees;
+        for (const auto &v : arr) {
+            if (!v.isString()) {
+                write_response(socket, {
+                    {"ok", false},
+                    {"error", "invalid_nominee"},
+                    {"message", "every nominee must be a string display name"},
+                });
+                return;
+            }
+            nominees.push_back(v.toString().toStdString());
+        }
+        // Fix round 1 (F6): talkback_nominate() (zoom-engine-client.cpp)
+        // early-returns on !is_running() BEFORE staging anything, so without
+        // this check a request that arrived while the engine process wasn't
+        // up would ack "nomination started" for a command that was silently
+        // dropped -- InMeeting alone does not imply the engine pipe is live.
+        // key_on() checks both for the same reason.
+        if (!ZoomEngineClient::instance().is_running()) {
+            write_response(socket, {
+                {"ok", false},
+                {"error", "engine_not_running"},
+                {"message", "The Zoom engine is not running."},
+            });
+            return;
+        }
+        if (ZoomEngineClient::instance().state() != MeetingState::InMeeting) {
+            write_response(socket, {
+                {"ok", false},
+                {"error", "not_in_meeting"},
+                {"message", "Join the meeting before nominating talkback talent."},
+            });
+            return;
+        }
+        blog(LOG_INFO, "[obs-zoom-plugin] Control API: talkback_nominate %d nominee(s)",
+             static_cast<int>(nominees.size()));
+        ZoomEngineClient::instance().talkback_nominate(nominees);
+        write_response(socket, {
+            {"ok", true},
+            {"note", "nomination started; poll talkback_status's \"nomination\" field "
+                     "or watch the OBS log for the plan outcome"},
+        });
+        return;
+    }
+
+    // Opens or closes a talkback key. TalkbackController (src/talkback-
+    // controller.h) owns every keying decision; this command only calls into
+    // it -- no keying logic lives here. needs_renewal is always true for this
+    // surface: a key opened over a socket must be re-asserted, because a lost
+    // release would otherwise leave audio flowing with nothing to notice (the
+    // lost-release backstop documented at the top of src/talkback-key.h).
+    if (cmd == "talkback_key") {
+        const QString state = req.value("state").toString();
+        // "off" always succeeds, even with a missing or invalid target
+        // or source -- the whole design fails closed, and the one command a
+        // panicking operator will send is "off". It must never be refused on
+        // a technicality.
+        if (state == "off") {
+            TalkbackController::instance().key_off();
+            write_response(socket, {{"ok", true}, {"open", false}});
+            return;
+        }
+        // Task 5: "target" is "all" (every nominated channel) or one
+        // nominee's own display name -- a key SELECTS an already-provisioned
+        // channel (TalkbackController::key_on(), src/talkback-controller.cpp),
+        // it does not name a participant to open one for.
+        const std::string target = req.value("target").toString().toStdString();
+        const std::string source = req.value("source").toString().toStdString();
+        // Fail closed on an unrecognised mode rather than silently guessing
+        // push-to-talk -- an operator who mistypes "Latch" or sends "toggle"
+        // needs to know their key opened in a different mode than they asked
+        // for, not discover it later on air. Omitted mode defaults to PTT.
+        const QString mode_str = req.value("mode").toString("push_to_talk");
+        TalkbackKeyMode mode;
+        if (mode_str == "latch") {
+            mode = TalkbackKeyMode::Latch;
+        } else if (mode_str == "push_to_talk" || mode_str == "ptt") {
+            mode = TalkbackKeyMode::PushToTalk;
+        } else {
+            write_response(socket, {
+                {"ok", false},
+                {"error", "invalid_talkback_mode"},
+                {"message", "mode must be \"latch\", \"push_to_talk\", or \"ptt\""},
+            });
+            return;
+        }
+        std::string error;
+        const bool ok = TalkbackController::instance().key_on(
+            target, source, mode, /*needs_renewal=*/true, error);
+        // "error" is a stable machine code for callers that branch on it;
+        // "message" carries the controller's specific reason (source
+        // missing, target not provisioned, key already open) so an operator
+        // knows WHICH thing failed, not just that talkback failed.
+        write_response(socket, ok
+            ? QJsonObject{{"ok", true}, {"open", true}}
+            : QJsonObject{{"ok", false}, {"error", "talkback_key_denied"},
+                          {"message", QString::fromStdString(error)}});
+        return;
+    }
+
+    // Re-asserts an open key -- the lost-release backstop's liveness ping.
+    // Harmless (and reported ok) if no key is currently open.
+    if (cmd == "talkback_renew") {
+        TalkbackController::instance().renew();
+        write_response(socket, {{"ok", true}});
+        return;
+    }
+
+    if (cmd == "talkback_status") {
+        // status_json() crosses this boundary as a raw std::string, so
+        // nothing here can rely on it being well-formed JSON no matter how
+        // the producer happens to build it today -- there is no compile-time
+        // guarantee tying the two sides together. QJsonDocument::fromJson()
+        // returns a null document on malformed input, and .object() on a
+        // null document silently returns an EMPTY QJsonObject with no error
+        // signal. Without this guard that reads back as {"ok":true,
+        // "talkback":{}} -- a false-positive success that hides whether a
+        // key is open, which is the one thing an operator mid-show most
+        // needs from this command. Fail loud instead of trusting the string.
+        QJsonParseError parse_error;
+        const QJsonDocument doc = QJsonDocument::fromJson(
+            QByteArray::fromStdString(TalkbackController::instance().status_json()),
+            &parse_error);
+        if (parse_error.error != QJsonParseError::NoError || !doc.isObject()) {
+            write_response(socket, {
+                {"ok", false},
+                {"error", "talkback_status_unavailable"},
+                {"message", "Could not parse talkback status."},
+            });
+            return;
+        }
+        write_response(socket, {
+            {"ok", true},
+            {"talkback", doc.object()},
+            {"nomination", talkback_nomination_to_json(
+                ZoomEngineClient::instance().talkback_nomination_status())},
+        });
         return;
     }
 

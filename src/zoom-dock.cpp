@@ -30,6 +30,9 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonValue>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -255,6 +258,50 @@ static QString participant_label_for_id(
 static bool combo_popup_open(const QComboBox *combo)
 {
     return combo && combo->view() && combo->view()->isVisible();
+}
+
+// Renders the latest talkback_probe stage line (raw compact JSON from
+// EngineTalkback::report(), see engine/src/engine-talkback.cpp) for the
+// status label, so the operator gets "create_channel: code=0" instead of a
+// JSON blob. The wire format is not contractual across stages -- each stage
+// reports whichever field is relevant to it -- so this is deliberately
+// defensive: anything that doesn't parse as an object with a "stage" field
+// falls back to the raw text verbatim rather than showing nothing or
+// crashing. An empty label would be worse than an ugly one; this diagnostic
+// exists specifically so the operator does not have to go read the log.
+static QString format_talkback_probe_status(const std::string &raw)
+{
+    if (raw.empty())
+        return QStringLiteral("No probe run yet.");
+
+    const QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(raw));
+    if (!doc.isObject())
+        return QString::fromStdString(raw);
+    const QJsonObject obj = doc.object();
+    const QString stage = obj.value("stage").toString();
+    if (stage.isEmpty())
+        return QString::fromStdString(raw);
+
+    // Checked in rough "most diagnostic" order; the first one present wins.
+    static const char *kFields[] = {
+        "code", "error", "supported", "buffers", "ok", "phase"
+    };
+    for (const char *field : kFields) {
+        if (!obj.contains(field))
+            continue;
+        const QJsonValue v = obj.value(field);
+        QString rendered;
+        if (v.isBool())
+            rendered = v.toBool() ? QStringLiteral("true") : QStringLiteral("false");
+        else if (v.isDouble())
+            rendered = QString::number(v.toDouble(), 'f', 0);
+        else if (v.isString())
+            rendered = v.toString();
+        else
+            continue;
+        return QString("%1: %2=%3").arg(stage, QString::fromLatin1(field), rendered);
+    }
+    return stage;
 }
 
 static bool combo_items_match(
@@ -768,6 +815,67 @@ ZoomDock::ZoomDock(QWidget *parent)
     routing_layout->addWidget(m_output_manager_btn);
     vLayout->addWidget(routing_group);
 
+    // -- Talkback probe (Milestone 1 diagnostic) --------------------------------
+    // This is NOT the talkback feature (Milestone 7: talk button, PTT, latch,
+    // tally, level meter). Those are deliberately out of this dock -- the
+    // operator has confirmed it stays config-and-tally-only. This is only the
+    // "can this account even open a channel" probe, exposed here because it
+    // was previously reachable only over the TCP control API, and its
+    // progress otherwise only ever showed up as OBS log lines.
+    auto *talkback_group = new QGroupBox("Talkback (probe)", this);
+    auto *talkback_layout = new QVBoxLayout(talkback_group);
+    talkback_layout->setSpacing(6);
+
+    auto *talkback_info = new QLabel(
+        "Milestone 1 diagnostic, not the talkback feature. Running it opens a "
+        "channel, invites the selected participant, and sends a 3-second "
+        "440Hz test tone that they WILL hear, ducking their meeting audio to "
+        "30% for the duration; the channel is destroyed afterward. Requires "
+        "host or co-host -- a plain participant is refused with "
+        "SDKERR_NO_PERMISSION.",
+        talkback_group);
+    talkback_info->setWordWrap(true);
+    talkback_layout->addWidget(talkback_info);
+
+    // A dedicated, roster-driven selector -- not the legacy m_participant_list
+    // above. That QListWidget is only ever filled inside refresh_outputs(),
+    // and that function's very first line returns whenever m_output_table is
+    // null, which it always is now that routing lives in the Output Manager
+    // dialog, so it never actually populates. This combo is rebuilt from the
+    // live roster every tick in update_state_indicator(), the same way
+    // m_speaker_override_combo above it already is.
+    m_talkback_participant_combo = new QComboBox(talkback_group);
+    m_talkback_participant_combo->addItem(QStringLiteral("Select participant"), QVariant());
+    m_talkback_participant_combo->setToolTip(
+        "Participant to invite into the probe talkback channel.");
+    talkback_layout->addWidget(m_talkback_participant_combo);
+
+    m_talkback_probe_btn = new QPushButton("Probe Selected Participant", talkback_group);
+    m_talkback_probe_btn->setEnabled(false);
+    talkback_layout->addWidget(m_talkback_probe_btn);
+
+    m_talkback_status_label = new QLabel(
+        format_talkback_probe_status(ZoomEngineClient::instance().talkback_probe_status()),
+        talkback_group);
+    m_talkback_status_label->setWordWrap(true);
+    m_talkback_status_label->setObjectName("talkbackProbeStatus");
+    talkback_layout->addWidget(m_talkback_status_label);
+
+    connect(m_talkback_probe_btn, &QPushButton::clicked, this, [this]() {
+        if (!m_talkback_participant_combo)
+            return;
+        // Passing the NAME, never the id the combo could have carried
+        // instead: Zoom user ids are meeting-scoped, so an id captured now
+        // would point at nobody after a rejoin and at the wrong person once
+        // ids get recycled -- the by-name resolution this whole feature (and
+        // the Companion module, see CLAUDE.md) is built on.
+        const QString name = m_talkback_participant_combo->currentData().toString();
+        if (name.isEmpty())
+            return;
+        ZoomEngineClient::instance().talkback_probe(name.toStdString());
+    });
+    vLayout->addWidget(talkback_group);
+
     // Pre-populate join fields from the last successful join, if any.
     {
         const ZoomPluginSettings prefill = ZoomPluginSettings::load();
@@ -1254,6 +1362,40 @@ void ZoomDock::update_state_indicator()
         m_speaker_label->setToolTip(status);
         m_director_speaker_label->setToolTip(m_speaker_label->toolTip());
     }
+
+    // -- Talkback probe (Milestone 1 diagnostic) --------------------------------
+    // Rebuilt every tick from the live roster, the same way
+    // m_speaker_override_combo is above -- see the comment where this combo is
+    // constructed for why it is not the legacy m_participant_list.
+    if (m_talkback_participant_combo && !combo_popup_open(m_talkback_participant_combo)) {
+        std::vector<std::pair<QString, QVariant>> items;
+        items.emplace_back(QStringLiteral("Select participant"), QVariant());
+        for (const auto &p : ZoomEngineClient::instance().roster()) {
+            if (p.user_id == 0 || p.display_name.empty())
+                continue;
+            items.emplace_back(participant_label(p),
+                               QVariant(QString::fromStdString(p.display_name)));
+        }
+        replace_combo_items(m_talkback_participant_combo, items, QVariant());
+    }
+    if (m_talkback_probe_btn && m_talkback_participant_combo) {
+        // Disabled outside a live meeting (nobody to invite/nowhere to open a
+        // channel) and until a participant is actually selected -- the combo's
+        // placeholder item carries an invalid/empty data(), which
+        // currentData().toString() reports as empty.
+        m_talkback_probe_btn->setEnabled(
+            in_meeting &&
+            !m_talkback_participant_combo->currentData().toString().isEmpty());
+    }
+    if (m_talkback_status_label) {
+        // Polled, not pushed: handle_event()'s talkback_probe branch just
+        // stores the latest line under m_mtx (see zoom-engine-client.cpp) and
+        // this timer-driven read picks it up on the next 100ms tick, matching
+        // how every other readout on this dock (last_error(), roster(),
+        // active_speaker_id()) already reaches the UI.
+        m_talkback_status_label->setText(format_talkback_probe_status(
+            ZoomEngineClient::instance().talkback_probe_status()));
+    }
 }
 
 void ZoomDock::refresh()
@@ -1332,6 +1474,12 @@ void ZoomDock::refresh_outputs()
                 !QString::number(p.user_id).contains(filter)) continue;
             auto *item = new QListWidgetItem(participant_roster_label(p));
             item->setData(Qt::UserRole, QString::number(p.user_id));
+            // Store the name alongside the id: Zoom user ids are
+            // meeting-scoped, so any by-name action (e.g. the talkback probe)
+            // must resolve off this, never off Qt::UserRole's id -- an id
+            // captured now points at nobody after a rejoin and at the wrong
+            // person once ids get recycled.
+            item->setData(Qt::UserRole + 1, name);
             m_participant_list->addItem(item);
             const QString id = item->data(Qt::UserRole).toString();
             if (selected_participants.contains(id))

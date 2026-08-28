@@ -109,6 +109,57 @@ int main()
               R"({"cmd":"subscribe","source_uuid":"tile_1_0","participant_id":7,"resolution":1,"isolate_audio":false,"audience_audio":false,"video_only":true})"),
           "video_only:true is detected on a tiles subscribe");
 
+    // --- Talkback probe routes exactly, and does not collide ---
+    routes(R"({"cmd":"talkback_probe","participant":"Sarah Muller"})",
+           IpcCommand::TalkbackProbe,
+           "talkback_probe did not route to IpcCommand::TalkbackProbe");
+    // A display name or payload containing the token must not route.
+    routes(R"({"cmd":"join","display_name":"talkback_probe"})",
+           IpcCommand::Join,
+           "a payload containing 'talkback_probe' hijacked the join branch");
+    // Guard the substring family the same way the existing commands are guarded.
+    routes(R"({"cmd":"talkback_probe_extra"})",
+           IpcCommand::Unknown,
+           "a longer command starting with talkback_probe matched it");
+
+    // ── Talkback audio-path commands route exactly ──────────────────────────
+    check(ipc_command_of(R"({"cmd":"talkback_open","region":"X","rate":48000})") ==
+              IpcCommand::TalkbackOpen,
+          "talkback_open did not route to IpcCommand::TalkbackOpen");
+    check(ipc_command_of(R"({"cmd":"talkback_audio"})") == IpcCommand::TalkbackAudio,
+          "talkback_audio did not route to IpcCommand::TalkbackAudio");
+    check(ipc_command_of(R"({"cmd":"talkback_close"})") == IpcCommand::TalkbackClose,
+          "talkback_close did not route to IpcCommand::TalkbackClose");
+    // The family shares a prefix with talkback_probe; exact match must keep
+    // them apart, the way it keeps unsubscribe out of the subscribe branch.
+    check(ipc_command_of(R"({"cmd":"talkback_probe"})") == IpcCommand::TalkbackProbe,
+          "talkback_probe was hijacked by a sibling talkback_* command");
+    check(ipc_command_of(R"({"cmd":"talkback_open_extra"})") == IpcCommand::Unknown,
+          "a longer command starting with talkback_open matched it");
+
+    // ── Talkback session commands route exactly ─────────────────────────────
+    check(ipc_command_of(R"({"cmd":"talkback_start","participant":"Sarah Muller"})") ==
+              IpcCommand::TalkbackStart,
+          "talkback_start did not route to IpcCommand::TalkbackStart");
+    check(ipc_command_of(R"({"cmd":"talkback_stop"})") == IpcCommand::TalkbackStop,
+          "talkback_stop did not route to IpcCommand::TalkbackStop");
+    // The talkback_* family now has seven members sharing a prefix. Exact
+    // match must keep every one of them apart.
+    check(ipc_command_of(R"({"cmd":"talkback_start_extra"})") == IpcCommand::Unknown,
+          "a longer command starting with talkback_start matched it");
+    check(ipc_command_of(R"({"cmd":"talkback_stop_extra"})") == IpcCommand::Unknown,
+          "a longer command starting with talkback_stop matched it");
+
+    // ── Talkback nominate (pre-provisioning) routes exactly ─────────────────
+    check(ipc_command_of(
+              R"({"cmd":"talkback_nominate","nominees":["Sarah Muller","Luis Ortiz"]})") ==
+              IpcCommand::TalkbackNominate,
+          "talkback_nominate did not route to IpcCommand::TalkbackNominate");
+    // Shares the talkback_ prefix with all six siblings above; exact match
+    // must keep it apart the same way it keeps every one of them apart.
+    check(ipc_command_of(R"({"cmd":"talkback_nominate_extra"})") == IpcCommand::Unknown,
+          "a longer command starting with talkback_nominate matched it");
+
     if (g_failures > 0) {
         std::cerr << "engine-command: " << g_failures << " failure(s)\n";
         return 1;

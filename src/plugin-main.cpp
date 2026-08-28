@@ -16,6 +16,7 @@
 #include "zoom-control-server.h"
 #include "zoom-osc-server.h"
 #include "cv-ffmpeg-loader.h"
+#include "talkback-controller.h"
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
@@ -69,6 +70,10 @@ static void shutdown_corevideo()
     ZoomControlServer::instance().stop();
     ZoomOscServer::instance().stop();
     ZoomIsoRecorder::instance().stop();
+    // Before the engine goes down: stops the dead-man timer and, if a key is
+    // still open, releases the OBS tap (capture callback, source ref, SHM
+    // region) explicitly rather than leaving it to static destruction order.
+    TalkbackController::instance().stop();
     ZoomEngineClient::instance().stop();
 }
 
@@ -79,6 +84,9 @@ static void frontend_event_callback(enum obs_frontend_event event, void *)
         ensure_iso_panel();
         ensure_output_panel();
         ensure_diagnostics_panel();
+        // Touch the singleton so its QTimer is constructed here, on the Qt
+        // main thread, rather than lazily on whatever thread first calls in.
+        TalkbackController::instance();
     }
     // Gates Tiles per-participant audio reconciliation off for the duration
     // of a scene-collection teardown+load, and sweeps every Tiles source once

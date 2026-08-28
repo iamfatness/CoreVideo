@@ -362,24 +362,42 @@ ZoomTalkbackPanel::ZoomTalkbackPanel(QWidget *parent)
     // audible tone at the participant. It is a diagnostic for when talkback
     // does not work at all, not a way to use it -- so it is collapsed by
     // default and lives at the very bottom.
-    m_probe_toggle = new QPushButton(
-        QStringLiteral("Diagnostic: talkback probe (show)"), this);
+    m_probe_toggle = new QPushButton(this);
     m_probe_toggle->setCheckable(true);
     m_probe_toggle->setProperty("role", "quiet");
     layout->addWidget(m_probe_toggle);
 
     m_probe_body = new QWidget(this);
-    m_probe_body->setVisible(false);
     auto *probe_layout = new QVBoxLayout(m_probe_body);
     probe_layout->setContentsMargins(0, 0, 0, 0);
     probe_layout->setSpacing(6);
-    connect(m_probe_toggle, &QPushButton::toggled, this, [this](bool on) {
+    // One place decides what "folded" and "unfolded" look like, used both to
+    // restore the saved state and to apply a fresh toggle, so the two cannot
+    // disagree. It is applied directly rather than through the signal below
+    // because seeding must not write the setting back during construction.
+    const auto apply_probe_disclosure = [this](bool on) {
         if (m_probe_body)
             m_probe_body->setVisible(on);
         if (m_probe_toggle)
             m_probe_toggle->setText(
                 on ? QStringLiteral("Diagnostic: talkback probe (hide)")
                    : QStringLiteral("Diagnostic: talkback probe (show)"));
+        // Unfolding should populate it now, not up to a second from now.
+        m_probe_poll_ms = 0;
+    };
+    m_probe_toggle->setChecked(initial_settings.talkback_probe_expanded);
+    apply_probe_disclosure(initial_settings.talkback_probe_expanded);
+    // Persisted, because folding this away does not merely hide it: while it is
+    // folded refresh_probe() skips the roster poll entirely, so this setting is
+    // what decides whether that work happens at all after a restart.
+    connect(m_probe_toggle, &QPushButton::toggled, this,
+            [this, apply_probe_disclosure](bool on) {
+        apply_probe_disclosure(on);
+        if (m_shutting_down)
+            return;
+        auto s = ZoomPluginSettings::load();
+        s.talkback_probe_expanded = on;
+        s.save();
     });
 
     auto *probe_info = new QLabel(
@@ -426,6 +444,9 @@ ZoomTalkbackPanel::ZoomTalkbackPanel(QWidget *parent)
         if (name.isEmpty())
             return;
         ZoomEngineClient::instance().talkback_probe(name.toStdString());
+        // The stage line under this button is about to start moving; do not
+        // make the operator wait out the poll gate to see the first one.
+        m_probe_poll_ms = 0;
     });
     layout->addWidget(m_probe_body);
 
@@ -484,17 +505,33 @@ TalkbackDockOpenKey ZoomTalkbackPanel::dock_open_key() const
     return open;
 }
 
-// The Milestone 1 probe's own polled readouts. Split out from refresh() only
-// because it is a diagnostic on a different clock of interest, not because it
-// runs on a different one -- it is called from the same tick.
+// The Milestone 1 probe's own polled readouts.
+//
+// GATED THE SAME WAY THE SOURCE SCAN IS, and for the same reason (m2). This
+// copies the whole roster out of ZoomEngineClient under its mutex and rebuilds
+// a combo from it, which is the second-heaviest repeated work on this panel --
+// and the panel is created at FINISHED_LOADING whether or not the operator ever
+// opens the dock, with the probe section folded by default. Left ungated it was
+// 10Hz of roster copying for a widget nobody can see. So: only while this dock
+// is visible AND the probe is unfolded, and then only once a second. Nothing
+// here needs tick resolution -- the key state that does stays on the 100ms tick
+// in refresh().
 void ZoomTalkbackPanel::refresh_probe()
 {
+    if (!isVisible() || !m_probe_body || !m_probe_body->isVisible())
+        return;
+    const uint64_t now_ms_tick = os_gettime_ns() / 1000000ULL;
+    if (m_probe_poll_ms != 0 &&
+        talkback_elapsed_ms(now_ms_tick, m_probe_poll_ms) < 1000)
+        return;
+    m_probe_poll_ms = now_ms_tick;
+
     const bool in_meeting =
         ZoomEngineClient::instance().state() == MeetingState::InMeeting;
 
-    // Rebuilt every tick from the live roster -- see the comment where this
-    // combo is constructed for why it is not the Zoom Control dock's legacy
-    // participant list.
+    // Rebuilt from the live roster -- see the comment where this combo is
+    // constructed for why it is not the Zoom Control dock's legacy participant
+    // list.
     if (m_probe_participant_combo && !combo_popup_open(m_probe_participant_combo)) {
         std::vector<std::pair<QString, QVariant>> items;
         items.emplace_back(QStringLiteral("Select participant"), QVariant());
@@ -518,9 +555,13 @@ void ZoomTalkbackPanel::refresh_probe()
     if (m_probe_status_label) {
         // Polled, not pushed: handle_event()'s talkback_probe branch just
         // stores the latest line under m_mtx (see zoom-engine-client.cpp) and
-        // this timer-driven read picks it up on the next tick, matching how
+        // this timer-driven read picks it up on the next poll, matching how
         // every other readout in this plugin's docks (last_error(), roster(),
-        // active_speaker_id()) already reaches the UI.
+        // active_speaker_id()) already reaches the UI. Only ever the LATEST
+        // line, at whatever rate this polls -- so a stage superseded inside the
+        // same second is not shown. That was already true of the 100ms version
+        // for anything faster than a tick, and the stage that matters (the
+        // terminal one) stays in the field until the next run.
         m_probe_status_label->setText(format_talkback_probe_status(
             ZoomEngineClient::instance().talkback_probe_status()));
     }
@@ -789,6 +830,23 @@ void ZoomTalkbackPanel::refresh()
         }
     }
 
+    // -- What the banner will say ----------------------------------------------
+    // Decided here, above the key buttons, because the buttons need its verdict
+    // too: the one button allowed to paint itself red is the one holding a key
+    // the banner is calling ON AIR, and deriving that twice is how the strip and
+    // the control under it would come to disagree.
+    const auto session = engine.talkback_session_status();
+    TalkbackDockSessionView view;
+    view.key_open = key_open;
+    view.target = open_target;
+    view.engine_live = session.live;
+    view.engine_reason = session.reason;
+    view.engine_recover = session.recover;
+    view.members_known = session.members_known;
+    view.members_present = session.members_present;
+    view.members_total = session.members_total;
+    const auto banner = talkback_dock_banner(view);
+
     // -- Key buttons -----------------------------------------------------------
     TalkbackDockKeyContext ctx;
     ctx.engine_running = engine_running;
@@ -828,10 +886,16 @@ void ZoomTalkbackPanel::refresh()
                 button->property("cvTalkbackTarget").toString().toStdString() !=
                     b.target)
                 continue;
-            // The button of the key that is actually live gets the same red the
-            // banner does, so the operator's eye can go straight from "ON AIR"
-            // to the control holding it. Set before the enable pass below so a
-            // held button is never left painted idle.
+            // RED MEANS THE DIRECTOR IS AUDIBLE, on the button exactly as it
+            // does on the banner and nowhere else -- so this is gated on both
+            // halves of that: the banner has to be calling this ON AIR (which
+            // requires the ENGINE's confirmation, never the plugin's intent),
+            // and THIS DOCK has to be the surface holding it. Dropping the
+            // ownership half would paint our own disabled button live whenever
+            // Companion or the control API keyed the same target, which is a
+            // red control that cannot be pressed and does not belong to the
+            // person looking at it. Where that key actually is, is already said
+            // in the button's refusal reason.
             //
             // Safe to repolish a button the operator is HOLDING: the way a
             // QPushButton silently loses `down` is QAbstractButton::
@@ -840,7 +904,18 @@ void ZoomTalkbackPanel::refresh()
             // which that switch acts on. setEnabled() below is the call that
             // has to be guarded, and it is.
             set_style_flag(button, "keyed",
-                           key_open && open_target == b.target);
+                           banner.state == TalkbackDockBannerState::Live &&
+                               ctx.open.dock_owned &&
+                               ctx.open.target == b.target);
+            // The tooltip is written BEFORE the never-disable guard below, so a
+            // button whose reason changed underneath a held key still says the
+            // true thing. Writing a tooltip cannot clear a button's down state;
+            // only an EnabledChange can, which is what the guard is for.
+            const QString tip = b.enabled
+                ? QString("Talk to %1.").arg(QString::fromStdString(b.label))
+                : QString::fromStdString(b.reason);
+            if (button->toolTip() != tip)
+                button->setToolTip(tip);
             // NEVER disable a held button. QAbstractButton clears its pressed
             // state on an EnabledChange without emitting released(), so
             // disabling one mid-press strands the key open until the backstop
@@ -850,28 +925,13 @@ void ZoomTalkbackPanel::refresh()
             if (!b.enabled && button->isDown())
                 break;
             button->setEnabled(b.enabled);
-            const QString tip = b.enabled
-                ? QString("Talk to %1.").arg(QString::fromStdString(b.label))
-                : QString::fromStdString(b.reason);
-            if (button->toolTip() != tip)
-                button->setToolTip(tip);
             break;
         }
     }
 
     // -- ON AIR banner ---------------------------------------------------------
-    const auto session = engine.talkback_session_status();
-    TalkbackDockSessionView view;
-    view.key_open = key_open;
-    view.target = open_target;
-    view.engine_live = session.live;
-    view.engine_reason = session.reason;
-    view.engine_recover = session.recover;
-    view.members_known = session.members_known;
-    view.members_present = session.members_present;
-    view.members_total = session.members_total;
-    const auto banner = talkback_dock_banner(view);
-
+    // Decided above the key buttons (see there); this is only the painting.
+    //
     // The tally dot is prepended here rather than in the pure header so that
     // header stays plain ASCII, and it is built from a code point rather than
     // typed as a glyph because these sources carry no BOM and this build passes
@@ -922,7 +982,13 @@ void ZoomTalkbackPanel::rebuild_key_buttons(
 
     for (auto *button : m_key_buttons) {
         if (!button) continue;
+        // hide() as well as removeWidget(): taking a widget out of a layout
+        // does not unmap it, so between here and the deferred delete an old
+        // button would keep painting at its last geometry -- on top of the
+        // fresh grid, which is now two-up rather than three-up, so the stale
+        // and new positions no longer coincide and the overlap would show.
         layout->removeWidget(button);
+        button->hide();
         button->deleteLater();
     }
     m_key_buttons.clear();

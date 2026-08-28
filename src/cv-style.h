@@ -254,6 +254,16 @@ QPushButton[role="key"][keyed="true"]:pressed,
 QPushButton[role="key"][kind="all"][keyed="true"]:pressed {
     background-color: #8c1c1c; border-color: #ff4d4d; color: #ffffff;
 }
+/* keyed + disabled should be unreachable: the flag is only set for a key THIS
+   dock holds, and talkback_dock_key_buttons() keeps that button enabled. Spelt
+   out anyway, because Qt resolves an unlisted overlap between [keyed="true"]
+   and :disabled by specificity and source order rather than by intent, and a
+   red control that cannot be pressed is the one thing this colour must never
+   mean. Disabled wins. */
+QPushButton[role="key"][keyed="true"]:disabled,
+QPushButton[role="key"][kind="all"][keyed="true"]:disabled {
+    background-color: #1e1e1e; border-color: #303030; color: #565656;
+}
 
 /* A control that must stay reachable without competing for attention -- the
    Milestone 1 probe's disclosure toggle at the bottom of the Talkback dock. */

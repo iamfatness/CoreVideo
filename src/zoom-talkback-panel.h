@@ -113,6 +113,11 @@ private:
     // rendered result is cached in the three fields below so the status
     // survives the ticks that skip the scan.
     uint64_t m_source_scan_ms = 0;
+    // The same treatment for the probe's roster poll, which is the only other
+    // repeated work here heavy enough to want it: monotonic ms of the last
+    // poll, 0 forces one on the next tick. Unfolding the probe section, and
+    // running a probe, both reset it so neither waits out the gate.
+    uint64_t m_probe_poll_ms = 0;
     QString  m_track_short;
     QString  m_track_text;
     bool     m_track_risk = false;

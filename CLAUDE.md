@@ -626,7 +626,19 @@ Every one of these is documented at length where it lives; the list is the map.
   the two docks now share, extracted rather than copied because
   `replace_combo_items()` BLOCKS the combo's signals while it rebuilds — a
   hand-copied second version that forgot to would rewrite the saved setting on
-  every refresh tick.
+  every refresh tick. **Fix round:** the probe's roster poll was the one thing
+  that did not get the visibility discipline across the re-home — it copied the
+  whole roster and rebuilt a combo at 10 Hz for a section that is folded by
+  default, on a dock created at `FINISHED_LOADING` whether or not anyone opens
+  it. It is now gated exactly like the source scan (visible **and** unfolded,
+  then 1 Hz), and `TalkbackProbeExpanded` is persisted **because** folding it
+  is what turns that work off, not merely which way an arrow points. Also:
+  `keyed="true"` is now gated on the banner saying Live **and** on
+  `dock_owned`, so another surface's key can no longer paint our own disabled
+  button red (red means the director is audible, on the button exactly as on
+  the banner); the held-button tooltip is written before the never-disable
+  guard instead of after it; and `rebuild_key_buttons()` hides before
+  `deleteLater()`.
 
 ## Live testing against a real meeting
 

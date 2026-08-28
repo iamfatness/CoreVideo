@@ -422,6 +422,23 @@ int main()
               "the raw all-talent sentinel leaked onto the banner");
     }
     {
+        // An open key whose target the controller has not reported -- the n7
+        // half-parse shape, or a control-API key seen before its target is
+        // echoed. The headline is what an operator reads under pressure, so it
+        // must not degrade to a dangling "ON AIR:" with nothing after it.
+        TalkbackDockSessionView s;
+        s.key_open = true;
+        s.engine_live = true;
+        const auto b = talkback_dock_banner(s);
+        check(b.state == TalkbackDockBannerState::Live,
+              "an open, engine-confirmed key with no reported target was not "
+              "shown as live");
+        check(contains(b.headline, "no target"),
+              "a key with no reported target left the banner headline dangling");
+        check(talkback_dock_target_label("") == "no target",
+              "an empty target rendered as an empty label");
+    }
+    {
         // Refused mid-ladder: the engine's own recovery hint is echoed, not
         // inferred -- the plugin never invents a remedy the engine did not
         // name.

@@ -889,6 +889,10 @@ ZoomDock::ZoomDock(QWidget *parent)
                 s.talkback_source =
                     m_talkback_source_combo->currentData().toString().toStdString();
                 s.save();
+                // Force the next tick to rescan rather than waiting out the
+                // 1Hz gate: the operator has just changed the source and the
+                // program-track warning under it is now about the wrong one.
+                m_talkback_source_scan_ms = 0;
             });
 
     // The deferred half of the program/ISO leak guarantee. The structural half
@@ -1619,6 +1623,20 @@ static std::vector<std::pair<QString, QVariant>> talkback_audio_source_items()
     return items;
 }
 
+// The key THIS DOCK is holding, if any -- the single record every dock-side
+// keying decision reads (fix round 1, M1). It carries the mode the key was
+// opened with, which is deliberately not re-read from the Latch checkbox: the
+// checkbox says what the NEXT key would be, this says what the open one IS.
+TalkbackDockOpenKey ZoomDock::dock_open_key() const
+{
+    TalkbackDockOpenKey open;
+    open.open       = !m_talkback_dock_target.empty();
+    open.dock_owned = open.open;
+    open.target     = m_talkback_dock_target;
+    open.latched    = m_talkback_dock_latched;
+    return open;
+}
+
 void ZoomDock::refresh_talkback()
 {
     if (!m_talkback_source_combo)
@@ -1628,8 +1646,31 @@ void ZoomDock::refresh_talkback()
     const bool engine_running = engine.is_running();
     const bool in_meeting = engine.state() == MeetingState::InMeeting;
 
-    // -- Source picker ---------------------------------------------------------
-    if (!combo_popup_open(m_talkback_source_combo)) {
+    // -- Source picker and its program-track warning ---------------------------
+    //
+    // m2: THE ONLY WORK IN THIS FUNCTION THAT WALKS LIBOBS, and the only part
+    // that does not run at 10Hz. obs_enum_sources() holds
+    // obs->data.sources_mutex for the whole walk and addrefs every source (the
+    // constraint is spelled out at zoom-supersource.cpp's
+    // warn_on_multiple_audio_walls()), and this dock already moved its
+    // feed-health sweep to a 1Hz timer for exactly that reason. Source lists
+    // and mixer assignments do not change ten times a second, and nobody is
+    // reading a dock that is not on screen, so: once a second, and only while
+    // visible. Everything else below -- the key state an operator's press
+    // depends on -- stays on the 100ms tick.
+    //
+    // The rendered warning is cached rather than recomputed, so the label does
+    // not blank out on the ticks that skip the scan. A source change forces the
+    // next tick to rescan (the combo's own handler resets the stamp), so the
+    // operator never waits a second to see what they just picked.
+    const uint64_t now_ms_tick = os_gettime_ns() / 1000000ULL;
+    const bool scan_due =
+        isVisible() &&
+        (m_talkback_source_scan_ms == 0 ||
+         talkback_elapsed_ms(now_ms_tick, m_talkback_source_scan_ms) >= 1000);
+    if (scan_due && !combo_popup_open(m_talkback_source_combo)) {
+        m_talkback_source_scan_ms = now_ms_tick;
+
         const QString chosen = m_talkback_source_combo->currentData().toString();
         auto items = talkback_audio_source_items();
         // Keep a chosen source that OBS does not currently have in the list, so
@@ -1639,40 +1680,42 @@ void ZoomDock::refresh_talkback()
         if (!chosen.isEmpty() && !combo_items_contain(items, chosen))
             items.emplace_back(chosen + " (not in OBS)", QVariant(chosen));
         replace_combo_items(m_talkback_source_combo, items, QVariant(chosen));
+
+        const QString scanned = m_talkback_source_combo->currentData().toString();
+        bool source_present = false;
+        uint32_t mixers = 0;
+        if (!scanned.isEmpty()) {
+            obs_source_t *src =
+                obs_get_source_by_name(scanned.toUtf8().constData());
+            if (src) {
+                source_present = true;
+                mixers = obs_source_get_audio_mixers(src);
+                obs_source_release(src);
+            }
+        }
+        if (!scanned.isEmpty() && !source_present) {
+            // Do NOT fall through to talkback_dock_track_warning() with
+            // mixers = 0 here: that would report "on no OBS track -- talkback
+            // only", which is a safety claim about a source that is not there
+            // to be safe.
+            m_talkback_track_text =
+                QString("\"%1\" is not in OBS right now. Pick the source you "
+                        "are actually going to talk through.").arg(scanned);
+            m_talkback_track_risk = false;
+        } else {
+            const auto warning = talkback_dock_track_warning(
+                scanned.toStdString(), mixers);
+            m_talkback_track_text = QString::fromStdString(warning.text);
+            m_talkback_track_risk = warning.on_air_risk;
+        }
     }
 
     const QString source_name = m_talkback_source_combo->currentData().toString();
 
-    // -- Program-track warning -------------------------------------------------
-    QString track_text;
-    bool track_risk = false;
-    bool source_present = false;
-    uint32_t mixers = 0;
-    if (!source_name.isEmpty()) {
-        obs_source_t *src =
-            obs_get_source_by_name(source_name.toUtf8().constData());
-        if (src) {
-            source_present = true;
-            mixers = obs_source_get_audio_mixers(src);
-            obs_source_release(src);
-        }
-    }
-    if (!source_name.isEmpty() && !source_present) {
-        // Do NOT fall through to talkback_dock_track_warning() with mixers = 0
-        // here: that would report "on no OBS track -- talkback only", which is
-        // a safety claim about a source that is not there to be safe.
-        track_text = QString("\"%1\" is not in OBS right now. Pick the source "
-                             "you are actually going to talk through.")
-                         .arg(source_name);
-    } else {
-        const auto warning = talkback_dock_track_warning(
-            source_name.toStdString(), mixers);
-        track_text = QString::fromStdString(warning.text);
-        track_risk = warning.on_air_risk;
-    }
-    if (m_talkback_track_label && m_talkback_track_label->text() != track_text)
-        m_talkback_track_label->setText(track_text);
-    set_style_flag(m_talkback_track_label, "risk", track_risk);
+    if (m_talkback_track_label &&
+        m_talkback_track_label->text() != m_talkback_track_text)
+        m_talkback_track_label->setText(m_talkback_track_text);
+    set_style_flag(m_talkback_track_label, "risk", m_talkback_track_risk);
 
     // -- Nominee list ----------------------------------------------------------
     // Identity is by display name, never by Zoom user id (ids are
@@ -1771,9 +1814,17 @@ void ZoomDock::refresh_talkback()
     // -- Whose key is open -----------------------------------------------------
     // Polled and parsed, the same treatment format_talkback_probe_status()
     // gives the engine's probe line, rather than a new accessor on the
-    // controller. A malformed document would read as "no key open"; the
-    // consequence is bounded, because key_on() refuses a second key itself and
-    // the dock shows that refusal.
+    // controller.
+    //
+    // A DOCUMENT THAT DOES NOT PARSE IS "UNKNOWN", NOT "NO KEY OPEN" (fix round
+    // 1, n7). Treating it as no-key would clear m_talkback_dock_target below --
+    // the dock would forget it owns a live key, its release would find nothing
+    // to close, and the backstop would go dormant, which is the same stranded
+    // director M1 produced. Practically unreachable (status_json() builds the
+    // string with QJsonDocument in this same process), so the fallback is
+    // simply the dock's own record of what it opened, and the ownership-clear
+    // below is skipped for the tick.
+    bool status_parsed = false;
     bool key_open = false;
     std::string open_target;
     {
@@ -1781,35 +1832,48 @@ void ZoomDock::refresh_talkback()
             QByteArray::fromStdString(
                 TalkbackController::instance().status_json()));
         if (doc.isObject()) {
+            status_parsed = true;
             const QJsonObject obj = doc.object();
             key_open = obj.value("open").toBool();
             open_target = obj.value("target").toString().toStdString();
         }
     }
+    if (!status_parsed) {
+        if (!m_talkback_status_parse_logged) {
+            m_talkback_status_parse_logged = true;   // once, not ten times a second
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] talkback dock: could not parse the "
+                 "controller's status; using this dock's own record of the key "
+                 "it opened");
+        }
+        key_open = !m_talkback_dock_target.empty();
+        open_target = m_talkback_dock_target;
+    }
 
     // The controller closes keys the dock never asked it to close: the dead-man
     // switch, an engine refusal, a Leave, a plugin shutdown. Notice that here
     // instead of leaving the dock believing it still owns a key.
-    if (!key_open && !m_talkback_dock_target.empty()) {
+    if (status_parsed && !key_open && !m_talkback_dock_target.empty()) {
         m_talkback_dock_target.clear();
         m_talkback_dock_latched = false;
     }
 
     // The dock's own lost-release backstop -- see talkback_dock_release_lost()
-    // in src/talkback-dock-state.h for why this surface uses the widget's own
-    // state instead of the renewal machinery a socket surface needs.
-    if (!m_talkback_dock_target.empty()) {
+    // in src/talkback-dock-state.h for why this surface reads the widget's own
+    // state instead of the renewal machinery a socket surface needs, and why it
+    // is cause-agnostic rather than aimed at one way a release can vanish.
+    {
+        const TalkbackDockOpenKey dock_key = dock_open_key();
         bool button_down = false;
         for (auto *button : m_talkback_key_buttons) {
             if (!button) continue;
             if (button->property("cvTalkbackTarget").toString().toStdString() ==
-                m_talkback_dock_target) {
+                dock_key.target) {
                 button_down = button->isDown();
                 break;
             }
         }
-        if (talkback_dock_release_lost(true, !m_talkback_dock_latched,
-                                       button_down)) {
+        if (talkback_dock_release_lost(dock_key, button_down)) {
             blog(LOG_WARNING,
                  "[obs-zoom-plugin] talkback dock: closing the key to \"%s\" -- "
                  "its button is no longer held and no release ever arrived",
@@ -1826,8 +1890,16 @@ void ZoomDock::refresh_talkback()
     TalkbackDockKeyContext ctx;
     ctx.engine_running = engine_running;
     ctx.in_meeting = in_meeting;
-    ctx.key_open = key_open;
-    ctx.open_target = open_target;
+    ctx.source_chosen = !source_name.isEmpty();
+    // The dock's own record first -- it is the only thing that knows the MODE
+    // an open key was opened in, which status_json() does not report -- and the
+    // controller's view only for a key the dock does not own.
+    ctx.open = dock_open_key();
+    if (!ctx.open.open && key_open) {
+        ctx.open.open = true;
+        ctx.open.dock_owned = false;
+        ctx.open.target = open_target;
+    }
     const auto buttons = talkback_dock_key_buttons(plan, ctx);
 
     std::string target_signature;
@@ -2016,8 +2088,15 @@ void ZoomDock::talkback_key_pressed(const std::string &target, bool latch)
     // delivered by libobs, not by Qt, and key_off()'s two-phase close (flip the
     // flag under m_mtx, then tear the tap down outside it) is only safe against
     // a concurrent evaluate() because of that thread identity.
-    if (latch && !m_talkback_dock_target.empty() &&
-        m_talkback_dock_target == target) {
+    // Fix round 1 (M1, Major): whether this press CLOSES the open key is
+    // decided from the key itself -- the mode captured when it was opened --
+    // not from the Latch checkbox as it stands now. Unchecking Latch while a
+    // latched key is live used to skip this branch, fall through to key_on()'s
+    // "A talkback key is already open" refusal, and leave the director live to
+    // talent with the dock's only close affordance answering with an error.
+    // `latch` below therefore decides only what a NEW key opens as.
+    if (talkback_dock_press_action(dock_open_key(), target, latch) ==
+        TalkbackDockPressAction::CloseHeldKey) {
         TalkbackController::instance().key_off();
         m_talkback_dock_target.clear();
         m_talkback_dock_latched = false;
@@ -2043,11 +2122,17 @@ void ZoomDock::talkback_key_pressed(const std::string &target, bool latch)
     // itself runs on, with no transport in between that could drop it. Passing
     // true instead would demand a heartbeat from this dock's UI-thread timer to
     // keep a key alive, which would close a genuinely held key whenever the OBS
-    // UI stalls for a second (a scene collection load, a modal dialog). The one
-    // in-process way a release can still vanish -- a held button being disabled
-    // -- is covered by talkback_dock_release_lost() from the refresh tick,
-    // which reads the widget's own state and so cannot false-close during a
-    // stall.
+    // UI stalls for a second (a scene collection load, a modal dialog).
+    //
+    // A release can still go missing in-process -- QAbstractButton drops its
+    // pressed state without emitting released() on an EnabledChange, on a
+    // non-popup focus loss, and anywhere setDown(false) is reached -- so
+    // talkback_dock_release_lost() runs from the refresh tick and asks the
+    // widget whether it is still down, never why it stopped being down. It
+    // covers all of those causes and any Qt adds later, and reading the widget
+    // (rather than a deadline) is what makes it unable to false-close during a
+    // UI stall. Do not delete it on the belief that some particular cause has
+    // been ruled out.
     const bool ok = TalkbackController::instance().key_on(
         target, source.toStdString(),
         latch ? TalkbackKeyMode::Latch : TalkbackKeyMode::PushToTalk,
@@ -2065,10 +2150,11 @@ void ZoomDock::talkback_key_pressed(const std::string &target, bool latch)
 
 void ZoomDock::talkback_key_released(const std::string &target)
 {
-    // Latch mode releases nothing: the next PRESS on this target closes it.
-    if (m_talkback_dock_latched)
-        return;
-    if (m_talkback_dock_target != target)
+    // The same record the press path reads (M1): a latch releases nothing (the
+    // next press on its own target closes it), a stray release for a target
+    // this dock is not holding closes nothing, and a key another surface owns
+    // is not this dock's to close.
+    if (!talkback_dock_release_closes(dock_open_key(), target))
         return;
     TalkbackController::instance().key_off();
     m_talkback_dock_target.clear();

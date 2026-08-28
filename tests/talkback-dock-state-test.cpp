@@ -61,7 +61,19 @@ static TalkbackDockKeyContext ready_context()
     TalkbackDockKeyContext ctx;
     ctx.engine_running = true;
     ctx.in_meeting = true;
+    ctx.source_chosen = true;
     return ctx;
+}
+
+// A key this dock opened on `target`, in the given mode.
+static TalkbackDockOpenKey dock_key(const std::string &target, bool latched)
+{
+    TalkbackDockOpenKey open;
+    open.open = true;
+    open.dock_owned = true;
+    open.target = target;
+    open.latched = latched;
+    return open;
 }
 
 int main()
@@ -145,18 +157,48 @@ int main()
             check(!b.enabled, "a key button was live outside a meeting");
 
         ctx = ready_context();
-        ctx.key_open = true;
-        ctx.open_target = "Sarah";
+        ctx.open = dock_key("Sarah", /*latched=*/false);
         const auto buttons = talkback_dock_key_buttons(plan, ctx);
         const auto *sarah = find_button(buttons, "Sarah");
         const auto *luis  = find_button(buttons, "Luis");
-        // The held button must stay enabled: disabling a pressed QPushButton
-        // is how its released() signal gets lost, which would strand the key
-        // open. See talkback_dock_release_lost()'s comment.
+        // The held button must stay enabled: it is the operator's only way to
+        // release a latch, and disabling a pressed QPushButton is itself how a
+        // released() signal gets lost. See talkback_dock_release_lost().
         check(sarah && sarah->enabled,
-              "the button for the currently open key was disabled");
+              "the button for the key this dock is holding was disabled");
         check(luis && !luis->enabled,
               "a second key button was live while a key was already open");
+    }
+
+    // m3: a key held by ANOTHER surface. key_on() refuses a second key
+    // unconditionally and the dock's toggle-off cannot apply to a key it does
+    // not own, so every button must refuse -- including the open target's,
+    // which the dock-owned case deliberately leaves live.
+    {
+        const auto plan = confirmed_plan();
+        auto ctx = ready_context();
+        ctx.open = dock_key("Sarah", /*latched=*/false);
+        ctx.open.dock_owned = false;
+        const auto buttons = talkback_dock_key_buttons(plan, ctx);
+        for (const auto &b : buttons) {
+            check(!b.enabled,
+                  "a key button was live while another surface held the key");
+            check(contains(b.reason, "surface"),
+                  "the reason does not say another surface holds the key");
+        }
+    }
+
+    // m4: no talk source chosen. Every press would reach key_on() and be
+    // refused for want of a tap, so say it on the button instead.
+    {
+        const auto plan = confirmed_plan();
+        auto ctx = ready_context();
+        ctx.source_chosen = false;
+        for (const auto &b : talkback_dock_key_buttons(plan, ctx)) {
+            check(!b.enabled, "a key button was live with no talk source");
+            check(contains(b.reason, "source"),
+                  "the reason does not name the missing source");
+        }
     }
 
     // ── The nomination outcome ────────────────────────────────────────────
@@ -320,17 +362,90 @@ int main()
               "the last key's failure reason was dropped once it closed");
     }
 
+    // ── M1: the mode CAPTURED AT THE PRESS governs closing ────────────────
+    //
+    // The Major this round fixes. Latch on, key Sarah, then uncheck Latch and
+    // press Sarah again to close it: the checkbox now says push-to-talk, but
+    // the key that is open is a latch, and only a press can close a latch. If
+    // this decision reads the checkbox instead of the open key, the press
+    // becomes an open attempt, key_on() refuses it as "already open", and the
+    // director stays LIVE to talent with the dock's only close affordance
+    // answering with an error.
+    {
+        const auto held = dock_key("Sarah", /*latched=*/true);
+        check(talkback_dock_press_action(held, "Sarah", /*latch_selected=*/false) ==
+                  TalkbackDockPressAction::CloseHeldKey,
+              "unchecking Latch while a latched key is live made its own button "
+              "stop closing it");
+        check(talkback_dock_press_action(held, "Sarah", /*latch_selected=*/true) ==
+                  TalkbackDockPressAction::CloseHeldKey,
+              "a latched key's own button did not close it");
+        // A different target is still an open attempt (key_on() refuses it, and
+        // the button is disabled anyway) -- never a close of the wrong key.
+        check(talkback_dock_press_action(held, "Luis", false) ==
+                  TalkbackDockPressAction::OpenPushToTalk,
+              "pressing another target closed the latched key");
+    }
+    {
+        // The reverse interleaving: checking Latch while a PTT key is held must
+        // not turn its button into a toggle -- the release is still coming.
+        const auto held = dock_key("Sarah", /*latched=*/false);
+        check(talkback_dock_press_action(held, "Sarah", /*latch_selected=*/true) !=
+                  TalkbackDockPressAction::CloseHeldKey,
+              "a push-to-talk key was treated as a latch because the checkbox "
+              "changed underneath it");
+    }
+    {
+        TalkbackDockOpenKey none;
+        check(talkback_dock_press_action(none, "Sarah", false) ==
+                  TalkbackDockPressAction::OpenPushToTalk,
+              "a press with nothing open did not open push-to-talk");
+        check(talkback_dock_press_action(none, "Sarah", true) ==
+                  TalkbackDockPressAction::OpenLatch,
+              "a press with Latch selected did not open a latch");
+        // A latched key belonging to another surface is not the dock's to
+        // toggle: key_on() will refuse, which is the honest outcome.
+        auto other = dock_key("Sarah", true);
+        other.dock_owned = false;
+        check(talkback_dock_press_action(other, "Sarah", false) !=
+                  TalkbackDockPressAction::CloseHeldKey,
+              "the dock tried to close a key another surface owns");
+    }
+
+    // ── Release ───────────────────────────────────────────────────────────
+    {
+        check(talkback_dock_release_closes(dock_key("Sarah", false), "Sarah"),
+              "releasing a held push-to-talk key did not close it");
+        check(!talkback_dock_release_closes(dock_key("Sarah", true), "Sarah"),
+              "releasing a latch closed it -- a latch is closed by the next "
+              "press");
+        check(!talkback_dock_release_closes(dock_key("Sarah", false), "Luis"),
+              "a release closed a key on a different target");
+        auto other = dock_key("Sarah", false);
+        other.dock_owned = false;
+        check(!talkback_dock_release_closes(other, "Sarah"),
+              "a release closed a key another surface owns");
+        TalkbackDockOpenKey none;
+        check(!talkback_dock_release_closes(none, "Sarah"),
+              "a stray release closed something with nothing open");
+    }
+
     // ── The dock's lost-release backstop ──────────────────────────────────
     {
-        check(talkback_dock_release_lost(true, true, false),
+        check(talkback_dock_release_lost(dock_key("Sarah", false), false),
               "a held PTT key whose button is no longer down was not closed");
-        check(!talkback_dock_release_lost(true, true, true),
+        check(!talkback_dock_release_lost(dock_key("Sarah", false), true),
               "a genuinely held PTT key was closed");
-        check(!talkback_dock_release_lost(true, false, false),
+        check(!talkback_dock_release_lost(dock_key("Sarah", true), false),
               "a latch was closed for not being held -- nothing is held in "
               "latch mode");
-        check(!talkback_dock_release_lost(false, true, false),
+        TalkbackDockOpenKey other = dock_key("Sarah", false);
+        other.dock_owned = false;
+        check(!talkback_dock_release_lost(other, false),
               "a key this dock does not own was closed by the dock");
+        TalkbackDockOpenKey none;
+        check(!talkback_dock_release_lost(none, false),
+              "the backstop fired with no key open at all");
     }
 
     if (failures == 0) std::cout << "talkback-dock-state-test: all checks passed\n";

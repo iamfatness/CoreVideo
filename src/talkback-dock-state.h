@@ -50,18 +50,39 @@ struct TalkbackDockKeyButton {
     bool        all_talent = false;
 };
 
+// THE ONE RECORD OF THE KEY THAT IS CURRENTLY OPEN. Fix round 1 (M1, Major):
+// the dock used to decide "does this press close the held key?" from the Latch
+// CHECKBOX at press time while deciding "does this release close it?" from the
+// mode captured when the key opened. Unchecking Latch while a latched key was
+// live therefore made it un-closeable from the dock: the toggle-off branch was
+// skipped, key_on() refused ("A talkback key is already open"), and the
+// following released() bailed out because the captured mode still said latch --
+// leaving the director live to talent with the surface they are looking at
+// answering with an error. Every decision below now reads `latched` from HERE,
+// so there is one mode per key and it is the one that key was opened with.
+struct TalkbackDockOpenKey {
+    // A key is open somewhere -- TalkbackController's own view (its
+    // status_json()'s "open"), not the dock's intent.
+    bool open = false;
+    // ...and this dock is the surface that opened it. A key opened over the
+    // control API or Companion is NOT the dock's to close or to hold: key_on()
+    // refuses a second key outright, so every dock button must refuse while one
+    // is live (fix round 1, m3).
+    bool dock_owned = false;
+    std::string target;
+    // The mode CAPTURED AT THE OPENING PRESS, never re-read from the checkbox.
+    bool latched = false;
+};
+
 // The state the dock has about keying at the moment it rebuilds its buttons.
 struct TalkbackDockKeyContext {
     bool engine_running = false;
     bool in_meeting     = false;
-    // TalkbackController's own view (its status_json()'s "open"), not the
-    // dock's: a key opened over the control API disables the dock's other
-    // buttons too, because key_on() refuses a second key outright.
-    bool key_open = false;
-    // Which target that open key is on. The button for THIS target stays
-    // enabled -- it is the one being held, and disabling a pressed
-    // QPushButton is how its released() signal gets lost (see zoom-dock.cpp).
-    std::string open_target;
+    // An OBS audio source is selected. Without one key_on() cannot open a tap
+    // at all, so a button offered here could only ever refuse (fix round 1,
+    // m4).
+    bool source_chosen  = false;
+    TalkbackDockOpenKey open;
 };
 
 // One button per keyable target: "all" first, then every nominee in the order
@@ -85,12 +106,28 @@ inline std::vector<TalkbackDockKeyButton> talkback_dock_key_buttons(
         b.label      = label;
         b.all_talent = all_talent;
 
-        if (ctx.key_open && target != ctx.open_target) {
+        // The button for a key THIS DOCK is holding stays enabled, and is
+        // checked before everything else: it is the operator's only way to let
+        // go of a latch, and disabling a pressed QPushButton is itself how a
+        // release gets lost (see talkback_dock_release_lost()).
+        const bool held_here = ctx.open.open && ctx.open.dock_owned &&
+                               ctx.open.target == target;
+        if (held_here) {
+            b.enabled = true;
+        } else if (ctx.open.open && !ctx.open.dock_owned) {
+            // m3: not "another talkback key is open" -- naming the surface is
+            // what tells the operator that pressing here cannot help and that
+            // the thing holding the channel is somewhere else.
+            b.reason = "another surface (Companion or the control API) holds "
+                       "the talkback key";
+        } else if (ctx.open.open) {
             b.reason = "another talkback key is open";
         } else if (!ctx.engine_running) {
             b.reason = "the Zoom engine is not running";
         } else if (!ctx.in_meeting) {
             b.reason = "not in a meeting";
+        } else if (!ctx.source_chosen) {
+            b.reason = "choose the OBS audio source you talk through first";
         } else if (talkback_target_known_unprovisioned(
                        target, confirmed.requested, confirmed.uncovered_private)) {
             if (confirmed.requested.empty()) {
@@ -343,6 +380,44 @@ inline TalkbackDockTally talkback_dock_tally(const TalkbackDockSessionView &s)
     return t;
 }
 
+// ── What a press and a release mean ─────────────────────────────────────────
+
+enum class TalkbackDockPressAction {
+    OpenPushToTalk,
+    OpenLatch,
+    // Close the latched key this dock is already holding on this target.
+    CloseHeldKey,
+};
+
+// `latch_selected` is the Latch checkbox as it stands RIGHT NOW, and it decides
+// only what a NEW key would be opened as. Whether this press CLOSES one is
+// decided by `open.latched` -- the mode that key was opened with (M1). The two
+// disagree exactly when the operator toggles the checkbox while a key is live,
+// which is the interleaving that used to leave a latched key un-closeable.
+inline TalkbackDockPressAction talkback_dock_press_action(
+    const TalkbackDockOpenKey &open, const std::string &pressed_target,
+    bool latch_selected)
+{
+    if (open.open && open.dock_owned && open.latched &&
+        open.target == pressed_target)
+        return TalkbackDockPressAction::CloseHeldKey;
+    return latch_selected ? TalkbackDockPressAction::OpenLatch
+                          : TalkbackDockPressAction::OpenPushToTalk;
+}
+
+// Does this button release close the open key? Only a push-to-talk key this
+// dock owns, on the target being released. A latch is closed by the next PRESS
+// (above), never by a release -- and a key belonging to another surface, or to
+// another target, is not this release's to close: a stray release arriving
+// after the dead-man switch already closed something must not close whatever
+// was opened next.
+inline bool talkback_dock_release_closes(const TalkbackDockOpenKey &open,
+                                         const std::string &released_target)
+{
+    return open.open && open.dock_owned && !open.latched &&
+           open.target == released_target;
+}
+
 // ── The dock's own lost-release backstop ────────────────────────────────────
 //
 // The dock passes needs_renewal = false to key_on(): its press and release are
@@ -352,17 +427,21 @@ inline TalkbackDockTally talkback_dock_tally(const TalkbackDockSessionView &s)
 // renewal discussion at the top of src/talkback-key.h, which names exactly
 // this class of surface).
 //
-// One in-process way a release CAN still go missing: QAbstractButton clears
-// its pressed state on an EnabledChange without emitting released(), so
-// disabling a held button would strand the key open. The dock does not disable
-// a held button -- and this is the backstop for it either way. It compares the
-// controller's open key against the widget's own current state, so a stalled
-// UI thread cannot false-close a genuinely held key: while the thread is
+// A release can still go missing in-process, and NOT only in one way:
+// QAbstractButton clears its pressed state without emitting released() on an
+// EnabledChange, on any non-popup focus loss (focusOutEvent), and anywhere a
+// style or a caller reaches setDown(false). This backstop is deliberately
+// CAUSE-AGNOSTIC -- it asks the widget whether it is still down, not why it
+// stopped being down -- so it covers all of those and whatever Qt adds next.
+// It is load-bearing, not a redundant second opinion: "the dock never disables
+// a held button" closes exactly one of those causes and is not coverage.
+//
+// Reading the widget's state (rather than a renewal deadline) is also what
+// makes it unable to false-close a genuinely held key: while the UI thread is
 // stalled this does not run at all, and once it resumes isDown() is accurate
 // again. A latch is exempt by definition -- nothing is being held.
-inline bool talkback_dock_release_lost(bool dock_owns_open_key,
-                                       bool push_to_talk,
+inline bool talkback_dock_release_lost(const TalkbackDockOpenKey &open,
                                        bool button_down)
 {
-    return dock_owns_open_key && push_to_talk && !button_down;
+    return open.open && open.dock_owned && !open.latched && !button_down;
 }

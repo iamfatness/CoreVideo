@@ -46,11 +46,14 @@ private:
     void on_cancel_recovery_clicked();
     void update_state_indicator();
     // Milestone 7. Everything the Talkback group polls, driven from the
-    // existing 100ms refresh tick -- deliberately NOT a second timer: this
-    // dock already has three (refresh, health retry, countdown) and the
-    // engine-confirmed talkback state is polled exactly the way
-    // last_error()/roster()/talkback_probe_status() already are.
+    // existing 100ms refresh tick -- deliberately NOT another timer: this dock
+    // already runs four (refresh, health retry, recovery countdown, pending
+    // OAuth join) and the engine-confirmed talkback state is polled exactly
+    // the way last_error()/roster()/talkback_probe_status() already are. The
+    // one piece of work in there that touches libobs's source list is
+    // self-gated to 1Hz and to the dock being visible -- see the function.
     void refresh_talkback();
+    TalkbackDockOpenKey dock_open_key() const;
     void rebuild_talkback_key_buttons(
         const std::vector<TalkbackDockKeyButton> &buttons);
     void on_talkback_nominate_clicked();
@@ -149,6 +152,18 @@ private:
     // off the controller's "open" flag.
     std::string m_talkback_dock_target;
     bool        m_talkback_dock_latched = false;
+    // m2: the source scan (obs_enum_sources + obs_get_source_by_name) is the
+    // only libobs-walking work on this dock's 100ms tick, and obs_enum_sources
+    // holds obs->data.sources_mutex and addref/releases every source for the
+    // walk. Monotonic ms of the last scan; 0 forces one on the next tick. The
+    // rendered result is cached in the two fields below so the label survives
+    // the ticks that skip the scan.
+    uint64_t    m_talkback_source_scan_ms = 0;
+    QString     m_talkback_track_text;
+    bool        m_talkback_track_risk = false;
+    // Logged once, not ten times a second, if the controller's status ever
+    // fails to parse.
+    bool        m_talkback_status_parse_logged = false;
     // The dock's own last refusal -- one the engine never sees (no source
     // chosen, the source is not in the current scene, OBS is at a sample rate
     // the Zoom talkback API will not take, a nominee named "all"). Cleared by

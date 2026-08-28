@@ -569,12 +569,26 @@ Every one of these is documented at length where it lives; the list is the map.
   signals on the same main thread the controller's `QTimer` runs `evaluate()`/
   `key_off()` on, with no transport to drop them, and demanding a heartbeat
   from a UI-thread timer instead would close a genuinely held key on any ~1s
-  OBS UI stall. The one in-process way a release still vanishes — a held
-  `QPushButton` being disabled, which clears `down` without emitting
-  `released()` — is closed twice: the dock never disables a held button, and
-  `talkback_dock_release_lost()` closes any dock-owned PTT key whose button is
-  no longer down, read from the widget on the existing 100 ms tick (no second
-  timer) so a stalled UI cannot false-close.
+  OBS UI stall. A release can still vanish in-process in SEVERAL ways —
+  `QAbstractButton` drops `down` without emitting `released()` on an
+  `EnabledChange`, on any non-popup focus loss, and anywhere `setDown(false)`
+  is reached — so `talkback_dock_release_lost()` is cause-agnostic by design:
+  it asks the widget whether it is still down, never why, and closes any
+  dock-owned PTT key that is not. It runs on the existing 100 ms tick (no
+  second timer), and reading the widget rather than a deadline is what makes it
+  unable to false-close during a stall. It is load-bearing, not a second
+  opinion — "the dock never disables a held button" closes one cause, not the
+  class. **Fix round 1 (M1, Major)**: the latch toggle-off used to read the
+  Latch CHECKBOX while the release path read the mode captured at the press, so
+  unchecking Latch while a latched key was live left it un-closeable from the
+  dock — `key_on()` answered "already open" and `released()` bailed out, with
+  the director still live to talent. One record now answers all three
+  questions (press / release / backstop): `TalkbackDockOpenKey`, carrying the
+  mode the open key was OPENED with. Buttons also refuse while another surface
+  holds the key (m3) and while no talk source is chosen (m4), instead of
+  offering a press that can only refuse; the source scan is gated to 1 Hz and
+  to the dock being visible (m2), since `obs_enum_sources()` holds libobs's
+  source mutex.
 
 ## Live testing against a real meeting
 

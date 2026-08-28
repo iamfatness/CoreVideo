@@ -1143,7 +1143,13 @@ if(BUILD_TESTING)
     # /WIN32_LEAN_AND_MEAN mirror the engine target's, and for the same reason
     # -- talkback-plan.h calls std::min, and windows.h arrives transitively via
     # zoom_sdk_def.h's HWND use.
-    if(EXISTS "${ZOOM_SDK_INCLUDE_DIR}/zoom_sdk.h")
+    # WIN32 gate, not just SDK-present: this target compiles the real
+    # engine/src/engine-talkback.cpp, and the engine is Windows-only (zchar_t
+    # = wchar_t, HWND via zoom_sdk_def.h). Linux CI carries a partial SDK
+    # include dir where zoom_sdk.h EXISTS but the meeting_service_components
+    # tree does not, so the SDK-present check alone let this target register
+    # there and fail at #include (PR #231 CI, 2026-08-27).
+    if(WIN32 AND EXISTS "${ZOOM_SDK_INCLUDE_DIR}/meeting_service_components/meeting_talkback_ctrl_interface.h")
         add_executable(CoreVideoEngineTalkbackSelectTest
             tests/engine-talkback-select-test.cpp
             engine/src/engine-talkback.cpp

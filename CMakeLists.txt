@@ -287,6 +287,7 @@ if(COREVIDEO_BUILD_PLUGIN)
         src/iso-ffmpeg-pipe.cpp
         src/zoom-iso-panel.cpp
         src/zoom-dock.cpp
+        src/zoom-talkback-panel.cpp
         src/zoom-control-server.cpp
         src/zoom-osc-server.cpp
         src/obs-utils.cpp

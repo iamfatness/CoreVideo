@@ -282,13 +282,54 @@ int main()
         check(why, "a destroyed channel set was reported with no reason");
     }
 
+    // A long shortfall list is ELIDED on the visible line and complete in the
+    // tooltip. The elision must never cost a name: naming a shortfall is the
+    // entire purpose of the reporting chain (src/talkback-plan.h), so a
+    // tooltip that dropped anyone would break the guarantee quietly.
+    {
+        auto plan = confirmed_plan();
+        plan.requested = {"A", "B", "C", "D", "E", "F", "G"};
+        plan.uncovered_private = {"A", "B", "C", "D", "E", "F", "G"};
+        const auto report = talkback_dock_nomination_report(plan);
+        bool elided = false;
+        for (const auto &line : report.lines)
+            if (contains(line, "and 2 more")) elided = true;
+        check(elided, "a seven-name shortfall was not elided on the line");
+        for (const auto &name : plan.uncovered_private)
+            check(contains(report.tooltip, name),
+                  "a name was dropped from the full-list tooltip");
+        check(contains(report.tooltip, "G") &&
+                  !contains(report.tooltip, "and 2 more"),
+              "the tooltip repeated the elision instead of listing everyone");
+    }
+    {
+        // At the threshold, nothing is elided -- an elision that fired early
+        // would hide names for no reason.
+        auto plan = confirmed_plan();
+        plan.requested = {"A", "B", "C", "D", "E"};
+        plan.uncovered_private = {"A", "B", "C", "D", "E"};
+        const auto report = talkback_dock_nomination_report(plan);
+        for (const auto &line : report.lines)
+            check(!contains(line, "more"),
+                  "a list at the elision threshold was elided anyway");
+    }
+
     // ── The program-track warning ─────────────────────────────────────────
+    //
+    // `short_text` is the line the panel renders beside the source combo and
+    // `text` is its tooltip. The split exists because the first live render
+    // put the whole paragraph on the panel; the SHORT form still has to carry
+    // the verdict on its own, because that is the only part most operators
+    // will ever read.
     {
         const auto w = talkback_dock_track_warning("Talkback Mic", 0);
         check(!w.on_air_risk, "a source on no track was flagged as on air");
         check(w.tracks.empty(), "a source on no track listed tracks");
         check(contains(w.text, "dedicated"),
               "the safe-pattern text does not name the safe pattern");
+        check(contains(w.short_text, "Off program") &&
+                  contains(w.short_text, "safe"),
+              "the short status does not say the source is off program");
     }
     {
         // Tracks 1 and 3 (bits 0 and 2) -- 1-based numbering, as OBS's
@@ -299,26 +340,55 @@ int main()
               "the enabled tracks were not listed as OBS numbers them");
         check(contains(w.text, "Host Mic") && contains(w.text, "1, 3"),
               "the warning names neither the source nor its tracks");
+        check(contains(w.short_text, "tracks 1, 3"),
+              "the short status does not name the tracks that are on air");
+        check(contains(w.short_text, "audience"),
+              "the short status does not say who else hears it");
+        check(w.short_text.size() < w.text.size(),
+              "the short status is not shorter than the full explanation");
+    }
+    {
+        // One track: the short line must not read "tracks 1".
+        const auto w = talkback_dock_track_warning("Host Mic", 0b1u);
+        check(w.on_air_risk, "a source on one program track was not flagged");
+        check(contains(w.short_text, "track 1") &&
+                  !contains(w.short_text, "tracks"),
+              "a single track was announced in the plural");
     }
     {
         const auto w = talkback_dock_track_warning("", 0);
         check(!w.on_air_risk, "no chosen source was flagged as on air");
         check(contains(w.text, "No talkback source"),
               "an unchosen source did not say so");
+        check(contains(w.short_text, "No source"),
+              "the short status did not say no source was chosen");
     }
 
-    // ── Live tally ────────────────────────────────────────────────────────
-    // The tally follows the ENGINE's confirmed state, never the plugin's
-    // intent -- the spec's own requirement, and the F2 Critical that made it
-    // one.
+    // ── The ON AIR banner ─────────────────────────────────────────────────
+    // The banner follows the ENGINE's confirmed state, never the plugin's
+    // intent -- the spec's own requirement, and the C2 Critical that made it
+    // one. It replaced the one-line tally when the dock became its own panel;
+    // these are the tally's own claims, re-pinned on the thing that renders
+    // them now.
+    {
+        // Nothing keyed, nothing to answer for: the quiet state.
+        TalkbackDockSessionView s;
+        const auto b = talkback_dock_banner(s);
+        check(b.state == TalkbackDockBannerState::Off,
+              "an idle panel was not shown as off air");
+        check(contains(b.headline, "Off air"), "the idle banner did not say so");
+        check(b.detail.empty(), "the idle banner invented a detail line");
+    }
     {
         TalkbackDockSessionView s;
         s.key_open = true;
         s.target = "Sarah";
-        const auto t = talkback_dock_tally(s);
-        check(!t.live, "an unconfirmed key was shown as live");
-        check(!t.alert, "waiting for confirmation was shown as a failure");
-        check(contains(t.text, "waiting"), "a pending key did not say so");
+        const auto b = talkback_dock_banner(s);
+        check(b.state == TalkbackDockBannerState::Waiting,
+              "an unconfirmed key was shown as live");
+        check(contains(b.headline, "Sarah"),
+              "the waiting banner does not name the target");
+        check(contains(b.detail, "Waiting"), "a pending key did not say so");
     }
     {
         TalkbackDockSessionView s;
@@ -328,11 +398,28 @@ int main()
         s.members_known = true;
         s.members_present = 2;
         s.members_total = 3;
-        const auto t = talkback_dock_tally(s);
-        check(t.live, "a confirmed key was not shown as live");
-        check(contains(t.text, "Sarah"), "the live tally does not name the target");
-        check(contains(t.text, "2 of 3 present"),
-              "the live tally does not report membership");
+        const auto b = talkback_dock_banner(s);
+        check(b.state == TalkbackDockBannerState::Live,
+              "a confirmed key was not shown as live");
+        check(contains(b.headline, "ON AIR"),
+              "the live banner does not say ON AIR");
+        check(contains(b.headline, "Sarah"),
+              "the live banner does not name the target");
+        check(contains(b.headline, "2 of 3 present"),
+              "the live banner does not report membership");
+    }
+    {
+        // The all-talent sentinel is a target, not a name: it must never reach
+        // the operator as the raw string the wire uses.
+        TalkbackDockSessionView s;
+        s.key_open = true;
+        s.target = kTalkbackAllTalentTarget;
+        s.engine_live = true;
+        const auto b = talkback_dock_banner(s);
+        check(contains(b.headline, "All talent"),
+              "the all-talent target was not spelled out on the banner");
+        check(b.headline.find(" all") == std::string::npos,
+              "the raw all-talent sentinel leaked onto the banner");
     }
     {
         // Refused mid-ladder: the engine's own recovery hint is echoed, not
@@ -343,23 +430,39 @@ int main()
         s.target = "Sarah";
         s.engine_reason = "provisioning_incomplete";
         s.engine_recover = "re-nominate";
-        const auto t = talkback_dock_tally(s);
-        check(!t.live, "a refused key was shown as live");
-        check(t.alert, "a refused key was not flagged");
-        check(contains(t.text, "provisioning_incomplete"),
+        const auto b = talkback_dock_banner(s);
+        check(b.state == TalkbackDockBannerState::Refused,
+              "a refused key was not flagged");
+        check(contains(b.headline, "Sarah"),
+              "the refusal banner does not name the target");
+        check(contains(b.detail, "provisioning_incomplete"),
               "the refusal reason was not shown");
-        check(contains(t.text, "re-nominate"),
+        check(contains(b.detail, "re-nominate"),
               "the engine's recovery hint was not surfaced");
     }
     {
         // A closed key keeps the last verdict visible, said as history.
         TalkbackDockSessionView s;
         s.engine_reason = "channels_destroyed";
-        const auto t = talkback_dock_tally(s);
-        check(!t.live, "a closed key was shown as live");
-        check(contains(t.text, "Not keyed"), "a closed key did not say so");
-        check(contains(t.text, "channels_destroyed"),
+        const auto b = talkback_dock_banner(s);
+        check(b.state == TalkbackDockBannerState::Refused,
+              "a closed key that had failed was shown as a clean idle state");
+        check(contains(b.headline, "Off air"),
+              "a closed key was not shown as off air");
+        check(contains(b.detail, "Last key"),
+              "the last key's verdict was not said as history");
+        check(contains(b.detail, "channels_destroyed"),
               "the last key's failure reason was dropped once it closed");
+    }
+    {
+        // A key that closed cleanly is Off, not Refused: an engine_live
+        // session leaves its reason behind and it must not read as a failure.
+        TalkbackDockSessionView s;
+        s.engine_live = true;
+        s.engine_reason = "ok";
+        const auto b = talkback_dock_banner(s);
+        check(b.state == TalkbackDockBannerState::Off,
+              "a cleanly closed key was reported as a failure");
     }
 
     // ── M1: the mode CAPTURED AT THE PRESS governs closing ────────────────

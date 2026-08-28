@@ -558,8 +558,10 @@ Every one of these is documented at length where it lives; the list is the map.
 - **The dock keys, by owner decision (Milestone 7)**: the spec
   (`docs/superpowers/specs/2026-08-24-zoom-talkback-design.md`) locks keying to
   Companion/control API/hotkey and says "**Not** the dock"; the owner has since
-  asked for a drivable dock, so `src/zoom-dock.cpp`'s Talkback group nominates
-  and keys — a deliberate, approved spec deviation, with everything else
+  asked for a drivable dock, so CoreVideo's own **Talkback dock**
+  (`src/zoom-talkback-panel.cpp`, registered as `ZoomTalkbackDock` alongside
+  ISO Recorder / Output Manager / Diagnostics) nominates and keys — a
+  deliberate, approved spec deviation, with everything else
   unchanged (identity by display name, keying SELECTS a provisioned channel,
   every refusal fails closed). Its decisions live in the Qt/OBS-free
   `src/talkback-dock-state.h` (pinned by `CoreVideoTalkbackDockState`) because
@@ -589,6 +591,42 @@ Every one of these is documented at length where it lives; the list is the map.
   offering a press that can only refuse; the source scan is gated to 1 Hz and
   to the dock being visible (m2), since `obs_enum_sources()` holds libobs's
   source mutex.
+- **...and it is its OWN dock, after the first live render (Milestone 7,
+  re-home)**: it shipped as two group boxes at the bottom of the Zoom Control
+  dock, under Join / Engine / Routing, and the owner's verdict was "the UI is
+  not good... it needs to be its own panel". Five defects, all confirmed on
+  screen: the LIVE state — the single most important fact on the surface — was
+  one line of small red text UNDER the buttons; the roster rendered as a
+  stretched blue selection bar that read as a mis-styled button; the
+  program-track advisory was a paragraph of amber prose beside a combo; nothing
+  had hierarchy (Nominate was a full-width blue slab while the key buttons
+  looked secondary); and the copy carried literal `--` runs and quoted names.
+  The re-home is **layout only** — every rule listed above (the single
+  `TalkbackDockOpenKey`, the cause-agnostic `talkback_dock_release_lost()`,
+  `needs_renewal = false`, the enablement rules, the 1 Hz + visibility-gated
+  source scan, the `(present, name)` roster-signature diff with check-state
+  reapply, keying on the Qt main thread) moved across unchanged, and the tick
+  it all rides is the panel's own 100 ms `QTimer` because the backstop's
+  resolution IS that interval. What changed: an **ON AIR banner** at the top
+  (`talkback_dock_banner()`, which REPLACED `talkback_dock_tally()` — same four
+  states, same "live means the ENGINE confirmed it" rule, same echoed recovery
+  hint, rendered as a full-width strip instead of a caption); a `short_text`
+  on the track warning with the paragraph demoted to its tooltip; name lists
+  elided past `kTalkbackDockNameListMax` = 5 with the FULL list in
+  `TalkbackDockNominationReport::tooltip`, so eliding never costs a name the
+  reporting chain exists to say out loud; the nominee list with selection
+  switched off entirely (selecting a row of tick boxes means nothing, and the
+  highlight was the thing impersonating a button); and the Milestone 1 probe
+  moved across too, collapsed, at the bottom. Six mutations were run against
+  the new pins in `tests/talkback-dock-state-test.cpp` (banner ignoring engine
+  confirmation, elision disabled, tooltip carrying the elided list, short
+  status reverting to the paragraph, the raw `"all"` sentinel leaking to the
+  banner, a failed closed key shown as clean idle) and all six were killed.
+  `src/cv-combo-utils.h` is new: the combo helpers and `participant_label()`
+  the two docks now share, extracted rather than copied because
+  `replace_combo_items()` BLOCKS the combo's signals while it rebuilds — a
+  hand-copied second version that forgot to would rewrite the saved setting on
+  every refresh tick.
 
 ## Live testing against a real meeting
 

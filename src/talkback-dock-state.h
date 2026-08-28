@@ -1,7 +1,14 @@
 #pragma once
 //
-// talkback-dock-state.h — what the dock's Talkback group shows, and which of
-// its key buttons are live.
+// talkback-dock-state.h — what the Talkback dock shows, and which of its key
+// buttons are live.
+//
+// The Talkback surface began as a group box at the bottom of the Zoom Control
+// dock. After its first live render the owner's verdict was that it needed to
+// be its own panel -- keying is the mid-show action and it was sharing a column
+// with join fields and routing -- so it is now a standalone dock
+// (src/zoom-talkback-panel.cpp, registered as "ZoomTalkbackDock"). Every
+// decision below moved across unchanged; only the layout and the wording did.
 //
 // Milestone 7, and a DELIBERATE, OWNER-APPROVED DEVIATION from the spec:
 // docs/superpowers/specs/2026-08-24-zoom-talkback-design.md locks the keying
@@ -137,8 +144,9 @@ inline std::vector<TalkbackDockKeyButton> talkback_dock_key_buttons(
                 for (const auto &u : confirmed.unreachable)
                     if (u == target) { unreachable = true; break; }
                 b.reason = unreachable
-                    ? "on no channel at all -- re-nominate a shorter list"
-                    : "no private channel -- key All instead, or re-nominate";
+                    ? "on no channel at all. Re-nominate a shorter list."
+                    : "no private channel. Key All talent instead, or "
+                      "re-nominate.";
             }
         } else {
             b.enabled = true;
@@ -162,11 +170,24 @@ inline std::vector<TalkbackDockKeyButton> talkback_dock_key_buttons(
 struct TalkbackDockNominationReport {
     std::string headline;
     // Detail lines, each already operator-facing and safe to show verbatim.
+    // Names past kTalkbackDockNameListMax are ELIDED here -- see `tooltip`,
+    // which always carries every one of them.
     std::vector<std::string> lines;
+    // The same report with no name elided at all, newline-separated. The dock
+    // hangs this off the block as a tooltip, so eliding the visible line never
+    // costs the operator a name: the guarantee src/talkback-plan.h's reporting
+    // chain exists for is that a shortfall is NAMED, and an elision that had
+    // nowhere to put the rest of the names would quietly break it.
+    std::string tooltip;
     // True when something the operator asked for did not happen: a shortfall,
     // or a failed attempt. The dock colours the block on this.
     bool warn = false;
 };
+
+// Past this many names a line stops being scannable at a glance in a dock the
+// width of an OBS side panel, and an operator mid-show skips a paragraph. The
+// elided form is what they read; the full list is one hover away.
+constexpr std::size_t kTalkbackDockNameListMax = 5;
 
 namespace talkback_dock_detail {
 
@@ -178,6 +199,19 @@ inline std::string join_names(const std::vector<std::string> &names)
         out += names[i];
     }
     return out;
+}
+
+// The visible form. Never silently truncated: the count of what was dropped is
+// part of the text, so a reader always knows there is more to see.
+inline std::string join_names_elided(const std::vector<std::string> &names)
+{
+    if (names.size() <= kTalkbackDockNameListMax)
+        return join_names(names);
+    const std::vector<std::string> head(
+        names.begin(),
+        names.begin() + static_cast<std::ptrdiff_t>(kTalkbackDockNameListMax));
+    return join_names(head) + " and " +
+           std::to_string(names.size() - kTalkbackDockNameListMax) + " more";
 }
 
 inline std::string plural(std::size_t n, const char *one, const char *many)
@@ -193,13 +227,24 @@ inline TalkbackDockNominationReport talkback_dock_nomination_report(
     using namespace talkback_dock_detail;
     TalkbackDockNominationReport report;
 
+    // Every detail line goes through here so the visible and the full form
+    // cannot drift: one call site, two renderings of the same names.
+    const auto push = [&report](const std::string &prefix,
+                                const std::vector<std::string> &names,
+                                const std::string &suffix) {
+        report.lines.push_back(prefix + join_names_elided(names) + suffix);
+        if (!report.tooltip.empty()) report.tooltip += "\n";
+        report.tooltip += prefix + join_names(names) + suffix;
+    };
+
     if (!confirmed.done) {
         // Not "nothing happened": a failed-after-destroy or superseded
         // outcome also lands here, with done reset to false and the reason
         // kept (src/talkback-nomination.h). Saying "no channels" alone would
         // hide the WHY on exactly the paths that need it most.
-        report.headline = "No talkback channels. Pick talent below and press "
+        report.headline = "No talkback channels yet. Tick talent and press "
                           "Nominate.";
+        report.tooltip = report.headline;
     } else {
         const std::vector<std::string> covered =
             talkback_private_channel_names(confirmed.requested,
@@ -208,32 +253,30 @@ inline TalkbackDockNominationReport talkback_dock_nomination_report(
             plural(confirmed.channels, "channel", "channels") + " in use of " +
             std::to_string(kTalkbackMaxChannels) + " for " +
             plural(confirmed.requested.size(), "nominee", "nominees") + ".";
-        report.lines.push_back(
-            covered.empty()
-                ? std::string("Private channel: nobody.")
-                : "Private channel: " + join_names(covered) + ".");
+        report.tooltip = report.headline;
+        if (covered.empty())
+            push("Private channel: ", {}, "nobody.");
+        else
+            push("Private channel: ", covered, ".");
     }
 
     if (!confirmed.uncovered_private.empty()) {
         report.warn = true;
-        report.lines.push_back(
-            "No private channel (reach them by keying All): " +
-            join_names(confirmed.uncovered_private) + ".");
+        push("No private channel, reach them via All talent: ",
+             confirmed.uncovered_private, ".");
     }
     if (!confirmed.unreachable.empty()) {
         report.warn = true;
         // Strictly worse than losing the private aside, and always a subset of
         // uncovered_private -- so it gets its own line rather than being
         // buried in the one above. See TalkbackPlan::unreachable.
-        report.lines.push_back(
-            "On no channel at all -- they hear nothing: " +
-            join_names(confirmed.unreachable) + ".");
+        push("On no channel at all, they hear nothing: ",
+             confirmed.unreachable, ".");
     }
     if (confirmed.done && !confirmed.all_talent_complete) {
         report.warn = true;
-        report.lines.push_back(
-            "All talent does not reach everyone: this list is larger than "
-            "16 channels can fan out to.");
+        push("All talent does not reach everyone: this list is larger than "
+             "16 channels can fan out to.", {}, "");
     }
     if (!confirmed.last_attempt_ok) {
         report.warn = true;
@@ -241,11 +284,10 @@ inline TalkbackDockNominationReport talkback_dock_nomination_report(
         // without contradicting it (a refused re-nomination leaves the
         // standing channels exactly as they were). Said as a separate line
         // for that reason.
-        report.lines.push_back(
-            "Last Nominate was refused: " +
-            (confirmed.last_attempt_reason.empty()
-                 ? std::string("no reason reported")
-                 : confirmed.last_attempt_reason) + ".");
+        push("Last Nominate was refused: ", {},
+             (confirmed.last_attempt_reason.empty()
+                  ? std::string("no reason reported")
+                  : confirmed.last_attempt_reason) + ".");
     }
     return report;
 }
@@ -272,6 +314,14 @@ struct TalkbackDockTrackWarning {
     // 1-based track numbers as OBS's Advanced Audio Properties shows them,
     // e.g. "1, 3".
     std::string tracks;
+    // ONE SHORT LINE, for the row beside the source combo. The dock's first
+    // live render put `text` on the panel and the owner's verdict was that a
+    // wall of prose next to a control is not a status -- an operator scanning
+    // mid-show needs to know only "is this safe or not", and the paragraph
+    // that says WHY belongs where they can go and read it deliberately.
+    std::string short_text;
+    // The full explanation, including what to do about it. The dock renders
+    // this as the tooltip of the short line, never as body copy.
     std::string text;
 };
 
@@ -283,6 +333,7 @@ inline TalkbackDockTrackWarning talkback_dock_track_warning(
 {
     TalkbackDockTrackWarning w;
     if (source_name.empty()) {
+        w.short_text = "No source chosen";
         w.text = "No talkback source chosen. The safe pattern is a dedicated "
                  "audio source on an unused track.";
         return w;
@@ -293,30 +344,62 @@ inline TalkbackDockTrackWarning talkback_dock_track_warning(
         w.tracks += std::to_string(i + 1);
     }
     if (w.tracks.empty()) {
-        w.text = "\"" + source_name + "\" is on no OBS track -- talkback only. "
-                 "That is the safe pattern: a dedicated source on an unused "
-                 "track.";
+        w.short_text = "Off program (safe)";
+        w.text = source_name + " is on no OBS track, so it feeds talkback "
+                 "only. That is the safe pattern: a dedicated source on an "
+                 "unused track.";
         return w;
     }
     w.on_air_risk = true;
-    w.text = "\"" + source_name + "\" is on OBS track(s) " + w.tracks +
+    const bool one = w.tracks.find(',') == std::string::npos;
+    w.short_text = std::string("On air via ") + (one ? "track " : "tracks ") +
+                   w.tracks + ". The audience will hear this.";
+    w.text = source_name + " is on OBS " + (one ? "track " : "tracks ") +
+             w.tracks +
              ". If any of those are on air, the audience hears this talkback "
              "aside at full level. Uncheck them in Advanced Audio Properties, "
              "or use a dedicated source on an unused track.";
     return w;
 }
 
-// ── Live tally ──────────────────────────────────────────────────────────────
+// ── The ON AIR banner ───────────────────────────────────────────────────────
+//
+// This replaced the one-line tally after the dock's first live render: the
+// owner's verdict was that the single most important fact on the panel -- am I
+// audible to talent right now -- was a line of small red text underneath the
+// buttons. It says the same four things the tally said, with the same rule
+// about which of them counts as "live"; what changed is that it is a full-width
+// strip at the top of the dock, sized and coloured to be read from across the
+// room rather than leaned into.
+//
+// The claims are unchanged and each is load-bearing:
+//   * LIVE requires the ENGINE's confirmation, never the plugin's intent (the
+//     spec's own requirement, and the Critical -- C2 -- that made it one: a
+//     ladder abort used to destroy the channels a live key was talking on with
+//     the plugin still reporting live).
+//   * A refusal is shown WITH the engine's own recovery hint, echoed and never
+//     inferred -- the plugin does not invent a remedy the engine did not name.
+//   * A closed key keeps the last verdict visible, said as history. The reason
+//     outlives the key that earned it (talkback_start() clears it at the next
+//     press), so it must not read as a current state.
 
-struct TalkbackDockTally {
-    std::string text;
-    // The key is open AND the engine has confirmed the channel. Anything less
-    // is not "on air" and must not be shown as such -- the spec's own
-    // requirement is that the tally reflects the engine's confirmed state,
-    // never the plugin's intent.
-    bool live = false;
-    // Something failed and the operator has to act. Distinct from `live`.
-    bool alert = false;
+enum class TalkbackDockBannerState {
+    // Nothing keyed and nothing to answer for.
+    Off,
+    // A key is open and the engine has not confirmed the channel yet.
+    Waiting,
+    // Open AND engine-confirmed. The only state that may be shown as on air.
+    Live,
+    // A key was refused, or the last one that closed had failed.
+    Refused,
+};
+
+struct TalkbackDockBanner {
+    TalkbackDockBannerState state = TalkbackDockBannerState::Off;
+    // Read from across the room. Short, and it names the target.
+    std::string headline;
+    // One short line under it; empty when there is nothing to add.
+    std::string detail;
 };
 
 struct TalkbackDockSessionView {
@@ -339,45 +422,54 @@ struct TalkbackDockSessionView {
     uint32_t members_total = 0;
 };
 
-inline TalkbackDockTally talkback_dock_tally(const TalkbackDockSessionView &s)
+// The label an operator reads for a key target. kTalkbackAllTalentTarget is a
+// sentinel ("all"), not somebody's name, and it is the target most likely to be
+// read under pressure -- so it is spelled out rather than shown raw.
+inline std::string talkback_dock_target_label(const std::string &target)
 {
-    TalkbackDockTally t;
+    if (target.empty()) return "no target";
+    if (target == kTalkbackAllTalentTarget) return "All talent";
+    return target;
+}
+
+inline TalkbackDockBanner talkback_dock_banner(const TalkbackDockSessionView &s)
+{
+    TalkbackDockBanner b;
     if (!s.key_open) {
-        t.text = "Not keyed.";
+        b.headline = "Off air";
         if (!s.engine_reason.empty() && !s.engine_live) {
-            // The reason outlives the key that earned it (talkback_start()
-            // clears it at the next press), so this is the last key's verdict
-            // -- said as such, not as a current state.
-            t.alert = true;
-            t.text += " Last key: " + s.engine_reason + ".";
+            // The last key's verdict, said as history -- see the header
+            // comment above for why it cannot read as a current state.
+            b.state = TalkbackDockBannerState::Refused;
+            b.detail = "Last key failed: " + s.engine_reason + ".";
             if (!s.engine_recover.empty())
-                t.text += " Recovery: " + s.engine_recover + ".";
+                b.detail += " Recovery: " + s.engine_recover + ".";
         }
-        return t;
+        return b;
     }
 
-    const std::string target = s.target.empty() ? std::string("(no target)")
-                                                : s.target;
+    const std::string label = talkback_dock_target_label(s.target);
     if (s.engine_live) {
-        t.live = true;
-        t.text = "LIVE to " + target;
+        b.state = TalkbackDockBannerState::Live;
+        b.headline = "ON AIR: " + label;
         if (s.members_known) {
-            t.text += " -- " + std::to_string(s.members_present) + " of " +
-                      std::to_string(s.members_total) + " present";
+            b.headline += " (" + std::to_string(s.members_present) + " of " +
+                          std::to_string(s.members_total) + " present)";
         }
-        t.text += ".";
-        return t;
+        return b;
     }
     if (s.engine_reason.empty()) {
-        t.text = "Keying " + target + " -- waiting for Zoom to confirm the "
-                 "channel.";
-        return t;
+        b.state = TalkbackDockBannerState::Waiting;
+        b.headline = "Keying " + label;
+        b.detail = "Waiting for Zoom to confirm the channel.";
+        return b;
     }
-    t.alert = true;
-    t.text = "Key refused for " + target + ": " + s.engine_reason + ".";
+    b.state = TalkbackDockBannerState::Refused;
+    b.headline = "Key refused: " + label;
+    b.detail = s.engine_reason + ".";
     if (!s.engine_recover.empty())
-        t.text += " Recovery: " + s.engine_recover + ".";
-    return t;
+        b.detail += " Recovery: " + s.engine_recover + ".";
+    return b;
 }
 
 // ── What a press and a release mean ─────────────────────────────────────────

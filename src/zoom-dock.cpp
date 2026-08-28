@@ -5,6 +5,10 @@
 #include "obs-utils.h"
 #include "speaker-director.h"
 #include "join-watchdog.h"
+#include "talkback-controller.h"
+#include "talkback-dock-state.h"
+#include "talkback-key.h"
+#include "talkback-plan.h"
 #include "zoom-engine-client.h"
 #include "zoom-join-decision.h"
 #include "zoom-oauth.h"
@@ -348,6 +352,17 @@ static void replace_combo_items(
         combo->setCurrentIndex(0);
         combo->blockSignals(false);
     }
+}
+
+// Does this item list already offer `data` as a selectable value? Used to keep
+// a saved talkback source visible when OBS does not currently have it.
+static bool combo_items_contain(
+    const std::vector<std::pair<QString, QVariant>> &items, const QVariant &data)
+{
+    for (const auto &item : items)
+        if (item.second == data)
+            return true;
+    return false;
 }
 
 static bool item_list_contains_data(
@@ -815,13 +830,155 @@ ZoomDock::ZoomDock(QWidget *parent)
     routing_layout->addWidget(m_output_manager_btn);
     vLayout->addWidget(routing_group);
 
+    // -- Talkback (Milestone 7) -------------------------------------------------
+    //
+    // A DELIBERATE, OWNER-APPROVED DEVIATION FROM THE SPEC. docs/superpowers/
+    // specs/2026-08-24-zoom-talkback-design.md locks the keying surfaces to
+    // "Companion/Stream Deck, TCP/OSC control API, OBS hotkey. **Not** the
+    // dock", and its Dock section says "Configuration and tally only, by
+    // operator preference -- no talk button". The owner has since asked for a
+    // dock that can actually be driven, so the dock keys. Nothing else in that
+    // decision moved: identity is still by display name, a key still SELECTS a
+    // channel nomination already created, and every refusal still fails closed.
+    //
+    // Every decision this group renders -- which buttons are live, what the
+    // nomination outcome says, whether the chosen source is on a program track
+    // -- lives in src/talkback-dock-state.h so it can be tested without OBS,
+    // Qt or a meeting. Keep it that way: the two Majors this feature shipped
+    // (F1, N1) both lived in wiring that no test could reach.
+    auto *tb_group = new QGroupBox("Talkback", this);
+    auto *tb_layout = new QVBoxLayout(tb_group);
+    tb_layout->setSpacing(6);
+
+    auto *tb_intro = new QLabel(
+        "Speak privately to nominated talent. Nominate first -- the Zoom "
+        "channels are created then, so a key press only opens the microphone.",
+        tb_group);
+    tb_intro->setWordWrap(true);
+    tb_intro->setProperty("role", "muted");
+    tb_layout->addWidget(tb_intro);
+
+    auto *tb_source_row = new QHBoxLayout;
+    tb_source_row->setSpacing(8);
+    m_talkback_source_combo = new QComboBox(tb_group);
+    m_talkback_source_combo->setMinimumWidth(200);
+    m_talkback_source_combo->setToolTip(
+        "The OBS audio source you talk through. Use a dedicated source with "
+        "every program track unchecked in Advanced Audio Properties.");
+    // Seeded from the saved name, not from a scan: the tick below rebuilds
+    // this from OBS, and seeding here is what makes the saved choice the
+    // preferred selection when it does (replace_combo_items() keeps the
+    // current data if it can still find it).
+    m_talkback_source_combo->addItem(
+        initial_settings.talkback_source.empty()
+            ? QStringLiteral("Select audio source")
+            : QString::fromStdString(initial_settings.talkback_source),
+        QVariant(QString::fromStdString(initial_settings.talkback_source)));
+    tb_source_row->addWidget(new QLabel("Talk source", tb_group));
+    tb_source_row->addWidget(m_talkback_source_combo, 1);
+    tb_layout->addLayout(tb_source_row);
+    connect(m_talkback_source_combo, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, [this](int) {
+                if (!m_alive->load(std::memory_order_acquire) ||
+                    !m_talkback_source_combo)
+                    return;
+                // Only a real operator change reaches here:
+                // replace_combo_items() blocks this combo's signals while it
+                // rebuilds and while it restores the selection.
+                auto s = ZoomPluginSettings::load();
+                s.talkback_source =
+                    m_talkback_source_combo->currentData().toString().toStdString();
+                s.save();
+                // Force the next tick to rescan rather than waiting out the
+                // 1Hz gate: the operator has just changed the source and the
+                // program-track warning under it is now about the wrong one.
+                m_talkback_source_scan_ms = 0;
+            });
+
+    // The deferred half of the program/ISO leak guarantee. The structural half
+    // holds unconditionally (a capture callback observes a source and cannot
+    // add it to any mix -- tests/talkback-isolation-test.cpp) and the tap
+    // already logs this at open() time (src/talkback-tap.cpp); this is the
+    // same advisory where the operator is looking, and BEFORE the key rather
+    // than on it.
+    m_talkback_track_label = new QLabel(tb_group);
+    m_talkback_track_label->setObjectName("talkbackTrackWarning");
+    m_talkback_track_label->setWordWrap(true);
+    tb_layout->addWidget(m_talkback_track_label);
+
+    auto *tb_nominate_label = new QLabel(
+        "Nominate talent -- everyone ticked gets a standing channel:", tb_group);
+    tb_nominate_label->setWordWrap(true);
+    tb_layout->addWidget(tb_nominate_label);
+
+    m_talkback_nominee_list = new QListWidget(tb_group);
+    m_talkback_nominee_list->setMaximumHeight(110);
+    m_talkback_nominee_list->setToolTip(
+        "Tick the people you may need to talk to. Zoom allows 16 channels and "
+        "10 people per channel; anyone the budget cannot cover is named below.");
+    tb_layout->addWidget(m_talkback_nominee_list);
+
+    m_talkback_nominate_btn = new QPushButton("Nominate", tb_group);
+    m_talkback_nominate_btn->setProperty("role", "primary");
+    m_talkback_nominate_btn->setEnabled(false);
+    tb_layout->addWidget(m_talkback_nominate_btn);
+    connect(m_talkback_nominate_btn, &QPushButton::clicked,
+            this, [this]() { on_talkback_nominate_clicked(); });
+
+    // The budget outcome, in the operator's own words and with every shortfall
+    // NAMED. This block is the whole reason the nomination reporting chain
+    // exists (src/talkback-plan.h): a count tells the operator that somebody
+    // is short, not who -- and who is the only part they can act on.
+    m_talkback_plan_label = new QLabel(tb_group);
+    m_talkback_plan_label->setObjectName("talkbackPlan");
+    m_talkback_plan_label->setWordWrap(true);
+    tb_layout->addWidget(m_talkback_plan_label);
+
+    m_talkback_latch_cb = new QCheckBox("Latch (tap on, tap off)", tb_group);
+    m_talkback_latch_cb->setChecked(initial_settings.talkback_latch);
+    m_talkback_latch_cb->setToolTip(
+        "Off: hold a key button to talk. On: one press opens the key, the next "
+        "closes it. A latch never survives a reconnect.");
+    tb_layout->addWidget(m_talkback_latch_cb);
+    connect(m_talkback_latch_cb, &QCheckBox::toggled, this, [this](bool on) {
+        if (!m_alive->load(std::memory_order_acquire))
+            return;
+        auto s = ZoomPluginSettings::load();
+        s.talkback_latch = on;
+        s.save();
+    });
+
+    // One button per keyable target, rebuilt from the CONFIRMED plan by
+    // refresh_talkback(). Empty until something is nominated -- there is
+    // nothing to key before that, and an always-present button that always
+    // refuses teaches the operator to ignore refusals.
+    m_talkback_key_row = new QWidget(tb_group);
+    auto *tb_key_layout = new QGridLayout(m_talkback_key_row);
+    tb_key_layout->setContentsMargins(0, 0, 0, 0);
+    tb_key_layout->setSpacing(6);
+    tb_layout->addWidget(m_talkback_key_row);
+
+    m_talkback_tally_label = new QLabel(QStringLiteral("Not keyed."), tb_group);
+    m_talkback_tally_label->setObjectName("talkbackTally");
+    m_talkback_tally_label->setWordWrap(true);
+    tb_layout->addWidget(m_talkback_tally_label);
+
+    // The dock's OWN refusals -- the ones the engine never sees (no source
+    // chosen, the source is not in the current scene, OBS is at a sample rate
+    // the Zoom talkback API will not take). The tally above shows the engine's.
+    m_talkback_notice = new QLabel(tb_group);
+    m_talkback_notice->setObjectName("errorLabel");
+    m_talkback_notice->setWordWrap(true);
+    m_talkback_notice->setVisible(false);
+    tb_layout->addWidget(m_talkback_notice);
+
+    vLayout->addWidget(tb_group);
+
     // -- Talkback probe (Milestone 1 diagnostic) --------------------------------
-    // This is NOT the talkback feature (Milestone 7: talk button, PTT, latch,
-    // tally, level meter). Those are deliberately out of this dock -- the
-    // operator has confirmed it stays config-and-tally-only. This is only the
-    // "can this account even open a channel" probe, exposed here because it
-    // was previously reachable only over the TCP control API, and its
-    // progress otherwise only ever showed up as OBS log lines.
+    // Kept, and kept separate from the Talkback group above: this is the "can
+    // this account even open a channel" probe, which destroys its channel
+    // afterwards and plays an audible tone at the participant. It is a
+    // diagnostic for when talkback does not work at all, not a way to use it.
     auto *talkback_group = new QGroupBox("Talkback (probe)", this);
     auto *talkback_layout = new QVBoxLayout(talkback_group);
     talkback_layout->setSpacing(6);
@@ -1013,6 +1170,18 @@ ZoomDock::~ZoomDock()
 void ZoomDock::prepare_shutdown()
 {
     m_alive->store(false, std::memory_order_release);
+    // Close a key this dock opened before its buttons go away. A destroyed
+    // QPushButton emits no released(), and after this function the refresh
+    // timer that would notice (talkback_dock_release_lost()) is stopped -- so
+    // without this the only thing left to close the key is
+    // TalkbackController::stop() at plugin unload, which is later than it
+    // should be for a key that is on air. key_off() is a no-op if nothing is
+    // open, and a key opened over the control API is not this dock's to close.
+    if (!m_talkback_dock_target.empty()) {
+        TalkbackController::instance().key_off();
+        m_talkback_dock_target.clear();
+        m_talkback_dock_latched = false;
+    }
     if (m_speaker_sensitivity_spin)
         QObject::disconnect(m_speaker_sensitivity_spin, nullptr, this, nullptr);
     if (m_speaker_hold_spin)
@@ -1396,11 +1565,601 @@ void ZoomDock::update_state_indicator()
         m_talkback_status_label->setText(format_talkback_probe_status(
             ZoomEngineClient::instance().talkback_probe_status()));
     }
+
+    // Milestone 7's group, on this same tick rather than a timer of its own --
+    // see refresh_talkback().
+    refresh_talkback();
 }
 
 void ZoomDock::refresh()
 {
     update_state_indicator();
+}
+
+// -- Talkback (Milestone 7) ----------------------------------------------------
+
+// A dynamic property plus a re-polish is how this dock already switches a
+// widget between styled states (see on_join_clicked()'s "error" property on
+// m_meeting_id): the stylesheet rules live in src/cv-style.h, not inline here,
+// so the dock keeps one place that decides colour. No-op when the flag is
+// unchanged -- this runs ten times a second.
+static void set_style_flag(QWidget *widget, const char *name, bool value)
+{
+    if (!widget || widget->property(name).toBool() == value)
+        return;
+    widget->setProperty(name, value);
+    widget->style()->unpolish(widget);
+    widget->style()->polish(widget);
+}
+
+// Every OBS source that can produce audio, by NAME -- which is what
+// TalkbackTap::open() takes (obs_get_source_by_name), and what survives the
+// operator rebuilding a scene collection.
+//
+// CoreVideo's own participant/Zoom audio sources are deliberately NOT filtered
+// out: relaying one participant privately to another is a legitimate thing to
+// key, and the tap cannot tell the difference anyway.
+static std::vector<std::pair<QString, QVariant>> talkback_audio_source_items()
+{
+    std::vector<std::pair<QString, QVariant>> items;
+    items.emplace_back(QStringLiteral("Select audio source"), QVariant(QString()));
+    // obs_enum_sources walks inputs and groups, not scenes (the same fact
+    // zoom-supersource.cpp's background picker relies on); a group has no
+    // audio output flag, so the flag test below is what actually selects.
+    obs_enum_sources(
+        [](void *param, obs_source_t *src) -> bool {
+            auto *out =
+                static_cast<std::vector<std::pair<QString, QVariant>> *>(param);
+            if (!(obs_source_get_output_flags(src) & OBS_SOURCE_AUDIO))
+                return true;
+            const char *name = obs_source_get_name(src);
+            if (!name || !*name)
+                return true;
+            const QString qname = QString::fromUtf8(name);
+            out->emplace_back(qname, QVariant(qname));
+            return true;
+        },
+        &items);
+    return items;
+}
+
+// The key THIS DOCK is holding, if any -- the single record every dock-side
+// keying decision reads (fix round 1, M1). It carries the mode the key was
+// opened with, which is deliberately not re-read from the Latch checkbox: the
+// checkbox says what the NEXT key would be, this says what the open one IS.
+TalkbackDockOpenKey ZoomDock::dock_open_key() const
+{
+    TalkbackDockOpenKey open;
+    open.open       = !m_talkback_dock_target.empty();
+    open.dock_owned = open.open;
+    open.target     = m_talkback_dock_target;
+    open.latched    = m_talkback_dock_latched;
+    return open;
+}
+
+void ZoomDock::refresh_talkback()
+{
+    if (!m_talkback_source_combo)
+        return;
+
+    auto &engine = ZoomEngineClient::instance();
+    const bool engine_running = engine.is_running();
+    const bool in_meeting = engine.state() == MeetingState::InMeeting;
+
+    // -- Source picker and its program-track warning ---------------------------
+    //
+    // m2: THE ONLY WORK IN THIS FUNCTION THAT WALKS LIBOBS, and the only part
+    // that does not run at 10Hz. obs_enum_sources() holds
+    // obs->data.sources_mutex for the whole walk and addrefs every source (the
+    // constraint is spelled out at zoom-supersource.cpp's
+    // warn_on_multiple_audio_walls()), and this dock already moved its
+    // feed-health sweep to a 1Hz timer for exactly that reason. Source lists
+    // and mixer assignments do not change ten times a second, and nobody is
+    // reading a dock that is not on screen, so: once a second, and only while
+    // visible. Everything else below -- the key state an operator's press
+    // depends on -- stays on the 100ms tick.
+    //
+    // The rendered warning is cached rather than recomputed, so the label does
+    // not blank out on the ticks that skip the scan. A source change forces the
+    // next tick to rescan (the combo's own handler resets the stamp), so the
+    // operator never waits a second to see what they just picked.
+    const uint64_t now_ms_tick = os_gettime_ns() / 1000000ULL;
+    const bool scan_due =
+        isVisible() &&
+        (m_talkback_source_scan_ms == 0 ||
+         talkback_elapsed_ms(now_ms_tick, m_talkback_source_scan_ms) >= 1000);
+    if (scan_due && !combo_popup_open(m_talkback_source_combo)) {
+        m_talkback_source_scan_ms = now_ms_tick;
+
+        const QString chosen = m_talkback_source_combo->currentData().toString();
+        auto items = talkback_audio_source_items();
+        // Keep a chosen source that OBS does not currently have in the list, so
+        // a saved choice survives the source being absent (a scene collection
+        // still loading, a mic not plugged in) instead of being silently
+        // replaced by whatever happens to be first.
+        if (!chosen.isEmpty() && !combo_items_contain(items, chosen))
+            items.emplace_back(chosen + " (not in OBS)", QVariant(chosen));
+        replace_combo_items(m_talkback_source_combo, items, QVariant(chosen));
+
+        const QString scanned = m_talkback_source_combo->currentData().toString();
+        bool source_present = false;
+        uint32_t mixers = 0;
+        if (!scanned.isEmpty()) {
+            obs_source_t *src =
+                obs_get_source_by_name(scanned.toUtf8().constData());
+            if (src) {
+                source_present = true;
+                mixers = obs_source_get_audio_mixers(src);
+                obs_source_release(src);
+            }
+        }
+        if (!scanned.isEmpty() && !source_present) {
+            // Do NOT fall through to talkback_dock_track_warning() with
+            // mixers = 0 here: that would report "on no OBS track -- talkback
+            // only", which is a safety claim about a source that is not there
+            // to be safe.
+            m_talkback_track_text =
+                QString("\"%1\" is not in OBS right now. Pick the source you "
+                        "are actually going to talk through.").arg(scanned);
+            m_talkback_track_risk = false;
+        } else {
+            const auto warning = talkback_dock_track_warning(
+                scanned.toStdString(), mixers);
+            m_talkback_track_text = QString::fromStdString(warning.text);
+            m_talkback_track_risk = warning.on_air_risk;
+        }
+    }
+
+    const QString source_name = m_talkback_source_combo->currentData().toString();
+
+    if (m_talkback_track_label &&
+        m_talkback_track_label->text() != m_talkback_track_text)
+        m_talkback_track_label->setText(m_talkback_track_text);
+    set_style_flag(m_talkback_track_label, "risk", m_talkback_track_risk);
+
+    // -- Nominee list ----------------------------------------------------------
+    // Identity is by display name, never by Zoom user id (ids are
+    // meeting-scoped: one captured now points at nobody after a rejoin and at
+    // the wrong face once ids get recycled). Each row carries its name in
+    // Qt::UserRole, because the row's TEXT can also say "(not in the meeting)".
+    //
+    // A TICKED NAME THAT HAS LEFT THE ROSTER STAYS ON THE LIST. Nominating
+    // somebody who is not here right now is meaningful -- the engine
+    // re-resolves nominations by name on every roster change and invites them
+    // when they arrive (resolve_roster_change(), engine-talkback.cpp) -- so
+    // dropping the row would silently drop them from the next Nominate press,
+    // on the exact path where a talent has just disconnected and the director
+    // is re-nominating to fix something else.
+    const auto roster = engine.roster();
+    std::vector<std::string> checked_names;
+    if (m_talkback_nominee_list) {
+        for (int i = 0; i < m_talkback_nominee_list->count(); ++i) {
+            auto *item = m_talkback_nominee_list->item(i);
+            if (item && item->checkState() == Qt::Checked)
+                checked_names.push_back(
+                    item->data(Qt::UserRole).toString().toStdString());
+        }
+    }
+
+    // (name, present in the meeting right now)
+    std::vector<std::pair<std::string, bool>> rows;
+    const auto row_index = [&rows](const std::string &name) {
+        for (std::size_t i = 0; i < rows.size(); ++i)
+            if (rows[i].first == name) return static_cast<int>(i);
+        return -1;
+    };
+    for (const auto &p : roster) {
+        // Someone with no display name cannot be nominated at all, and is left
+        // out rather than listed as an id that would not resolve.
+        if (p.display_name.empty()) continue;
+        if (row_index(p.display_name) < 0) rows.emplace_back(p.display_name, true);
+    }
+    for (const auto &name : checked_names)
+        if (row_index(name) < 0) rows.emplace_back(name, false);
+
+    // Rebuilt only when those rows change: this runs ten times a second and a
+    // rebuild throws away the tick-boxes the operator is in the middle of
+    // setting. (The roster itself churns constantly -- two of Zoom's five
+    // roster callbacks fire on every mute and camera toggle by anyone.)
+    std::string roster_signature;
+    for (const auto &row : rows) {
+        roster_signature += row.second ? "+" : "-";
+        roster_signature += row.first;
+        roster_signature += '\n';
+    }
+    if (m_talkback_nominee_list &&
+        roster_signature != m_talkback_roster_signature) {
+        m_talkback_nominee_list->clear();
+        for (const auto &row : rows) {
+            const QString name = QString::fromStdString(row.first);
+            auto *item = new QListWidgetItem(
+                row.second ? name : name + " (not in the meeting)");
+            item->setData(Qt::UserRole, name);
+            item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+            const bool was_checked =
+                std::find(checked_names.begin(), checked_names.end(), row.first) !=
+                checked_names.end();
+            item->setCheckState(was_checked ? Qt::Checked : Qt::Unchecked);
+            m_talkback_nominee_list->addItem(item);
+        }
+        m_talkback_roster_signature = roster_signature;
+    }
+
+    const int checked_count = static_cast<int>(checked_names.size());
+    if (m_talkback_nominate_btn) {
+        // Both conditions, not just InMeeting: talkback_nominate() is a silent
+        // no-op when the engine pipe is not up, which is why the control API
+        // acks "engine_not_running" separately from "not_in_meeting".
+        m_talkback_nominate_btn->setEnabled(engine_running && in_meeting);
+        // An empty nomination is a deliberate denominate (the engine's
+        // nominate() documents it as such), not a mistake to block -- but it
+        // must not be labelled "Nominate".
+        const QString label = checked_count == 0
+            ? QStringLiteral("Clear all nominations")
+            : QString("Nominate (%1)").arg(checked_count);
+        if (m_talkback_nominate_btn->text() != label)
+            m_talkback_nominate_btn->setText(label);
+    }
+
+    // -- The confirmed plan, and what it cost ----------------------------------
+    const auto plan = engine.talkback_nomination_status();
+    const auto report = talkback_dock_nomination_report(plan);
+    QString plan_text = QString::fromStdString(report.headline);
+    for (const auto &line : report.lines)
+        plan_text += "\n" + QString::fromStdString(line);
+    if (m_talkback_plan_label && m_talkback_plan_label->text() != plan_text)
+        m_talkback_plan_label->setText(plan_text);
+    set_style_flag(m_talkback_plan_label, "warn", report.warn);
+
+    // -- Whose key is open -----------------------------------------------------
+    // Polled and parsed, the same treatment format_talkback_probe_status()
+    // gives the engine's probe line, rather than a new accessor on the
+    // controller.
+    //
+    // A DOCUMENT THAT DOES NOT PARSE IS "UNKNOWN", NOT "NO KEY OPEN" (fix round
+    // 1, n7). Treating it as no-key would clear m_talkback_dock_target below --
+    // the dock would forget it owns a live key, its release would find nothing
+    // to close, and the backstop would go dormant, which is the same stranded
+    // director M1 produced. Practically unreachable (status_json() builds the
+    // string with QJsonDocument in this same process), so the fallback is
+    // simply the dock's own record of what it opened, and the ownership-clear
+    // below is skipped for the tick.
+    bool status_parsed = false;
+    bool key_open = false;
+    std::string open_target;
+    {
+        const QJsonDocument doc = QJsonDocument::fromJson(
+            QByteArray::fromStdString(
+                TalkbackController::instance().status_json()));
+        if (doc.isObject()) {
+            status_parsed = true;
+            const QJsonObject obj = doc.object();
+            key_open = obj.value("open").toBool();
+            open_target = obj.value("target").toString().toStdString();
+        }
+    }
+    if (!status_parsed) {
+        if (!m_talkback_status_parse_logged) {
+            m_talkback_status_parse_logged = true;   // once, not ten times a second
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] talkback dock: could not parse the "
+                 "controller's status; using this dock's own record of the key "
+                 "it opened");
+        }
+        key_open = !m_talkback_dock_target.empty();
+        open_target = m_talkback_dock_target;
+    }
+
+    // The controller closes keys the dock never asked it to close: the dead-man
+    // switch, an engine refusal, a Leave, a plugin shutdown. Notice that here
+    // instead of leaving the dock believing it still owns a key.
+    if (status_parsed && !key_open && !m_talkback_dock_target.empty()) {
+        m_talkback_dock_target.clear();
+        m_talkback_dock_latched = false;
+    }
+
+    // The dock's own lost-release backstop -- see talkback_dock_release_lost()
+    // in src/talkback-dock-state.h for why this surface reads the widget's own
+    // state instead of the renewal machinery a socket surface needs, and why it
+    // is cause-agnostic rather than aimed at one way a release can vanish.
+    {
+        const TalkbackDockOpenKey dock_key = dock_open_key();
+        bool button_down = false;
+        for (auto *button : m_talkback_key_buttons) {
+            if (!button) continue;
+            if (button->property("cvTalkbackTarget").toString().toStdString() ==
+                dock_key.target) {
+                button_down = button->isDown();
+                break;
+            }
+        }
+        if (talkback_dock_release_lost(dock_key, button_down)) {
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] talkback dock: closing the key to \"%s\" -- "
+                 "its button is no longer held and no release ever arrived",
+                 m_talkback_dock_target.c_str());
+            TalkbackController::instance().key_off();
+            m_talkback_dock_target.clear();
+            m_talkback_dock_latched = false;
+            key_open = false;
+            open_target.clear();
+        }
+    }
+
+    // -- Key buttons -----------------------------------------------------------
+    TalkbackDockKeyContext ctx;
+    ctx.engine_running = engine_running;
+    ctx.in_meeting = in_meeting;
+    ctx.source_chosen = !source_name.isEmpty();
+    // The dock's own record first -- it is the only thing that knows the MODE
+    // an open key was opened in, which status_json() does not report -- and the
+    // controller's view only for a key the dock does not own.
+    ctx.open = dock_open_key();
+    if (!ctx.open.open && key_open) {
+        ctx.open.open = true;
+        ctx.open.dock_owned = false;
+        ctx.open.target = open_target;
+    }
+    const auto buttons = talkback_dock_key_buttons(plan, ctx);
+
+    std::string target_signature;
+    for (const auto &b : buttons) {
+        target_signature += b.target;
+        target_signature += '\n';
+    }
+    // Rebuild only when the SET OF TARGETS changes, and never while this dock
+    // has a key open: deleting the widget the operator is holding loses its
+    // release. Deferring costs little -- the engine refuses a re-nomination
+    // outright while a session is live ("reason":"session_live", nominate() in
+    // engine-talkback.cpp), so the confirmed plan seldom moves mid-press at
+    // all, and when it does (a superseded ladder's terminal invalidating it)
+    // the buttons are rebuilt on the first tick after the key closes.
+    if (target_signature != m_talkback_key_signature &&
+        m_talkback_dock_target.empty()) {
+        rebuild_talkback_key_buttons(buttons);
+        m_talkback_key_signature = target_signature;
+    }
+
+    for (const auto &b : buttons) {
+        for (auto *button : m_talkback_key_buttons) {
+            if (!button ||
+                button->property("cvTalkbackTarget").toString().toStdString() !=
+                    b.target)
+                continue;
+            // NEVER disable a held button. QAbstractButton clears its pressed
+            // state on an EnabledChange without emitting released(), so
+            // disabling one mid-press strands the key open until the backstop
+            // above notices. talkback_dock_key_buttons() already keeps the open
+            // key's own button enabled; this is the second line of defence for
+            // any future caller that forgets.
+            if (!b.enabled && button->isDown())
+                break;
+            button->setEnabled(b.enabled);
+            const QString tip = b.enabled
+                ? QString("Talk to %1.").arg(QString::fromStdString(b.label))
+                : QString::fromStdString(b.reason);
+            if (button->toolTip() != tip)
+                button->setToolTip(tip);
+            break;
+        }
+    }
+
+    // -- Tally -----------------------------------------------------------------
+    const auto session = engine.talkback_session_status();
+    TalkbackDockSessionView view;
+    view.key_open = key_open;
+    view.target = open_target;
+    view.engine_live = session.live;
+    view.engine_reason = session.reason;
+    view.engine_recover = session.recover;
+    view.members_known = session.members_known;
+    view.members_present = session.members_present;
+    view.members_total = session.members_total;
+    const auto tally = talkback_dock_tally(view);
+    const QString tally_text = QString::fromStdString(tally.text);
+    if (m_talkback_tally_label && m_talkback_tally_label->text() != tally_text)
+        m_talkback_tally_label->setText(tally_text);
+    set_style_flag(m_talkback_tally_label, "live", tally.live);
+    set_style_flag(m_talkback_tally_label, "alert", tally.alert);
+
+    if (m_talkback_notice) {
+        if (m_talkback_notice->text() != m_talkback_notice_text)
+            m_talkback_notice->setText(m_talkback_notice_text);
+        m_talkback_notice->setVisible(!m_talkback_notice_text.isEmpty());
+    }
+}
+
+// Takes the button specs its caller already computed rather than recomputing
+// them from a second, thinner context: the two would otherwise disagree for the
+// one tick between the rebuild and the enable pass, which is exactly the window
+// an operator's press lands in.
+void ZoomDock::rebuild_talkback_key_buttons(
+    const std::vector<TalkbackDockKeyButton> &buttons)
+{
+    if (!m_talkback_key_row)
+        return;
+    auto *layout = qobject_cast<QGridLayout *>(m_talkback_key_row->layout());
+    if (!layout)
+        return;
+
+    for (auto *button : m_talkback_key_buttons) {
+        if (!button) continue;
+        layout->removeWidget(button);
+        button->deleteLater();
+    }
+    m_talkback_key_buttons.clear();
+
+    int column = 0, row = 0;
+    for (const auto &spec : buttons) {
+        auto *button = new QPushButton(QString::fromStdString(spec.label),
+                                       m_talkback_key_row);
+        button->setProperty("cvTalkbackTarget",
+                            QString::fromStdString(spec.target));
+        if (spec.all_talent)
+            button->setProperty("role", "primary");
+        button->setEnabled(spec.enabled);
+        button->setToolTip(spec.enabled
+            ? QString("Talk to %1.").arg(QString::fromStdString(spec.label))
+            : QString::fromStdString(spec.reason));
+        // The target is captured by value: the button outlives any particular
+        // plan, and a captured pointer into one would not.
+        const std::string target = spec.target;
+        connect(button, &QPushButton::pressed, this, [this, target]() {
+            talkback_key_pressed(target,
+                m_talkback_latch_cb && m_talkback_latch_cb->isChecked());
+        });
+        connect(button, &QPushButton::released, this, [this, target]() {
+            talkback_key_released(target);
+        });
+        layout->addWidget(button, row, column);
+        m_talkback_key_buttons.push_back(button);
+        if (++column == 3) { column = 0; ++row; }
+    }
+    // No setStyleSheet() here: this dock's own sheet already applies to
+    // descendants created later, and role="primary" is set above before the
+    // button is ever polished.
+}
+
+void ZoomDock::on_talkback_nominate_clicked()
+{
+    if (!m_talkback_nominee_list)
+        return;
+
+    std::vector<std::string> nominees;
+    for (int i = 0; i < m_talkback_nominee_list->count(); ++i) {
+        auto *item = m_talkback_nominee_list->item(i);
+        // Qt::UserRole, not text(): a row for someone who has left says "(not
+        // in the meeting)" in its label, and the engine must be sent the name.
+        if (item && item->checkState() == Qt::Checked)
+            nominees.push_back(item->data(Qt::UserRole).toString().toStdString());
+    }
+
+    // Refused here rather than left to the engine, because the engine's own
+    // refusal reason ("target_name_collision") does not say WHO. A participant
+    // whose display name is "all" (any casing) collides with the all-talent
+    // target, and keying that name would go to the whole panel -- the exact
+    // privacy promise talkback is built on. See talkback-plan.h.
+    const std::string collision = talkback_nominate_sentinel_collision(nominees);
+    if (!collision.empty()) {
+        m_talkback_notice_text = QString(
+            "\"%1\" cannot be nominated: that name is how CoreVideo addresses "
+            "the whole panel. Ask them to change their Zoom display name.")
+            .arg(QString::fromStdString(collision));
+        refresh_talkback();
+        return;
+    }
+
+    auto &engine = ZoomEngineClient::instance();
+    if (!engine.is_running()) {
+        m_talkback_notice_text =
+            QStringLiteral("The Zoom engine is not running -- start it before "
+                           "nominating talkback talent.");
+        refresh_talkback();
+        return;
+    }
+    if (engine.state() != MeetingState::InMeeting) {
+        m_talkback_notice_text =
+            QStringLiteral("Join the meeting before nominating talkback talent.");
+        refresh_talkback();
+        return;
+    }
+
+    m_talkback_notice_text.clear();
+    blog(LOG_INFO,
+         "[obs-zoom-plugin] talkback dock: nominating %d name(s)",
+         static_cast<int>(nominees.size()));
+    // Fire-and-acknowledge: the plan outcome arrives asynchronously and is
+    // polled out of talkback_nomination_status() by refresh_talkback() above.
+    engine.talkback_nominate(nominees);
+    refresh_talkback();
+}
+
+void ZoomDock::talkback_key_pressed(const std::string &target, bool latch)
+{
+    // THREAD NOTE, and the reason it is written here rather than assumed: this
+    // handler runs on the Qt main thread -- Qt delivers QPushButton::pressed
+    // from the widget's own thread -- which is the SAME thread
+    // TalkbackController's QTimer drives evaluate() and key_off() on. So
+    // calling key_on()/key_off() directly, with no dispatch, is correct here,
+    // exactly as it is for ZoomControlServer's socket handlers.
+    //
+    // A NON-Qt-thread keying surface must NOT copy this call shape without
+    // first confirming it lands on that same thread: an OBS hotkey callback is
+    // delivered by libobs, not by Qt, and key_off()'s two-phase close (flip the
+    // flag under m_mtx, then tear the tap down outside it) is only safe against
+    // a concurrent evaluate() because of that thread identity.
+    // Fix round 1 (M1, Major): whether this press CLOSES the open key is
+    // decided from the key itself -- the mode captured when it was opened --
+    // not from the Latch checkbox as it stands now. Unchecking Latch while a
+    // latched key is live used to skip this branch, fall through to key_on()'s
+    // "A talkback key is already open" refusal, and leave the director live to
+    // talent with the dock's only close affordance answering with an error.
+    // `latch` below therefore decides only what a NEW key opens as.
+    if (talkback_dock_press_action(dock_open_key(), target, latch) ==
+        TalkbackDockPressAction::CloseHeldKey) {
+        TalkbackController::instance().key_off();
+        m_talkback_dock_target.clear();
+        m_talkback_dock_latched = false;
+        refresh_talkback();
+        return;
+    }
+
+    const QString source = m_talkback_source_combo
+        ? m_talkback_source_combo->currentData().toString()
+        : QString();
+    if (source.isEmpty()) {
+        m_talkback_notice_text = QStringLiteral(
+            "Choose the OBS audio source you talk through before keying.");
+        refresh_talkback();
+        return;
+    }
+
+    std::string error;
+    // needs_renewal = false. src/talkback-key.h's rule is that a surface whose
+    // release is in-process and reliable does not need the lost-release
+    // backstop, and names the OBS hotkey as the example; a dock button's
+    // release is the same shape -- a Qt signal on the thread the controller
+    // itself runs on, with no transport in between that could drop it. Passing
+    // true instead would demand a heartbeat from this dock's UI-thread timer to
+    // keep a key alive, which would close a genuinely held key whenever the OBS
+    // UI stalls for a second (a scene collection load, a modal dialog).
+    //
+    // A release can still go missing in-process -- QAbstractButton drops its
+    // pressed state without emitting released() on an EnabledChange, on a
+    // non-popup focus loss, and anywhere setDown(false) is reached -- so
+    // talkback_dock_release_lost() runs from the refresh tick and asks the
+    // widget whether it is still down, never why it stopped being down. It
+    // covers all of those causes and any Qt adds later, and reading the widget
+    // (rather than a deadline) is what makes it unable to false-close during a
+    // UI stall. Do not delete it on the belief that some particular cause has
+    // been ruled out.
+    const bool ok = TalkbackController::instance().key_on(
+        target, source.toStdString(),
+        latch ? TalkbackKeyMode::Latch : TalkbackKeyMode::PushToTalk,
+        /*needs_renewal=*/false, error);
+    if (!ok) {
+        m_talkback_notice_text = QString::fromStdString(error);
+        refresh_talkback();
+        return;
+    }
+    m_talkback_notice_text.clear();
+    m_talkback_dock_target = target;
+    m_talkback_dock_latched = latch;
+    refresh_talkback();
+}
+
+void ZoomDock::talkback_key_released(const std::string &target)
+{
+    // The same record the press path reads (M1): a latch releases nothing (the
+    // next press on its own target closes it), a stray release for a target
+    // this dock is not holding closes nothing, and a key another surface owns
+    // is not this dock's to close.
+    if (!talkback_dock_release_closes(dock_open_key(), target))
+        return;
+    TalkbackController::instance().key_off();
+    m_talkback_dock_target.clear();
+    m_talkback_dock_latched = false;
+    refresh_talkback();
 }
 
 void ZoomDock::refresh_outputs()

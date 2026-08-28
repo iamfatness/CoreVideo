@@ -269,6 +269,33 @@ inline bool talkback_target_known_unprovisioned(
     return true; // never nominated at all
 }
 
+// Who, out of a confirmed nomination, actually got a private channel.
+//
+// The engine only ever names SHORTFALLS -- never successes (this file's
+// header comment says why) -- so every surface that wants to show "who can be
+// taken aside" has to subtract. zoom-control-server.cpp's
+// talkback_nomination_to_json() computed this inline for the wire and the dock
+// needed the same list; two copies of one subtraction is how a wire field and
+// a dock label drift into disagreeing about the same meeting. One
+// implementation, here, beside the semantics it depends on.
+//
+// `requested` and `uncovered_private` must both come from the CONFIRMED plan
+// (src/talkback-nomination.h). Mixing a confirmed list with an in-flight
+// attempt's shortfall names would name people who do have a channel.
+inline std::vector<std::string> talkback_private_channel_names(
+    const std::vector<std::string> &requested,
+    const std::vector<std::string> &uncovered_private)
+{
+    std::vector<std::string> covered;
+    for (const auto &name : requested) {
+        bool uncovered = false;
+        for (const auto &u : uncovered_private)
+            if (u == name) { uncovered = true; break; }
+        if (!uncovered) covered.push_back(name);
+    }
+    return covered;
+}
+
 inline bool talkback_channel_serves_target(bool is_all_talent,
                                            const std::vector<std::string> &members,
                                            const std::string &target)

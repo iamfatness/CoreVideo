@@ -3,6 +3,7 @@
 #include "speaker-director.h"
 #include "talkback-controller.h"
 #include "talkback-key.h"
+#include "talkback-plan.h"
 #include "zoom-control-parse.h"
 #include "zoom-engine-client.h"
 #include "zoom-iso-recorder.h"
@@ -432,12 +433,14 @@ static QJsonObject talkback_nomination_to_json(
         uncovered.append(QString::fromStdString(name));
     for (const auto &name : n.unreachable)
         unreachable.append(QString::fromStdString(name));
-    for (const auto &name : n.requested) {
-        const bool is_uncovered =
-            std::find(n.uncovered_private.begin(), n.uncovered_private.end(), name) !=
-            n.uncovered_private.end();
-        if (!is_uncovered) has_private_channel.append(QString::fromStdString(name));
-    }
+    // The subtraction itself is talkback_private_channel_names()
+    // (src/talkback-plan.h) rather than a loop here: the dock's Talkback group
+    // shows the same list, and two copies of one subtraction is how a wire
+    // field and a dock label drift into describing the same meeting
+    // differently.
+    for (const auto &name : talkback_private_channel_names(n.requested,
+                                                           n.uncovered_private))
+        has_private_channel.append(QString::fromStdString(name));
     obj["uncovered_private"] = uncovered;
     obj["unreachable"] = unreachable;
     obj["has_private_channel"] = has_private_channel;

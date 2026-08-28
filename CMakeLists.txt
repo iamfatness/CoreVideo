@@ -1126,6 +1126,22 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoTalkbackNomination
              COMMAND CoreVideoTalkbackNominationTest)
 
+    # Milestone 7: what the dock's Talkback group shows and which of its key
+    # buttons are live. Extracted from the QWidget for the same reason every
+    # other decision in this feature was extracted from the engine: these are
+    # claims an operator acts on mid-show ("this button is safe to press",
+    # "this person hears nothing", "this source is on air"), and none of them
+    # could be exercised while they lived in code needing libobs, a Qt event
+    # loop and a running engine to construct. See src/talkback-dock-state.h.
+    add_executable(CoreVideoTalkbackDockStateTest
+        tests/talkback-dock-state-test.cpp
+    )
+    target_include_directories(CoreVideoTalkbackDockStateTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTalkbackDockState
+             COMMAND CoreVideoTalkbackDockStateTest)
+
     # THE FIRST TEST TARGET THAT COMPILES AN ENGINE TRANSLATION UNIT.
     #
     # Every other talkback test above compiles a pure header with src/ on the

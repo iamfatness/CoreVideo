@@ -555,6 +555,40 @@ Every one of these is documented at length where it lives; the list is the map.
   HONEST ("0 of 1", since they were pruned out of `present`) and is
   recoverable by re-nominating; and `"attempt"` is emitted BEFORE `"nominees"`
   because `json_uint()` is a first-match scan, not a parser.
+- **The dock keys, by owner decision (Milestone 7)**: the spec
+  (`docs/superpowers/specs/2026-08-24-zoom-talkback-design.md`) locks keying to
+  Companion/control API/hotkey and says "**Not** the dock"; the owner has since
+  asked for a drivable dock, so `src/zoom-dock.cpp`'s Talkback group nominates
+  and keys — a deliberate, approved spec deviation, with everything else
+  unchanged (identity by display name, keying SELECTS a provisioned channel,
+  every refusal fails closed). Its decisions live in the Qt/OBS-free
+  `src/talkback-dock-state.h` (pinned by `CoreVideoTalkbackDockState`) because
+  the two Majors this feature shipped both lived in wiring no test could reach.
+  Dock keys pass **`needs_renewal = false`** — `src/talkback-key.h`'s rule for
+  a surface whose release is in-process and reliable: press/release are Qt
+  signals on the same main thread the controller's `QTimer` runs `evaluate()`/
+  `key_off()` on, with no transport to drop them, and demanding a heartbeat
+  from a UI-thread timer instead would close a genuinely held key on any ~1s
+  OBS UI stall. A release can still vanish in-process in SEVERAL ways —
+  `QAbstractButton` drops `down` without emitting `released()` on an
+  `EnabledChange`, on any non-popup focus loss, and anywhere `setDown(false)`
+  is reached — so `talkback_dock_release_lost()` is cause-agnostic by design:
+  it asks the widget whether it is still down, never why, and closes any
+  dock-owned PTT key that is not. It runs on the existing 100 ms tick (no
+  second timer), and reading the widget rather than a deadline is what makes it
+  unable to false-close during a stall. It is load-bearing, not a second
+  opinion — "the dock never disables a held button" closes one cause, not the
+  class. **Fix round 1 (M1, Major)**: the latch toggle-off used to read the
+  Latch CHECKBOX while the release path read the mode captured at the press, so
+  unchecking Latch while a latched key was live left it un-closeable from the
+  dock — `key_on()` answered "already open" and `released()` bailed out, with
+  the director still live to talent. One record now answers all three
+  questions (press / release / backstop): `TalkbackDockOpenKey`, carrying the
+  mode the open key was OPENED with. Buttons also refuse while another surface
+  holds the key (m3) and while no talk source is chosen (m4), instead of
+  offering a press that can only refuse; the source scan is gated to 1 Hz and
+  to the dock being visible (m2), since `obs_enum_sources()` holds libobs's
+  source mutex.
 
 ## Live testing against a real meeting
 

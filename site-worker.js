@@ -312,6 +312,28 @@ function zoomFailureMessage(prefix, exchanged) {
   };
 }
 
+// Which apps may receive the browser after Zoom consent. CoreVideo's OBS
+// plugin registers the corevideo:// protocol; ZComms (the talkback panel,
+// which shares this Marketplace app while it awaits its own) receives the
+// callback on its loopback HTTP server instead -- the RFC 8252 §7.3 shape
+// for native apps, and loopback cannot be reached off-machine. Only the
+// /oauth/callback path is honored so an open-redirect through this broker
+// cannot be built out of a loopback URL.
+function isAllowedOauthReturnUri(returnUri) {
+  if (returnUri === "corevideo://oauth/callback") {
+    return true;
+  }
+  let url;
+  try {
+    url = new URL(returnUri);
+  } catch {
+    return false;
+  }
+  return url.protocol === "http:" &&
+    (url.hostname === "127.0.0.1" || url.hostname === "localhost") &&
+    url.pathname === "/oauth/callback";
+}
+
 async function handleOauthStart(request, env) {
   const requestUrl = new URL(request.url);
   const config = oauthConfig(env, requestUrl);
@@ -325,7 +347,7 @@ async function handleOauthStart(request, env) {
   if (!localState) {
     return jsonResponse({ error: "Missing CoreVideo OAuth state." }, 400);
   }
-  if (returnUri !== "corevideo://oauth/callback") {
+  if (!isAllowedOauthReturnUri(returnUri)) {
     return jsonResponse({ error: "Unsupported OAuth return URI." }, 400);
   }
 

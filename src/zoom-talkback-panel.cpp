@@ -30,7 +30,6 @@
 #include <obs-module.h>
 #include <util/platform.h>
 
-#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
@@ -300,19 +299,27 @@ ZoomTalkbackPanel::ZoomTalkbackPanel(QWidget *parent)
 
     layout->addWidget(source_group);
 
-    // ── 4. Nomination ───────────────────────────────────────────────────────
+    // ── 4. Talent ───────────────────────────────────────────────────────────
     //
     // Setup, not showtime -- so it sits below the key block and its button is
     // an ordinary one. The list is CHECKABLE, and its selection is turned off
     // entirely: a full-width selection highlight on a list of tick boxes reads
     // as a mis-styled button, and selecting a row here means nothing.
-    auto *nominate_group = new QGroupBox(QStringLiteral("Nomination"), this);
+    //
+    // The section, the button and the report say "channels", never "nominate":
+    // the wire command is still talkback_nominate and the code still calls it
+    // that, but the owner's verdict on the operator-facing word was that it is
+    // "not a word that really makes sense here". What the operator is actually
+    // doing is standing up a channel per person, in advance, so the key press
+    // has nothing left to do but open the microphone.
+    auto *nominate_group = new QGroupBox(QStringLiteral("Talent"), this);
     auto *nominate_layout = new QVBoxLayout(nominate_group);
     nominate_layout->setSpacing(6);
 
     auto *nominate_hint = new QLabel(
-        "Everyone ticked gets a standing Zoom channel, created now so a key "
-        "press only opens the microphone.", nominate_group);
+        "Tick everyone you may need to talk to. Each gets a standing Zoom "
+        "channel, created now so a key press only opens the microphone.",
+        nominate_group);
     nominate_hint->setWordWrap(true);
     nominate_hint->setProperty("role", "muted");
     nominate_layout->addWidget(nominate_hint);
@@ -335,7 +342,8 @@ ZoomTalkbackPanel::ZoomTalkbackPanel(QWidget *parent)
 
     auto *nominate_row = new QHBoxLayout;
     nominate_row->setSpacing(8);
-    m_nominate_btn = new QPushButton(QStringLiteral("Nominate"), nominate_group);
+    m_nominate_btn = new QPushButton(QStringLiteral("Assign channels"),
+                                     nominate_group);
     m_nominate_btn->setEnabled(false);
     nominate_row->addWidget(m_nominate_btn);
     nominate_row->addStretch(1);
@@ -654,20 +662,29 @@ void ZoomTalkbackPanel::refresh()
     }
     set_style_flag(m_track_label, "risk", m_track_risk);
 
-    // -- Nominee list ----------------------------------------------------------
+    // -- Talent list -----------------------------------------------------------
     // Identity is by display name, never by Zoom user id (ids are
     // meeting-scoped: one captured now points at nobody after a rejoin and at
     // the wrong face once ids get recycled). Each row carries its name in
     // Qt::UserRole, because the row's TEXT can also say "(not in the meeting)".
     //
-    // A TICKED NAME THAT HAS LEFT THE ROSTER STAYS ON THE LIST. Nominating
-    // somebody who is not here right now is meaningful -- the engine
-    // re-resolves nominations by name on every roster change and invites them
-    // when they arrive (resolve_roster_change(), engine-talkback.cpp) -- so
-    // dropping the row would silently drop them from the next Nominate press,
-    // on the exact path where a talent has just disconnected and the director
-    // is re-nominating to fix something else.
+    // WHICH ROWS, IN WHICH ORDER, AND WHEN THIS WIDGET IS THROWN AWAY are all
+    // decided by talkback_nominee_list_refresh() (src/talkback-dock-state.h),
+    // where the live "moving from room to room the list doesn't update" defect
+    // and its ordering rule are written up. This function only paints the
+    // answer. The one thing that MUST stay here is that the operator's ticks
+    // are read out of the widget on every tick: the widget is where they live,
+    // and any state on this side is a mirror of it, never the source.
     const auto roster = engine.roster();
+    std::vector<std::string> roster_names;
+    roster_names.reserve(roster.size());
+    for (const auto &p : roster) {
+        // Someone with no display name cannot be addressed at all, and is left
+        // out rather than listed as an id that would not resolve.
+        if (p.display_name.empty()) continue;
+        roster_names.push_back(p.display_name);
+    }
+
     std::vector<std::string> checked_names;
     if (m_nominee_list) {
         for (int i = 0; i < m_nominee_list->count(); ++i) {
@@ -678,47 +695,19 @@ void ZoomTalkbackPanel::refresh()
         }
     }
 
-    // (name, present in the meeting right now)
-    std::vector<std::pair<std::string, bool>> rows;
-    const auto row_index = [&rows](const std::string &name) {
-        for (std::size_t i = 0; i < rows.size(); ++i)
-            if (rows[i].first == name) return static_cast<int>(i);
-        return -1;
-    };
-    for (const auto &p : roster) {
-        // Someone with no display name cannot be nominated at all, and is left
-        // out rather than listed as an id that would not resolve.
-        if (p.display_name.empty()) continue;
-        if (row_index(p.display_name) < 0) rows.emplace_back(p.display_name, true);
-    }
-    for (const auto &name : checked_names)
-        if (row_index(name) < 0) rows.emplace_back(name, false);
-
-    // Rebuilt only when those rows change: this runs ten times a second and a
-    // rebuild throws away the tick-boxes the operator is in the middle of
-    // setting. (The roster itself churns constantly -- two of Zoom's five
-    // roster callbacks fire on every mute and camera toggle by anyone.)
-    std::string roster_signature;
-    for (const auto &row : rows) {
-        roster_signature += row.second ? "+" : "-";
-        roster_signature += row.first;
-        roster_signature += '\n';
-    }
-    if (m_nominee_list && roster_signature != m_roster_signature) {
+    if (m_nominee_list &&
+        talkback_nominee_list_refresh(m_nominee_state, roster_names,
+                                      checked_names)) {
         m_nominee_list->clear();
-        for (const auto &row : rows) {
-            const QString name = QString::fromStdString(row.first);
+        for (const auto &row : m_nominee_state.rows) {
+            const QString name = QString::fromStdString(row.name);
             auto *item = new QListWidgetItem(
-                row.second ? name : name + " (not in the meeting)");
+                row.present ? name : name + " (not in the meeting)");
             item->setData(Qt::UserRole, name);
             item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-            const bool was_checked =
-                std::find(checked_names.begin(), checked_names.end(), row.first) !=
-                checked_names.end();
-            item->setCheckState(was_checked ? Qt::Checked : Qt::Unchecked);
+            item->setCheckState(row.checked ? Qt::Checked : Qt::Unchecked);
             m_nominee_list->addItem(item);
         }
-        m_roster_signature = roster_signature;
     }
 
     const int checked_count = static_cast<int>(checked_names.size());
@@ -729,10 +718,10 @@ void ZoomTalkbackPanel::refresh()
         m_nominate_btn->setEnabled(engine_running && in_meeting);
         // An empty nomination is a deliberate denominate (the engine's
         // nominate() documents it as such), not a mistake to block -- but it
-        // must not be labelled "Nominate".
+        // must not be labelled as setting channels up.
         const QString label = checked_count == 0
-            ? QStringLiteral("Clear all nominations")
-            : QString("Nominate (%1)").arg(checked_count);
+            ? QStringLiteral("Clear all channels")
+            : QString("Assign channels (%1)").arg(checked_count);
         if (m_nominate_btn->text() != label)
             m_nominate_btn->setText(label);
     }
@@ -1050,8 +1039,9 @@ void ZoomTalkbackPanel::on_nominate_clicked()
     const std::string collision = talkback_nominate_sentinel_collision(nominees);
     if (!collision.empty()) {
         m_notice_text = QString(
-            "%1 cannot be nominated: that name is how CoreVideo addresses the "
-            "whole panel. Ask them to change their Zoom display name.")
+            "%1 cannot be given a channel: that name is how CoreVideo "
+            "addresses the whole panel. Ask them to change their Zoom display "
+            "name.")
             .arg(QString::fromStdString(collision));
         refresh();
         return;
@@ -1061,13 +1051,14 @@ void ZoomTalkbackPanel::on_nominate_clicked()
     if (!engine.is_running()) {
         m_notice_text =
             QStringLiteral("The Zoom engine is not running. Start it before "
-                           "nominating talkback talent.");
+                           "assigning talkback channels.");
         refresh();
         return;
     }
     if (engine.state() != MeetingState::InMeeting) {
         m_notice_text =
-            QStringLiteral("Join the meeting before nominating talkback talent.");
+            QStringLiteral("Join the meeting before assigning talkback "
+                           "channels.");
         refresh();
         return;
     }

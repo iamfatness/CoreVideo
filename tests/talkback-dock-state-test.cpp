@@ -76,8 +76,135 @@ static TalkbackDockOpenKey dock_key(const std::string &target, bool latched)
     return open;
 }
 
+// The names on a list, in the order it would render them.
+static std::vector<std::string> row_names(
+    const std::vector<TalkbackNomineeRow> &rows)
+{
+    std::vector<std::string> names;
+    for (const auto &r : rows) names.push_back(r.name);
+    return names;
+}
+
+static const TalkbackNomineeRow *find_row(
+    const std::vector<TalkbackNomineeRow> &rows, const std::string &name)
+{
+    for (const auto &r : rows)
+        if (r.name == name) return &r;
+    return nullptr;
+}
+
 int main()
 {
+    // ── The talent list ───────────────────────────────────────────────────
+    //
+    // THE LIVE DEFECT (2026-08-29, Zoom Events production with breakout
+    // rooms): "moving from room to room the nomination list doesn't update".
+    // The roster cache the dock reads was verified fresh at the time and the
+    // rows it derived were right; what was wrong was the rebuild GATE. The
+    // signature was built by walking the roster in whatever order the Zoom SDK
+    // returned it, so a REORDERED roster -- same people, same presence --
+    // looked like a changed one and rebuilt the whole QListWidget, on a 100 ms
+    // tick, in a room where two of Zoom's five roster callbacks fire on every
+    // mute and camera toggle by anyone. A rebuild resets the scroll position
+    // and destroys the item a click is in the middle of, so what the operator
+    // saw was a list that would not take their ticks.
+    {
+        // A room move: A and B, tick A, then the roster becomes C and D.
+        TalkbackNomineeListState list;
+        check(talkback_nominee_list_refresh(list, {"A", "B"}, {}),
+              "the first roster did not build the list");
+        check(row_names(list.rows) == std::vector<std::string>({"A", "B"}),
+              "the first roster did not render both people");
+
+        // The operator ticks A; the widget is the only place that lives, so
+        // the next tick reads it back in.
+        check(!talkback_nominee_list_refresh(list, {"A", "B"}, {"A"}),
+              "ticking a box rebuilt the list under the operator");
+        check(find_row(list.rows, "A") && find_row(list.rows, "A")->checked,
+              "the tick was not carried");
+
+        // The room move.
+        check(talkback_nominee_list_refresh(list, {"C", "D"}, {"A"}),
+              "a room move did not rebuild the list");
+        const auto *a = find_row(list.rows, "A");
+        const auto *c = find_row(list.rows, "C");
+        const auto *d = find_row(list.rows, "D");
+        check(a && !a->present && a->checked,
+              "the ticked name from the previous room was dropped, or was "
+              "shown as present");
+        check(c && c->present && !c->checked,
+              "the new room's people did not arrive on the list");
+        check(d && d->present, "the new room's people did not arrive in full");
+        check(list.rows.size() == 3, "the list carried a stale row");
+        // Present first, then the ticked strays, each in name order -- so the
+        // rows an operator is ticking do not move under the cursor.
+        check(row_names(list.rows) == std::vector<std::string>({"C", "D", "A"}),
+              "the rows are not in the deterministic present-then-absent "
+              "order");
+    }
+    {
+        // The same move, but the roster goes transiently EMPTY in between --
+        // which is what a rejoin looks like from here.
+        TalkbackNomineeListState list;
+        check(talkback_nominee_list_refresh(list, {"A", "B"}, {}),
+              "the first roster did not build the list");
+        check(talkback_nominee_list_refresh(list, {}, {"A"}),
+              "an emptied roster did not rebuild the list");
+        check(row_names(list.rows) == std::vector<std::string>({"A"}),
+              "an emptied roster did not prune to the ticked names");
+        check(!list.rows.front().present,
+              "a name with nobody in the meeting was still shown as present");
+        check(talkback_nominee_list_refresh(list, {"C", "D"}, {"A"}),
+              "the roster coming back did not rebuild the list");
+        check(row_names(list.rows) == std::vector<std::string>({"C", "D", "A"}),
+              "the roster coming back after an empty tick did not repopulate");
+    }
+    {
+        // THE REGRESSION ITSELF. The same people in a different order is not a
+        // change, and must not cost the operator the widget they are clicking.
+        TalkbackNomineeListState list;
+        check(talkback_nominee_list_refresh(list, {"Ann", "Bo", "Cy"}, {}),
+              "the first roster did not build the list");
+        check(!talkback_nominee_list_refresh(list, {"Cy", "Ann", "Bo"}, {}),
+              "a reordered roster rebuilt the list -- this is the live defect: "
+              "at 100 ms a rebuild eats the click that is in flight");
+        check(!talkback_nominee_list_refresh(list, {"Bo", "Cy", "Ann"}, {"Bo"}),
+              "a reordered roster rebuilt the list once something was ticked");
+        check(row_names(list.rows) ==
+                  std::vector<std::string>({"Ann", "Bo", "Cy"}),
+              "the rendered order followed the roster's order");
+        check(talkback_nominee_signature(list.rows) ==
+                  talkback_nominee_signature(
+                      talkback_nominee_rows({"Cy", "Bo", "Ann"}, {})),
+              "the signature is order-sensitive");
+        // A real change still rebuilds: presence and membership are the only
+        // things that may.
+        check(talkback_nominee_list_refresh(list, {"Ann", "Bo"}, {"Bo"}),
+              "somebody leaving did not rebuild the list");
+        check(talkback_nominee_list_refresh(list, {"Ann", "Bo", "Cy"}, {"Bo"}),
+              "somebody arriving did not rebuild the list");
+    }
+    {
+        // Two people with the same display name are one row, and a duplicate
+        // in the roster is not a change either.
+        TalkbackNomineeListState list;
+        check(talkback_nominee_list_refresh(list, {"Ann", "Ann", "Bo"}, {}),
+              "the first roster did not build the list");
+        check(row_names(list.rows) == std::vector<std::string>({"Ann", "Bo"}),
+              "a duplicated display name produced two rows");
+        check(!talkback_nominee_list_refresh(list, {"Bo", "Ann"}, {}),
+              "dropping a duplicate rebuilt the list");
+        // A ticked name that comes BACK flips to present and keeps its tick.
+        check(talkback_nominee_list_refresh(list, {"Bo"}, {"Ann"}),
+              "a ticked name leaving did not rebuild the list");
+        check(talkback_nominee_list_refresh(list, {"Ann", "Bo"}, {"Ann"}),
+              "a ticked name returning did not rebuild the list");
+        const auto *ann = find_row(list.rows, "Ann");
+        check(ann && ann->present && ann->checked,
+              "a ticked name who came back was not shown as present and "
+              "ticked");
+    }
+
     // ── Buttons agree with key_on()'s own refusal rule ─────────────────────
     {
         const auto plan = confirmed_plan();
@@ -139,8 +266,11 @@ int main()
         check(buttons.size() == 1, "an unnominated plan produced nominee buttons");
         check(!buttons.front().enabled,
               "all-talent was keyable with nothing nominated");
-        check(contains(buttons.front().reason, "nominated"),
-              "the no-nomination reason does not mention nominating");
+        check(contains(buttons.front().reason, "channel"),
+              "the no-nomination reason does not say that nobody has a "
+              "channel");
+        check(!contains(buttons.front().reason, "nominat"),
+              "operator-facing copy still says nominate");
     }
 
     // Engine/meeting preconditions, and the one-key-at-a-time rule.
@@ -211,8 +341,8 @@ int main()
               "the headline does not report the channel count");
         check(contains(report.headline, "16"),
               "the headline does not report the channel budget");
-        check(contains(report.headline, "2 nominees"),
-              "the headline does not report the nominee count");
+        check(contains(report.headline, "2 people"),
+              "the headline does not report how many people are covered");
         bool named_both = false;
         for (const auto &line : report.lines)
             if (contains(line, "Sarah") && contains(line, "Luis")) named_both = true;
@@ -274,7 +404,7 @@ int main()
         TalkbackNominationPlan plan = confirmed_plan();
         talkback_nomination_note_failed_after_destroy(plan, "create_rate_limited");
         const auto report = talkback_dock_nomination_report(plan);
-        check(contains(report.headline, "No talkback channels"),
+        check(contains(report.headline, "No channels assigned"),
               "a destroyed channel set was still reported as provisioned");
         bool why = false;
         for (const auto &line : report.lines)
@@ -454,8 +584,49 @@ int main()
               "the refusal banner does not name the target");
         check(contains(b.detail, "provisioning_incomplete"),
               "the refusal reason was not shown");
-        check(contains(b.detail, "re-nominate"),
-              "the engine's recovery hint was not surfaced");
+        check(contains(b.detail, "re-assign channels"),
+              "the engine's recovery hint was not surfaced in the operator's "
+              "own vocabulary");
+        check(!contains(b.detail, "nominat"),
+              "the operator-facing recovery hint still says nominate");
+    }
+    {
+        // The recovery hint is still ECHOED, never inferred: a hint this
+        // vocabulary does not know is passed through verbatim rather than
+        // dropped or reworded, and no hint stays no hint.
+        check(talkback_dock_recovery_label("re-nominate") ==
+                  "re-assign channels",
+              "the engine's re-nominate hint was not spelled for an operator");
+        check(talkback_dock_recovery_label("restart the engine") ==
+                  "restart the engine",
+              "an unrecognised recovery hint was not passed through verbatim");
+        TalkbackDockSessionView s;
+        s.key_open = true;
+        s.target = "Sarah";
+        s.engine_reason = "provisioning_incomplete";
+        const auto b = talkback_dock_banner(s);
+        check(!contains(b.detail, "Recovery"),
+              "a recovery hint was invented for a refusal that carried none");
+    }
+    {
+        // The whole operator-facing report, swept for the word the owner
+        // rejected. Internal vocabulary (the wire command, the code) is
+        // deliberately untouched; this is only what is on screen.
+        auto plan = confirmed_plan();
+        plan.uncovered_private = {"Dana"};
+        plan.unreachable = {"Dana"};
+        talkback_nomination_note_refused(plan, "create_busy");
+        const auto report = talkback_dock_nomination_report(plan);
+        check(!contains(report.headline, "nominat") &&
+                  !contains(report.tooltip, "nominat"),
+              "the plan report still says nominate");
+        for (const auto &line : report.lines)
+            check(!contains(line, "nominat"),
+                  "a plan report line still says nominate");
+        bool failed_line = false;
+        for (const auto &line : report.lines)
+            if (contains(line, "Channel setup failed")) failed_line = true;
+        check(failed_line, "a refusal is no longer named as a setup failure");
     }
     {
         // A closed key keeps the last verdict visible, said as history.

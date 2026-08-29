@@ -639,6 +639,50 @@ Every one of these is documented at length where it lives; the list is the map.
   the banner); the held-button tooltip is written before the never-disable
   guard instead of after it; and `rebuild_key_buttons()` hides before
   `deleteLater()`.
+- **The talent list is ordered by CoreVideo, not by the Zoom SDK** (live
+  defect, 2026-08-29, Zoom Events production with breakout rooms). The
+  operator's report was "moving from room to room the nomination list doesn't
+  update". The roster cache was fresh (`ZoomEngineClient::roster()`, the exact
+  cache the dock reads, verified live through the control API's
+  `list_participants`) and the rows the dock derived from it were right. The
+  defect was the REBUILD GATE: the `(present, name)` signature was built by
+  walking the roster in whatever order `GetParticipantsList()` returned, so a
+  merely REORDERED roster — same people, same presence — read as a changed one
+  and rebuilt the whole `QListWidget`. On this dock's 100 ms tick, in a room
+  where two of Zoom's five roster callbacks fire on every mute and camera
+  toggle by anyone, that is a `clear()` + re-add several times a second: the
+  scroll position resets, and a tick-box click (an ordinary click is
+  80–150 ms) lands its press on an item that no longer exists by the release,
+  so **the tick never registers**. What the operator saw as "the list doesn't
+  update" was their own edits being thrown away, not the roster's. The whole
+  rows-and-signature decision now lives in `talkback_nominee_rows()` /
+  `talkback_nominee_signature()` / `talkback_nominee_list_refresh()`
+  (`src/talkback-dock-state.h`, pinned by `CoreVideoTalkbackDockState`), which
+  order the rows from CONTENT alone — everyone present sorted, then the ticked
+  names who have left, sorted — so the signature is a function of the set and
+  a reorder cannot rebuild. Two deliberate consequences: the visible order
+  stops moving under the operator's cursor mid-tick, and the nominee list this
+  feature sends is now deterministic, which matters because with the channel
+  budget short it is LIST ORDER that decides who gets a private channel
+  (`talkback_plan()`, `src/talkback-plan.h`) — roster order made that
+  arbitrary and re-rollable on any roster event. Mutation-proved: restoring
+  roster-order rows fails five assertions in
+  `tests/talkback-dock-state-test.cpp`, including the reorder-must-not-rebuild
+  case, and reverts clean.
+- **"Nominate" is gone from the operator-facing copy, and only from there**
+  (owner: "not a word that really makes sense here"). The section is
+  **Talent**, the button is **Assign channels (N)** / **Clear all channels**,
+  the plan block leads with "No channels assigned yet." and reports a refusal
+  as "Channel setup failed: <reason>.", and the key-button refusals talk about
+  channels ("no one has a channel yet", "assign channels again"). The engine's
+  echoed recovery hint goes through `talkback_dock_recovery_label()`, which
+  spells its `"re-nominate"` token as "re-assign channels" and passes anything
+  it does not recognise through VERBATIM — that is a vocabulary map, not an
+  inference: a refusal that carried no hint still gets none, pinned by its own
+  test. Everything internal is untouched on purpose: the `talkback_nominate`
+  wire command and its stage names, `TalkbackNominationPlan` and the rest of
+  the identifiers, and the comments, which describe code that still says
+  nominate. Companion and the control API depend on that surface.
 
 ## Live testing against a real meeting
 

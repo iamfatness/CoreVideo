@@ -38,6 +38,7 @@
 #include "talkback-nomination.h"
 #include "talkback-plan.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -138,15 +139,16 @@ inline std::vector<TalkbackDockKeyButton> talkback_dock_key_buttons(
         } else if (talkback_target_known_unprovisioned(
                        target, confirmed.requested, confirmed.uncovered_private)) {
             if (confirmed.requested.empty()) {
-                b.reason = "no one has been nominated yet";
+                b.reason = "no one has a channel yet";
             } else {
                 bool unreachable = false;
                 for (const auto &u : confirmed.unreachable)
                     if (u == target) { unreachable = true; break; }
                 b.reason = unreachable
-                    ? "on no channel at all. Re-nominate a shorter list."
-                    : "no private channel. Key All talent instead, or "
-                      "re-nominate.";
+                    ? "on no channel at all. Assign channels for a shorter "
+                      "list."
+                    : "no private channel. Key All talent instead, or assign "
+                      "channels again.";
             }
         } else {
             b.enabled = true;
@@ -158,6 +160,142 @@ inline std::vector<TalkbackDockKeyButton> talkback_dock_key_buttons(
     for (const auto &name : confirmed.requested)
         add(name, name, false);
     return buttons;
+}
+
+// ── The talent list ─────────────────────────────────────────────────────────
+//
+// The tick-box list the operator picks talent from, and the diff that decides
+// when the widget behind it is thrown away and rebuilt.
+//
+// WHY THE ORDER IS OURS AND NOT THE ROSTER'S -- the live defect this section
+// exists for. Reported by the operator mid-show, 2026-08-29, in a Zoom Events
+// production with breakout rooms: "moving from room to room the nomination
+// list doesn't update". The roster cache the dock reads was verified fresh at
+// the time (the control API's list_participants reads the same
+// ZoomEngineClient::roster() and showed the new room's people), and the row
+// content was right. What was wrong was the REBUILD GATE: the signature it
+// compared was built by walking the roster in the order the Zoom SDK's
+// GetParticipantsList() happened to return it, so a roster that had merely
+// been REORDERED -- same people, same presence -- produced a different
+// signature and a full rebuild.
+//
+// The panel ticks at 100 ms and the engine re-sends the roster on all five of
+// Zoom's roster callbacks (two of which fire on every mute and camera toggle
+// by anyone in the meeting), so in a busy room that is a QListWidget::clear()
+// plus a re-add several times a second. From the operator's seat that is not a
+// list that refreshes, it is a list that CANNOT BE USED: every rebuild resets
+// the scroll position, and a tick-box click that spans one -- an ordinary
+// click is 80-150 ms -- lands its press on an item that no longer exists by
+// the time the release arrives, so the tick never registers. Hence "doesn't
+// update": the operator's own edits were being thrown away, not the roster's.
+//
+// So the rows are ordered HERE, deterministically, from content alone:
+// everyone present (sorted), then the ticked names who have left (sorted). Two
+// consequences are deliberate:
+//   * the signature is now a function of the SET, so a reorder cannot rebuild;
+//   * the visible order stops moving under the operator's cursor while they
+//     are ticking, which the roster's own order did on every mute.
+// It also makes the nominee list this feature sends deterministic: with the
+// channel budget short, WHICH names get a private channel is decided by list
+// order (talkback_plan(), src/talkback-plan.h), and roster order made that
+// arbitrary and re-rollable on any roster event.
+
+struct TalkbackNomineeRow {
+    // The identity, and the only thing ever sent to the engine. The row's
+    // visible TEXT can also say "(not in the meeting)", which is why the
+    // widget carries this separately in Qt::UserRole.
+    std::string name;
+    // In the meeting right now. False rows are ticked names who have left.
+    bool present = false;
+    bool checked = false;
+};
+
+// What the dock's list widget currently shows, and what it was built from.
+struct TalkbackNomineeListState {
+    std::vector<TalkbackNomineeRow> rows;
+    // The signature of the last build. Deliberately not derived on demand: it
+    // is the record of what is ON SCREEN, which `rows` alone cannot be after
+    // the operator has ticked something the widget knows about and this does
+    // not.
+    std::string signature;
+};
+
+// A TICKED NAME THAT HAS LEFT THE ROSTER STAYS ON THE LIST. Nominating
+// somebody who is not here right now is meaningful -- the engine re-resolves
+// nominations by name on every roster change and invites them when they arrive
+// (resolve_roster_change(), engine/src/engine-talkback.cpp) -- so dropping the
+// row would silently drop them from the next press, on the exact path where a
+// talent has just disconnected and the director is re-assigning to fix
+// something else.
+//
+// `roster_names` may repeat a name and may arrive in any order; both are
+// normalised here. Someone with no display name cannot be addressed at all and
+// is expected to have been dropped by the caller.
+inline std::vector<TalkbackNomineeRow> talkback_nominee_rows(
+    const std::vector<std::string> &roster_names,
+    const std::vector<std::string> &checked_names)
+{
+    const auto ticked = [&checked_names](const std::string &name) {
+        return std::find(checked_names.begin(), checked_names.end(), name) !=
+               checked_names.end();
+    };
+
+    std::vector<std::string> present(roster_names);
+    std::sort(present.begin(), present.end());
+    present.erase(std::unique(present.begin(), present.end()), present.end());
+
+    std::vector<std::string> absent;
+    for (const auto &name : checked_names) {
+        if (name.empty()) continue;
+        if (std::binary_search(present.begin(), present.end(), name)) continue;
+        absent.push_back(name);
+    }
+    std::sort(absent.begin(), absent.end());
+    absent.erase(std::unique(absent.begin(), absent.end()), absent.end());
+
+    std::vector<TalkbackNomineeRow> rows;
+    rows.reserve(present.size() + absent.size());
+    for (const auto &name : present)
+        rows.push_back(TalkbackNomineeRow{name, true, ticked(name)});
+    for (const auto &name : absent)
+        rows.push_back(TalkbackNomineeRow{name, false, true});
+    return rows;
+}
+
+// What a rebuild is gated on: presence and name, nothing else. The tick state
+// is NOT in here on purpose -- the operator setting a box must not cost them
+// the widget they are setting it in.
+inline std::string talkback_nominee_signature(
+    const std::vector<TalkbackNomineeRow> &rows)
+{
+    std::string signature;
+    for (const auto &row : rows) {
+        signature += row.present ? "+" : "-";
+        signature += row.name;
+        signature += '\n';
+    }
+    return signature;
+}
+
+// One tick of the list. `checked_names` comes from the WIDGET, which is the
+// only place the operator's ticks live; returns true when the caller must
+// throw the widget's items away and re-add them from `state.rows`.
+inline bool talkback_nominee_list_refresh(
+    TalkbackNomineeListState &state,
+    const std::vector<std::string> &roster_names,
+    const std::vector<std::string> &checked_names)
+{
+    auto rows = talkback_nominee_rows(roster_names, checked_names);
+    const std::string signature = talkback_nominee_signature(rows);
+    if (signature == state.signature) {
+        // No rebuild, but the widget's ticks have moved on without us; keep
+        // this side honest rather than letting it describe a stale screen.
+        state.rows = std::move(rows);
+        return false;
+    }
+    state.rows = std::move(rows);
+    state.signature = signature;
+    return true;
 }
 
 // ── The nomination outcome ──────────────────────────────────────────────────
@@ -242,8 +380,8 @@ inline TalkbackDockNominationReport talkback_dock_nomination_report(
         // outcome also lands here, with done reset to false and the reason
         // kept (src/talkback-nomination.h). Saying "no channels" alone would
         // hide the WHY on exactly the paths that need it most.
-        report.headline = "No talkback channels yet. Tick talent and press "
-                          "Nominate.";
+        report.headline = "No channels assigned yet. Tick talent and press "
+                          "Assign channels.";
         report.tooltip = report.headline;
     } else {
         const std::vector<std::string> covered =
@@ -252,7 +390,7 @@ inline TalkbackDockNominationReport talkback_dock_nomination_report(
         report.headline =
             plural(confirmed.channels, "channel", "channels") + " in use of " +
             std::to_string(kTalkbackMaxChannels) + " for " +
-            plural(confirmed.requested.size(), "nominee", "nominees") + ".";
+            plural(confirmed.requested.size(), "person", "people") + ".";
         report.tooltip = report.headline;
         if (covered.empty())
             push("Private channel: ", {}, "nobody.");
@@ -284,7 +422,7 @@ inline TalkbackDockNominationReport talkback_dock_nomination_report(
         // without contradicting it (a refused re-nomination leaves the
         // standing channels exactly as they were). Said as a separate line
         // for that reason.
-        push("Last Nominate was refused: ", {},
+        push("Channel setup failed: ", {},
              (confirmed.last_attempt_reason.empty()
                   ? std::string("no reason reported")
                   : confirmed.last_attempt_reason) + ".");
@@ -432,6 +570,20 @@ inline std::string talkback_dock_target_label(const std::string &target)
     return target;
 }
 
+// The engine's own recovery hint, in the operator's vocabulary.
+//
+// This does NOT weaken "echoed, never inferred": a hint the engine did not
+// send is still nothing, and a hint this function does not recognise is passed
+// through verbatim rather than dropped or reworded. All it does is spell the
+// engine's `"recover":"re-nominate"` token -- which names an internal command,
+// `talkback_nominate` -- as the action the dock's own button offers. The wire
+// token is deliberately unchanged; Companion and the control API depend on it.
+inline std::string talkback_dock_recovery_label(const std::string &recover)
+{
+    if (recover == "re-nominate") return "re-assign channels";
+    return recover;
+}
+
 inline TalkbackDockBanner talkback_dock_banner(const TalkbackDockSessionView &s)
 {
     TalkbackDockBanner b;
@@ -443,7 +595,8 @@ inline TalkbackDockBanner talkback_dock_banner(const TalkbackDockSessionView &s)
             b.state = TalkbackDockBannerState::Refused;
             b.detail = "Last key failed: " + s.engine_reason + ".";
             if (!s.engine_recover.empty())
-                b.detail += " Recovery: " + s.engine_recover + ".";
+                b.detail += " Recovery: " +
+                            talkback_dock_recovery_label(s.engine_recover) + ".";
         }
         return b;
     }
@@ -468,7 +621,8 @@ inline TalkbackDockBanner talkback_dock_banner(const TalkbackDockSessionView &s)
     b.headline = "Key refused: " + label;
     b.detail = s.engine_reason + ".";
     if (!s.engine_recover.empty())
-        b.detail += " Recovery: " + s.engine_recover + ".";
+        b.detail += " Recovery: " +
+                    talkback_dock_recovery_label(s.engine_recover) + ".";
     return b;
 }
 

@@ -97,9 +97,13 @@ private:
     // deleting the widget the operator is holding is not a refresh, it is a
     // lost release (see talkback_dock_release_lost()).
     std::string m_key_signature;
-    // Which roster names the nominee list was last built from, for the same
-    // reason -- a rebuild loses the tick-boxes the operator has just set.
-    std::string m_roster_signature;
+    // What the talent list currently shows, and what it was last built from.
+    // A rebuild loses the tick-boxes the operator is in the middle of setting
+    // -- and, when it happens on this dock's 100 ms tick, loses the CLICK
+    // itself, because an ordinary click outlives one tick. The rule that keeps
+    // that rare (and its live defect history) is in
+    // talkback_nominee_list_refresh(), src/talkback-dock-state.h.
+    TalkbackNomineeListState m_nominee_state;
     // The target THIS dock currently has keyed, empty when it has none. A key
     // opened over the control API is visible in the banner but is not ours to
     // close, so the dock's own release/backstop paths key off this rather than

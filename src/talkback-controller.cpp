@@ -97,9 +97,15 @@ bool TalkbackController::key_on(const std::string &target,
     const auto nomination = ZoomEngineClient::instance().talkback_nomination_status();
     if (talkback_target_known_unprovisioned(target, nomination.requested,
                                             nomination.uncovered_private)) {
+        // Operator-facing (this reaches the Talkback dock's notice line as
+        // well as the control API's error field), so it says what the dock's
+        // own button says. The COMMAND is still talkback_nominate and is named
+        // as such for a caller driving the API by hand.
         error_out = nomination.requested.empty()
-            ? "No one has been nominated for talkback yet -- run talkback_nominate first"
-            : "\"" + target + "\" has no talkback channel -- nominate them, or key \"all\"";
+            ? "Nobody has a talkback channel yet. Assign channels first "
+              "(control API: talkback_nominate)."
+            : "\"" + target + "\" has no talkback channel. Assign channels "
+              "including them, or key \"all\".";
         return false;
     }
 

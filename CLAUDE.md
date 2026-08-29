@@ -190,6 +190,50 @@ Every one of these is documented at length where it lives; the list is the map.
   path, not yet re-measured on the new one. **Gate run 1 (2026-08-26) failed
   before it could measure anything** — see the create-pacing entry below and
   `docs/superpowers/notes/2026-08-26-talkback-preprovisioned-live-gate.md`.
+- **Channel membership must be acoustically NEUTRAL until keyed** (live
+  production, 2026-08-29: talent reported their meeting audio ducking the
+  moment they were **assigned** to a talkback channel, before any key was
+  pressed). Nothing in the engine ducks at provision — the key-down duck is
+  armed by `session_start()` and applied on the first `drain_audio()`, and
+  restored by `session_stop()` — so the attenuation was **Zoom's own default
+  for a channel member**: Zoom appears to create channels already ducked,
+  treating membership as "about to be talked to". That silently voids the
+  premise the whole pre-provisioned architecture rests on (channels stand for
+  the length of the show, so the key press pays for nothing): a standing
+  channel became a standing duck, for every nominee, for the whole show. The
+  member state is now **deterministic instead of inherited** — every channel
+  gets an explicit `SetChannelBackgroundVolume(channel, kBackgroundNeutral)`
+  in `onCreateChannelResponse`'s nomination branch, on the command-loop
+  thread, outside `m_chan_mtx`, **before any invite is issued** for it (a
+  member invited into a channel still at Zoom's default hears the duck for the
+  length of the gap), reported once per CHANNEL as
+  `"stage":"background_volume_neutral"` — never per member, which on a
+  13-channel plan is the message-storm shape this codebase already has a live
+  incident about. `kBackgroundNeutral` = **1.0**: the SDK header
+  (`meeting_talkback_ctrl_interface.h`) documents the parameter as the main
+  meeting audio volume people in the channel hear, range 0.0–2.0, "decrease
+  … to hear the channel audio more clearly" — a gain whose midpoint 1.0 is
+  unity, i.e. the meeting exactly as everyone outside the channel hears it.
+  **One set at creation is the whole contract**, and that is an argument from
+  the SDK's shape, not an experiment: the setter is keyed by `channelID`
+  ALONE, there is no user parameter and no per-member variant anywhere in
+  `IMeetingTalkbackController`, so volume is a property OF THE CHANNEL that a
+  member invited later by `resolve_roster_change()` inherits — there is no
+  per-member state to re-assert and no API with which to assert it, which is
+  why nothing in `onChannelUserJoinResponse` touches volume. The keyed cycle
+  is unchanged and now writes the same two named constants around it (duck
+  `kBackgroundDucked` = 0.3 on the first drain, restore `kBackgroundNeutral`
+  on `session_stop()`) — the restore writes THE CONSTANT, never a value cached
+  from before the duck, which became load-bearing the moment Zoom's default
+  turned out to be ducked itself: "restore what it was" would hand talent back
+  the duck and make idle-after-a-key differ from idle-before-the-first.
+  Mutation-proved in `tests/engine-talkback-select-test.cpp` (deleting the
+  provision-time set fails six assertions; restoring to a non-neutral value
+  fails two) and reverted clean. The probe is unchanged — it ducks for its
+  three-second tone and destroys its channel, self-contained. **Not yet
+  confirmed live**: this is written from the operator's report plus the
+  absence of any duck-at-provision in our own code; it needs the next
+  production to confirm talent are no longer ducked on assign.
 - **The nomination ladder must be PACED, and code 18 is a wait not a failure**
   (`kNominationCreateSpacing` / `nomination_tick()` in
   `engine/src/engine-talkback.cpp`, live gate run 1, 2026-08-26 20:04): Zoom

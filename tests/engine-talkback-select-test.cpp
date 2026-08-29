@@ -256,8 +256,16 @@ public:
     std::basic_string<zchar_t> invite_channel_in_progress;
     std::vector<unsigned int> invite_users_in_progress;
     std::vector<std::pair<std::string, unsigned int> > invited;
+    // 2026-08-29: ordering marker, the same device `first_send_call` and
+    // `first_volume_call` already are. The neutral background-volume set has
+    // to land BEFORE anybody is invited into the channel, or a member spends
+    // the gap at Zoom's ducked default -- which is the whole defect. A count
+    // of invites cannot see that; a call index can.
+    int first_invite_call = -1;
     ZOOMSDK::SDKError BeginBatchInviteUsers(const zchar_t *channelID) override
     {
+        if (first_invite_call < 0) first_invite_call = calls;
+        ++calls;
         invite_channel_in_progress = channelID;
         invite_users_in_progress.clear();
         return ZOOMSDK::SDKERR_SUCCESS;
@@ -563,6 +571,48 @@ static void respond(EngineTalkback &tb, const zchar_t *id,
     tb.nomination_tick();
 }
 
+// LIVE PRODUCTION 2026-08-29: every channel is set to NEUTRAL background
+// volume the moment it is created, because Zoom's own default for a channel
+// member is ducked -- talent lost meeting audio by being ASSIGNED, before any
+// key was pressed. These two helpers let a test say "exactly one neutral set
+// per provisioned channel, and nothing else" without hand-rolling the count.
+static bool volume_is(float v, float expected)
+{
+    return v > expected - 0.001f && v < expected + 0.001f;
+}
+
+// Counts entries in the fake's volume log that set `expected` on any channel.
+static int count_volume_sets(const std::vector<std::pair<std::string, float> > &volumes,
+                             float expected)
+{
+    int n = 0;
+    for (const auto &v : volumes)
+        if (volume_is(v.second, expected)) ++n;
+    return n;
+}
+
+// True when EVERY id in the log is distinct -- "exactly one per channel" is
+// two facts (the right count, and no channel set twice while another was
+// missed) and a bare count proves only the first.
+static bool volume_channels_distinct(
+    const std::vector<std::pair<std::string, float> > &volumes)
+{
+    for (std::size_t i = 0; i < volumes.size(); ++i)
+        for (std::size_t j = i + 1; j < volumes.size(); ++j)
+            if (volumes[i].first == volumes[j].first) return false;
+    return true;
+}
+
+// Wipes the volume log AND the ordering marker, so a test that cares about the
+// KEYED cycle starts from the same blank slate it had before provisioning set
+// anything. Without the first_volume_call reset, the provision-time neutral
+// set would make "the duck ran after the first send" trivially false.
+static void reset_volume_log(FakeTalkbackController &ctrl)
+{
+    ctrl.volumes.clear();
+    ctrl.first_volume_call = -1;
+}
+
 int main()
 {
     // -- One CreateChannel at a time, and the arbiter is claimed -----------
@@ -616,6 +666,22 @@ int main()
         const int creates_after_provisioning = svc.ctrl.creates;
         check(creates_after_provisioning == 13,
               "the 11-name plan did not provision 13 channels");
+
+        // LIVE PRODUCTION 2026-08-29: provisioning leaves every channel
+        // explicitly NEUTRAL. Asserted here as well as in its own block below
+        // because this is the test that then drives the keyed cycle -- the two
+        // halves of "idle is neutral, keyed is ducked, idle is neutral again"
+        // have to be pinned against the SAME channel set to mean anything.
+        check(static_cast<int>(svc.ctrl.volumes.size()) == 13,
+              "provisioning did not set background volume once per channel");
+        check(count_volume_sets(svc.ctrl.volumes, 1.0f) == 13,
+              "PROVISIONING LEFT ZOOM'S DEFAULT IN PLACE -- talent are ducked "
+              "by being ASSIGNED to a channel, before any key is pressed");
+        check(volume_channels_distinct(svc.ctrl.volumes),
+              "the neutral set did not reach every channel exactly once");
+        // From here the test is about the KEYED cycle, so start it from a
+        // blank log -- see reset_volume_log().
+        reset_volume_log(svc.ctrl);
 
         // The tap's ring, built here the way TalkbackTap does, so drain_audio()
         // has something real to fan out. This is what lets the test see SENDS
@@ -688,11 +754,13 @@ int main()
         check(svc.ctrl.volumes.size() == 2,
               "the deferred duck never ran, so talent hear the director competing "
               "with full meeting audio for the whole press");
+        check(count_volume_sets(svc.ctrl.volumes, 0.3f) == 2,
+              "the key-down duck did not set the ducked level on both channels");
         check(svc.ctrl.first_send_call < svc.ctrl.first_volume_call,
               "the duck ran BEFORE the first buffer was sent -- deferring it is "
               "the point; ordering here is the whole fix");
 
-        svc.ctrl.volumes.clear();
+        reset_volume_log(svc.ctrl);
         tb.session_stop();
         check(!tb.session_live(), "the session stayed live after a key release");
         check(svc.ctrl.destroyed.empty(),
@@ -700,6 +768,13 @@ int main()
               "for a create+invite round trip all over again");
         check(svc.ctrl.volumes.size() == 2,
               "the key release did not restore meeting audio on both channels");
+        // 2026-08-29: the restore must write the SAME neutral the provision
+        // wrote, not a value cached from before the duck -- Zoom's default is
+        // itself ducked, so a "restore what it was" would hand talent back the
+        // duck and make idle-after-a-key differ from idle-before-the-first.
+        check(count_volume_sets(svc.ctrl.volumes, 1.0f) == 2,
+              "THE KEY RELEASE RESTORED SOMETHING OTHER THAN NEUTRAL -- idle "
+              "after a press must be identical to idle before the first one");
 
         // A second press must still work, from the same standing channels.
         check(tb.session_start(&svc, kTalkbackAllTalentTarget),
@@ -1271,8 +1346,13 @@ int main()
               "A ROSTER EVENT MID-PRESS NULLED m_ctrl -- the rest of the "
               "press silently stopped reaching Zoom");
 
+        // 2026-08-29: this used to be `>= 1`, which provisioning's own neutral
+        // sets would now satisfy on their own -- the assertion would have
+        // stayed green with the restore deleted. Clear the log first so the
+        // only thing that can satisfy it is session_stop()'s own call.
+        reset_volume_log(svc.ctrl);
         tb.session_stop();
-        check(svc.ctrl.volumes.size() >= 1,
+        check(count_volume_sets(svc.ctrl.volumes, 1.0f) == 1,
               "session_stop() could not restore the duck -- m_ctrl went null "
               "mid-press");
         tb.close_audio();
@@ -1878,6 +1958,86 @@ int main()
               "M1: the invite half was NOT gated on the probe -- that is the "
               "half the gate exists for (Begin/Add/Execute interleaving with "
               "the probe's driving thread)");
+    }
+
+    // -- LIVE PRODUCTION 2026-08-29: MEMBERSHIP MUST BE ACOUSTICALLY NEUTRAL
+    // UNTIL KEYED ---------------------------------------------------------
+    //
+    // Talent reported losing meeting audio the moment they were ASSIGNED to a
+    // talkback channel, before any key was pressed. Nothing in the engine
+    // ducks at provision, so Zoom's own default for a channel member is
+    // ducked -- and a pre-provisioned architecture, whose whole premise is
+    // that channels can stand for the length of the show, turned that into a
+    // standing duck. The engine now sets the level explicitly at creation
+    // instead of inheriting whatever Zoom chose.
+    //
+    // This block is the pin. Delete the SetChannelBackgroundVolume call in
+    // onCreateChannelResponse's nomination branch and every check below fails.
+    {
+        std::vector<std::string> lines;
+        EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
+
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        svc.participants.users.push_back(make_user(4101, "Sarah"));
+        svc.participants.users.push_back(make_user(4102, "Luis"));
+        check(tb.nominate(&svc, {"Sarah", "Luis"}), "nominate refused a two-name plan");
+        // 1 all-talent + 2 private = 3 channels.
+        for (int i = 1; i <= 3; ++i)
+            respond(tb, chan_id(i).c_str(), kOk);
+        check(svc.ctrl.creates == 3, "setup: the two-name plan did not provision 3 channels");
+
+        // (1) EXACTLY ONE SET PER PROVISIONED CHANNEL, and it is neutral.
+        check(svc.ctrl.volumes.size() == 3,
+              "provisioning did not set background volume exactly once per channel");
+        check(count_volume_sets(svc.ctrl.volumes, 1.0f) == 3,
+              "PROVISIONING LEFT ZOOM'S DEFAULT IN PLACE -- this is the live "
+              "2026-08-29 defect: talent ducked by being assigned, no key pressed");
+        check(volume_channels_distinct(svc.ctrl.volumes),
+              "one channel was set twice while another was never set at all");
+
+        // (2) NEUTRAL BEFORE ANYBODY IS INVITED. A member invited into a
+        // channel still at Zoom's default hears the duck for however long the
+        // gap lasts, which is the defect in miniature.
+        check(svc.ctrl.first_invite_call >= 0, "setup: nobody was invited");
+        check(svc.ctrl.first_volume_call >= 0 &&
+              svc.ctrl.first_volume_call < svc.ctrl.first_invite_call,
+              "a member was invited into a channel BEFORE its background volume "
+              "was made neutral");
+
+        // (3) ONE REPORT LINE PER CHANNEL, not per member. Six members are
+        // invited across these three channels; per-member reporting would be
+        // six lines, and a 13-channel show's worth of that is the message-storm
+        // shape this codebase already has a live incident about.
+        int neutral_reports = 0;
+        for (const auto &l : lines)
+            if (line_has(l, "\"cmd\":\"talkback_nominate\"") &&
+                line_has(l, "\"stage\":\"background_volume_neutral\""))
+                ++neutral_reports;
+        check(neutral_reports == 3,
+              "the neutral background-volume set was not reported once per "
+              "channel");
+
+        // (4) THE SETTING IS CHANNEL-SCOPED, SO CREATION-TIME IS ENOUGH.
+        // SetChannelBackgroundVolume is keyed by channelID alone -- there is no
+        // per-member variant in the controller at all -- so a member invited
+        // LATER by a roster re-resolution inherits the channel's value. Prove
+        // the engine agrees: a leave+rejoin under a new id re-invites (the
+        // roster path really did run) and issues NO further volume calls.
+        const std::size_t invited_before = svc.ctrl.invited.size();
+        svc.participants.users.clear();
+        svc.participants.users.push_back(make_user(4201, "Sarah"));
+        svc.participants.users.push_back(make_user(4202, "Luis"));
+        tb.resolve_roster_change(&svc);
+        check(svc.ctrl.invited.size() > invited_before,
+              "setup: the rejoin never re-invited, so this proves nothing about "
+              "what a late member join does to volume");
+        check(svc.ctrl.volumes.size() == 3,
+              "a LATE member join re-asserted background volume -- the setting is "
+              "a CHANNEL property (no user parameter exists), so one set at "
+              "creation is the whole contract");
+
+        EngineIpc::test_sink() = nullptr;
     }
 
     if (failures == 0)

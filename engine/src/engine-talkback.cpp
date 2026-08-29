@@ -55,6 +55,44 @@ constexpr std::chrono::milliseconds kNominationRateLimitBackoff{500};
 // true cause.
 constexpr uint32_t kMaxNominationCreateRetries = 4;
 
+// ── Channel background volume: the level of MAIN MEETING audio that the
+// people in a talkback channel hear ─────────────────────────────────────────
+//
+// SDK semantic (meeting_talkback_ctrl_interface.h, SetChannelBackgroundVolume):
+// "Set the background volume - the main meeting audio volume - that people in
+// the talkback channel can hear. Specify the background volume from 0.0 to
+// 2.0. If you want people in the channel to hear the channel audio more
+// clearly, decrease the backgroundVolume." It is a gain across a 0.0-2.0
+// range whose midpoint 1.0 is unity -- meeting audio as everyone outside the
+// channel hears it -- with below-1.0 attenuating and above-1.0 boosting.
+// 1.0 is therefore "normal/unchanged", and that is what kBackgroundNeutral
+// means everywhere in this file.
+//
+// LIVE PRODUCTION, 2026-08-29 -- WHY THE NEUTRAL SET AT PROVISION EXISTS.
+// Talent reported their meeting audio ducking as soon as they were ASSIGNED
+// to a talkback channel, before any key was ever pressed. Nothing in this
+// file ducks at provision (the key-down duck is armed in session_start() and
+// applied in drain_audio(); see those), so the attenuation is ZOOM'S OWN
+// DEFAULT for a channel member -- Zoom appears to create channels already
+// ducked, treating membership as "about to be talked to". That silently
+// breaks the premise the whole pre-provisioned architecture rests on: that
+// membership is acoustically NEUTRAL until keyed, so channels can stand for
+// the length of the show and the key press pays for nothing. A standing
+// channel became a standing duck.
+//
+// So the member state is now DETERMINISTIC rather than inherited: every
+// channel is set to kBackgroundNeutral the moment it is created, overriding
+// whatever default Zoom chose, and the keyed cycle (duck on the first drain,
+// restore on session_stop) writes these same two constants around it. Idle
+// state is byte-identical before the first key and after any key.
+constexpr float kBackgroundNeutral = 1.0f;
+
+// The key-down duck: talent hear the director over meeting audio held at 30%,
+// the dim of a real talkback panel. Paired ONLY with kBackgroundNeutral above
+// -- never with a cached "what it was before", which after the 2026-08-29
+// finding would have meant restoring to Zoom's ducked default.
+constexpr float kBackgroundDucked = 0.3f;
+
 // Final-review C1 (CRITICAL): the ",\"attempt\":N" suffix that identifies
 // which nominate attempt a report belongs to, so the plugin can match it to
 // the staging slot it came from instead of assuming it is whatever is staged
@@ -713,7 +751,7 @@ void EngineTalkback::tick()
         // set-on-the-way-in / restore-on-the-way-out pairing for the session;
         // this is the one place that still had only half of it.
         if (!channel_copy.empty())
-            m_ctrl->SetChannelBackgroundVolume(channel_copy.c_str(), 1.0f);
+            m_ctrl->SetChannelBackgroundVolume(channel_copy.c_str(), kBackgroundNeutral);
 
         ZOOMSDK::SDKError e = m_ctrl->BeginBatchDestroyChannels();
         if (e == ZOOMSDK::SDKERR_SUCCESS && !channel_copy.empty())
@@ -1155,11 +1193,47 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
                           (planned.is_all_talent ? "true" : "false") + R"(,"members":)" +
                           std::to_string(planned.members.size()));
 
+        const std::basic_string<zchar_t> channel_copy(channelID);
+
+        // LIVE PRODUCTION, 2026-08-29: TALENT WERE DUCKED BY BEING ASSIGNED.
+        // Make this channel's background volume explicit before anybody is
+        // invited into it, so no member ever spends a moment at Zoom's
+        // default. See kBackgroundNeutral for the full observation; the short
+        // version is that Zoom ducks channel members on its own, and this
+        // overrides that default rather than trusting it.
+        //
+        // ONE SET PER CHANNEL, AT CREATION, IS ENOUGH -- and this is an
+        // argument from the SDK's shape, not an experiment. The setter is
+        // keyed by channelID ALONE; there is no user parameter and no
+        // per-member variant anywhere in IMeetingTalkbackController. Volume is
+        // a property OF THE CHANNEL that every member reads, so a member
+        // invited later by a roster re-resolution (resolve_roster_change() ->
+        // invite_nominee(), which can run minutes after this create for
+        // someone who rejoined) inherits the value already set here. There is
+        // no per-member state to re-assert and no API with which to assert it,
+        // which is why nothing in onChannelUserJoinResponse touches volume.
+        //
+        // Placed here, after the response is attributed to this ladder and the
+        // channel is in m_provisioned_channels, on the COMMAND-LOOP THREAD
+        // (this callback and the pump share it -- see
+        // assert_command_loop_thread()) and OUTSIDE m_chan_mtx: the lock scope
+        // that pushed the provisioned entry closed above, and this file never
+        // calls the SDK while holding it.
+        //
+        // One report line per CHANNEL, not per member: a 13-channel plan is 13
+        // lines, where per-member would be up to 130 -- the message-storm shape
+        // this codebase already has a live incident about.
+        const ZOOMSDK::SDKError bgv =
+            m_ctrl->SetChannelBackgroundVolume(channel_copy.c_str(),
+                                               kBackgroundNeutral);
+        report_nomination("background_volume_neutral",
+                          R"("channel":")" + json_escape(id) + R"(","volume":1.0,"code":)" +
+                          std::to_string(static_cast<int>(bgv)));
+
         // Invite by NAME, resolved now: Zoom user ids are meeting-scoped, so
         // a stored id would point at nobody after a rejoin and at the wrong
         // face once ids are recycled -- same rule the probe and the session
         // already follow.
-        const std::basic_string<zchar_t> channel_copy(channelID);
         for (const auto &name : planned.members)
             invite_nominee(channel_copy, id, name);
 
@@ -1529,7 +1603,7 @@ void EngineTalkback::onChannelUserJoinResponse(const zchar_t *channelID,
     // Duck the main meeting for the person being spoken to, so the tone is
     // unambiguous rather than competing with meeting audio.
     const ZOOMSDK::SDKError vol =
-        m_ctrl->SetChannelBackgroundVolume(channel_copy.c_str(), 0.3f);
+        m_ctrl->SetChannelBackgroundVolume(channel_copy.c_str(), kBackgroundDucked);
     report("background_volume", R"("code":)" +
            std::to_string(static_cast<int>(vol)));
 
@@ -3000,7 +3074,7 @@ void EngineTalkback::drain_audio()
         m_session_duck_pending = false;
         if (m_ctrl && !channels.empty()) {
             for (const auto &id : channels)
-                m_ctrl->SetChannelBackgroundVolume(id.c_str(), 0.3f);
+                m_ctrl->SetChannelBackgroundVolume(id.c_str(), kBackgroundDucked);
             m_session_ducked = true;
             report_session("audio_duck", R"("channels":)" +
                            std::to_string(channels.size()));
@@ -3390,18 +3464,28 @@ void EngineTalkback::session_stop()
         return;
     }
 
-    // Undo the key-down duck -- but only if it was ever applied. 1.0 is the
-    // SDK's unattenuated value (documented range 0.0-2.0), so the talent is
-    // left hearing the meeting exactly as everybody else does between presses
-    // rather than at 30% for the rest of the show. A press released before its
-    // first drain_audio() never ducked (fix round 1, M4), and restoring then
-    // would be N SDK calls setting 1.0 on channels already at 1.0.
+    // Undo the key-down duck -- but only if it was ever applied.
+    // kBackgroundNeutral (1.0) is the SDK's unattenuated value (documented
+    // range 0.0-2.0), so the talent is left hearing the meeting exactly as
+    // everybody else does between presses rather than at 30% for the rest of
+    // the show. A press released before its first drain_audio() never ducked
+    // (fix round 1, M4), and restoring then would be N SDK calls setting
+    // neutral on channels already neutral.
+    //
+    // 2026-08-29: this writes THE CONSTANT, never a value cached from before
+    // the duck. That distinction became load-bearing when the live production
+    // showed Zoom's own channel default is already ducked (see
+    // kBackgroundNeutral): a "restore what it was" would restore talent to
+    // Zoom's duck, and the idle state after a key would differ from the idle
+    // state before the first one. Provision sets neutral, the duck sets 0.3,
+    // this sets neutral again -- one value, two writers, no history.
+    //
     // Best-effort by design: a failure here costs one person's meeting-audio
     // level, and refusing to release the key over it would cost the operator
     // the feature.
     if (was_ducked) {
         for (const auto &id : channels)
-            m_ctrl->SetChannelBackgroundVolume(id.c_str(), 1.0f);
+            m_ctrl->SetChannelBackgroundVolume(id.c_str(), kBackgroundNeutral);
     }
 
     report_session("session_stop", R"("ok":true,"channels":)" +

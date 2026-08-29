@@ -34,11 +34,36 @@ class QTimer;
 // moved with it, as a quiet diagnostic at the bottom, so Zoom Control is back
 // to join / engine / routing / speaker-director only.
 //
-// Every decision this panel renders -- which buttons are live, what the banner
-// says, what the nomination cost, whether the chosen source is on a program
-// track -- lives in src/talkback-dock-state.h so it can be exercised without
-// OBS, Qt or a meeting. Keep it that way: the two Majors this feature shipped
-// (F1, N1) both lived in wiring that no test could reach.
+// THE INTERCOM GRID (owner, after running the first version live with seven
+// talent: "need to rethink how this works and how it will look"). The panel
+// used to list the same people TWICE -- a key button each in a Key section, a
+// tick box each in a Talent section -- so it grew twice as fast as the cast,
+// and one 28-character Zoom display name flipped the adaptive key grid to a
+// single full-width column: a 400 px tower of buttons for seven people, and
+// nothing survivable at twenty-four.
+//
+// It is now ONE grid, on the model the operator already carries in their head
+// from a Clear-Com/RTS panel: an "All talent" key across the top, then one
+// COMPACT cell per person, two or three across by dock width, each cell both
+// the status display and the talk key. The tick-box list is behind an
+// [Edit talent] toggle and takes the grid's place while it is open, so there
+// is exactly one list of people on screen at a time.
+//
+// A cell IS a key button -- a restyled QPushButton, not a new interaction
+// path. Every rule the key buttons earned carries over untouched: press/
+// release push-to-talk and latch, the single TalkbackDockOpenKey record,
+// talkback_dock_release_lost(), the enablement delegation to
+// talkback_dock_key_buttons(), the never-disable-a-held-button guard, and
+// keying on the Qt main thread. What is new is what the cell SAYS: a state
+// line per person (ready / ON AIR / no channel / no talkback / not in
+// channel), from talkback_dock_cell_state().
+//
+// Every decision this panel renders -- which cells are live, what state each
+// person is in, what the banner says, what the nomination cost, whether the
+// chosen source is on a program track -- lives in src/talkback-dock-state.h
+// so it can be exercised without OBS, Qt or a meeting. Keep it that way: the
+// two Majors this feature shipped (F1, N1) both lived in wiring that no test
+// could reach.
 class ZoomTalkbackPanel : public QWidget {
     Q_OBJECT
 public:
@@ -56,12 +81,16 @@ private:
     void refresh();
     void refresh_probe();
     TalkbackDockOpenKey dock_open_key() const;
-    void rebuild_key_buttons(const std::vector<TalkbackDockKeyButton> &buttons);
-    // Re-flows the existing key buttons into the widest grid their labels fit
-    // in, and writes each label elided to its button. Safe to call at any time
-    // -- it never enables, disables or deletes a button, so it cannot drop a
-    // held key's `down` state (only an EnabledChange does that).
-    void layout_key_buttons();
+    void rebuild_cells(const std::vector<TalkbackDockCell> &cells);
+    // Re-flows the existing cells into two or three columns by the dock's
+    // current width and elides each name to the column it landed in. Safe to
+    // call at any time -- it never enables, disables or deletes a cell, so it
+    // cannot drop a held key's `down` state (only an EnabledChange does that).
+    void layout_cells();
+    // Shows the grid or the talent editor, never both. Refuses to open the
+    // editor while a key is open (talkback_dock_edit_mode()): hiding a held
+    // button strands the key.
+    void apply_edit_mode();
     // Sets the talent list's height to exactly the rows it should show, from
     // the widget's own measured row height.
     void size_nominee_list();
@@ -78,18 +107,39 @@ private:
     QLabel *m_banner_line   = nullptr;
     QLabel *m_banner_detail = nullptr;
 
-    // ── Key ─────────────────────────────────────────────────────────────────
-    QWidget   *m_key_row  = nullptr;
-    QCheckBox *m_latch_cb = nullptr;
-    QLabel    *m_notice   = nullptr;
-    std::vector<QPushButton *> m_key_buttons;
-    // The UNELIDED label for each button in m_key_buttons, index for index.
-    // The button's own text() is whatever fits, so it cannot be the source for
-    // the next re-flow: eliding an already-elided string compounds.
-    std::vector<QString> m_key_labels;
-    // The grid the buttons are currently laid out in, so a resize that does
-    // not change it does not re-parent every button.
-    int m_key_columns = 0;
+    // ── The grid ────────────────────────────────────────────────────────────
+    // One cell per keyable target. The cell is a QPushButton with two child
+    // labels rather than a two-line button text, so the name and the state
+    // line can carry different type -- the labels are
+    // WA_TransparentForMouseEvents, so every press and release still lands on
+    // the button and the keying machinery is untouched.
+    struct KeyCell {
+        QPushButton *button = nullptr;
+        QLabel      *name   = nullptr;
+        QLabel      *state  = nullptr;
+        // The UNELIDED name. The label's own text() is whatever fits, so it
+        // cannot be the source for the next re-flow: eliding an
+        // already-elided string compounds.
+        QString      label;
+        std::string  target;
+        bool         all_talent = false;
+    };
+    QWidget   *m_grid_area = nullptr;
+    QWidget   *m_cell_row  = nullptr;
+    QCheckBox *m_latch_cb  = nullptr;
+    QLabel    *m_notice    = nullptr;
+    std::vector<KeyCell> m_cells;
+    // The grid the cells are currently laid out in, so a resize that does not
+    // change it does not re-parent every cell.
+    int m_cell_columns = 0;
+
+    // ── Edit talent ─────────────────────────────────────────────────────────
+    // The checklist, which takes the grid's place rather than sitting under
+    // it. m_edit_requested is what the operator asked for; whether it is
+    // honoured is talkback_dock_edit_mode()'s answer, re-decided every tick.
+    QWidget     *m_edit_area = nullptr;
+    QPushButton *m_edit_btn  = nullptr;
+    bool         m_edit_requested = false;
 
     // ── Talk source ─────────────────────────────────────────────────────────
     QComboBox *m_source_combo = nullptr;
@@ -119,10 +169,10 @@ private:
     QPushButton *m_probe_btn               = nullptr;
     QLabel      *m_probe_status_label      = nullptr;
 
-    // What the last rebuild of the key buttons was built from. The buttons are
-    // rebuilt only when this changes: the tick runs ten times a second, and
-    // deleting the widget the operator is holding is not a refresh, it is a
-    // lost release (see talkback_dock_release_lost()).
+    // What the last rebuild of the grid was built from. The cells are rebuilt
+    // only when this changes: the tick runs ten times a second, and deleting
+    // the widget the operator is holding is not a refresh, it is a lost
+    // release (see talkback_dock_release_lost()).
     std::string m_key_signature;
     // What the talent list currently shows, and what it was last built from.
     // A rebuild loses the tick-boxes the operator is in the middle of setting
@@ -137,6 +187,11 @@ private:
     // off the controller's "open" flag.
     std::string m_dock_target;
     bool        m_dock_latched = false;
+    // Whether a talkback key is open ANYWHERE -- this dock's or another
+    // surface's -- as of the last tick. Read only by apply_edit_mode(), which
+    // must put the grid back on screen when one is live; the keying paths all
+    // use the richer TalkbackDockOpenKey record above.
+    bool        m_any_key_open = false;
     // m2: the source scan (obs_enum_sources + obs_get_source_by_name) is the
     // only libobs-walking work on this dock's 100ms tick, and obs_enum_sources
     // holds obs->data.sources_mutex and addref/releases every source for the

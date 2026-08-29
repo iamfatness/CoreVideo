@@ -176,6 +176,15 @@ public:
     // talkback_session_status() above -- see TalkbackNominationStatus's doc
     // comment for what each field means and where it comes from.
     TalkbackNominationStatus talkback_nomination_status() const;
+    // Milestone 7 (the intercom grid): who the engine has actually confirmed
+    // INTO a talkback channel, which the plan above cannot say. Assembled
+    // from the same "cmd":"talkback_nominate" stage lines, by
+    // talkback_channel_presence_apply_report()
+    // (src/talkback-nomination-dispatch.h). Polled and copied under m_mtx
+    // like every status above, and display-only: nothing in the keying path
+    // reads it. See TalkbackChannelPresence in src/talkback-nomination.h for
+    // the live defect it exists for and the two limits it carries.
+    TalkbackChannelPresence talkback_channel_presence() const;
 
     // Milestone 5's live-talkback senders. All five follow talkback_probe's
     // shape exactly: guarded by m_running, fire-and-forget, no result
@@ -406,6 +415,13 @@ private:
     // leaves this field untouched).
     TalkbackNominationStatus m_talkback_nomination_status;
     TalkbackNominationPending m_talkback_nomination_pending;
+    // Milestone 7: the per-person channel presence view, guarded by m_mtx
+    // like everything above it. Cleared at exactly the points
+    // talkback_nomination_reset() is called (a Leave, an engine restart) and
+    // additionally at the send of a new nominate -- a nomination replaces
+    // the standing channel set, so every observation in here is about
+    // channels the engine is destroying.
+    TalkbackChannelPresence m_talkback_channel_presence;
     // C1 (CRITICAL, final whole-branch review 2026-08-26): the identity
     // stamped into each talkback_nominate request and echoed back in that
     // attempt's terminal reports, so a report can be matched to the staging

@@ -151,6 +151,13 @@ QLabel#speakerValue { color: #999999; font-style: italic; }
 QLabel#errorLabel   { color: #ee5555; font-size: 11px; }
 QLabel[role="muted"] { color: #8a8a8a; font-size: 11px; }
 
+)css"
+    // SPLIT HERE, and it is not a formatting choice: MSVC caps a single
+    // string literal at 16380 bytes (C2026), which the sheet crossed when the
+    // intercom grid's rules landed. Adjacent literals concatenate at compile
+    // time, so this is one string to Qt and two to the compiler. Split at a
+    // section boundary so a future rule lands on the obvious side of it.
+    R"css(
 /* Talkback (Milestone 7), all of it on the Talkback dock. Each of the two
    pairs below is a calm default plus one flagged state, switched by a dynamic
    property from zoom-talkback-panel.cpp's set_style_flag(). Amber is "you
@@ -219,62 +226,142 @@ QLabel#talkbackBannerDetail[state="waiting"],
 QLabel#talkbackBannerDetail[state="refused"] { color: #e0a020; }
 QLabel#talkbackBannerDetail[state="live"]    { color: #ffd8d8; }
 
-/* ─── Talkback: key buttons ─────────────────────────────────────────────────
-   Sized to be the biggest controls on the panel, because keying is the
-   mid-show action and everything else there is setup done once. kind="all" is
-   the all-talent target, which is what a director reaches for when something
-   has gone wrong; keyed="true" is the one that is actually live, painted the
-   same red as the banner so the eye goes straight from the state to the
-   control holding it. */
-QPushButton[role="key"] {
-    min-height: 44px;
-    padding: 6px 10px;
-    font-size: 14px;
-    font-weight: 600;
+/* --- Talkback: the intercom grid ------------------------------------------
+   ONE CELL PER PERSON, and the cell is both the status display and the talk
+   key. The version this replaces listed everybody twice (a key button each,
+   a tick box each) and sized every button to the longest name in the room,
+   so one 28-character Zoom display name turned seven people into a 400 px
+   column of full-width buttons.
+
+   A cell is COMPACT and FIXED-HEIGHT on purpose: this is a panel to be
+   scanned, and 24 people have to stay usable. The two lines inside it are
+   real child QLabels (QPushButton draws one font), so their colour is set
+   here and not by the button's own `color`.
+
+   The state comes from talkback_dock_cell_state() via a "cell" property. The
+   colour vocabulary is the rest of this sheet's: red ONLY for a key that is
+   actually live to talent, amber for "you should look at this", grey-out for
+   "nothing you do here reaches them". */
+QPushButton[role="cell"] {
+    min-height: 46px;
+    padding: 0px;
+    text-align: left;
     border: 1px solid #4a5260;
+    border-radius: 4px;
     background-color: #2f3540;
-    color: #e4e4e4;
 }
-QPushButton[role="key"]:hover   { background-color: #3a4250; border-color: #626d80; }
-QPushButton[role="key"]:pressed { background-color: #202430; }
-QPushButton[role="key"]:disabled {
-    background-color: #1e1e1e; border-color: #303030; color: #565656;
+QPushButton[role="cell"]:hover   { background-color: #3a4250; border-color: #626d80; }
+QPushButton[role="cell"]:pressed { background-color: #202430; }
+QPushButton[role="cell"]:disabled { background-color: #1e1e1e; border-color: #303030; }
+
+/* All talent: the target a director reaches for when something has gone
+   wrong, and the one that keeps working when the channel budget has not
+   covered everybody. It spans the full width of the grid, above everyone. */
+QPushButton[role="cell"][kind="all"] {
+    background-color: #1D6DC2; border-color: #1D6DC2;
 }
-QPushButton[role="key"][kind="all"] {
-    background-color: #1D6DC2; border-color: #1D6DC2; color: #ffffff;
+QPushButton[role="cell"][kind="all"]:hover   { background-color: #2479d6; border-color: #2479d6; }
+QPushButton[role="cell"][kind="all"]:pressed { background-color: #185db0; }
+QPushButton[role="cell"][kind="all"]:disabled {
+    background-color: #1a3a5c; border-color: #1a3a5c;
 }
-QPushButton[role="key"][kind="all"]:hover   { background-color: #2479d6; border-color: #2479d6; }
-QPushButton[role="key"][kind="all"]:pressed { background-color: #185db0; }
-QPushButton[role="key"][kind="all"]:disabled {
-    background-color: #1a3a5c; border-color: #1a3a5c; color: #565656;
+
+/* Amber edges for the two states that mean "this person cannot hear you and
+   you can do something about it". Deliberately a border and not a fill: a
+   filled cell competes with the ON AIR one, and only one thing on this panel
+   is allowed to shout. */
+QPushButton[role="cell"][cell="nochannel"],
+QPushButton[role="cell"][cell="notinchannel"] {
+    border: 1px solid rgba(240,180,41,0.65);
+    background-color: rgba(240,180,41,0.10);
 }
-/* The live key stays red under the cursor and under a held press. Qt resolves
-   equal-specificity rules by source order but a pseudo-state adds specificity,
-   so the :hover/:pressed variants have to be spelled out or a held all-talent
-   button would repaint itself with the accent's own pressed colour for exactly
-   as long as it is on air. */
-QPushButton[role="key"][keyed="true"],
-QPushButton[role="key"][kind="all"][keyed="true"] {
-    background-color: #b02020; border-color: #ff4d4d; color: #ffffff;
+QPushButton[role="cell"][cell="nochannel"]:hover,
+QPushButton[role="cell"][cell="notinchannel"]:hover {
+    background-color: rgba(240,180,41,0.16);
 }
-QPushButton[role="key"][keyed="true"]:hover,
-QPushButton[role="key"][kind="all"][keyed="true"]:hover {
-    background-color: #c02626; border-color: #ff6b6b; color: #ffffff;
+/* Nothing reaches them at all -- their client cannot do talkback, or the
+   budget could not cover them. Darker than a disabled cell rather than
+   louder than one: there is no action here, and amber would send the
+   operator to re-assign channels that cannot help. */
+QPushButton[role="cell"][cell="unreachable"] {
+    background-color: #191919; border-color: #2b2b2b;
 }
-QPushButton[role="key"][keyed="true"]:pressed,
-QPushButton[role="key"][kind="all"][keyed="true"]:pressed {
-    background-color: #8c1c1c; border-color: #ff4d4d; color: #ffffff;
+QPushButton[role="cell"][cell="unreachable"]:hover {
+    background-color: #1f1f1f; border-color: #333333;
 }
-/* keyed + disabled should be unreachable: the flag is only set for a key THIS
-   dock holds, and talkback_dock_key_buttons() keeps that button enabled. Spelt
-   out anyway, because Qt resolves an unlisted overlap between [keyed="true"]
-   and :disabled by specificity and source order rather than by intent, and a
-   red control that cannot be pressed is the one thing this colour must never
-   mean. Disabled wins. */
-QPushButton[role="key"][keyed="true"]:disabled,
-QPushButton[role="key"][kind="all"][keyed="true"]:disabled {
-    background-color: #1e1e1e; border-color: #303030; color: #565656;
+
+/* The live key, painted the same red as the banner so the eye goes straight
+   from the state to the control holding it. Qt resolves equal-specificity
+   rules by source order but a pseudo-state adds specificity, so :hover and
+   :pressed have to be spelled out or a held all-talent cell would repaint
+   itself with the accent's own pressed colour for exactly as long as it is
+   on air. */
+QPushButton[role="cell"][cell="onair"],
+QPushButton[role="cell"][kind="all"][cell="onair"] {
+    background-color: #b02020; border-color: #ff4d4d;
 }
+QPushButton[role="cell"][cell="onair"]:hover,
+QPushButton[role="cell"][kind="all"][cell="onair"]:hover {
+    background-color: #c02626; border-color: #ff6b6b;
+}
+QPushButton[role="cell"][cell="onair"]:pressed,
+QPushButton[role="cell"][kind="all"][cell="onair"]:pressed {
+    background-color: #8c1c1c; border-color: #ff4d4d;
+}
+/* on-air + disabled should be unreachable: the state is only set for a key
+   THIS dock holds, and talkback_dock_key_buttons() keeps that target's cell
+   enabled. Spelt out anyway, because Qt resolves an unlisted overlap between
+   [cell="onair"] and :disabled by specificity and source order rather than by
+   intent, and a red control that cannot be pressed is the one thing this
+   colour must never mean. Disabled wins. */
+QPushButton[role="cell"][cell="onair"]:disabled,
+QPushButton[role="cell"][kind="all"][cell="onair"]:disabled {
+    background-color: #1e1e1e; border-color: #303030;
+}
+
+/* The two lines inside a cell. The NAME is what the operator aims at, so it
+   carries the weight; the state line is a caption under it and is the only
+   part that changes colour with the state. Both labels get [off="true"] when
+   the cell is disabled -- flagged rather than left to a ":disabled QLabel#id"
+   descendant rule, because Qt resolves that overlap by specificity and the ID
+   rule would win, leaving bright text inside a greyed-out control. */
+QLabel#talkbackCellName {
+    background: transparent; border: none;
+    color: #e4e4e4; font-size: 12px; font-weight: 600;
+}
+QLabel#talkbackCellName[cell="onair"] { color: #ffffff; }
+/* All talent sits on a filled accent, so its two lines need their own
+   contrast: the muted grey below is calibrated against the neutral cell
+   ground and disappears on blue. Set from a property rather than a
+   ":cell[kind=all] QLabel" descendant rule, because Qt resolves the overlap
+   with the ID rules below by specificity and the ID would win. */
+QLabel#talkbackCellName[kind="all"]   { color: #ffffff; }
+QLabel#talkbackCellName[off="true"]   { color: #6a6a6a; }
+QLabel#talkbackCellState {
+    background: transparent; border: none;
+    color: #909090; font-size: 10px;
+}
+QLabel#talkbackCellState[cell="nochannel"],
+QLabel#talkbackCellState[cell="notinchannel"] { color: #f0b429; font-weight: 600; }
+QLabel#talkbackCellState[cell="unreachable"]  { color: #6f6f6f; }
+QLabel#talkbackCellState[cell="onair"] {
+    color: #ffffff; font-weight: 800; letter-spacing: 1px;
+}
+QLabel#talkbackCellState[kind="all"] { color: rgba(255,255,255,0.78); }
+QLabel#talkbackCellState[off="true"] { color: #565656; }
+
+/* The bottom strip's own button ([Edit talent] / [Done]). Ordinary weight
+   and ordinary size: it is setup, and the grid above it is the panel. */
+QPushButton[role="strip"] {
+    min-height: 24px;
+    padding: 3px 10px;
+    font-size: 11px;
+    border: 1px solid #3a3a3a;
+    background-color: #262626;
+    color: #c8c8c8;
+}
+QPushButton[role="strip"]:hover   { background-color: #303030; border-color: #4a4a4a; }
+QPushButton[role="strip"]:checked { background-color: #1D6DC2; border-color: #1D6DC2; color: #ffffff; }
 
 /* A control that must stay reachable without competing for attention -- the
    Milestone 1 probe's disclosure toggle at the bottom of the Talkback dock. */

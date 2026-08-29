@@ -232,31 +232,63 @@ int main()
               "the row bounds are inverted");
     }
     {
-        // Two columns only when two of the WIDEST button fit with the gap
-        // between them. Anything less is one full-width column -- which is
-        // what stops a name being clipped mid-glyph at both ends, the defect
-        // that made "Grant Whitehead" render as "rant Whitehead".
-        check(talkback_dock_key_columns(320, 150, 8) == 2,
-              "two buttons that fit were not given two columns");
-        check(talkback_dock_key_columns(308, 150, 8) == 2,
-              "the exact two-column fit was rejected");
-        check(talkback_dock_key_columns(307, 150, 8) == 1,
-              "two columns were used one pixel too narrow, which is where the "
-              "clipping starts");
-        check(talkback_dock_key_columns(200, 150, 8) == 1,
-              "a narrow dock kept two columns");
-        // The gap counts: it is the thing that makes the fit exact.
-        check(talkback_dock_key_columns(300, 150, 0) == 2,
-              "the gap was charged when there was none");
-        check(talkback_dock_key_columns(300, 150, 8) == 1,
-              "the gap was not charged against the fit");
-        // Never zero columns, whatever it is asked.
-        check(talkback_dock_key_columns(0, 150, 8) == 1,
-              "an unrealised width produced no columns at all");
-        check(talkback_dock_key_columns(320, 0, 8) == 1,
-              "an unmeasured label produced no columns at all");
-        check(talkback_dock_key_columns(10, 4000, 8) == 1,
-              "a label wider than the dock produced no columns at all");
+        // TWO OR THREE, NEVER ONE. The grid this replaces sized every button
+        // to the WIDEST label in the room, so one 28-character display name
+        // ("Ronny Hofsoy, Tromso, Norway", 2026-08-29) dropped seven people
+        // into a single full-width column -- a 400 px tower of buttons, and
+        // nothing survivable at twenty-four. A cell is sized to a minimum
+        // readable width instead and a name that does not fit is elided.
+        //
+        // The floor of two is the load-bearing claim: this grid is a status
+        // display as much as a control surface, and one column of 24 cells is
+        // not scannable whatever the dock width.
+        check(talkback_dock_cell_columns(400, 118, 8) == 3,
+              "a wide dock did not get three columns");
+        check(talkback_dock_cell_columns(370, 118, 8) == 3,
+              "the exact three-column fit was rejected");
+        check(talkback_dock_cell_columns(369, 118, 8) == 2,
+              "three columns were used one pixel too narrow");
+        check(talkback_dock_cell_columns(276, 118, 8) == 2,
+              "the 320 px dock minimum did not get two columns");
+        // The gap counts: it is what makes the fit exact.
+        check(talkback_dock_cell_columns(354, 118, 0) == 3,
+              "the gaps were charged when there were none");
+        check(talkback_dock_cell_columns(354, 118, 8) == 2,
+              "the gaps were not charged against the fit");
+        // Never one, never zero, whatever it is asked -- including before the
+        // layout has run and the width is not real yet.
+        check(talkback_dock_cell_columns(0, 118, 8) == 2,
+              "an unrealised width collapsed the grid to a column");
+        check(talkback_dock_cell_columns(120, 118, 8) == 2,
+              "an absurdly narrow dock collapsed the grid to a column");
+        check(talkback_dock_cell_columns(400, 0, 8) == 2,
+              "an unmeasured cell width collapsed the grid to a column");
+        check(kTalkbackDockCellMinPx > 0,
+              "the minimum cell width is not a width");
+    }
+
+    // ── Edit mode never costs the operator a key ─────────────────────
+    //
+    // The grid and the talent checklist share one slot, which is the whole
+    // point (the same people used to appear twice on one panel). Hiding a
+    // button the operator is HOLDING strands the key: a latch loses its only
+    // close affordance and a push-to-talk loses its release, leaving the
+    // director live to talent with nothing on screen to stop it.
+    {
+        TalkbackDockOpenKey none;
+        check(talkback_dock_edit_mode(true, none),
+              "the editor would not open with nothing keyed");
+        check(!talkback_dock_edit_mode(false, none),
+              "the editor opened without being asked for");
+        check(!talkback_dock_edit_mode(true, dock_key("Sarah", true)),
+              "the editor hid the grid while this dock held a latched key");
+        check(!talkback_dock_edit_mode(true, dock_key("Sarah", false)),
+              "the editor hid the grid while this dock held a key");
+        TalkbackDockOpenKey other = dock_key("Sarah", false);
+        other.dock_owned = false;
+        check(!talkback_dock_edit_mode(true, other),
+              "the editor stayed open while another surface held a key -- the "
+              "grid is what the operator needs to be looking at");
     }
 
     // ── Buttons agree with key_on()'s own refusal rule ─────────────────────
@@ -383,6 +415,269 @@ int main()
             check(contains(b.reason, "source"),
                   "the reason does not name the missing source");
         }
+    }
+
+    // ── The intercom grid: what a cell says about a person ───────────
+    //
+    // THE REDESIGN'S OWN CLAIM. The old panel could only say "this person has
+    // a channel". On 2026-08-29 that was true of John Wallace and he could
+    // hear NOTHING: every invite for him was refused SDKERR_WRONG_USAGE (2)
+    // because he was in a different breakout room from the engine, and Zoom's
+    // talkback reaches only the room the inviter is in. Grant Whitehead's
+    // client reported no talkback support at all (supported:false, then
+    // SDKERR_INVALID_PARAMETER (3)). Both rendered as a ready, pressable key
+    // on a person who hears silence.
+    //
+    // Enablement is NOT re-derived here -- a cell carries
+    // talkback_dock_key_buttons()' own answer verbatim, so the state below can
+    // never make a cell live that key_on() would refuse. These pin the STATE.
+    {
+        auto plan = confirmed_plan();
+        plan.requested = {"Sarah", "Luis", "Dana", "Mo"};
+        plan.uncovered_private = {"Mo"};
+        TalkbackChannelPresence presence;
+        talkback_presence_note(presence, "Sarah", TalkbackPersonPresence::Present);
+        talkback_presence_note(presence, "Luis", TalkbackPersonPresence::NotInChannel);
+        talkback_presence_note(presence, "Dana", TalkbackPersonPresence::NoTalkback);
+        // Mo: nothing observed at all.
+
+        const auto cells = talkback_dock_cells(plan, ready_context(), presence, "");
+        check(cells.size() == 5,
+              "expected one All cell plus one per nominee");
+        check(cells.front().all_talent &&
+                  cells.front().target == kTalkbackAllTalentTarget,
+              "the all-talent cell is not first, or is not flagged as such");
+
+        const auto find = [&cells](const std::string &t) -> const TalkbackDockCell * {
+            for (const auto &c : cells) if (c.target == t) return &c;
+            return nullptr;
+        };
+        const auto *sarah = find("Sarah");
+        const auto *luis  = find("Luis");
+        const auto *dana  = find("Dana");
+        const auto *mo    = find("Mo");
+
+        check(sarah && sarah->state == TalkbackDockCellState::Ready &&
+                  sarah->state_line == "ready",
+              "a covered, present nominee was not shown as ready");
+        check(luis && luis->state == TalkbackDockCellState::NotInChannel,
+              "somebody with a channel who is not in it was shown as ready -- "
+              "this is the 2026-08-29 breakout-room case");
+        check(luis && contains(luis->state_line, "not in channel"),
+              "the not-in-channel state line does not say so");
+        check(luis && contains(luis->hint, "breakout"),
+              "the not-in-channel hint does not name the likely cause");
+        check(dana && dana->state == TalkbackDockCellState::Unreachable &&
+                  contains(dana->state_line, "no talkback"),
+              "a client with no talkback support was not shown as unreachable");
+        check(mo && mo->state == TalkbackDockCellState::NoChannel &&
+                  contains(mo->state_line, "no channel"),
+              "a nominee with no private channel was not shown as such");
+        // Enablement is the key buttons' answer, verbatim -- never re-derived
+        // from the state above.
+        const auto buttons = talkback_dock_key_buttons(plan, ready_context());
+        check(buttons.size() == cells.size(),
+              "the grid and the key buttons disagree about how many targets "
+              "there are");
+        for (std::size_t i = 0; i < cells.size(); ++i)
+            check(cells[i].enabled == buttons[i].enabled &&
+                      cells[i].reason == buttons[i].reason &&
+                      cells[i].target == buttons[i].target,
+                  "a cell re-derived its own enablement instead of carrying "
+                  "talkback_dock_key_buttons()' answer");
+    }
+    {
+        // ON AIR BEATS EVERYTHING. A live key is the one fact on this panel an
+        // operator must never have to reason about; every other state is about
+        // whether a key WOULD work. `live_target` is the caller's answer (the
+        // banner says Live AND this dock owns it), so the engine-confirmation
+        // rule is decided once and not a second time here.
+        auto plan = confirmed_plan();
+        plan.unreachable = {"Luis"};
+        plan.uncovered_private = {"Luis"};
+        TalkbackChannelPresence presence;
+        talkback_presence_note(presence, "Luis", TalkbackPersonPresence::NotInChannel);
+        auto ctx = ready_context();
+        ctx.open = dock_key("Luis", /*latched=*/true);
+        const auto cells = talkback_dock_cells(plan, ctx, presence, "Luis");
+        for (const auto &c : cells) {
+            if (c.target != "Luis") continue;
+            check(c.state == TalkbackDockCellState::OnAir,
+                  "a cell holding a live key did not say ON AIR");
+            check(c.state_line == "ON AIR",
+                  "the live cell's state line does not say ON AIR");
+        }
+        // ...and nothing else claims it.
+        for (const auto &c : cells)
+            check(c.target == "Luis" || c.state != TalkbackDockCellState::OnAir,
+                  "a cell that is not holding the key claimed to be ON AIR");
+        // No live target reported -> no cell is ON AIR, whatever the dock's
+        // own record says. This is the C2 rule at the cell.
+        for (const auto &c : talkback_dock_cells(plan, ctx, presence, ""))
+            check(c.state != TalkbackDockCellState::OnAir,
+                  "a cell painted itself ON AIR without the engine's "
+                  "confirmation");
+    }
+    {
+        // UNREACHABLE BEATS NO-CHANNEL. TalkbackPlan::unreachable is always a
+        // subset of uncovered_private, so the generic "no channel, assign
+        // again" would otherwise win and send the operator to re-assign
+        // channels for somebody no assignment can reach.
+        auto plan = confirmed_plan();
+        plan.requested = {"Sarah", "Luis"};
+        plan.uncovered_private = {"Luis"};
+        plan.unreachable = {"Luis"};
+        plan.all_talent_complete = false;
+        const auto cells =
+            talkback_dock_cells(plan, ready_context(), TalkbackChannelPresence{}, "");
+        for (const auto &c : cells) {
+            if (c.target != "Luis") continue;
+            check(c.state == TalkbackDockCellState::Unreachable,
+                  "an unreachable nominee was reported as merely having no "
+                  "channel");
+            check(!contains(c.state_line, "no channel"),
+                  "an unreachable nominee was told to look for a channel");
+        }
+        // The same precedence from the OTHER source of unreachability: the
+        // person's client, not the budget.
+        auto covered = confirmed_plan();
+        TalkbackChannelPresence presence;
+        talkback_presence_note(presence, "Luis", TalkbackPersonPresence::NoTalkback);
+        for (const auto &c :
+             talkback_dock_cells(covered, ready_context(), presence, "")) {
+            if (c.target != "Luis") continue;
+            check(c.state == TalkbackDockCellState::Unreachable,
+                  "a client with no talkback support was shown as ready "
+                  "because it had a channel");
+        }
+    }
+    {
+        // NO-CHANNEL BEATS NOT-IN-CHANNEL: there is no channel to be in. And
+        // a plan that is not confirmed yet says "assigning...", not "no
+        // channel" -- a ladder that is still running is not a failure to
+        // re-assign.
+        auto plan = confirmed_plan();
+        plan.requested = {"Sarah", "Luis"};
+        plan.uncovered_private = {"Luis"};
+        TalkbackChannelPresence presence;
+        talkback_presence_note(presence, "Luis", TalkbackPersonPresence::NotInChannel);
+        for (const auto &c :
+             talkback_dock_cells(plan, ready_context(), presence, "")) {
+            if (c.target != "Luis") continue;
+            check(c.state == TalkbackDockCellState::NoChannel,
+                  "somebody with no channel at all was described by their "
+                  "membership of it");
+        }
+        TalkbackNominationPlan pending;
+        check(talkback_dock_cell_state_line(TalkbackDockCellState::NoChannel,
+                                            pending) == "assigning...",
+              "a ladder that has not reported yet was called a missing "
+              "channel");
+        auto done = confirmed_plan();
+        check(talkback_dock_cell_state_line(TalkbackDockCellState::NoChannel,
+                                            done) == "no channel",
+              "a confirmed plan's shortfall was still called in progress");
+    }
+    {
+        // UNKNOWN IS READY, not absent. An engine that reports none of the
+        // membership stages, or a plugin that has simply not seen them yet,
+        // must not paint every person amber -- absence of evidence is not
+        // evidence of absence, and this record never gates a key anyway.
+        const auto cells = talkback_dock_cells(
+            confirmed_plan(), ready_context(), TalkbackChannelPresence{}, "");
+        for (const auto &c : cells)
+            check(c.state == TalkbackDockCellState::Ready,
+                  "a person nobody has reported on was painted as a problem");
+    }
+    {
+        // All talent is a fan-out, not a person: no client to lack support, no
+        // membership of its own. Its only failures are the plan's.
+        TalkbackChannelPresence presence;
+        talkback_presence_note(presence, kTalkbackAllTalentTarget,
+                               TalkbackPersonPresence::NotInChannel);
+        const auto ready = talkback_dock_cells(confirmed_plan(),
+                                               ready_context(), presence, "");
+        check(ready.front().state == TalkbackDockCellState::Ready,
+              "the all-talent cell took a per-person absence personally");
+
+        TalkbackNominationPlan nothing;
+        const auto empty = talkback_dock_cells(nothing, ready_context(),
+                                               TalkbackChannelPresence{}, "");
+        check(empty.size() == 1 &&
+                  empty.front().state == TalkbackDockCellState::NoChannel,
+              "all-talent was shown as ready with nothing assigned");
+
+        auto short_fanout = confirmed_plan();
+        short_fanout.all_talent_complete = false;
+        check(talkback_dock_cells(short_fanout, ready_context(),
+                                  TalkbackChannelPresence{}, "")
+                      .front()
+                      .state == TalkbackDockCellState::Unreachable,
+              "an all-talent fan-out the channel cap could not complete was "
+              "still offered as reaching everyone");
+    }
+    {
+        // The global refusals (engine stopped, out of meeting, no talk source)
+        // are NOT per-person facts. They disable every cell with their own
+        // reason -- which is the key buttons' job, unchanged -- while the
+        // state line still describes the PERSON. "Ready, and you cannot press
+        // it right now" is two true facts, and the banner says which.
+        auto ctx = ready_context();
+        ctx.engine_running = false;
+        for (const auto &c : talkback_dock_cells(confirmed_plan(), ctx,
+                                                 TalkbackChannelPresence{}, "")) {
+            check(!c.enabled, "a cell was live with the engine stopped");
+            check(c.state == TalkbackDockCellState::Ready,
+                  "a stopped engine was reported as a person's own problem");
+            check(contains(c.reason, "engine"),
+                  "the cell lost the key button's refusal reason");
+        }
+    }
+
+    // ── Per-person presence, the record the states are read from ───────
+    {
+        TalkbackChannelPresence presence;
+        check(talkback_presence_for(presence, "Sarah") ==
+                  TalkbackPersonPresence::Unknown,
+              "an empty record invented a state for somebody");
+        talkback_presence_note(presence, "Sarah", TalkbackPersonPresence::NotInChannel);
+        check(talkback_presence_for(presence, "Sarah") ==
+                  TalkbackPersonPresence::NotInChannel,
+              "an observation was not recorded");
+        talkback_presence_note(presence, "Sarah", TalkbackPersonPresence::Present);
+        check(talkback_presence_for(presence, "Sarah") ==
+                  TalkbackPersonPresence::Present,
+              "a later confirmed join did not replace an earlier refusal -- "
+              "on 2026-08-29 three people were refused SDKERR_TOO_FREQUENT_"
+              "CALL on the all-talent invite and admitted to their own "
+              "channel a second later");
+        // NoTalkback survives a later NotInChannel, because the wire produces
+        // BOTH for a client that cannot do talkback (supported:false, then the
+        // invite refused) and the specific diagnosis is the useful one: "their
+        // Zoom cannot do this" rather than "re-assign channels".
+        talkback_presence_note(presence, "Dana", TalkbackPersonPresence::NoTalkback);
+        talkback_presence_note(presence, "Dana", TalkbackPersonPresence::NotInChannel);
+        check(talkback_presence_for(presence, "Dana") ==
+                  TalkbackPersonPresence::NoTalkback,
+              "a no-talkback client was downgraded to a generic absence by "
+              "its own invite failure");
+        talkback_presence_note(presence, "Dana", TalkbackPersonPresence::Present);
+        check(talkback_presence_for(presence, "Dana") ==
+                  TalkbackPersonPresence::Present,
+              "a confirmed join could not clear a stale no-support report");
+        // A nameless or Unknown observation is not a fact.
+        talkback_presence_note(presence, "", TalkbackPersonPresence::Present);
+        talkback_presence_note(presence, "Sarah", TalkbackPersonPresence::Unknown);
+        check(talkback_presence_for(presence, "Sarah") ==
+                  TalkbackPersonPresence::Present,
+              "an Unknown observation erased a real one");
+        talkback_presence_reset(presence);
+        check(talkback_presence_for(presence, "Sarah") ==
+                  TalkbackPersonPresence::Unknown &&
+                  talkback_presence_for(presence, "Dana") ==
+                      TalkbackPersonPresence::Unknown,
+              "the world-reset left observations about destroyed channels "
+              "behind");
     }
 
     // ── The nomination outcome ────────────────────────────────────────────

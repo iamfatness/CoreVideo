@@ -14,7 +14,6 @@
 #include <QFontMetrics>
 #include <QFrame>
 #include <QGridLayout>
-#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -25,6 +24,7 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QStyle>
 #include <QStyleOptionButton>
 #include <QTimer>
@@ -44,19 +44,27 @@
 //
 // The first render used 8 / 6 / 4 / 8 across four adjacent blocks, which is
 // what "the UI doesn't feel polished" looks like before anyone can name it.
-// These four numbers are the only ones this file is allowed to space with, and
-// they match the sibling docks' own outer margin (zoom-dock.cpp and
-// zoom-iso-panel.cpp both open with 8 px and space at 6-8).
+// These three numbers are the only ones this file is allowed to space with,
+// and they match the sibling docks' own outer margin (zoom-dock.cpp and
+// zoom-iso-panel.cpp both open with 8 px and space at 6-8). kGroupPad is gone
+// with the group boxes it padded: the intercom grid IS the panel, and wrapping
+// it in a captioned frame only spent height saying so.
 static constexpr int kDockMargin  = 10;  // panel edge to content
-static constexpr int kSectionGap  = 14;  // between the banner and the groups
-static constexpr int kGroupPad    = 4;   // inside a group, ON TOP of the
-                                         // stylesheet's own QGroupBox padding,
-                                         // so no control sits on the border
+static constexpr int kSectionGap  = 14;  // between the panel's own sections
 static constexpr int kInnerGap    = 8;   // between controls in one section
 
-// The gap the key grid uses, kept equal to kInnerGap and named separately
-// because talkback_dock_key_columns() is given it as an argument.
-static constexpr int kKeyGridGap = kInnerGap;
+// The gap between cells in the grid, kept equal to kInnerGap and named
+// separately because talkback_dock_cell_columns() is given it as an argument.
+static constexpr int kCellGap = kInnerGap;
+
+// The horizontal breathing room inside a cell, applied as the cell layout's
+// own margin rather than as stylesheet padding -- a QPushButton with a layout
+// inside it lays that layout out over its whole rect, not over the style's
+// contents rect, so stylesheet padding would be counted by
+// sizeFromContents() and then not actually applied. layout_cells() charges
+// this against the room a name has, which is why it is a constant and not
+// two literals.
+static constexpr int kCellNamePad = 9;
 
 // The panel's own tick. Deliberately the same 100ms the Zoom Control dock used
 // when this surface lived inside it: the lost-release backstop
@@ -135,6 +143,20 @@ static void set_style_state(QWidget *widget, const char *name, const char *value
     widget->style()->polish(widget);
 }
 
+// The cell's state as a stylesheet property value. One place maps the enum to
+// a string, so a new state cannot reach the sheet under two spellings.
+static const char *cell_state_name(TalkbackDockCellState state)
+{
+    switch (state) {
+    case TalkbackDockCellState::OnAir:        return "onair";
+    case TalkbackDockCellState::NoChannel:    return "nochannel";
+    case TalkbackDockCellState::Unreachable:  return "unreachable";
+    case TalkbackDockCellState::NotInChannel: return "notinchannel";
+    case TalkbackDockCellState::Ready:        break;
+    }
+    return "ready";
+}
+
 static const char *banner_state_name(TalkbackDockBannerState state)
 {
     switch (state) {
@@ -190,11 +212,11 @@ ZoomTalkbackPanel::ZoomTalkbackPanel(QWidget *parent)
     // clipped politely -- Qt shrinks whatever is shrinkable. In the owner's
     // first look at this dock that landed on the two things that could give:
     // the talent list collapsed to its 3-row minimum (showing about two and a
-    // half rows for five people, with a scrollbar) and the third row of key
-    // buttons was squeezed short against the Key group's bottom border. Both
-    // are the same defect. With the content in a scroll area the sections keep
-    // the size they ask for and the DOCK scrolls, which is also how a short
-    // dock stays usable at all.
+    // half rows for five people, with a scrollbar) and the bottom row of key
+    // buttons was squeezed flat against the group box that then held them.
+    // Both were the same defect. With the content in a scroll area the
+    // sections keep the size they ask for and the DOCK scrolls, which is also
+    // how a 24-person grid stays usable in a short dock.
     auto *outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 0, 0, 0);
     outer->setSpacing(0);
@@ -253,34 +275,127 @@ ZoomTalkbackPanel::ZoomTalkbackPanel(QWidget *parent)
     banner_layout->addWidget(m_banner_detail);
     layout->addWidget(m_banner);
 
-    // ── 2. Key ──────────────────────────────────────────────────────────────
+    // ── 2. The grid, or the talent editor ──────────────────────────────────
     //
-    // The dominant block, because keying is the mid-show action and everything
-    // else on this panel is setup done once. One button per keyable target,
-    // rebuilt from the CONFIRMED plan by refresh(). Empty until something is
-    // nominated -- there is nothing to key before that, and an always-present
-    // button that always refuses teaches the operator to ignore refusals.
-    auto *key_group = new QGroupBox(QStringLiteral("Key"), body);
-    auto *key_layout = new QVBoxLayout(key_group);
-    key_layout->setContentsMargins(kGroupPad, kGroupPad, kGroupPad, kGroupPad);
-    key_layout->setSpacing(kInnerGap);
+    // ONE OF THE TWO, NEVER BOTH. The whole redesign is here: the panel used
+    // to show the same people as key buttons AND as tick boxes, so seven
+    // talent meant fourteen rows of person and a 24-person show was absurd.
+    // The editor now takes the grid's place while it is open
+    // (apply_edit_mode()), so there is exactly one list of people on screen.
+    m_grid_area = new QWidget(body);
+    auto *grid_area_layout = new QVBoxLayout(m_grid_area);
+    grid_area_layout->setContentsMargins(0, 0, 0, 0);
+    grid_area_layout->setSpacing(kInnerGap);
 
-    m_key_row = new QWidget(key_group);
-    auto *key_grid = new QGridLayout(m_key_row);
-    key_grid->setContentsMargins(0, 0, 0, 0);
-    key_grid->setSpacing(kInnerGap);
-    key_layout->addWidget(m_key_row);
+    m_cell_row = new QWidget(m_grid_area);
+    auto *cell_grid = new QGridLayout(m_cell_row);
+    cell_grid->setContentsMargins(0, 0, 0, 0);
+    cell_grid->setSpacing(kCellGap);
+    grid_area_layout->addWidget(m_cell_row);
+    layout->addWidget(m_grid_area);
 
-    auto *latch_row = new QHBoxLayout;
-    latch_row->setSpacing(kInnerGap);
-    m_latch_cb = new QCheckBox(QStringLiteral("Latch"), key_group);
+    // ── The talent editor ──────────────────────────────────────────────────
+    //
+    // Setup, not showtime. The hint, the button and the report say
+    // "channels", never "nominate": the wire command is still
+    // talkback_nominate and the code still calls it that, but the owner's
+    // verdict on the operator-facing word was that it is "not a word that
+    // really makes sense here". What the operator is actually doing is
+    // standing up a channel per person, in advance, so the key press has
+    // nothing left to do but open the microphone.
+    m_edit_area = new QWidget(body);
+    m_edit_area->setVisible(false);
+    auto *edit_layout = new QVBoxLayout(m_edit_area);
+    edit_layout->setContentsMargins(0, 0, 0, 0);
+    edit_layout->setSpacing(kInnerGap);
+
+    auto *nominate_hint = new QLabel(
+        "Tick who you'll talk to. Each gets a standing channel.", m_edit_area);
+    nominate_hint->setWordWrap(true);
+    nominate_hint->setProperty("role", "muted");
+    // The long version of the hint. Body copy under a caption is read once
+    // and then skipped forever, so the panel gets ONE line and the paragraph
+    // that explains WHY the channel exists before the press stays one hover
+    // away -- the same trade the track warning makes with its short_text.
+    nominate_hint->setToolTip(
+        "Everyone ticked gets a standing Zoom channel, created now so a key "
+        "press only has to open the microphone. Zoom allows 16 channels and 10 "
+        "people per channel; anyone the budget cannot cover is named below.");
+    edit_layout->addWidget(nominate_hint);
+
+    m_nominee_list = new QListWidget(m_edit_area);
+    m_nominee_list->setObjectName(QStringLiteral("talkbackNominees"));
+    m_nominee_list->setSelectionMode(QAbstractItemView::NoSelection);
+    m_nominee_list->setFocusPolicy(Qt::NoFocus);
+    m_nominee_list->setToolTip(
+        "Tick the people you may need to talk to. Zoom allows 16 channels and "
+        "10 people per channel; anyone the budget cannot cover is named below.");
+    // Height is set from the REAL row height once there are rows to measure --
+    // see size_nominee_list(). Guessing it from fontMetrics() is what showed
+    // two and a half rows for five people.
+    size_nominee_list();
+    edit_layout->addWidget(m_nominee_list);
+
+    m_nominate_btn = new QPushButton(QStringLiteral("Assign channels"),
+                                     m_edit_area);
+    m_nominate_btn->setEnabled(false);
+    // Full width, matching the Zoom Control dock's own section actions (Join,
+    // Start Engine, Open Output Manager).
+    edit_layout->addWidget(m_nominate_btn);
+    connect(m_nominate_btn, &QPushButton::clicked,
+            this, [this]() { on_nominate_clicked(); });
+
+    // The budget outcome, in the operator's own words and with every shortfall
+    // NAMED. This block is the whole reason the nomination reporting chain
+    // exists (src/talkback-plan.h): a count tells the operator that somebody
+    // is short, not who -- and who is the only part they can act on. Long name
+    // lists are elided here and complete in the tooltip.
+    //
+    // TWO labels, not one: the headline is the answer ("6 channels in use of
+    // 16 for 5 people") and the lines under it are the supporting detail. Set
+    // as one muted 11px block they read as a footnote and the answer was lost
+    // inside it.
+    m_plan_label = new QLabel(m_edit_area);
+    m_plan_label->setObjectName(QStringLiteral("talkbackPlan"));
+    m_plan_label->setWordWrap(true);
+    edit_layout->addWidget(m_plan_label);
+
+    m_plan_detail = new QLabel(m_edit_area);
+    m_plan_detail->setObjectName(QStringLiteral("talkbackPlanDetail"));
+    m_plan_detail->setWordWrap(true);
+    m_plan_detail->setVisible(false);
+    edit_layout->addWidget(m_plan_detail);
+
+    layout->addWidget(m_edit_area);
+
+    // ── 3. The bottom strip ────────────────────────────────────────────────
+    //
+    // Everything that is not a person, in ONE compact row: the editor toggle,
+    // the latch mode, and the microphone the director talks through. These
+    // were three separate stacked sections before, each inside its own group
+    // box, and between them they pushed the grid -- the only part of this
+    // panel anybody looks at mid-show -- down a screen.
+    auto *strip = new QHBoxLayout;
+    strip->setSpacing(kInnerGap);
+
+    m_edit_btn = new QPushButton(QStringLiteral("Edit talent"), body);
+    m_edit_btn->setCheckable(true);
+    m_edit_btn->setProperty("role", "strip");
+    m_edit_btn->setToolTip(
+        "Choose who gets a standing talkback channel. The grid is replaced "
+        "while this is open, and it closes itself if a key goes live.");
+    strip->addWidget(m_edit_btn);
+    connect(m_edit_btn, &QPushButton::toggled, this, [this](bool on) {
+        m_edit_requested = on;
+        apply_edit_mode();
+    });
+
+    m_latch_cb = new QCheckBox(QStringLiteral("Latch"), body);
     m_latch_cb->setChecked(initial_settings.talkback_latch);
     m_latch_cb->setToolTip(
-        "Off: hold a key button to talk. On: one press opens the key, the next "
+        "Off: hold a cell to talk. On: one press opens the key, the next "
         "closes it. A latch never survives a reconnect.");
-    latch_row->addWidget(m_latch_cb);
-    latch_row->addStretch(1);
-    key_layout->addLayout(latch_row);
+    strip->addWidget(m_latch_cb);
     connect(m_latch_cb, &QCheckBox::toggled, this, [this](bool on) {
         if (m_shutting_down)
             return;
@@ -289,32 +404,15 @@ ZoomTalkbackPanel::ZoomTalkbackPanel(QWidget *parent)
         s.save();
     });
 
-    // The dock's OWN refusals -- the ones the engine never sees (no source
-    // chosen, the source is not in the current scene, OBS is at a sample rate
-    // the Zoom talkback API will not take). The banner shows the engine's.
-    m_notice = new QLabel(key_group);
-    m_notice->setObjectName(QStringLiteral("errorLabel"));
-    m_notice->setWordWrap(true);
-    m_notice->setVisible(false);
-    key_layout->addWidget(m_notice);
-
-    layout->addWidget(key_group);
-
-    // ── 3. Talk source ──────────────────────────────────────────────────────
-    //
-    // One row: label, combo, and ONE short status line. The full explanation
-    // of the program-track risk is the tooltip, not body copy -- see
-    // TalkbackDockTrackWarning::short_text.
-    auto *source_group = new QGroupBox(QStringLiteral("Talk source"), body);
-    auto *source_layout = new QVBoxLayout(source_group);
-    source_layout->setContentsMargins(kGroupPad, kGroupPad, kGroupPad,
-                                      kGroupPad);
-    source_layout->setSpacing(kInnerGap);
-
-    auto *source_row = new QHBoxLayout;
-    source_row->setSpacing(kInnerGap);
-    m_source_combo = new QComboBox(source_group);
-    m_source_combo->setMinimumWidth(160);
+    m_source_combo = new QComboBox(body);
+    // Deliberately small: a QComboBox elides its own text, the full source
+    // name is in its tooltip, and at the 320 px dock minimum this row has to
+    // fit three controls. WHICH microphone is setup detail; the STATE of it
+    // ("On air via track 1") is the line underneath, and that is the part
+    // that matters mid-show.
+    m_source_combo->setMinimumWidth(80);
+    m_source_combo->setSizeAdjustPolicy(
+        QComboBox::AdjustToMinimumContentsLengthWithIcon);
     m_source_combo->setToolTip(
         "The OBS audio source you talk through. Use a dedicated source with "
         "every program track unchecked in Advanced Audio Properties.");
@@ -327,9 +425,7 @@ ZoomTalkbackPanel::ZoomTalkbackPanel(QWidget *parent)
             ? QStringLiteral("Select audio source")
             : QString::fromStdString(initial_settings.talkback_source),
         QVariant(QString::fromStdString(initial_settings.talkback_source)));
-    source_row->addWidget(new QLabel(QStringLiteral("Source"), source_group));
-    source_row->addWidget(m_source_combo, 1);
-    source_layout->addLayout(source_row);
+    strip->addWidget(m_source_combo, 1);
     connect(m_source_combo, qOverload<int>(&QComboBox::currentIndexChanged),
             this, [this](int) {
                 if (m_shutting_down || !m_source_combo)
@@ -346,101 +442,29 @@ ZoomTalkbackPanel::ZoomTalkbackPanel(QWidget *parent)
                 // program-track status under it is now about the wrong one.
                 m_source_scan_ms = 0;
             });
+    layout->addLayout(strip);
 
+    // ── 4. One line about the talk source ──────────────────────────────────
+    //
     // The deferred half of the program/ISO leak guarantee. The structural half
     // holds unconditionally (a capture callback observes a source and cannot
     // add it to any mix -- tests/talkback-isolation-test.cpp) and the tap
     // already logs this at open() time (src/talkback-tap.cpp); this is the
     // same advisory where the operator is looking, and BEFORE the key rather
-    // than on it.
-    m_track_label = new QLabel(source_group);
+    // than on it. ONE line: the paragraph that explains it is its tooltip.
+    m_track_label = new QLabel(body);
     m_track_label->setObjectName(QStringLiteral("talkbackTrackWarning"));
     m_track_label->setWordWrap(true);
-    source_layout->addWidget(m_track_label);
+    layout->addWidget(m_track_label);
 
-    layout->addWidget(source_group);
-
-    // ── 4. Talent ───────────────────────────────────────────────────────────
-    //
-    // Setup, not showtime -- so it sits below the key block and its button is
-    // an ordinary one. The list is CHECKABLE, and its selection is turned off
-    // entirely: a full-width selection highlight on a list of tick boxes reads
-    // as a mis-styled button, and selecting a row here means nothing.
-    //
-    // The section, the button and the report say "channels", never "nominate":
-    // the wire command is still talkback_nominate and the code still calls it
-    // that, but the owner's verdict on the operator-facing word was that it is
-    // "not a word that really makes sense here". What the operator is actually
-    // doing is standing up a channel per person, in advance, so the key press
-    // has nothing left to do but open the microphone.
-    auto *nominate_group = new QGroupBox(QStringLiteral("Talent"), body);
-    // The long version of the hint, on the section itself. The body copy under
-    // a section caption is read once and then skipped forever, so it gets ONE
-    // line; the paragraph that explains WHY the channel exists before the
-    // press stays one hover away, the same trade the track warning already
-    // makes with its short_text.
-    nominate_group->setToolTip(
-        "Everyone ticked gets a standing Zoom channel, created now so a key "
-        "press only has to open the microphone. Zoom allows 16 channels and 10 "
-        "people per channel; anyone the budget cannot cover is named below.");
-    auto *nominate_layout = new QVBoxLayout(nominate_group);
-    nominate_layout->setContentsMargins(kGroupPad, kGroupPad, kGroupPad,
-                                        kGroupPad);
-    nominate_layout->setSpacing(kInnerGap);
-
-    auto *nominate_hint = new QLabel(
-        "Tick who you'll talk to. Each gets a standing channel.",
-        nominate_group);
-    nominate_hint->setWordWrap(true);
-    nominate_hint->setProperty("role", "muted");
-    nominate_layout->addWidget(nominate_hint);
-
-    m_nominee_list = new QListWidget(nominate_group);
-    m_nominee_list->setObjectName(QStringLiteral("talkbackNominees"));
-    m_nominee_list->setSelectionMode(QAbstractItemView::NoSelection);
-    m_nominee_list->setFocusPolicy(Qt::NoFocus);
-    m_nominee_list->setToolTip(
-        "Tick the people you may need to talk to. Zoom allows 16 channels and "
-        "10 people per channel; anyone the budget cannot cover is named below.");
-    // Height is set from the REAL row height once there are rows to measure --
-    // see size_nominee_list(). Guessing it from fontMetrics() is what showed
-    // two and a half rows for five people.
-    size_nominee_list();
-    nominate_layout->addWidget(m_nominee_list);
-
-    m_nominate_btn = new QPushButton(QStringLiteral("Assign channels"),
-                                     nominate_group);
-    m_nominate_btn->setEnabled(false);
-    // Full width, matching the Zoom Control dock's own section actions (Join,
-    // Start Engine, Open Output Manager): a half-width button floating beside
-    // empty space was reading as an afterthought against the full-width list
-    // directly above it.
-    nominate_layout->addWidget(m_nominate_btn);
-    connect(m_nominate_btn, &QPushButton::clicked,
-            this, [this]() { on_nominate_clicked(); });
-
-    // The budget outcome, in the operator's own words and with every shortfall
-    // NAMED. This block is the whole reason the nomination reporting chain
-    // exists (src/talkback-plan.h): a count tells the operator that somebody
-    // is short, not who -- and who is the only part they can act on. Long name
-    // lists are elided here and complete in the tooltip.
-    //
-    // TWO labels, not one: the headline is the answer ("6 channels in use of
-    // 16 for 5 people") and the lines under it are the supporting detail. Set
-    // as one muted 11px block they read as a footnote and the answer was lost
-    // inside it.
-    m_plan_label = new QLabel(nominate_group);
-    m_plan_label->setObjectName(QStringLiteral("talkbackPlan"));
-    m_plan_label->setWordWrap(true);
-    nominate_layout->addWidget(m_plan_label);
-
-    m_plan_detail = new QLabel(nominate_group);
-    m_plan_detail->setObjectName(QStringLiteral("talkbackPlanDetail"));
-    m_plan_detail->setWordWrap(true);
-    m_plan_detail->setVisible(false);
-    nominate_layout->addWidget(m_plan_detail);
-
-    layout->addWidget(nominate_group);
+    // The dock's OWN refusals -- the ones the engine never sees (no source
+    // chosen, the source is not in the current scene, OBS is at a sample rate
+    // the Zoom talkback API will not take). The banner shows the engine's.
+    m_notice = new QLabel(body);
+    m_notice->setObjectName(QStringLiteral("errorLabel"));
+    m_notice->setWordWrap(true);
+    m_notice->setVisible(false);
+    layout->addWidget(m_notice);
 
     // ── 5. Probe (Milestone 1 diagnostic) ───────────────────────────────────
     //
@@ -896,11 +920,10 @@ void ZoomTalkbackPanel::refresh()
     {
         const TalkbackDockOpenKey dock_key = dock_open_key();
         bool button_down = false;
-        for (auto *button : m_key_buttons) {
-            if (!button) continue;
-            if (button->property("cvTalkbackTarget").toString().toStdString() ==
-                dock_key.target) {
-                button_down = button->isDown();
+        for (const auto &cell : m_cells) {
+            if (!cell.button) continue;
+            if (cell.target == dock_key.target) {
+                button_down = cell.button->isDown();
                 break;
             }
         }
@@ -915,13 +938,16 @@ void ZoomTalkbackPanel::refresh()
             key_open = false;
             open_target.clear();
         }
+        // Recorded for apply_edit_mode() below, which is the only thing that
+        // wants "is anything keyed" without caring whose key it is.
+        m_any_key_open = key_open || !m_dock_target.empty();
     }
 
     // -- What the banner will say ----------------------------------------------
-    // Decided here, above the key buttons, because the buttons need its verdict
-    // too: the one button allowed to paint itself red is the one holding a key
-    // the banner is calling ON AIR, and deriving that twice is how the strip and
-    // the control under it would come to disagree.
+    // Decided here, above the grid, because the cells need its verdict too: the
+    // one cell allowed to paint itself red is the one holding a key the banner
+    // is calling ON AIR, and deriving that twice is how the strip and the
+    // control under it would come to disagree.
     const auto session = engine.talkback_session_status();
     TalkbackDockSessionView view;
     view.key_open = key_open;
@@ -934,7 +960,7 @@ void ZoomTalkbackPanel::refresh()
     view.members_total = session.members_total;
     const auto banner = talkback_dock_banner(view);
 
-    // -- Key buttons -----------------------------------------------------------
+    // -- The grid --------------------------------------------------------------
     TalkbackDockKeyContext ctx;
     ctx.engine_running = engine_running;
     ctx.in_meeting = in_meeting;
@@ -948,11 +974,33 @@ void ZoomTalkbackPanel::refresh()
         ctx.open.dock_owned = false;
         ctx.open.target = open_target;
     }
-    const auto buttons = talkback_dock_key_buttons(plan, ctx);
+
+    // Editing is re-decided on every tick, not only when the toggle is
+    // clicked: a key opened from Companion or the control API while the
+    // editor is open has to put the grid back, and talkback_dock_edit_mode()
+    // is the one place that rule lives. Keying wins over editing, always.
+    apply_edit_mode();
+
+    // RED MEANS THE DIRECTOR IS AUDIBLE, and only that. Decided once, here,
+    // from both halves: the banner has to be calling this ON AIR (which
+    // requires the ENGINE's confirmation, never the plugin's intent -- the C2
+    // rule) and THIS DOCK has to be the surface holding it. Dropping the
+    // ownership half would paint our own disabled cell live whenever
+    // Companion or the control API keyed the same target, which is a red
+    // control that cannot be pressed and does not belong to the person
+    // looking at it. Where that key actually is, is already said in the
+    // cell's refusal reason.
+    const std::string live_target =
+        (banner.state == TalkbackDockBannerState::Live && ctx.open.dock_owned)
+            ? ctx.open.target
+            : std::string();
+
+    const auto cells = talkback_dock_cells(
+        plan, ctx, engine.talkback_channel_presence(), live_target);
 
     std::string target_signature;
-    for (const auto &b : buttons) {
-        target_signature += b.target;
+    for (const auto &c : cells) {
+        target_signature += c.target;
         target_signature += '\n';
     }
     // Rebuild only when the SET OF TARGETS changes, and never while this dock
@@ -961,68 +1009,78 @@ void ZoomTalkbackPanel::refresh()
     // outright while a session is live ("reason":"session_live", nominate() in
     // engine-talkback.cpp), so the confirmed plan seldom moves mid-press at
     // all, and when it does (a superseded ladder's terminal invalidating it)
-    // the buttons are rebuilt on the first tick after the key closes.
+    // the cells are rebuilt on the first tick after the key closes.
     if (target_signature != m_key_signature && m_dock_target.empty()) {
-        rebuild_key_buttons(buttons);
+        rebuild_cells(cells);
         m_key_signature = target_signature;
     }
 
-    for (const auto &b : buttons) {
-        for (auto *button : m_key_buttons) {
-            if (!button ||
-                button->property("cvTalkbackTarget").toString().toStdString() !=
-                    b.target)
+    for (const auto &c : cells) {
+        for (auto &cell : m_cells) {
+            if (!cell.button || cell.target != c.target)
                 continue;
-            // RED MEANS THE DIRECTOR IS AUDIBLE, on the button exactly as it
-            // does on the banner and nowhere else -- so this is gated on both
-            // halves of that: the banner has to be calling this ON AIR (which
-            // requires the ENGINE's confirmation, never the plugin's intent),
-            // and THIS DOCK has to be the surface holding it. Dropping the
-            // ownership half would paint our own disabled button live whenever
-            // Companion or the control API keyed the same target, which is a
-            // red control that cannot be pressed and does not belong to the
-            // person looking at it. Where that key actually is, is already said
-            // in the button's refusal reason.
+            // The cell's state drives its paint, on the button and on both of
+            // its labels -- a QLabel inside a restyled QPushButton is not
+            // repolished by the button's own repolish, and they carry the
+            // cell's text colours. set_style_state() self-no-ops, so these
+            // run unguarded ten times a second.
             //
-            // Safe to repolish a button the operator is HOLDING: the way a
+            // Safe to repolish a cell the operator is HOLDING: the way a
             // QPushButton silently loses `down` is QAbstractButton::
             // changeEvent()'s EnabledChange arm, and a dynamic-property
             // repolish delivers StyleChange/PaletteChange/FontChange, none of
             // which that switch acts on. setEnabled() below is the call that
             // has to be guarded, and it is.
-            set_style_flag(button, "keyed",
-                           banner.state == TalkbackDockBannerState::Live &&
-                               ctx.open.dock_owned &&
-                               ctx.open.target == b.target);
-            // The tooltip is written BEFORE the never-disable guard below, so a
-            // button whose reason changed underneath a held key still says the
-            // true thing. Writing a tooltip cannot clear a button's down state;
-            // only an EnabledChange can, which is what the guard is for.
-            const QString tip = b.enabled
-                ? QString("Talk to %1.").arg(QString::fromStdString(b.label))
-                : QString::fromStdString(b.reason);
-            if (button->toolTip() != tip)
-                button->setToolTip(tip);
-            // NEVER disable a held button. QAbstractButton clears its pressed
+            const char *const cell_state = cell_state_name(c.state);
+            set_style_state(cell.button, "cell", cell_state);
+            set_style_state(cell.name, "cell", cell_state);
+            set_style_state(cell.state, "cell", cell_state);
+            if (cell.state->text() != QString::fromStdString(c.state_line))
+                cell.state->setText(QString::fromStdString(c.state_line));
+
+            // The tooltip is written BEFORE the never-disable guard below, so
+            // a cell whose reason changed underneath a held key still says the
+            // true thing. Writing a tooltip cannot clear a button's down
+            // state; only an EnabledChange can, which is what the guard is
+            // for. The full name is always in here, so the elision
+            // layout_cells() applies never costs the operator a name.
+            QString tip = QString::fromStdString(c.label);
+            if (!c.enabled && !c.reason.empty())
+                tip += "\n" + QString::fromStdString(c.reason);
+            else if (c.enabled)
+                tip = QString("Talk to %1.").arg(QString::fromStdString(c.label));
+            if (!c.hint.empty())
+                tip += "\n" + QString::fromStdString(c.hint);
+            if (cell.button->toolTip() != tip)
+                cell.button->setToolTip(tip);
+
+            // NEVER disable a held cell. QAbstractButton clears its pressed
             // state on an EnabledChange without emitting released(), so
             // disabling one mid-press strands the key open until the backstop
-            // above notices. talkback_dock_key_buttons() already keeps the open
-            // key's own button enabled; this is the second line of defence for
-            // any future caller that forgets.
-            if (!b.enabled && button->isDown())
+            // above notices. talkback_dock_key_buttons() already keeps the
+            // open key's own target enabled; this is the second line of
+            // defence for any future caller that forgets.
+            if (!c.enabled && cell.button->isDown())
                 break;
-            button->setEnabled(b.enabled);
+            cell.button->setEnabled(c.enabled);
+            // A disabled QPushButton greys itself, but its child labels carry
+            // their own stylesheet colours and would stay bright inside it.
+            // Flagged rather than left to a descendant selector, because Qt
+            // resolves ":disabled QLabel#id" by specificity and source order
+            // and the ID rule would win.
+            set_style_flag(cell.name, "off", !c.enabled);
+            set_style_flag(cell.state, "off", !c.enabled);
             break;
         }
     }
 
     // Column count and elision, re-decided on the tick as well as on resize.
-    // Both depend on the dock's CURRENT width, and the width a button is asked
+    // Both depend on the dock's CURRENT width, and the width a cell is asked
     // about right after a rebuild is the one the layout has not run yet -- so
-    // without this a first paint could keep a one-column grid at a width that
-    // fits two. Self-no-opping: it re-grids only when the column count moves
+    // without this a first paint could keep a two-column grid at a width that
+    // fits three. Self-no-opping: it re-grids only when the column count moves
     // and writes a label only when the string changes.
-    layout_key_buttons();
+    layout_cells();
 
     // -- ON AIR banner ---------------------------------------------------------
     // Decided above the key buttons (see there); this is only the painting.
@@ -1062,156 +1120,246 @@ void ZoomTalkbackPanel::refresh()
     refresh_probe();
 }
 
-// Takes the button specs its caller already computed rather than recomputing
+// Takes the cell specs its caller already computed rather than recomputing
 // them from a second, thinner context: the two would otherwise disagree for the
 // one tick between the rebuild and the enable pass, which is exactly the window
 // an operator's press lands in.
-void ZoomTalkbackPanel::rebuild_key_buttons(
-    const std::vector<TalkbackDockKeyButton> &buttons)
+void ZoomTalkbackPanel::rebuild_cells(const std::vector<TalkbackDockCell> &cells)
 {
-    if (!m_key_row)
+    if (!m_cell_row)
         return;
-    auto *layout = qobject_cast<QGridLayout *>(m_key_row->layout());
+    auto *layout = qobject_cast<QGridLayout *>(m_cell_row->layout());
     if (!layout)
         return;
 
-    for (auto *button : m_key_buttons) {
-        if (!button) continue;
+    for (auto &cell : m_cells) {
+        if (!cell.button) continue;
         // hide() as well as removeWidget(): taking a widget out of a layout
         // does not unmap it, so between here and the deferred delete an old
-        // button would keep painting at its last geometry -- on top of the
-        // fresh grid, which is now two-up rather than three-up, so the stale
-        // and new positions no longer coincide and the overlap would show.
-        layout->removeWidget(button);
-        button->hide();
-        button->deleteLater();
+        // cell would keep painting at its last geometry -- on top of the fresh
+        // grid, whose column count may have moved, so the stale and new
+        // positions no longer coincide and the overlap would show.
+        layout->removeWidget(cell.button);
+        cell.button->hide();
+        cell.button->deleteLater();
     }
-    m_key_buttons.clear();
-    m_key_labels.clear();
-    m_key_columns = 0;
+    m_cells.clear();
+    m_cell_columns = 0;
 
-    for (const auto &spec : buttons) {
-        auto *button = new QPushButton(m_key_row);
-        button->setProperty("cvTalkbackTarget",
-                            QString::fromStdString(spec.target));
-        // role="key" is what makes these the biggest controls on the panel;
-        // all-talent additionally carries the accent, because it is the target
-        // a director reaches for when something has gone wrong and is the one
-        // that keeps working when the channel budget has not covered everybody.
-        button->setProperty("role", "key");
-        if (spec.all_talent)
-            button->setProperty("kind", "all");
-        button->setEnabled(spec.enabled);
-        button->setToolTip(spec.enabled
-            ? QString("Talk to %1.").arg(QString::fromStdString(spec.label))
-            : QString::fromStdString(spec.reason));
-        // The target is captured by value: the button outlives any particular
+    for (const auto &spec : cells) {
+        KeyCell cell;
+        cell.target     = spec.target;
+        cell.label      = QString::fromStdString(spec.label);
+        cell.all_talent = spec.all_talent;
+
+        cell.button = new QPushButton(m_cell_row);
+        // role="cell" is what gives these their fixed height and their state
+        // colours (src/cv-style.h). kind="all" is set further down, with the
+        // labels that need it too.
+        cell.button->setProperty("role", "cell");
+        cell.button->setEnabled(spec.enabled);
+
+        // TWO LABELS INSIDE THE BUTTON, not a two-line button text: the name
+        // and the state line carry different type, and QPushButton draws one
+        // font. Both are transparent for mouse events, so every press and
+        // release still lands on the button itself -- the keying machinery
+        // (press/release, the backstop's isDown(), the never-disable guard)
+        // is looking at exactly the widget it always was.
+        auto *cell_layout = new QVBoxLayout(cell.button);
+        cell_layout->setContentsMargins(kCellNamePad, 5, kCellNamePad, 5);
+        cell_layout->setSpacing(0);
+        cell.name = new QLabel(cell.button);
+        cell.name->setObjectName(QStringLiteral("talkbackCellName"));
+        cell.name->setAttribute(Qt::WA_TransparentForMouseEvents);
+        cell_layout->addWidget(cell.name);
+        cell.state = new QLabel(QString::fromStdString(spec.state_line),
+                                cell.button);
+        cell.state->setObjectName(QStringLiteral("talkbackCellState"));
+        cell.state->setAttribute(Qt::WA_TransparentForMouseEvents);
+        cell_layout->addWidget(cell.state);
+
+        const char *const cell_state = cell_state_name(spec.state);
+        cell.button->setProperty("cell", QString::fromLatin1(cell_state));
+        cell.name->setProperty("cell", QString::fromLatin1(cell_state));
+        cell.state->setProperty("cell", QString::fromLatin1(cell_state));
+        cell.name->setProperty("off", !spec.enabled);
+        cell.state->setProperty("off", !spec.enabled);
+        // kind="all" goes on the labels as well as the button: all-talent
+        // sits on a filled accent and the neutral cell's muted grey vanishes
+        // on it. See the sheet for why this is a property and not a
+        // descendant selector.
+        if (spec.all_talent) {
+            cell.button->setProperty("kind", "all");
+            cell.name->setProperty("kind", "all");
+            cell.state->setProperty("kind", "all");
+        }
+
+        QString tip = cell.label;
+        if (spec.enabled)
+            tip = QString("Talk to %1.").arg(cell.label);
+        else if (!spec.reason.empty())
+            tip += "\n" + QString::fromStdString(spec.reason);
+        if (!spec.hint.empty())
+            tip += "\n" + QString::fromStdString(spec.hint);
+        cell.button->setToolTip(tip);
+
+        // The target is captured by value: the cell outlives any particular
         // plan, and a captured pointer into one would not.
         const std::string target = spec.target;
-        connect(button, &QPushButton::pressed, this, [this, target]() {
+        connect(cell.button, &QPushButton::pressed, this, [this, target]() {
             key_pressed(target, m_latch_cb && m_latch_cb->isChecked());
         });
-        connect(button, &QPushButton::released, this, [this, target]() {
+        connect(cell.button, &QPushButton::released, this, [this, target]() {
             key_released(target);
         });
-        m_key_buttons.push_back(button);
-        m_key_labels.push_back(QString::fromStdString(spec.label));
+        m_cells.push_back(cell);
     }
-    // Placement and the visible (possibly elided) text are one job, done in one
-    // place, because a resize has to redo exactly the same work.
-    layout_key_buttons();
+    // Placement and the visible (possibly elided) name are one job, done in
+    // one place, because a resize has to redo exactly the same work.
+    layout_cells();
     // No setStyleSheet() here: this dock's own sheet already applies to
-    // descendants created later, and the role properties are set above before
-    // the button is ever polished.
+    // descendants created later, and the role/state properties are set above
+    // before the cell is ever polished.
 }
 
-// THE CLIPPED-LABEL FIX (owner's first look at the standalone dock,
-// 2026-08-29). The grid was hard-coded two-up, so at an ordinary dock width a
-// real name overflowed its button and Qt clipped it mid-glyph at BOTH ends --
-// centred text loses the same amount either side, so "Grant Whitehead" read as
-// "rant Whitehead" and "Jeffrey Wiltshire" as "effrey Wiltshire". On a control
-// that opens a live microphone to one named person, two names that differ only
-// at the start reading identically is a wrong-person hazard, not a cosmetic
-// one. QPushButton does not elide, so both halves are done here: the grid
-// drops to one full-width column when two of the widest button will not fit
-// (talkback_dock_key_columns()), and whatever still does not fit is elided
-// with the full name kept in the tooltip.
+// THE LAYOUT THE REDESIGN IS FOR (owner, 2026-08-29: "need to rethink how this
+// works and how it will look"). The old grid sized every button to the WIDEST
+// label in the room, so "Ronny Hofsoy, Tromso, Norway" dropped seven people
+// into one full-width column 400 px tall. A cell is sized to a MINIMUM
+// READABLE WIDTH instead (talkback_dock_cell_columns(), two or three across,
+// never one), and a name that does not fit that column is elided END-ONLY with
+// the full name in the tooltip.
+//
+// End-only elision is not a style choice. A QPushButton does not elide at all;
+// it CLIPS, and centred text in a too-narrow widget loses the same amount at
+// each end -- which is how "Grant Whitehead" rendered as "rant Whitehead" on
+// the first version. On a control that opens a live microphone to one named
+// person, two names that differ only at the start reading identically is a
+// wrong-person hazard, and it is the START of a name that has to survive.
+//
+// All talent spans every column: it is not a person, it is the target a
+// director reaches for when something has gone wrong, and it stays in the same
+// place whatever the cast does.
 //
 // This function may run while the operator is HOLDING a key. It only moves
 // widgets and sets text, and neither can clear a QAbstractButton's `down`
 // state -- only an EnabledChange does that, which is what refresh()'s
 // never-disable guard is for. The re-parenting a column change would do is
 // skipped while a key is held anyway, out of caution rather than necessity.
-void ZoomTalkbackPanel::layout_key_buttons()
+void ZoomTalkbackPanel::layout_cells()
 {
-    if (!m_key_row || m_key_buttons.empty())
+    if (!m_cell_row || m_cells.empty())
         return;
-    auto *layout = qobject_cast<QGridLayout *>(m_key_row->layout());
+    auto *layout = qobject_cast<QGridLayout *>(m_cell_row->layout());
     if (!layout)
         return;
 
-    // What the widest label needs, INCLUDING the button's own chrome. The
-    // chrome is asked of the STYLE rather than measured off a live button:
-    // sizeFromContents() is where QStyleSheetStyle applies role="key"'s padding
-    // and border, and unlike a button's own sizeHint() it cannot be inflated
-    // by a minimum width for a short label. The probe string is long enough
-    // that no minimum can bind.
-    auto *probe = m_key_buttons.front();
-    const QFontMetrics fm(probe->font());
-    const QString gauge = QStringLiteral("MMMMMMMMMMMM");
-    QStyleOptionButton opt;
-    opt.initFrom(probe);
-    opt.text = gauge;
-    const QSize gauge_content(fm.horizontalAdvance(gauge), fm.height());
-    const int chrome = std::max(
-        0, style()->sizeFromContents(QStyle::CT_PushButton, &opt,
-                                     gauge_content, probe).width() -
-               gauge_content.width());
-
-    int widest_text = 0;
-    for (const auto &label : m_key_labels)
-        widest_text = std::max(widest_text, fm.horizontalAdvance(label));
-    const int widest_button = widest_text + chrome;
-
-    // m_key_row's own width is only meaningful once the layout has run it, so
+    // m_cell_row's own width is only meaningful once the layout has run it, so
     // fall back to the panel's until it has. refresh() calls this on the tick,
     // which is what makes a first paint at the wrong width self-correct.
-    const int available = m_key_row->width() > 1
-        ? m_key_row->width()
+    const int available = m_cell_row->width() > 1
+        ? m_cell_row->width()
         : width() - 2 * kDockMargin;
-    int columns = talkback_dock_key_columns(available, widest_button,
-                                            kKeyGridGap);
-    // Never re-flow the grid out from under a held button; the elision pass
-    // below still runs, so a label never stays clipped for the length of a
+    int columns = talkback_dock_cell_columns(available, kTalkbackDockCellMinPx,
+                                             kCellGap);
+    // Never re-flow the grid out from under a held cell; the elision pass
+    // below still runs, so a name never stays clipped for the length of a
     // press.
-    if (m_key_columns != 0 && !m_dock_target.empty())
-        columns = m_key_columns;
+    if (m_cell_columns != 0 && !m_dock_target.empty())
+        columns = m_cell_columns;
 
-    if (columns != m_key_columns) {
-        for (auto *button : m_key_buttons)
-            if (button) layout->removeWidget(button);
+    if (columns != m_cell_columns) {
+        for (auto &cell : m_cells)
+            if (cell.button) layout->removeWidget(cell.button);
         int column = 0, row = 0;
-        for (auto *button : m_key_buttons) {
-            if (!button) continue;
-            layout->addWidget(button, row, column);
+        for (auto &cell : m_cells) {
+            if (!cell.button) continue;
+            if (cell.all_talent) {
+                // Its own row, full width, above everyone.
+                if (column != 0) { column = 0; ++row; }
+                layout->addWidget(cell.button, row, 0, 1, columns);
+                ++row;
+                continue;
+            }
+            layout->addWidget(cell.button, row, column);
             if (++column == columns) { column = 0; ++row; }
         }
-        m_key_columns = columns;
+        for (int c = 0; c < columns; ++c)
+            layout->setColumnStretch(c, 1);
+        m_cell_columns = columns;
     }
 
-    const int cell = columns > 0
-        ? (available - (columns - 1) * kKeyGridGap) / columns
+    // What one cell's NAME LABEL has to fit in: the column, less the button's
+    // own chrome (border + the cell layout's margins). The chrome is asked of
+    // the STYLE rather than measured off a live widget, because
+    // sizeFromContents() is where QStyleSheetStyle applies role="cell"'s
+    // border and unlike a button's own sizeHint() it cannot be inflated by a
+    // minimum width for a short label.
+    QStyleOptionButton opt;
+    opt.initFrom(m_cells.front().button);
+    const QString gauge = QStringLiteral("MMMMMMMMMMMM");
+    const QFontMetrics gauge_fm(m_cells.front().button->font());
+    const QSize gauge_content(gauge_fm.horizontalAdvance(gauge),
+                              gauge_fm.height());
+    opt.text = gauge;
+    const int chrome =
+        std::max(0, style()->sizeFromContents(QStyle::CT_PushButton, &opt,
+                                              gauge_content,
+                                              m_cells.front().button)
+                            .width() -
+                        gauge_content.width()) +
+        2 * kCellNamePad;
+
+    const int cell_px = columns > 0
+        ? (available - (columns - 1) * kCellGap) / columns
         : available;
-    const int room = std::max(cell - chrome, 0);
-    for (std::size_t i = 0; i < m_key_buttons.size(); ++i) {
-        auto *button = m_key_buttons[i];
-        if (!button) continue;
-        const QString &full = m_key_labels[i];
-        const QString shown = fm.horizontalAdvance(full) <= room
-            ? full
-            : fm.elidedText(full, Qt::ElideRight, room);
-        if (button->text() != shown)
-            button->setText(shown);
+    for (auto &cell : m_cells) {
+        if (!cell.name) continue;
+        // All talent spans the whole row, so it is measured against the whole
+        // row -- charging it one column's width would elide a label that fits.
+        const int room = std::max(
+            (cell.all_talent ? available : cell_px) - chrome, 0);
+        const QFontMetrics fm(cell.name->font());
+        const QString shown = fm.horizontalAdvance(cell.label) <= room
+            ? cell.label
+            : fm.elidedText(cell.label, Qt::ElideRight, room);
+        if (cell.name->text() != shown)
+            cell.name->setText(shown);
+    }
+}
+
+// The editor and the grid share one slot, and keying wins. The decision is
+// talkback_dock_edit_mode()'s (src/talkback-dock-state.h); this only applies
+// it, and pushes the toggle back up when the answer is no so the button never
+// says "open" over a grid.
+void ZoomTalkbackPanel::apply_edit_mode()
+{
+    // "A key is open" means ANY surface's, not only this dock's. Our own is
+    // the dangerous one -- hiding a button we are holding strands it -- but a
+    // key live from Companion or the control API is also the moment the
+    // operator needs to be looking at the grid rather than at a checklist,
+    // and nothing is lost by swapping: the ticks live in the list widget,
+    // which is hidden, never destroyed.
+    TalkbackDockOpenKey open = dock_open_key();
+    if (!open.open && m_any_key_open) {
+        open.open = true;
+        open.dock_owned = false;
+    }
+    const bool editing = talkback_dock_edit_mode(m_edit_requested, open);
+    if (m_grid_area) m_grid_area->setVisible(!editing);
+    if (m_edit_area) m_edit_area->setVisible(editing);
+    if (m_edit_btn) {
+        if (m_edit_btn->isChecked() != editing) {
+            // Reflect the answer without re-entering this function through
+            // the toggled() handler.
+            const QSignalBlocker block(m_edit_btn);
+            m_edit_btn->setChecked(editing);
+        }
+        m_edit_requested = editing;
+        const QString label = editing ? QStringLiteral("Done")
+                                      : QStringLiteral("Edit talent");
+        if (m_edit_btn->text() != label)
+            m_edit_btn->setText(label);
     }
 }
 
@@ -1246,7 +1394,7 @@ void ZoomTalkbackPanel::size_nominee_list()
 void ZoomTalkbackPanel::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
-    layout_key_buttons();
+    layout_cells();
 }
 
 void ZoomTalkbackPanel::on_nominate_clicked()

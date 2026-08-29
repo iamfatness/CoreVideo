@@ -162,6 +162,196 @@ inline std::vector<TalkbackDockKeyButton> talkback_dock_key_buttons(
     return buttons;
 }
 
+// ── The intercom grid: one cell per person ──────────────────────────────────
+//
+// THE REDESIGN THIS IS THE POINT OF (owner, after running the first dock live
+// with seven talent: "need to rethink how this works and how it will look").
+// The old panel showed the same people TWICE -- a key button each, and a tick
+// box each -- so the surface grew twice as fast as the cast, and a single
+// 28-character display name flipped the adaptive grid to one full-width
+// column and built a 400 px tower of buttons for seven people. A 24-person
+// show was not survivable.
+//
+// The model is a broadcast intercom panel (Clear-Com/RTS), because that is
+// what the operator already is: ONE grid, one compact cell per person, and
+// the cell is both the status display and the talk key. The tick-box list
+// moves behind an [Edit talent] toggle (talkback_dock_edit_mode() above), so
+// there is exactly one list of people on screen at a time.
+//
+// WHAT A CELL DECIDES, AND WHAT IT DOES NOT. The state below is about the
+// PERSON -- can they hear me if I press this. Whether the cell may be pressed
+// at all is still talkback_dock_key_buttons()' answer and is not re-derived
+// here: that function delegates to talkback_target_known_unprovisioned(), the
+// exact predicate TalkbackController::key_on() refuses on, and re-deciding
+// enablement from a second, presence-flavoured rule is how a button the dock
+// shows as live would become one key_on() rejects. So a cell carries the
+// button's `enabled` and `reason` verbatim, and adds a state of its own.
+//
+// The consequence is deliberate and worth stating: with the engine stopped,
+// or outside a meeting, or with no talk source chosen, every cell is disabled
+// with the global reason in its tooltip while its state line still describes
+// the PERSON. "Ready, and you cannot press it right now" is two true facts,
+// not a contradiction, and the banner above the grid says which.
+enum class TalkbackDockCellState {
+    // Has a channel, and nothing says they are not in it. Also the state for
+    // "we have not been told anything about this person" -- see
+    // TalkbackPersonPresence::Unknown for why absence of evidence is not
+    // painted as evidence of absence.
+    Ready,
+    // A key THIS DOCK is holding, that the ENGINE has confirmed, on THIS
+    // target. Never the plugin's intent alone -- the C2 rule.
+    OnAir,
+    // Nominated but with no private channel of their own: the budget was
+    // short, or the plan is not confirmed yet.
+    NoChannel,
+    // Nothing reaches them: their client reported no talkback support, or
+    // the plan put them outside even the all-talent fan-out.
+    Unreachable,
+    // They have a channel and are NOT in it. The 2026-08-29 live case: every
+    // invite refused SDKERR_WRONG_USAGE because the person was in a different
+    // breakout room from the engine.
+    NotInChannel,
+};
+
+struct TalkbackDockCell {
+    // Verbatim from TalkbackDockKeyButton -- never re-derived here.
+    std::string target;
+    std::string label;
+    bool        enabled = false;
+    std::string reason;
+    bool        all_talent = false;
+
+    TalkbackDockCellState state = TalkbackDockCellState::Ready;
+    // The small second line on the cell. Short enough to survive a 118 px
+    // column; the sentence that explains it is `hint`, which the panel hangs
+    // in the tooltip.
+    std::string state_line;
+    // Empty when there is nothing to add beyond `reason`.
+    std::string hint;
+};
+
+// PRECEDENCE, in the order the checks run, and each is load-bearing:
+//
+//   1. ON AIR beats everything. A live key is the one fact on this panel an
+//      operator must never have to reason about, and every other state is
+//      about whether a key WOULD work.
+//   2. Unreachable beats no-channel. An unreachable person is always also
+//      uncovered_private (TalkbackPlan::unreachable is a strict subset), so
+//      the generic "no channel, assign again" would otherwise win and send
+//      the operator to re-assign channels for someone no assignment reaches.
+//   3. No channel beats not-in-channel. There is no channel to be in.
+//   4. Not-in-channel beats ready, which is the whole reason this exists.
+inline TalkbackDockCellState talkback_dock_cell_state(
+    const std::string &target, bool all_talent,
+    const TalkbackNominationPlan &confirmed, bool live_here,
+    TalkbackPersonPresence presence)
+{
+    if (live_here) return TalkbackDockCellState::OnAir;
+
+    // All talent is a fan-out, not a person: it has no client to lack
+    // support and no membership of its own to be absent from. Its only
+    // failure is the plan's ("nobody has a channel yet", or a fan-out the
+    // 16-channel cap could not complete).
+    if (all_talent) {
+        if (talkback_target_known_unprovisioned(target, confirmed.requested,
+                                                confirmed.uncovered_private))
+            return TalkbackDockCellState::NoChannel;
+        if (confirmed.done && !confirmed.all_talent_complete)
+            return TalkbackDockCellState::Unreachable;
+        return TalkbackDockCellState::Ready;
+    }
+
+    if (presence == TalkbackPersonPresence::NoTalkback)
+        return TalkbackDockCellState::Unreachable;
+    for (const auto &u : confirmed.unreachable)
+        if (u == target) return TalkbackDockCellState::Unreachable;
+
+    if (talkback_target_known_unprovisioned(target, confirmed.requested,
+                                            confirmed.uncovered_private))
+        return TalkbackDockCellState::NoChannel;
+
+    if (presence == TalkbackPersonPresence::NotInChannel)
+        return TalkbackDockCellState::NotInChannel;
+
+    return TalkbackDockCellState::Ready;
+}
+
+// The words on the cell. Kept beside the state so a new state cannot ship
+// without one, and plain ASCII because these sources carry no BOM and the
+// build passes MSVC no /utf-8 (the same rule the banner's tally dot follows).
+inline std::string talkback_dock_cell_state_line(
+    TalkbackDockCellState state, const TalkbackNominationPlan &confirmed)
+{
+    switch (state) {
+    case TalkbackDockCellState::OnAir:        return "ON AIR";
+    case TalkbackDockCellState::Unreachable:  return "no talkback";
+    case TalkbackDockCellState::NotInChannel: return "not in channel";
+    case TalkbackDockCellState::NoChannel:
+        // A ladder that has not reported a terminal yet is genuinely still
+        // working; saying "no channel" there would send the operator to
+        // re-assign something that is mid-assignment.
+        return confirmed.done ? "no channel" : "assigning...";
+    case TalkbackDockCellState::Ready:        break;
+    }
+    return "ready";
+}
+
+// The sentence behind the two words, for the tooltip. Empty when the state
+// line already says everything.
+//
+// The not-in-channel hint names BREAKOUT ROOMS specifically, which is not a
+// guess: it is what happened on 2026-08-29, and Zoom's talkback reaches only
+// the room the inviting client is in. It is worded as a possibility ("may
+// be") because the plugin sees a refused invite, not a room list.
+inline std::string talkback_dock_cell_hint(TalkbackDockCellState state)
+{
+    switch (state) {
+    case TalkbackDockCellState::NotInChannel:
+        return "They have a channel but are not in it. They may be in a "
+               "different breakout room -- talkback reaches only the room the "
+               "engine is in.";
+    case TalkbackDockCellState::Unreachable:
+        return "Nothing reaches them: their Zoom client reported no talkback "
+               "support, or the channel budget could not cover them.";
+    case TalkbackDockCellState::OnAir:
+    case TalkbackDockCellState::NoChannel:
+    case TalkbackDockCellState::Ready:
+        break;
+    }
+    return {};
+}
+
+// One cell per keyable target, in talkback_dock_key_buttons()' own order
+// (all-talent first, then nominees). `live_target` is the target the BANNER
+// is calling ON AIR and this dock owns -- empty when neither is true, so the
+// C2 rule (live requires the engine's confirmation, never the plugin's
+// intent) and the ownership rule are both decided once, by the caller, and
+// not a second time here.
+inline std::vector<TalkbackDockCell> talkback_dock_cells(
+    const TalkbackNominationPlan &confirmed,
+    const TalkbackDockKeyContext &ctx,
+    const TalkbackChannelPresence &presence,
+    const std::string &live_target)
+{
+    std::vector<TalkbackDockCell> cells;
+    for (const auto &b : talkback_dock_key_buttons(confirmed, ctx)) {
+        TalkbackDockCell cell;
+        cell.target     = b.target;
+        cell.label      = b.label;
+        cell.enabled    = b.enabled;
+        cell.reason     = b.reason;
+        cell.all_talent = b.all_talent;
+        cell.state = talkback_dock_cell_state(
+            b.target, b.all_talent, confirmed,
+            !live_target.empty() && live_target == b.target,
+            talkback_presence_for(presence, b.target));
+        cell.state_line = talkback_dock_cell_state_line(cell.state, confirmed);
+        cell.hint       = talkback_dock_cell_hint(cell.state);
+        cells.push_back(std::move(cell));
+    }
+    return cells;
+}
+
 // ── The talent list ─────────────────────────────────────────────────────────
 //
 // The tick-box list the operator picks talent from, and the diff that decides
@@ -322,26 +512,49 @@ inline int talkback_dock_nominee_visible_rows(std::size_t row_count)
     return static_cast<int>(row_count);
 }
 
-// How many key buttons fit across.
+// How many person cells fit across.
 //
-// THE DEFECT THIS EXISTS FOR: the grid was hard-coded two-up, so at an
-// ordinary OBS dock width a real name overflowed its button and QPushButton
-// clipped it MID-GLYPH and on BOTH edges -- centred text in a too-narrow
-// widget loses the same amount at each end. "Grant Whitehead" rendered as
-// "rant Whitehead" and "Jeffrey Wiltshire" as "effrey Wiltshire", which on a
-// control that opens a live microphone to one named person is not a cosmetic
-// problem: two names that differ only at the start read identically.
+// THE DEFECT THIS REPLACES, and why the answer is never one. The first grid
+// was hard-coded two-up and sized to the WIDEST label, so one long real name
+// ("Ronny Hofsoy, Tromso, Norway", 2026-08-29) dropped the whole grid to a
+// single full-width column: seven people became a 400 px tower of buttons,
+// and a 24-person show would have been unusable. Sizing every cell to the
+// longest name in the room is the mistake -- it lets one person's Zoom
+// display name decide the layout for everybody.
 //
-// `widest_button_px` is what the WIDEST label needs including the button's own
-// padding and border, so this answers "can two of the biggest fit", not "can
-// two average ones". A name that still does not fit one full-width column is
-// elided by the caller (QFontMetrics::elidedText, with the full name in the
-// tooltip) -- elision is a legible last resort, clipping never is.
-inline int talkback_dock_key_columns(int available_px, int widest_button_px,
-                                     int gap_px)
+// So the cell is sized to a MINIMUM READABLE WIDTH instead, and a name that
+// does not fit is elided (end-elide only, full name in the tooltip). The
+// floor of two columns is the load-bearing part: this grid is a status
+// display as much as a control surface, and a column of 24 stacked cells is
+// not scannable at a glance whatever the dock width. Three when the room is
+// there, two otherwise, never one and never zero.
+constexpr int kTalkbackDockCellMinPx = 118;
+
+inline int talkback_dock_cell_columns(int available_px, int min_cell_px,
+                                      int gap_px)
 {
-    if (available_px <= 0 || widest_button_px <= 0) return 1;
-    return available_px >= 2 * widest_button_px + gap_px ? 2 : 1;
+    if (available_px <= 0 || min_cell_px <= 0) return 2;
+    if (available_px >= 3 * min_cell_px + 2 * gap_px) return 3;
+    return 2;
+}
+
+// ── Edit mode ───────────────────────────────────────────────────────────────
+//
+// The grid area shows EITHER the intercom grid or the talent checklist, never
+// both. That is the whole point of it: before this, the same seven people
+// appeared twice on one panel -- once as key buttons, once as tick boxes --
+// and both lists grew linearly with the cast.
+//
+// Editing is never allowed to cost the operator a key they are holding.
+// Hiding a held button strands it (the latch loses its only close affordance;
+// a push-to-talk loses its release and waits on
+// talkback_dock_release_lost()), so a key that is open anywhere -- this
+// dock's or another surface's -- forces the grid back on screen. Keying wins
+// over editing, always.
+inline bool talkback_dock_edit_mode(bool requested,
+                                    const TalkbackDockOpenKey &open)
+{
+    return requested && !open.open;
 }
 
 // ── The nomination outcome ──────────────────────────────────────────────────

@@ -692,12 +692,13 @@ Every one of these is documented at length where it lives; the list is the map.
   `QPushButton` does not elide, so centred text lost the same amount at each
   side: "Grant Whitehead" rendered as "rant Whitehead". On a control that opens
   a live microphone to one named person, two names that differ only at the
-  start reading identically is a wrong-person hazard. The grid is now adaptive
-  (`talkback_dock_key_columns()`: two columns only when two of the WIDEST
-  button fit with the gap, else one full-width column) and anything that still
-  does not fit is elided with the full name in the tooltip. Measured at the
-  320 px minimum: six real names fit two-up with 108 px of room each; add a
-  38-character name and it drops to one column and elides only that one.
+  start reading identically is a wrong-person hazard. The grid was made
+  adaptive (`talkback_dock_key_columns()`: two columns only when two of the
+  WIDEST button fit with the gap, else one full-width column) and anything
+  that still did not fit was elided with the full name in the tooltip.
+  **That helper is gone** — sizing every button to the longest name in the
+  room is what produced the 400 px tower the redesign below replaced; the
+  elision-with-tooltip half survived it verbatim.
   (2) **The talent list showed about two and a half rows for five people** —
   its height was guessed from `fontMetrics()`, which misses the stylesheet's
   item padding and the frame, and then a dock shorter than the panel squeezed
@@ -709,9 +710,9 @@ Every one of these is documented at length where it lives; the list is the map.
   whatever is shrinkable — that is what squeezed the list AND what pressed the
   third key row flat against the Key group's bottom border. Sections now keep
   the size they ask for and the dock scrolls. One spacing scale replaces the ad
-  hoc 8/6/4/8 (`kDockMargin` 10 / `kSectionGap` 14 / `kGroupPad` 4 /
-  `kInnerGap` 8, sitting on top of the shared `QGroupBox` padding so nothing
-  touches a border), the Talent intro is one line with the paragraph moved to
+  hoc 8/6/4/8 (`kDockMargin` 10 / `kSectionGap` 14 / `kInnerGap` 8; the fourth,
+  `kGroupPad`, went with the group boxes the redesign below removed), the
+  Talent intro is one line with the paragraph moved to
   the section's tooltip, the plan block splits into a body-weight headline and
   a secondary detail label (`#talkbackPlanDetail`) instead of one muted 11 px
   run that buried the answer, the Assign button is full width like the sibling
@@ -723,6 +724,92 @@ Every one of these is documented at length where it lives; the list is the map.
   pinned in `tests/talkback-dock-state-test.cpp`; both mutation-proved (fixing
   the row count at the minimum, and hard-coding two columns) and reverted
   clean.
+
+- **The dock is an INTERCOM GRID now** (owner, after running the polished
+  version live with seven talent, 2026-08-29: "need to rethink how this works
+  and how it will look"). The structural flaw was not styling. The **same
+  people appeared twice** — a key button each in the Key section, a tick box
+  each in the Talent section — so the panel grew at twice the rate of the cast;
+  and because the key grid sized every button to the WIDEST label in the room,
+  one 28-character Zoom display name ("Ronny Hofsøy, Tromsø, Norway") flipped
+  it to a single full-width column: a 400 px tower of buttons for seven people,
+  and nothing survivable at twenty-four. The model is now the one the operator
+  already carries from a Clear-Com/RTS panel: **ONE grid**, "All talent" as a
+  full-width key on top, then one COMPACT fixed-height cell per person, **two
+  or three across by dock width and never one**
+  (`talkback_dock_cell_columns()`, `kTalkbackDockCellMinPx` = 118 — sized to a
+  minimum readable width, not to the longest name, which is the mistake that
+  let one person's display name decide the layout for everybody). The tick-box
+  list is behind an **[Edit talent]** toggle and takes the grid's *place*
+  (`talkback_dock_edit_mode()`), so exactly one list of people is on screen at
+  a time; it refuses to open, and re-closes itself, whenever a key is open
+  anywhere — hiding a button the operator is holding strands the key (a latch
+  loses its only close affordance, a PTT loses its release). The three group
+  boxes are gone; everything that is not a person is one bottom strip
+  ([Edit talent] · Latch · source combo) over a one-line source status.
+  **A cell IS a key button** — a restyled `QPushButton` with two
+  `WA_TransparentForMouseEvents` child labels (the name and a state line;
+  `QPushButton` draws one font, so a two-line `text()` could not carry two
+  type sizes). Every rule the key buttons earned moved across untouched: the
+  single `TalkbackDockOpenKey`, `talkback_dock_release_lost()` reading the
+  widget's own `isDown()`, `needs_renewal = false`, the never-disable-a-held-
+  button guard, the rebuild gate, keying on the Qt main thread.
+  **What is new is what a cell SAYS**, and it is the point of the redesign:
+  `talkback_dock_cell_state()` maps each person to Ready / OnAir / NoChannel /
+  Unreachable / NotInChannel, with a stated precedence (ON AIR beats
+  everything; unreachable beats no-channel, because `TalkbackPlan::unreachable`
+  is a strict subset of `uncovered_private` and the generic "assign channels
+  again" would otherwise send the operator to fix something no assignment can
+  reach; no-channel beats not-in-channel, there being no channel to be in).
+  **Enablement is NOT re-derived from any of it** — a cell carries
+  `talkback_dock_key_buttons()`'s `enabled`/`reason` verbatim, so the state can
+  never make a cell live that `key_on()` would refuse, and a stale presence
+  observation can never refuse a key on a standing channel (F1's lesson,
+  through a new door). The consequence is deliberate and documented: with the
+  engine stopped every cell is disabled with the global reason in its tooltip
+  while its state line still describes the PERSON.
+- **...and where per-person presence comes from** (`TalkbackChannelPresence`,
+  `src/talkback-nomination.h`; the mapping in
+  `talkback_channel_presence_apply_report()`,
+  `src/talkback-nomination-dispatch.h`). **The wire protocol did not change.**
+  The engine already reports every membership edge as a
+  `"cmd":"talkback_nominate"` stage line, and the 2026-08-29 show's own log is
+  what the states were written against:
+  `"stage":"invite","name":"John Wallace",…,"code":2` (SDKERR_WRONG_USAGE, on
+  both his channels — he was in a **different breakout room** from the engine,
+  and Zoom's talkback reaches only the room the inviter is in) and
+  `"stage":"participant_talkback_support","name":"Grant Whitehead",
+  "supported":false` followed by an invite refused `code:3`. Both men had a
+  private channel, a completed `nominate_done` (7 channels), and heard
+  **nothing**; to the old dock both were ready, pressable keys.
+  `member_invited` → Present; `supported:false` → NoTalkback; a non-zero
+  `invite` `code`, `member_invite_failed`, `member_not_in_meeting`,
+  `member_left` → NotInChannel. Rules that are not preferences but what the
+  wire does: **`supported:true` is not presence** (it is emitted before the
+  invite is issued); **NoTalkback survives a later NotInChannel**, because a
+  client with no support produces both and the specific diagnosis is the
+  useful one; **last edge wins otherwise** (three people that morning were
+  refused `code:18` on the all-talent invite and admitted to their own channel
+  a second later); **Unknown renders as "ready", never as absent** — an engine
+  that reports none of these, or a plugin that has not seen them yet, must not
+  paint every person amber. Missing fields default to "nothing happened"
+  (`code` 0, `supported` true) for the same mixed-version reason the attempt id
+  does, since a DLL-only install is this project's canonical mistake. It is
+  **display-only**: nothing in the keying path reads it. Cleared at exactly the
+  points `talkback_nomination_reset()` is, plus the SEND of a new nominate — a
+  nomination replaces the standing channel set, so every observation is about
+  channels the engine is destroying, and clearing to Unknown fails soft.
+  A separate function rather than a third out-parameter on
+  `talkback_nomination_apply_report()`: these stages carry no `"attempt"` id
+  (they are edges about the current channel set, not staged reports of an
+  attempt's outcome), and two matching rules behind one call is C1's confusion
+  again. Ten mutations run and all ten killed, including the two precedence
+  swaps, the not-sticky NoTalkback, a one-column grid, an editor that opens
+  over a held key, and a cell that re-derives its own enablement.
+  Verified by MEASURED OFFSCREEN RENDER, not by reading the code: at a 320 px
+  dock, 2 columns, 48 px cells, 126 px of name room, one of the seven real
+  names elided (end-only) and nothing clipped; at 420 px, 3 columns; 24 people
+  at 320 px is 25 cells in 910 px inside the scroll area.
 
 ## Live testing against a real meeting
 

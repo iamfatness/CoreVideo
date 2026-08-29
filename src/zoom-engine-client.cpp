@@ -514,6 +514,7 @@ bool ZoomEngineClient::start(const std::string &jwt_token,
         std::lock_guard<std::mutex> lk(m_mtx);
         talkback_nomination_reset(m_talkback_nomination_status);
         m_talkback_nomination_pending = TalkbackNominationPending{};
+        talkback_presence_reset(m_talkback_channel_presence);
     }
 
     // Fresh engine session: no init retry is owed. This must come AFTER the
@@ -655,6 +656,7 @@ void ZoomEngineClient::stop_for_reconnect()
         std::lock_guard<std::mutex> lk(m_mtx);
         talkback_nomination_reset(m_talkback_nomination_status);
         m_talkback_nomination_pending = TalkbackNominationPending{};
+        talkback_presence_reset(m_talkback_channel_presence);
     }
 }
 
@@ -962,6 +964,14 @@ void ZoomEngineClient::talkback_nominate(const std::vector<std::string> &nominee
         std::lock_guard<std::mutex> lk(m_mtx);
         attempt = ++m_talkback_nominate_attempt;
         talkback_nomination_begin(m_talkback_nomination_pending, deduped, attempt);
+        // Milestone 7: the standing channel set is about to be REPLACED
+        // (nominate()'s replace path destroys it before planning), so every
+        // presence observation this record holds is about channels that are
+        // going away. Clearing to Unknown fails soft -- the grid reads
+        // "ready" until the new ladder's own invites report -- which is the
+        // right direction for a display-only record. See
+        // talkback_presence_reset().
+        talkback_presence_reset(m_talkback_channel_presence);
     }
     // Task 5 fix round 1 (F5, documented not fixed): json_escape() below
     // escapes '\n'/'\r'/'\t' as two-character sequences ("\\n" etc.), but the
@@ -1212,6 +1222,12 @@ ZoomEngineClient::TalkbackNominationStatus ZoomEngineClient::talkback_nomination
     return m_talkback_nomination_status;
 }
 
+TalkbackChannelPresence ZoomEngineClient::talkback_channel_presence() const
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    return m_talkback_channel_presence;
+}
+
 void ZoomEngineClient::fail_after_init_retries_exhausted()
 {
     // Monitor thread only.
@@ -1433,8 +1449,15 @@ void ZoomEngineClient::handle_event(const std::string &line)
         // logic back here; extend the dispatcher and its test instead.
         blog(LOG_INFO, "[obs-zoom-plugin] talkback_nominate: %s", line.c_str());
         std::lock_guard<std::mutex> lk(m_mtx);
+        const QString nominate_stage = obj.value("stage").toString();
         talkback_nomination_apply_report(m_talkback_nomination_status,
-            m_talkback_nomination_pending, obj.value("stage").toString(), obj);
+            m_talkback_nomination_pending, nominate_stage, obj);
+        // Milestone 7: the per-person presence view, from the SAME stage
+        // lines and under the same lock. A separate call rather than a third
+        // out-parameter above, because these stages carry no "attempt" id --
+        // see talkback_channel_presence_apply_report()'s header comment.
+        talkback_channel_presence_apply_report(m_talkback_channel_presence,
+                                               nominate_stage, obj);
         return;
     }
     if (cmd == "awaiting_admission") {
@@ -1472,6 +1495,7 @@ void ZoomEngineClient::handle_event(const std::string &line)
             // refuse with "no_nomination".
             talkback_nomination_reset(m_talkback_nomination_status);
             m_talkback_nomination_pending = TalkbackNominationPending{};
+            talkback_presence_reset(m_talkback_channel_presence);
             keep_failed = !m_last_error.empty() &&
                 !m_user_leaving.load(std::memory_order_acquire);
         }

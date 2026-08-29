@@ -684,6 +684,46 @@ Every one of these is documented at length where it lives; the list is the map.
   the identifiers, and the comments, which describe code that still says
   nominate. Companion and the control API depend on that surface.
 
+- **Polish round on the standalone dock** (owner's first look at the built
+  panel, 2026-08-29: "UI still doesn't feel polished"). Four defects, all
+  confirmed on a screenshot and all now confirmed fixed by an offscreen render
+  of the same widget tree rather than by reading the code. (1) **Key labels
+  were clipped mid-glyph at BOTH ends** — the grid was hard-coded two-up and
+  `QPushButton` does not elide, so centred text lost the same amount at each
+  side: "Grant Whitehead" rendered as "rant Whitehead". On a control that opens
+  a live microphone to one named person, two names that differ only at the
+  start reading identically is a wrong-person hazard. The grid is now adaptive
+  (`talkback_dock_key_columns()`: two columns only when two of the WIDEST
+  button fit with the gap, else one full-width column) and anything that still
+  does not fit is elided with the full name in the tooltip. Measured at the
+  320 px minimum: six real names fit two-up with 108 px of room each; add a
+  38-character name and it drops to one column and elides only that one.
+  (2) **The talent list showed about two and a half rows for five people** —
+  its height was guessed from `fontMetrics()`, which misses the stylesheet's
+  item padding and the frame, and then a dock shorter than the panel squeezed
+  it to its 3-row minimum. It is now sized in WHOLE rows
+  (`talkback_dock_nominee_visible_rows()`, clamped to 3..6) from the widget's
+  measured `sizeHintForRow()`. (3+4) **The whole panel is in a `QScrollArea`
+  now**, which is the structural half of the same defect: a `QWidget` in an OBS
+  dock that wants more room than it has does not clip politely, Qt shrinks
+  whatever is shrinkable — that is what squeezed the list AND what pressed the
+  third key row flat against the Key group's bottom border. Sections now keep
+  the size they ask for and the dock scrolls. One spacing scale replaces the ad
+  hoc 8/6/4/8 (`kDockMargin` 10 / `kSectionGap` 14 / `kGroupPad` 4 /
+  `kInnerGap` 8, sitting on top of the shared `QGroupBox` padding so nothing
+  touches a border), the Talent intro is one line with the paragraph moved to
+  the section's tooltip, the plan block splits into a body-weight headline and
+  a secondary detail label (`#talkbackPlanDetail`) instead of one muted 11 px
+  run that buried the answer, the Assign button is full width like the sibling
+  docks' section actions, and the Off-air banner drops from 16 px to 14 px —
+  the strip earns its height from the LIVE rule, not from a permanent block of
+  empty space. Group titles were left alone on purpose: they already come from
+  the shared `cv_stylesheet()` rule every other dock uses, which is what
+  "consistent with the siblings" means here. Both new helpers are pure and
+  pinned in `tests/talkback-dock-state-test.cpp`; both mutation-proved (fixing
+  the row count at the minimum, and hard-coding two columns) and reverted
+  clean.
+
 ## Live testing against a real meeting
 
 The control API (TCP line-JSON, `127.0.0.1:19870`, no HTTP) drives a full

@@ -298,6 +298,52 @@ inline bool talkback_nominee_list_refresh(
     return true;
 }
 
+// ── How much room the list and the key grid need ────────────────────────────
+//
+// Two sizing decisions that were wrong on screen in the owner's first look at
+// the standalone dock (2026-08-29, "UI still doesn't feel polished"), and are
+// arithmetic rather than painting -- so they are decided here, where they can
+// be exercised, and only APPLIED by the panel.
+
+// The talent list is sized in ROWS, never in pixels guessed from a font: five
+// people must show five whole rows. Below the minimum an almost-empty list
+// collapses to a sliver that does not read as a list at all; past the maximum
+// it would push the key buttons -- the one thing on this dock that must never
+// move -- off the bottom, so it scrolls instead.
+constexpr int kTalkbackNomineeMinRows = 3;
+constexpr int kTalkbackNomineeMaxRows = 6;
+
+inline int talkback_dock_nominee_visible_rows(std::size_t row_count)
+{
+    if (row_count < static_cast<std::size_t>(kTalkbackNomineeMinRows))
+        return kTalkbackNomineeMinRows;
+    if (row_count > static_cast<std::size_t>(kTalkbackNomineeMaxRows))
+        return kTalkbackNomineeMaxRows;
+    return static_cast<int>(row_count);
+}
+
+// How many key buttons fit across.
+//
+// THE DEFECT THIS EXISTS FOR: the grid was hard-coded two-up, so at an
+// ordinary OBS dock width a real name overflowed its button and QPushButton
+// clipped it MID-GLYPH and on BOTH edges -- centred text in a too-narrow
+// widget loses the same amount at each end. "Grant Whitehead" rendered as
+// "rant Whitehead" and "Jeffrey Wiltshire" as "effrey Wiltshire", which on a
+// control that opens a live microphone to one named person is not a cosmetic
+// problem: two names that differ only at the start read identically.
+//
+// `widest_button_px` is what the WIDEST label needs including the button's own
+// padding and border, so this answers "can two of the biggest fit", not "can
+// two average ones". A name that still does not fit one full-width column is
+// elided by the caller (QFontMetrics::elidedText, with the full name in the
+// tooltip) -- elision is a legible last resort, clipping never is.
+inline int talkback_dock_key_columns(int available_px, int widest_button_px,
+                                     int gap_px)
+{
+    if (available_px <= 0 || widest_button_px <= 0) return 1;
+    return available_px >= 2 * widest_button_px + gap_px ? 2 : 1;
+}
+
 // ── The nomination outcome ──────────────────────────────────────────────────
 //
 // The budget outcome being visible AT NOMINATION TIME is the point of the

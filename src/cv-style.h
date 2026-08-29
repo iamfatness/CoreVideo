@@ -160,8 +160,15 @@ QLabel[role="muted"] { color: #8a8a8a; font-size: 11px; }
    appears only on the banner and on the button holding that key. */
 QLabel#talkbackTrackWarning              { color: #8a8a8a; font-size: 11px; }
 QLabel#talkbackTrackWarning[risk="true"] { color: #f0b429; font-weight: 600; }
-QLabel#talkbackPlan                      { color: #b0b0b0; font-size: 11px; }
-QLabel#talkbackPlan[warn="true"]         { color: #f0b429; }
+/* The plan block reads top-down: the ANSWER ("6 channels in use of 16 for 5
+   people") at body weight and body colour, the names that support it one step
+   quieter. Setting both as one muted 11px run -- which is how it first
+   shipped -- turned the answer into a footnote about itself. Amber still wins
+   over both when something the operator asked for did not happen. */
+QLabel#talkbackPlan                      { color: #d0d0d0; font-size: 12px; }
+QLabel#talkbackPlan[warn="true"]         { color: #f0b429; font-weight: 600; }
+QLabel#talkbackPlanDetail                { color: #8a8a8a; font-size: 11px; }
+QLabel#talkbackPlanDetail[warn="true"]   { color: #e0a020; }
 
 /* ─── Talkback: the ON AIR banner ───────────────────────────────────────────
    THE ONE ELEMENT ON THE PANEL THAT IS ALLOWED TO SHOUT, and the reason it
@@ -184,11 +191,15 @@ QFrame#talkbackBanner[state="live"] {
     border: 2px solid #ff4d4d;
     background-color: #8c1c1c;
 }
+/* Off air is what this strip shows for all but a few seconds of a show, so it
+   is sized to be legible rather than to shout; the shouting is the LIVE rule
+   below, which nearly doubles the type and fills the ground. A permanently
+   16px/700 line just made the calm state tall. */
 QLabel#talkbackBannerLine {
     background: transparent;
     border: none;
     color: #8a8a8a;
-    font-size: 16px;
+    font-size: 14px;
     font-weight: 700;
 }
 QLabel#talkbackBannerLine[state="waiting"],

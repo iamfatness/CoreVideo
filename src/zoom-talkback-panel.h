@@ -47,11 +47,24 @@ public:
     void prepare_shutdown();
     void refresh_now();
 
+protected:
+    // Column count and label elision both depend on how wide the dock is right
+    // now, so both are re-decided here rather than fixed at build time.
+    void resizeEvent(QResizeEvent *event) override;
+
 private:
     void refresh();
     void refresh_probe();
     TalkbackDockOpenKey dock_open_key() const;
     void rebuild_key_buttons(const std::vector<TalkbackDockKeyButton> &buttons);
+    // Re-flows the existing key buttons into the widest grid their labels fit
+    // in, and writes each label elided to its button. Safe to call at any time
+    // -- it never enables, disables or deletes a button, so it cannot drop a
+    // held key's `down` state (only an EnabledChange does that).
+    void layout_key_buttons();
+    // Sets the talent list's height to exactly the rows it should show, from
+    // the widget's own measured row height.
+    void size_nominee_list();
     void on_nominate_clicked();
     // `latch` is captured at PRESS time, not read at release: an operator who
     // toggles the Latch box while holding a button must not have the release
@@ -70,6 +83,13 @@ private:
     QCheckBox *m_latch_cb = nullptr;
     QLabel    *m_notice   = nullptr;
     std::vector<QPushButton *> m_key_buttons;
+    // The UNELIDED label for each button in m_key_buttons, index for index.
+    // The button's own text() is whatever fits, so it cannot be the source for
+    // the next re-flow: eliding an already-elided string compounds.
+    std::vector<QString> m_key_labels;
+    // The grid the buttons are currently laid out in, so a resize that does
+    // not change it does not re-parent every button.
+    int m_key_columns = 0;
 
     // ── Talk source ─────────────────────────────────────────────────────────
     QComboBox *m_source_combo = nullptr;
@@ -78,7 +98,14 @@ private:
     // ── Nomination ──────────────────────────────────────────────────────────
     QListWidget *m_nominee_list = nullptr;
     QPushButton *m_nominate_btn = nullptr;
+    // The plan's answer, then its supporting names. Two labels so the headline
+    // can carry normal weight and colour while the name runs stay secondary.
     QLabel      *m_plan_label   = nullptr;
+    QLabel      *m_plan_detail  = nullptr;
+    // The row height the talent list was last sized from, so a tick that
+    // changes nothing does not re-set a fixed height ten times a second.
+    int m_nominee_sized_rows = -1;
+    int m_nominee_sized_row_h = -1;
 
     // ── Probe (Milestone 1 diagnostic) ──────────────────────────────────────
     // Collapsed by default. m_probe_participant_combo is a dedicated,

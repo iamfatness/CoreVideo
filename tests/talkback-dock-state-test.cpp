@@ -205,6 +205,60 @@ int main()
               "ticked");
     }
 
+    // ── How much room the list and the key grid need ──────────────────────
+    //
+    // Both are arithmetic the owner's first look at the standalone dock caught
+    // being wrong on screen (2026-08-29).
+    {
+        // Five people must show five WHOLE rows. The old code guessed a row
+        // height from the font, missed the stylesheet's item padding and the
+        // frame, and then got squeezed to its 3-row minimum by a dock shorter
+        // than the panel -- about two and a half rows, with a scrollbar.
+        check(talkback_dock_nominee_visible_rows(5) == 5,
+              "five people did not get five rows");
+        // An almost-empty list still has to read as a list, and an unbounded
+        // one must not push the key buttons off the bottom.
+        check(talkback_dock_nominee_visible_rows(0) == kTalkbackNomineeMinRows,
+              "an empty list collapsed below the minimum");
+        check(talkback_dock_nominee_visible_rows(1) == kTalkbackNomineeMinRows,
+              "a one-row list collapsed to a sliver");
+        check(talkback_dock_nominee_visible_rows(kTalkbackNomineeMaxRows) ==
+                  kTalkbackNomineeMaxRows,
+              "exactly the maximum did not get every row");
+        check(talkback_dock_nominee_visible_rows(40) == kTalkbackNomineeMaxRows,
+              "a long roster grew the list past the maximum instead of "
+              "scrolling");
+        check(kTalkbackNomineeMinRows <= kTalkbackNomineeMaxRows,
+              "the row bounds are inverted");
+    }
+    {
+        // Two columns only when two of the WIDEST button fit with the gap
+        // between them. Anything less is one full-width column -- which is
+        // what stops a name being clipped mid-glyph at both ends, the defect
+        // that made "Grant Whitehead" render as "rant Whitehead".
+        check(talkback_dock_key_columns(320, 150, 8) == 2,
+              "two buttons that fit were not given two columns");
+        check(talkback_dock_key_columns(308, 150, 8) == 2,
+              "the exact two-column fit was rejected");
+        check(talkback_dock_key_columns(307, 150, 8) == 1,
+              "two columns were used one pixel too narrow, which is where the "
+              "clipping starts");
+        check(talkback_dock_key_columns(200, 150, 8) == 1,
+              "a narrow dock kept two columns");
+        // The gap counts: it is the thing that makes the fit exact.
+        check(talkback_dock_key_columns(300, 150, 0) == 2,
+              "the gap was charged when there was none");
+        check(talkback_dock_key_columns(300, 150, 8) == 1,
+              "the gap was not charged against the fit");
+        // Never zero columns, whatever it is asked.
+        check(talkback_dock_key_columns(0, 150, 8) == 1,
+              "an unrealised width produced no columns at all");
+        check(talkback_dock_key_columns(320, 0, 8) == 1,
+              "an unmeasured label produced no columns at all");
+        check(talkback_dock_key_columns(10, 4000, 8) == 1,
+              "a label wider than the dock produced no columns at all");
+    }
+
     // ── Buttons agree with key_on()'s own refusal rule ─────────────────────
     {
         const auto plan = confirmed_plan();

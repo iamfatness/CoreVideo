@@ -114,7 +114,31 @@ public:
     // one after tick() is as close as that gets.
     //
     // Command-loop thread only (nomination_create_next() asserts it).
+    //
+    // TALKBACK DELIVERY LAW 2 (ZComms, 2026-08-29, live 12-person meeting):
+    // Zoom's rate limit is per MEMBERSHIP CALL, not per call KIND -- invites
+    // draw SDKERR_TOO_FREQUENT_CALL exactly as creates do. So this is no
+    // longer the create pump; it is the ONE membership-call pacer, and creates
+    // and invites share its single ~600ms cadence (kMembershipCallSpacing).
+    // See membership_pump_invite() below for the invite half and for why
+    // creates take priority within a turn.
     void nomination_tick();
+
+    // TALKBACK DELIVERY LAW 1 (ZComms, 2026-08-29, live): talkback delivers
+    // ONLY while this client's own meeting audio is OPEN. Muted, every
+    // SendAudioDataToChannel is ACCEPTED -- success codes, members confirmed,
+    // zero failures -- and every member hears silence. A host can re-mute the
+    // bot at any moment, including mid-key, so "open at session_start()" is
+    // not a state that stays true; it has to be re-asserted.
+    //
+    // Rides main.cpp's command-loop idle pump beside nomination_tick(), NOT a
+    // thread of its own: everything this touches (m_svc, the participants and
+    // audio controllers, m_session_live) is command-loop state, and this file
+    // already has one hard-won exception to that rule (the probe's tick()
+    // thread) which is not worth a second. Cheap on every turn: with no live
+    // session it is one bool read, and with one it is a deadline compare
+    // against kMicReassertInterval (2s, ZComms's measured value).
+    void mic_tick();
 
     // ── Talkback audio path (Milestone 2) ──────────────────────────────────
     bool open_audio(const std::string &region_name, uint32_t sample_rate,
@@ -202,7 +226,34 @@ public:
     // 13-channel plan would otherwise cost ~4s of real time in the suite. Like
     // its siblings it only moves the deadline; nomination_tick() is what
     // actually issues, exactly as the command loop's own pump would.
+    //
+    // LAW 2 (2026-08-29): it now expires BOTH halves of the pacer -- the
+    // create's own not-before AND the shared membership-call not-before
+    // (m_membership_next_at) -- because once those two were unified a test
+    // that expired only the create half would find the pump still closed and
+    // read the result as "the ladder stalled". Deliberately kept under its
+    // original name: same hook, same job, same reason, and renaming it would
+    // churn ~50 call sites in the select test for nothing.
     void debug_expire_create_spacing_for_test();
+
+    // LAW 2 (2026-08-29): the NARROW sibling of the hook above -- it expires
+    // ONLY the create's own not-before and leaves the shared membership floor
+    // standing. TEST-ONLY, same discipline as the rest.
+    //
+    // It exists because the wide hook cannot express the state Law 2 is
+    // actually about ("a create is due, but a membership call just went out"),
+    // and without that state the shared floor is UNPINNABLE: deleting it left
+    // the whole suite green, because every test that expired the create
+    // deadline expired the floor along with it. Found by mutation, not by
+    // review -- the third time in this feature that a guard's only test also
+    // disabled the thing it guards against.
+    void debug_expire_create_schedule_for_test();
+
+    // LAW 1 (2026-08-29): the mic re-assert's deadline, same TEST-ONLY
+    // discipline as its three siblings above -- it only moves the deadline
+    // into the past; mic_tick() is what actually re-asserts, exactly as 2s of
+    // real command-loop idle would.
+    void debug_expire_mic_assert_for_test();
 
     // ── Pre-provisioned channels (Task 2, 2026-08-25) ───────────────────────
     // Computes talkback_plan(nominees) (src/talkback-plan.h) and provisions
@@ -485,7 +536,19 @@ private:
     // talkback_session branch (distinguishes this from a stage line by the
     // presence of "live") and TalkbackController::evaluate()/status_json()
     // for the consumer side.
-    void report_session_state(bool live, const std::string &reason) const;
+    //
+    // LAW 1 (2026-08-29): `mic` is the third, OPTIONAL field. nullptr emits
+    // nothing, so every one of the eleven pre-existing call sites is
+    // byte-identical to before; session_start()'s live line passes "open" or
+    // "blocked". It rides THIS line rather than only the session_live stage
+    // line because this is the one the plugin's state machine consumes, and a
+    // key that is live over a MUTED bot is exactly the state the banner has to
+    // be able to say out loud ("ON AIR -- but the bot is muted by the host").
+    // A missing field is tolerated on the plugin side, same mixed-version rule
+    // as the nomination attempt id: a DLL-only install is this project's
+    // canonical mistake.
+    void report_session_state(bool live, const std::string &reason,
+                              const char *mic = nullptr) const;
 
     // Fix round 1, M3: resolve_participant()'s one report call
     // ("participant_talkback_support", the per-user IsSupportTalkback()
@@ -695,6 +758,92 @@ private:
     // tested mid-ladder path, not a new one).
     void nomination_schedule_create(std::chrono::milliseconds delay);
 
+    // ── LAW 2: the shared membership-call pacer (2026-08-29) ────────────────
+    // Stamps m_membership_next_at kMembershipCallSpacing into the future.
+    // Called immediately after ANY membership call reaches Zoom -- the
+    // CreateChannel in nomination_create_next() and the
+    // Begin/Add/ExecuteBatchInviteUsers in membership_pump_invite() -- because
+    // the rate limit ZComms measured counts CALLS, not call kinds, and a pacer
+    // that only counted one of the two is the defect this change exists to
+    // remove. Stamped on the CALL, not on its answer: a refused call was still
+    // a call, and it is exactly the calls Zoom refuses that must not be
+    // followed instantly by another.
+    void stamp_membership_call();
+
+    // Issues AT MOST ONE invite SDK call and returns whether it did. Called
+    // only from nomination_tick(), only when no create is due, and only once
+    // per turn -- that is the whole pacing mechanism on the invite side.
+    //
+    // It may LOOP internally, and that is deliberate rather than sloppy: a
+    // queued invite whose nominee is not currently in the meeting resolves to
+    // user id 0 and makes NO SDK call at all, so consuming the 600ms budget
+    // for it would let a plan full of absent names starve the ones who are
+    // present. The loop skips those (reporting each, exactly as the old
+    // synchronous path did) and stops at the first entry that actually reaches
+    // Zoom.
+    //
+    // ROUND-ROBIN, per ZComms's law: among the entries eligible right now it
+    // prefers one whose channel is NOT the channel the last invite went to.
+    // A 10-member all-talent channel enqueues ten at once, and strict FIFO
+    // would leave the last talent's own private channel waiting six seconds
+    // behind a queue that has nothing to do with them.
+    bool membership_pump_invite();
+
+    // Queues an invite instead of issuing it. Was invite_nominee(), which
+    // called Begin/Add/Execute inline; LAW 2 is that it may not, because two
+    // of its call sites (onCreateChannelResponse's per-channel member loop and
+    // resolve_roster_change()'s per-name loop) fire in BURSTS -- all members of
+    // a channel back to back, and every re-resolved name at once -- which is
+    // precisely the shape Zoom answers with SDKERR_TOO_FREQUENT_CALL.
+    //
+    // Deduped on (channel, name) against the queue itself, so a burst of the
+    // five roster callbacks for one join cannot enqueue the same invite five
+    // times. That is the SECOND half of the idempotence
+    // resolve_roster_change() already had against m_nomination_pending_invites:
+    // before this change an invite became "pending" the instant it was issued,
+    // and now there is a window where it is queued but not yet issued, which
+    // that check alone cannot see.
+    void enqueue_invite(const std::basic_string<zchar_t> &channel_id_z,
+                        const std::string &channel_id_utf8,
+                        const std::string &name);
+
+    // ── LAW 1: this client's own meeting audio (2026-08-29) ─────────────────
+    // Reads the authoritative self-mute state (IUserInfo::IsAudioMuted() on
+    // GetMySelfUser(), the participants controller's own answer -- there is no
+    // "am I muted" on IMeetingAudioController) and, if muted, UnMuteAudio()s
+    // this user. Returns whether the mic ended up OPEN.
+    //
+    // `when` is "session_start" or "tick" and decides the reporting volume:
+    // the key edge always reports, a tick reports only when it actually found
+    // the mic shut (a host re-muting the bot mid-key is worth a line; "still
+    // open" every 2s for the length of a latched key is the message-storm
+    // shape this codebase already has a live incident about).
+    //
+    // NOT A GATE. A meeting that forbids self-unmute leaves the key LIVE and
+    // reports "mic":"blocked" -- refusing the key would take away the
+    // director's only remaining option (ask the host to unmute the bot) while
+    // they are trying to talk, and the audio path is genuinely intact; what is
+    // missing is a permission only the host can grant. Fail LOUD, not closed,
+    // for this one.
+    bool ensure_mic_open(const char *when);
+
+    // The other half of ensure_mic_open(): if this file muted-to-unmuted the
+    // client for THIS key, put it back on release.
+    //
+    // THE SEMANTIC, stated because the alternative is defensible and this is a
+    // choice: restore iff (a) the client was observed MUTED at the moment the
+    // key opened and (b) our UnMuteAudio() succeeded. A bot the host had muted
+    // must not be left hot after the key closes -- from the room's side an
+    // open mic on a machine running a live production is the worse failure --
+    // and a bot that was already unmuted is left exactly as found. There is no
+    // "re-key pending" exception, because this engine has no such state: every
+    // press is its own session_start()/session_stop() pair (latch included),
+    // and inventing a pending-re-key window would mean guessing at an operator
+    // intent the wire never carries. The cost is one UnMuteAudio per press on
+    // a host-muted bot, which is one membership-unrelated SDK call on the
+    // RELEASE path, where latency does not reach the audience.
+    void restore_mic_state();
+
     // Fix round 1, m6: nomination_create_next() is the first call in this
     // file to issue CreateChannel from inside a callback dispatch
     // (onCreateChannelResponse's Nomination branch calls it again for the
@@ -792,9 +941,26 @@ private:
     // primitive without touching create-side state at all. A name not
     // currently in the meeting is reported and skipped, not an error --
     // that is the expected shape for someone who has not joined yet.
-    void invite_nominee(const std::basic_string<zchar_t> &channel_id_z,
+    //
+    // LAW 2 (2026-08-29) changed WHO calls this and what it returns. It is no
+    // longer called from the provisioning loop or from the roster path -- both
+    // enqueue_invite() now -- and its ONE caller is membership_pump_invite(),
+    // which has already spent the pacer's turn on it. The return value is
+    // "did an SDK membership call actually reach Zoom", so the pump can tell a
+    // spent turn from a skipped name (uid 0, nobody by that name in the
+    // meeting right now) without re-deriving it.
+    //
+    // `retries` is how many SDKERR_TOO_FREQUENT_CALL refusals this
+    // (channel, name) has already ridden out, carried in from the queue entry
+    // so an 18 can re-queue itself with a doubling backoff instead of being
+    // reported as a failure. THAT IS THE OTHER HALF OF LAW 2: an 18 on an
+    // invite means exactly what an 18 on a create means -- Zoom saying "not
+    // yet" -- and the pre-Law-2 code reported it as a plain `"stage":"invite"`
+    // failure and then relied on some later roster event to try again, which
+    // for a name already marked present or failed would never come.
+    bool invite_nominee(const std::basic_string<zchar_t> &channel_id_z,
                         const std::string &channel_id_utf8,
-                        const std::string &name);
+                        const std::string &name, uint32_t retries);
 
     ZOOMSDK::IMeetingService          *m_svc  = nullptr;
     ZOOMSDK::IMeetingTalkbackController *m_ctrl = nullptr;
@@ -1383,6 +1549,67 @@ private:
     // a dead ladder's scheduled create can never fire into a live one).
     bool m_nomination_create_scheduled = false;
     std::chrono::steady_clock::time_point m_nomination_next_create_at{};
+
+    // ── LAW 2 (2026-08-29): the ONE membership-call not-before ──────────────
+    // Zoom rate-limits membership CALLS, so creates and invites share this
+    // deadline: whichever kind goes out stamps it, and neither kind may leave
+    // until it has passed. m_nomination_next_create_at above did not become
+    // redundant -- it is the create's OWN schedule (is a create even wanted
+    // yet, and after a code-18 backoff that can be far longer than the shared
+    // spacing), while this is the floor under every membership call whatever
+    // its kind. Both must be clear before a create is issued.
+    //
+    // Guarded by m_chan_mtx for the same reason its create-side sibling is:
+    // the pump reads it in the same lock scope as the queue and the schedule,
+    // and a decision assembled from three separately-locked reads is three
+    // instants pretending to be one.
+    std::chrono::steady_clock::time_point m_membership_next_at{};
+
+    // An invite this file has decided on but not yet issued -- see
+    // enqueue_invite()/membership_pump_invite(). Guarded by m_chan_mtx like
+    // every other membership table here.
+    //
+    // A QUEUED INVITE MUST NEVER OUTLIVE ITS CHANNEL, the same rule
+    // m_nomination_pending_invites and m_session_channels are both cleared
+    // under: nomination_destroy_provisioned() empties this in the identical
+    // lock scope that empties the provisioned table, so "queued for a channel
+    // Zoom no longer has" is not a state that exists rather than one argued to
+    // be unreachable.
+    struct TalkbackQueuedInvite {
+        std::basic_string<zchar_t> channel_id_z;
+        std::string channel_id;   // UTF-8, reporting only
+        std::string name;         // resolved to a live id at ISSUE time, never here
+        // Not-before for THIS entry, distinct from the pacer's own floor: it
+        // is how a code-18 refusal backs itself off (kInviteRateLimitBackoff
+        // doubling) without holding up every other channel's invites, which a
+        // single shared deadline would.
+        std::chrono::steady_clock::time_point not_before;
+        uint32_t retries = 0;
+    };
+    std::vector<TalkbackQueuedInvite> m_invite_queue;
+
+    // The channel the last issued invite went to, so the pump can round-robin
+    // away from it. Guarded by m_chan_mtx. Not a fairness nicety: with one
+    // membership call per 600ms, a 13-channel plan's FIFO order decides
+    // whether the last talent's own private channel is confirmed at second 2
+    // or at second 20 -- and it is the private channels the director keys.
+    std::basic_string<zchar_t> m_last_invite_channel;
+
+    // ── LAW 1 (2026-08-29): this client's own meeting audio ─────────────────
+    // Command-loop thread only, like the audio path itself -- session_start(),
+    // session_stop() and mic_tick() are the only writers and all three run
+    // there. Not under m_chan_mtx: none of this is channel-id state, and
+    // nothing off the command loop reads it.
+    //
+    // m_mic_open is the LAST OBSERVED answer to "can anything this key sends
+    // actually be heard", which is what the session report's "mic" field
+    // carries. m_mic_restore_pending is set only when THIS file took the
+    // client from muted to unmuted for the current key -- see
+    // restore_mic_state() for the semantic and why there is no re-key
+    // exception.
+    bool m_mic_open = false;
+    bool m_mic_restore_pending = false;
+    std::chrono::steady_clock::time_point m_mic_next_assert_at{};
 
     // Consecutive SDKERR_TOO_FREQUENT_CALL retries for the channel currently
     // at the front of m_nomination_pending. Reset to 0 whenever that front

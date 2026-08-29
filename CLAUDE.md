@@ -234,20 +234,109 @@ Every one of these is documented at length where it lives; the list is the map.
   confirmed live**: this is written from the operator's report plus the
   absence of any duck-at-provision in our own code; it needs the next
   production to confirm talent are no longer ducked on assign.
-- **The nomination ladder must be PACED, and code 18 is a wait not a failure**
-  (`kNominationCreateSpacing` / `nomination_tick()` in
-  `engine/src/engine-talkback.cpp`, live gate run 1, 2026-08-26 20:04): Zoom
+- **THE THREE TALKBACK DELIVERY LAWS** (ported 2026-08-29 from the sibling
+  ZComms project, which spent that day live-hunting talkback delivery failures
+  against the same Meeting SDK 7.1.5; its writeup is in
+  `C:\Users\walla\ZComms\CLAUDE.md` under "The talkback delivery laws"). **None
+  of the three is documented by Zoom** and each one is silent or indefinite in
+  the failure direction, which is why they are laws here and not TODOs.
+  1. **Talkback delivers ONLY while this client's own meeting audio is OPEN.**
+     Muted, `SendAudioDataToChannel` is *accepted* — success codes, members
+     confirmed, zero failures — and every member hears silence. The operator's
+     own production on 2026-08-29 had the bot muted by the host, so every send
+     would have been that accepted-but-silent ghost.
+     `EngineTalkback::ensure_mic_open()` reads the authoritative state
+     (`GetMySelfUser()->IsAudioMuted()` — `IMeetingAudioController` has **no**
+     "am I muted" getter, only `MuteAudio`/`UnMuteAudio`) and unmutes at
+     `session_start()`; `mic_tick()` re-asserts every 2 s on the command loop's
+     idle turn, because a host can re-mute the bot mid-key.
+     `restore_mic_state()` puts it back on release **iff** this file was the
+     one that opened it — a bot left hot on the machine running the show is
+     the worse failure. An unmute the meeting refuses does **not** refuse the
+     key (the channels are real and a host can still unmute); it reports
+     `"mic":"blocked"` on the `talkback_session` `live` line so the dock can
+     say *"ON AIR — but the bot is muted by the host"* instead of plain
+     "live", which is the one word that made the ghost invisible.
+     **The leak question, answered from the code rather than assumed**: `Join`
+     sets `isAudioOff = false` / `isMyVoiceInMix = true`
+     (`engine/src/main.cpp`) and **nothing in this repository calls
+     `setExternalAudioSource()`** — the only `IZoomSDKAudioRawDataHelper` use
+     anywhere is `engine-audio.cpp`'s `subscribe()`/`unSubscribe()`, the
+     *receive* path — so a bare unmute would open the OBS machine's **default
+     capture device** live into the meeting. The insurance runs once at auth,
+     in `main.cpp`'s existing `CreateSettingService` block (stage
+     `mic_insurance`): `SelectMic()` onto a device id that matches nothing plus
+     `SetMicVol(0)`. **Weaker than ZComms's** never-fed virtual mic, and
+     deliberately so — theirs installs a virtual mic into the same helper our
+     show-critical receive subscribe uses. If a live gate ever hears the room
+     through this, `setExternalAudioSource()` is the escalation.
+  2. **The rate limit is per membership CALL, and invites count** — see the
+     next bullet, which this rewrote.
+  3. **A same-account host collision hangs the join forever unless answered.**
+     Joining with a ZAK for an account already hosting elsewhere (the
+     operator's own client in their own PMI — the ordinary way anyone tests)
+     does not fail the join: the SDK asks, via
+     `IMeetingConfigurationEvent::onEndOtherMeetingToJoinMeetingNotification`,
+     whether to end the other meeting. **Unanswered, `Join()` never resolves
+     and no `MEETING_STATUS_FAILED` ever arrives** — the dock sits on "joining"
+     until someone kills the process. This is the 2026-08-25 displacement
+     class. `EngineMeetingEvent` now implements `IMeetingConfigurationEvent`
+     (registered via `GetMeetingConfiguration()->SetEvent()`, a **separate**
+     registration from `IMeetingService::SetEvent()`) and answers `Cancel()` —
+     **never `EndOtherMeeting()`**, which would end the operator's live show to
+     join it — then fails the join loudly through the existing
+     `{"cmd":"error","msg":"meeting_failed"}` shape with local sentinel code
+     `909001` and reason `account_busy_elsewhere` (Zoom never failed the join,
+     we did, so there is no Zoom enum for it; the number matches ZComms's so
+     two projects' logs read alike).
+- **The membership ladder must be PACED — creates AND invites out of ONE
+  budget — and code 18 is a wait not a failure**
+  (`kMembershipCallSpacing` / `nomination_tick()` in
+  `engine/src/engine-talkback.cpp`; live gate run 1, 2026-08-26 20:04, then
+  **Law 2**, ZComms live 12-person meeting 2026-08-29): Zoom
   rate-limits back-to-back `CreateChannel` calls. The ladder used to issue
   channel N+1 synchronously from inside channel N's `onCreateChannelResponse`
   — a 0 ms gap — and Zoom refused it with `SDKERR_TOO_FREQUENT_CALL` (enum
   position 18), so **no nomination with more than one channel could ever
   succeed live**, which is every real talent list. No unit test could catch it:
-  the fake controller has no rate limit. The create is now scheduled 300 ms
-  after the previous response and issued by `nomination_tick()`; a code-18
+  the fake controller has no rate limit. The create is now scheduled after the
+  previous response and issued by `nomination_tick()`; a code-18
   refusal backs off (500 ms doubling, 4 retries per channel) and retries the
   SAME channel, and only cap exhaustion is terminal — with reason
   `create_rate_limited`, never the generic `create_channel_failed`, because
   run 1 spent its first pass suspecting permissions and channel budget.
+  **LAW 2 (2026-08-29) widened this from creates to every membership call.**
+  ZComms measured Zoom refusing code 18 on **invites**, on every pass, while
+  making no creates at all; their working cadence is **one membership call per
+  ~600 ms, round-robin across channels**. Our ladder paced creates and fired
+  invites *unpaced*, in bursts — every member of a channel back to back inside
+  `onCreateChannelResponse`, and every re-resolved name at once from
+  `resolve_roster_change()`. Two channels passed the 2026-08-26 gate because
+  two channels is two creates and two invites; a 24-talent plan is 13 creates
+  and 24+ invites and would have tripped exactly what ZComms measured. So
+  `kNominationCreateSpacing` (300 ms, creates only) became
+  **`kMembershipCallSpacing` (600 ms, shared)**: both call kinds queue,
+  `nomination_tick()` spends **at most one call per turn** against one floor
+  (`m_membership_next_at`), creates take priority within a turn (a channel that
+  does not exist cannot be invited into), and invites round-robin away from the
+  last channel served — at one call per 600 ms, FIFO order decides whether the
+  last talent's own private channel is confirmed at second 2 or second 20, and
+  it is the private channels the director keys. Invites got the create's
+  code-18 treatment too: requeued with a doubling backoff
+  (`invite_rate_limited_retry`), capped per (channel, name), and **cap
+  exhaustion is NOT terminal for the ladder** — one person's membership is not
+  the nomination's progress. **The cost is stated, not hidden**: a 13-channel /
+  24-invite plan now takes ~22 s of otherwise-idle wall time to fully provision
+  *and* confirm, paid once at nomination and never at key time. **The shared
+  floor was unpinnable until a second, narrow test hook existed**
+  (`debug_expire_create_schedule_for_test()`): deleting the floor left the
+  whole suite green, because every test reached the "next turn" state through
+  `debug_expire_create_spacing_for_test()`, which expired the floor along with
+  the create deadline — a guard whose only test also disables the thing it
+  guards against asserts nothing. Found by mutation, and the *same* mutation
+  first survived because the floor was redundantly re-checked inside
+  `membership_pump_invite()`; there is now exactly **one** floor check, in
+  `nomination_tick()`.
   **`nomination_tick()` is not `tick()` and must never be folded into it**:
   `tick()` has exactly one driver, the thread `main.cpp` spawns when `probe()`
   returns true, which by construction does not exist during a nomination — a

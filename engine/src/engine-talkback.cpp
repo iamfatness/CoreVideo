@@ -31,21 +31,56 @@ constexpr uint32_t kMaxDestroyAttempts = 5;
 // aborted terminally, correctly and uselessly: every real talent list plans
 // more than one channel, so no nomination could ever have succeeded live.
 //
-// kNominationCreateSpacing: the minimum gap between one create's RESPONSE and
-// the next create's ISSUE. 300ms is six turns of the command loop's 50ms idle
-// pump (ipc_read_line_with_message_pump's MsgWaitForMultipleObjects timeout in
-// main.cpp), so the pump's granularity cannot round it down to something near
-// the 0ms Zoom refused; and it keeps a big plan tolerable -- the 13-channel
-// 11-nominee case provisions in ~4s of otherwise idle wall time, once, at
-// nomination rather than at key time. Zoom documents no rate for this, so the
-// value is an engineering guess with margin, not a published limit; if a later
-// gate still sees 18 at 300ms, raise this rather than leaning on the retry.
-constexpr std::chrono::milliseconds kNominationCreateSpacing{300};
+// TALKBACK DELIVERY LAW 2 (ZComms, 2026-08-29, live 12-person meeting; its
+// writeup is in that project's CLAUDE.md under "The talkback delivery laws").
+// THE RATE LIMIT IS PER MEMBERSHIP CALL, AND INVITES COUNT. ZComms's healer
+// ran one batch-exchange per person every 2s and drew
+// SDKERR_TOO_FREQUENT_CALL on EVERY pass -- not on creates, which it was not
+// making, but on the invites themselves. Their measured working cadence is one
+// membership call per ~600ms, round-robin across channels.
+//
+// This is why kNominationCreateSpacing (300ms, and creates only) became
+// kMembershipCallSpacing: our ladder paced creates and fired invites unpaced
+// in bursts -- every member of a channel back to back inside
+// onCreateChannelResponse, plus every re-resolved name at once from
+// resolve_roster_change(). Two channels passed the 2026-08-26 gate because two
+// channels is two creates and two invites; a 24-talent plan is 13 creates and
+// 24+ invites, and it would have tripped exactly the limit ZComms measured.
+//
+// 600ms is ZComms's live-measured value, not an engineering guess like the
+// 300ms it replaces, and it is still twelve turns of the command loop's 50ms
+// idle pump (ipc_read_line_with_message_pump's MsgWaitForMultipleObjects
+// timeout in main.cpp) so the pump's granularity cannot round it down. THE
+// COST IS STATED, not hidden: the 13-channel / 24-invite case now takes ~22s
+// of otherwise-idle wall time to fully provision AND confirm, versus ~4s for
+// the creates alone before. That is paid once, at nomination, never at key
+// time -- and the alternative measured live is a rate-limited burst where an
+// unknowable subset of the talent are simply not in their channels.
+constexpr std::chrono::milliseconds kMembershipCallSpacing{600};
 
-// The first backoff after an actual SDKERR_TOO_FREQUENT_CALL, doubled per
-// retry: 500 / 1000 / 2000 / 4000ms. Starts above kNominationCreateSpacing
-// because the spacing already proved insufficient by the time this fires.
+// The first backoff after an actual SDKERR_TOO_FREQUENT_CALL on a CREATE,
+// doubled per retry: 500 / 1000 / 2000 / 4000ms. Was chosen to start above the
+// old 300ms spacing because the spacing had already proved insufficient by the
+// time it fires; that reasoning is now weaker (the spacing is 600ms) but the
+// ladder is the same and the first backoff is deliberately left where the
+// 2026-08-26 gate proved it works, rather than re-tuned blind.
 constexpr std::chrono::milliseconds kNominationRateLimitBackoff{500};
+
+// The same idea on the INVITE side, and new with Law 2. Deliberately its own
+// constant rather than sharing the create's: an invite's retry is one PERSON's
+// membership, not the ladder's progress, so exhausting it is not terminal for
+// the nomination (see invite_nominee()) and its budget has no reason to move
+// in lockstep with the create's.
+constexpr std::chrono::milliseconds kInviteRateLimitBackoff{600};
+constexpr uint32_t kMaxInviteRetries = 4;
+
+// TALKBACK DELIVERY LAW 1 (ZComms, 2026-08-29, live): how often a LIVE key
+// re-asserts that this client's own meeting audio is still open. ZComms uses
+// 2s and this matches it deliberately -- the number is theirs, measured
+// against a real host re-muting a bot, and there is no reason for two projects
+// against the same SDK to drift on it. A host CAN mute the bot mid-key, and
+// past that instant every buffer this engine sends is accepted and inaudible.
+constexpr std::chrono::milliseconds kMicReassertInterval{2000};
 
 // Per-channel cap on those retries. Four gives 7.5s of total backoff for one
 // channel -- long enough to ride out a burst, short enough that an operator
@@ -169,11 +204,18 @@ void EngineTalkback::report_nomination(const std::string &stage, const std::stri
     EngineIpc::write(line);
 }
 
-void EngineTalkback::report_session_state(bool live, const std::string &reason) const
+void EngineTalkback::report_session_state(bool live, const std::string &reason,
+                                          const char *mic) const
 {
     std::string line = R"({"cmd":"talkback_session","live":)" +
                         std::string(live ? "true" : "false") +
-                        R"(,"reason":")" + json_escape(reason) + "\"}";
+                        R"(,"reason":")" + json_escape(reason) + "\"";
+    // LAW 1: omitted entirely when nullptr, so the eleven pre-existing call
+    // sites emit byte-identical lines to a pre-Law-1 engine's -- the same
+    // mixed-version discipline attempt_field() follows, and for the same
+    // reason (a DLL-only install is this project's canonical mistake).
+    if (mic) line += R"(,"mic":")" + std::string(mic) + "\"";
+    line += "}";
     EngineIpc::write(line);
 }
 
@@ -1230,12 +1272,20 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
                           R"("channel":")" + json_escape(id) + R"(","volume":1.0,"code":)" +
                           std::to_string(static_cast<int>(bgv)));
 
-        // Invite by NAME, resolved now: Zoom user ids are meeting-scoped, so
-        // a stored id would point at nobody after a rejoin and at the wrong
-        // face once ids are recycled -- same rule the probe and the session
-        // already follow.
+        // Invite by NAME, resolved at ISSUE time: Zoom user ids are
+        // meeting-scoped, so a stored id would point at nobody after a rejoin
+        // and at the wrong face once ids are recycled -- same rule the probe
+        // and the session already follow.
+        //
+        // LAW 2 (2026-08-29): QUEUED, not issued. This loop is the exact burst
+        // ZComms measured Zoom refusing -- up to ten Begin/Add/Execute
+        // sequences back to back for one all-talent slice, at whatever gap the
+        // CPU manages. The pacer (nomination_tick() ->
+        // membership_pump_invite()) spends them one per kMembershipCallSpacing
+        // and shares that budget with the ladder's own creates, because Zoom's
+        // limit does not distinguish the two.
         for (const auto &name : planned.members)
-            invite_nominee(channel_copy, id, name);
+            enqueue_invite(channel_copy, id, name);
 
         bool more;
         std::size_t provisioned_count = 0;
@@ -1250,11 +1300,18 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
             // synchronously from inside channel N's response, a 0ms gap, which
             // Zoom refuses with SDKERR_TOO_FREQUENT_CALL (18). The create is
             // now SCHEDULED and nomination_tick() issues it from the command
-            // loop once kNominationCreateSpacing has passed. Same thread
-            // either way (this callback and the pump both run on the command
-            // loop -- see assert_command_loop_thread()); what changes is only
-            // that the create no longer leaves from inside the callback.
-            nomination_schedule_create(kNominationCreateSpacing);
+            // loop once the spacing has passed. Same thread either way (this
+            // callback and the pump both run on the command loop -- see
+            // assert_command_loop_thread()); what changes is only that the
+            // create no longer leaves from inside the callback.
+            //
+            // LAW 2 (2026-08-29): the constant is kMembershipCallSpacing now,
+            // 600ms and shared with the invites this same branch just queued.
+            // The schedule armed here is the create's OWN not-before; the
+            // shared floor (m_membership_next_at) is armed independently by
+            // whichever membership call goes out next, and BOTH must be clear
+            // before the create is issued.
+            nomination_schedule_create(kMembershipCallSpacing);
         else
             report_nomination("nominate_done",
                               R"("channels":)" + std::to_string(provisioned_count) +
@@ -1963,6 +2020,12 @@ bool EngineTalkback::nomination_create_next()
     }
 
     const ZOOMSDK::SDKError e = m_ctrl->CreateChannel(1);
+    // LAW 2: a membership call has now reached Zoom, whatever it answers.
+    // Stamped here rather than in nomination_tick() so BOTH entry points are
+    // covered -- the pump's, and nominate()'s direct call for the plan's first
+    // channel, which is not paced (it is the first) but must still push the
+    // next membership call of ANY kind out by the spacing.
+    stamp_membership_call();
     report_nomination("create_channel", R"("code":)" + std::to_string(static_cast<int>(e)));
 
     // LIVE GATE RUN 1 (2026-08-26): SDKERR_TOO_FREQUENT_CALL is the ONE
@@ -2044,39 +2107,166 @@ void EngineTalkback::nomination_schedule_create(std::chrono::milliseconds delay)
     m_nomination_next_create_at = std::chrono::steady_clock::now() + delay;
 }
 
+void EngineTalkback::stamp_membership_call()
+{
+    // LAW 2: one floor under every membership call, whatever its kind. See
+    // kMembershipCallSpacing and the declaration comment.
+    std::lock_guard<std::mutex> lock(m_chan_mtx);
+    m_membership_next_at = std::chrono::steady_clock::now() + kMembershipCallSpacing;
+}
+
 void EngineTalkback::nomination_tick()
 {
-    // The whole pump. Deliberately tiny: everything about WHICH channel and
-    // WHETHER the arbiter allows it already lives in nomination_create_next(),
-    // and duplicating any of it here is how the two would drift.
+    // THE MEMBERSHIP PUMP. Still deliberately tiny: everything about WHICH
+    // channel and WHETHER the arbiter allows it lives in
+    // nomination_create_next(), and everything about which invite is next
+    // lives in membership_pump_invite(). What is decided HERE, and only here,
+    // is the one thing Law 2 is about -- that at most ONE membership call
+    // leaves per turn, and none at all before the shared floor has passed.
     //
     // Consume the schedule under the lock BEFORE issuing, never after: the
     // issue path calls the SDK (which must not happen under m_chan_mtx) and
     // can itself re-arm the schedule on a rate-limit retry. Clearing after
     // would wipe that fresh arm and stall the ladder silently.
+    //
+    // CREATES TAKE PRIORITY over invites within a turn, which is a ruling and
+    // not an accident: a channel that does not exist yet cannot be invited
+    // into, the ladder's terminal report is what the operator's whole
+    // nomination surface waits on, and every invite queued behind a create is
+    // for a channel the same ladder is still building. The invite queue cannot
+    // be starved by this -- creates are finite (one per planned channel) and
+    // each one's response is what enqueues the invites behind it.
     bool due;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
-        due = m_nomination_create_scheduled &&
-              std::chrono::steady_clock::now() >= m_nomination_next_create_at;
+        const auto now = std::chrono::steady_clock::now();
+        if (now < m_membership_next_at) return;   // the pacer is closed
+        due = m_nomination_create_scheduled && now >= m_nomination_next_create_at;
         if (due) m_nomination_create_scheduled = false;
     }
-    if (!due) return;
-    // Return value deliberately unused: every false path inside has already
-    // emitted its own terminal report through nomination_abort_ladder(), and
-    // there is no caller here to tell -- unlike main.cpp's nominate() call
-    // site, which keeps a diagnostic backstop for exactly that reason.
-    (void)nomination_create_next();
+    if (due) {
+        // Return value deliberately unused: every false path inside has
+        // already emitted its own terminal report through
+        // nomination_abort_ladder(), and there is no caller here to tell --
+        // unlike main.cpp's nominate() call site, which keeps a diagnostic
+        // backstop for exactly that reason.
+        (void)nomination_create_next();
+        return;
+    }
+    (void)membership_pump_invite();
+}
+
+bool EngineTalkback::membership_pump_invite()
+{
+    // LAW 2, the invite half. ONE SDK membership call at most; see the
+    // declaration for the loop's justification (a name that resolves to
+    // nobody makes no call and must not spend the turn) and for the
+    // round-robin rule.
+    //
+    // Same thread rule as every other membership call in this file: the pump
+    // runs on the command loop, and Begin/Add/ExecuteBatchInviteUsers is the
+    // shape tick()'s own inventory documents as unsafe to interleave with the
+    // probe's driving thread. Unlike the create path there is no arbiter to
+    // consult -- invites carry their own channel id, so two in flight are
+    // never confusable -- but the probe-thread exclusion still matters, and it
+    // is held where it always was: the queue is only ever FILLED from paths
+    // already gated on has_pending_work() (resolve_roster_change()) or
+    // structurally excluded from one (onCreateChannelResponse's nomination
+    // branch, which by construction runs with no probe ladder alive).
+    assert_command_loop_thread("membership_pump_invite");
+    if (!m_ctrl) return false;
+
+    for (;;) {
+        TalkbackQueuedInvite job;
+        {
+            std::lock_guard<std::mutex> lock(m_chan_mtx);
+            const auto now = std::chrono::steady_clock::now();
+            // NO SECOND CHECK OF m_membership_next_at HERE, deliberately.
+            // nomination_tick() owns that decision for BOTH call kinds -- it
+            // is the only caller of this function, and it returns before
+            // reaching it when the pacer is closed. An identical check here
+            // looked like defence and was actually a mask: it survived a
+            // mutation that deleted the floor from nomination_tick() (where
+            // the create half also lives), leaving creates unpaced against
+            // invites with the whole suite green. One floor, one place that
+            // reads it -- see nomination_tick(). `now` is still needed below,
+            // for each ENTRY's own not_before (a code-18 backoff).
+
+            // ROUND-ROBIN: among the entries eligible NOW, prefer one whose
+            // channel is not the channel the previous invite went to; fall
+            // back to the first eligible one when every eligible entry is for
+            // that same channel (the one-channel case, and the tail of a
+            // fan-out).
+            const std::size_t none = m_invite_queue.size();
+            std::size_t pick = none;
+            std::size_t first_eligible = none;
+            for (std::size_t i = 0; i < m_invite_queue.size(); ++i) {
+                if (now < m_invite_queue[i].not_before) continue;
+                if (first_eligible == none) first_eligible = i;
+                if (m_invite_queue[i].channel_id_z != m_last_invite_channel) {
+                    pick = i;
+                    break;
+                }
+            }
+            if (pick == none) pick = first_eligible;
+            if (pick == none) return false;   // nothing queued, or all backed off
+            job = m_invite_queue[pick];
+            m_invite_queue.erase(m_invite_queue.begin() +
+                                 static_cast<std::ptrdiff_t>(pick));
+            // Stamped from the DEQUEUE, not from a successful issue: a name
+            // that resolves to nobody still tells us which channel this pass
+            // was working on, and rotating away from it is right either way.
+            m_last_invite_channel = job.channel_id_z;
+        }
+        if (invite_nominee(job.channel_id_z, job.channel_id, job.name, job.retries))
+            return true;    // a real membership call went out; the turn is spent
+        // uid 0 -- nobody by that name is in the meeting right now. Reported
+        // inside invite_nominee(), no SDK call made, so the pacer's budget is
+        // untouched and the next eligible entry gets this turn instead.
+    }
 }
 
 void EngineTalkback::debug_expire_create_spacing_for_test()
 {
-    // TEST-ONLY, no production call site. Only moves the deadline into the
+    // TEST-ONLY, no production call site. Only moves the deadlines into the
     // past -- nomination_tick() is what issues, exactly as the real pump
     // would. Same discipline as debug_expire_pending_create_for_test() and
     // debug_expire_pending_invites_for_test().
+    //
+    // LAW 2: BOTH halves of the pacer, for the reason on the declaration --
+    // expiring only the create's own schedule would leave the shared
+    // membership floor closed and read as a stalled ladder.
+    std::lock_guard<std::mutex> lock(m_chan_mtx);
+    const auto now = std::chrono::steady_clock::now();
+    m_nomination_next_create_at = now;
+    m_membership_next_at = now;
+    for (auto &q : m_invite_queue) q.not_before = now;
+}
+
+void EngineTalkback::debug_expire_create_schedule_for_test()
+{
+    // TEST-ONLY, no production call site. The NARROW sibling of the hook
+    // above: it moves ONLY the create's own not-before into the past and
+    // leaves the shared membership floor exactly where the last membership
+    // call stamped it.
+    //
+    // It exists because the wide hook cannot express the one state Law 2 is
+    // actually about -- "a create is due, but a membership call just went
+    // out" -- and without that state the shared floor in nomination_tick() is
+    // unpinnable: a mutation deleting it left the whole suite green, because
+    // every test that expired the create deadline expired the floor with it.
+    // Same shape as the round-2 deadline backstop and the round-3 "nothing
+    // pins the engine side": a guard whose only test also disables the thing
+    // it guards against asserts nothing.
     std::lock_guard<std::mutex> lock(m_chan_mtx);
     m_nomination_next_create_at = std::chrono::steady_clock::now();
+}
+
+void EngineTalkback::debug_expire_mic_assert_for_test()
+{
+    // TEST-ONLY, no production call site. Only moves the deadline; mic_tick()
+    // is what re-asserts, exactly as 2s of real command-loop idle would.
+    m_mic_next_assert_at = std::chrono::steady_clock::now();
 }
 
 void EngineTalkback::assert_command_loop_thread(const char *where) const
@@ -2142,6 +2332,15 @@ void EngineTalkback::nomination_destroy_provisioned()
         // it, same reasoning as m_session_channels.clear() just below: a
         // pending invite must never outlive the channel it names.
         m_nomination_pending_invites.clear();
+        // LAW 2 (2026-08-29): and neither may a QUEUED one, for exactly the
+        // same reason and in exactly the same lock scope. A queued invite
+        // names a channel by id; once these ids are destroyed, issuing it
+        // would be a membership call into a channel Zoom no longer has -- and
+        // it would spend a pacer turn some live channel's invite needs. Same
+        // structural guarantee as m_session_channels.clear() below: not a
+        // state that exists, rather than one argued unreachable.
+        m_invite_queue.clear();
+        m_last_invite_channel.clear();
         // Task 3: a selection must never outlive the channels it names.
         // Clearing it in the SAME lock scope that empties the table means
         // "selected a destroyed channel" is not a state that exists, rather
@@ -2261,31 +2460,98 @@ void EngineTalkback::nomination_abort_ladder(const std::string &reason)
                       attempt_field(m_nomination_attempt));
 }
 
-void EngineTalkback::invite_nominee(const std::basic_string<zchar_t> &channel_id_z,
+void EngineTalkback::enqueue_invite(const std::basic_string<zchar_t> &channel_id_z,
                                     const std::string &channel_id_utf8,
                                     const std::string &name)
+{
+    // LAW 2: the two callers of this (onCreateChannelResponse's per-channel
+    // member loop and resolve_roster_change()'s per-name loop) both fire in
+    // BURSTS, which is exactly the shape Zoom answers with
+    // SDKERR_TOO_FREQUENT_CALL. They decide WHO needs inviting; the pacer
+    // decides WHEN, one call per kMembershipCallSpacing.
+    std::lock_guard<std::mutex> lock(m_chan_mtx);
+    // Dedupe on (channel, name). resolve_roster_change() already refuses to
+    // re-invite a name with an entry in m_nomination_pending_invites, but that
+    // table is only written when an invite has actually ISSUED -- and Law 2
+    // opens a window, potentially seconds wide, where an invite is decided but
+    // not yet issued. Without this, a burst of the five roster callbacks for
+    // one join queues the same invite five times and spends five turns of the
+    // pacer on it.
+    for (const auto &q : m_invite_queue)
+        if (q.channel_id_z == channel_id_z && q.name == name) return;
+    m_invite_queue.push_back({channel_id_z, channel_id_utf8, name,
+                              std::chrono::steady_clock::now(), 0});
+}
+
+bool EngineTalkback::invite_nominee(const std::basic_string<zchar_t> &channel_id_z,
+                                    const std::string &channel_id_utf8,
+                                    const std::string &name, uint32_t retries)
 {
     // resolve_participant() reports IsSupportTalkback() itself (the
     // per-user gate) whenever it finds a match -- see its own comment. A
     // nominee not currently in the meeting resolves to 0: reported and
-    // skipped here, not an error -- a future roster-driven re-resolution
-    // (Task 4) is what is expected to pick them up once they join.
+    // skipped here, not an error -- a roster-driven re-resolution (Task 4) is
+    // what picks them up once they join.
     const unsigned int uid = resolve_participant(name, ReportSink::Nomination);
     if (uid == 0) {
         report_nomination("member_not_in_meeting",
                           R"("name":")" + json_escape(name) + R"(","channel":")" +
                           json_escape(channel_id_utf8) + "\"");
-        return;
+        return false;   // NO SDK call was made -- see membership_pump_invite()
     }
     ZOOMSDK::SDKError e = m_ctrl->BeginBatchInviteUsers(channel_id_z.c_str());
     if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->AddUserToInvite(uid);
     if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->ExecuteBatchInviteUsers();
+    // LAW 2: a membership call reached Zoom, whatever it answered. Stamped
+    // BEFORE the disposition below, because it is precisely the refused calls
+    // that must not be followed instantly by another.
+    stamp_membership_call();
     report_nomination("invite",
                       R"("name":")" + json_escape(name) + R"(","user_id":)" +
                       std::to_string(uid) + R"(,"channel":")" +
                       json_escape(channel_id_utf8) + R"(","code":)" +
                       std::to_string(static_cast<int>(e)));
-    if (e != ZOOMSDK::SDKERR_SUCCESS) return;
+
+    // LAW 2's other half: 18 IS A WAIT, NOT A FAILURE -- the same ruling the
+    // create ladder already lives under, applied to the call kind ZComms
+    // proved it also applies to. Before this, an invite refused 18 reported
+    // the line above and stopped: no pending entry was recorded, so nothing
+    // marked the name present OR failed, and the only thing that could try
+    // again was a future roster event for that same person -- which for
+    // someone who is already in the meeting and staying put never comes.
+    // Three people in the 2026-08-29 show were refused code 18 on the
+    // all-talent invite; they were only admitted because a SECOND, unrelated
+    // invite for their private channel happened a second later.
+    //
+    // Requeued with a doubling backoff, capped per (channel, name). Cap
+    // exhaustion is NOT terminal for the ladder -- one person's membership is
+    // not the nomination's progress -- and it deliberately leaves the name
+    // neither `present` nor `failed`, so the ordinary roster path can still
+    // pick them up later; what it does is say so, once, under its own stage
+    // name.
+    if (e == ZOOMSDK::SDKERR_TOO_FREQUENT_CALL) {
+        const uint32_t next = retries + 1;
+        if (next > kMaxInviteRetries) {
+            report_nomination("invite_rate_limited",
+                              R"("name":")" + json_escape(name) + R"(","channel":")" +
+                              json_escape(channel_id_utf8) + R"(","retries":)" +
+                              std::to_string(retries));
+            return true;
+        }
+        const std::chrono::milliseconds delay =
+            kInviteRateLimitBackoff * (1u << retries);
+        report_nomination("invite_rate_limited_retry",
+                          R"("name":")" + json_escape(name) + R"(","channel":")" +
+                          json_escape(channel_id_utf8) + R"(","retry":)" +
+                          std::to_string(next) + R"(,"max_retries":)" +
+                          std::to_string(kMaxInviteRetries) + R"(,"backoff_ms":)" +
+                          std::to_string(delay.count()));
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        m_invite_queue.push_back({channel_id_z, channel_id_utf8, name,
+                                  std::chrono::steady_clock::now() + delay, next});
+        return true;
+    }
+    if (e != ZOOMSDK::SDKERR_SUCCESS) return true;
 
     // Task 4: ExecuteBatchInviteUsers is asynchronous -- its own SDK doc
     // comment says the synchronous SDKERR_SUCCESS above is only "the batch
@@ -2302,9 +2568,12 @@ void EngineTalkback::invite_nominee(const std::basic_string<zchar_t> &channel_id
     // resolve_roster_change()'s sweep can forget an entry whose response is
     // never coming -- see m_nomination_pending_invites' header comment for
     // why an un-expiring entry here permanently suppressed a rejoin.
-    std::lock_guard<std::mutex> lock(m_chan_mtx);
-    m_nomination_pending_invites.push_back(
-        {channel_id_z, uid, name, std::chrono::steady_clock::now() + kAwaitTimeout});
+    {
+        std::lock_guard<std::mutex> lock(m_chan_mtx);
+        m_nomination_pending_invites.push_back(
+            {channel_id_z, uid, name, std::chrono::steady_clock::now() + kAwaitTimeout});
+    }
+    return true;
 }
 
 void EngineTalkback::nomination_reset()
@@ -2367,6 +2636,11 @@ void EngineTalkback::nomination_reset()
     // pending invite naming a channel that no longer exists (meeting-scoped,
     // like everything else this function forgets) must not outlive it.
     m_nomination_pending_invites.clear();
+    // LAW 2 (2026-08-29): the not-yet-issued half of the same rule. A queued
+    // invite that survived a Leave would be a membership call into another
+    // meeting's channel id.
+    m_invite_queue.clear();
+    m_last_invite_channel.clear();
     // Task 3: the key press's selection is made of ids from the table above,
     // so it is forgotten in the same breath -- same reasoning as
     // nomination_destroy_provisioned(). main.cpp's Leave path calls
@@ -2623,11 +2897,29 @@ void EngineTalkback::resolve_roster_change(ZOOMSDK::IMeetingService *svc)
                     // onUserVideoStatusChange) that fire on every mute and
                     // camera toggle by anyone in the meeting, not just on an
                     // actual roster change.
+                    //
+                    // LAW 2 (2026-08-29): the queue counts too. An invite is
+                    // now DECIDED here and ISSUED up to seconds later by the
+                    // pacer, so m_nomination_pending_invites -- which is only
+                    // written at issue time -- no longer covers the whole
+                    // "already handled" window on its own. enqueue_invite()
+                    // dedupes as well (belt and braces, and it is the only
+                    // guard the provisioning path has), but checking here too
+                    // keeps `work.names` honest for the report and costs one
+                    // walk of a list bounded by the plan.
                     bool already_pending = false;
                     for (const auto &pi : m_nomination_pending_invites) {
                         if (pi.channel_id_z == pc.channel_id_z && pi.name == name) {
                             already_pending = true;
                             break;
+                        }
+                    }
+                    if (!already_pending) {
+                        for (const auto &q : m_invite_queue) {
+                            if (q.channel_id_z == pc.channel_id_z && q.name == name) {
+                                already_pending = true;
+                                break;
+                            }
                         }
                     }
                     if (!already_pending) work.names.push_back(name);
@@ -2676,10 +2968,18 @@ void EngineTalkback::resolve_roster_change(ZOOMSDK::IMeetingService *svc)
     // genuinely does get another chance at them on the next roster event --
     // the claim the old early-return comment made about the whole function,
     // which is true here and only here.
+    //
+    // LAW 2 (2026-08-29): QUEUED, not issued. This is the second burst ZComms
+    // measured: a roster event can re-resolve every nominated name at once,
+    // and each one is a Begin/Add/Execute. The pacer spends them one per
+    // kMembershipCallSpacing, sharing the budget with any creates a ladder is
+    // still making. Nothing else about the gate changes -- a pass that skips
+    // this still enqueues nothing, so it still genuinely gets another chance
+    // on the next roster event.
     if (invites_allowed)
         for (const auto &work : to_invite)
             for (const auto &name : work.names)
-                invite_nominee(work.channel_id_z, work.channel_id, name);
+                enqueue_invite(work.channel_id_z, work.channel_id, name);
 }
 
 // ── Talkback audio path (Milestone 2) ───────────────────────────────────────
@@ -3169,6 +3469,158 @@ void EngineTalkback::debug_expire_pending_create_for_test()
                                        std::memory_order_release);
 }
 
+// ── TALKBACK DELIVERY LAW 1 (ZComms, 2026-08-29, live) ──────────────────────
+//
+// TALKBACK DELIVERS ONLY WHILE THIS CLIENT'S OWN MEETING AUDIO IS OPEN.
+// Muted, SendAudioDataToChannel is ACCEPTED -- SDKERR_SUCCESS on every call,
+// members confirmed in the channel, zero failures anywhere -- and every member
+// hears silence. Nothing in the SDK headers or Zoom's documentation says so;
+// ZComms found it by unmuting a bot mid-experiment and hearing the same
+// channel come alive. It is the accepted-but-silent ghost, and it is the worst
+// shape a failure can take here, because every instrument this engine has says
+// the key is working.
+//
+// LIVE-RELEVANT THE DAY THIS SHIPPED: the operator's own production had the
+// bot muted by the host. Every send that show would have been that ghost.
+//
+// THE LEAK QUESTION -- ANSWERED FROM THE CODE, NOT ASSUMED. Does opening this
+// client's mic put the ENGINE MACHINE'S microphone into the meeting? YES, it
+// could, and the insurance is therefore real rather than theoretical:
+//   * engine/src/main.cpp's Join sets JoinParam4WithoutLogin::isAudioOff =
+//     false and isMyVoiceInMix = true, so the SDK connects VoIP audio on join
+//     with whatever capture device it picks.
+//   * NOTHING in this engine installs a virtual mic. The only
+//     IZoomSDKAudioRawDataHelper use in the whole repository is
+//     engine/src/engine-audio.cpp's subscribe()/unSubscribe(), which is the
+//     RECEIVE path; setExternalAudioSource() -- ZComms's never-fed virtual
+//     mic, and the airtight version of this insurance -- is called nowhere in
+//     engine/ or src/.
+//   * So a bare UnMuteAudio() would open the DEFAULT SYSTEM CAPTURE DEVICE of
+//     the machine running OBS, into a live meeting. That is a hot mic in a
+//     control room.
+// The insurance is applied ONCE, at authentication, in main.cpp's existing
+// CreateSettingService block (see "mic_insurance" there): the SDK's audio
+// settings are pointed at a device that does not exist and the mic volume is
+// set to zero, before any join. It lives there and not here for a hard
+// reason as well as a tidy one -- CreateSettingService() is an SDK EXPORT, and
+// engine-talkback.cpp is compiled into a test target that links no SDK library
+// at all (tests/engine-talkback-select-test.cpp fakes pure-virtual interfaces
+// only). Everything in THIS function goes through IMeetingService's virtual
+// interfaces, which is exactly why the ordering below can be pinned.
+// WEAKER THAN ZCOMMS'S, and stated rather than glossed: a never-fed virtual
+// mic is silent by construction, while a dead device selection is silent
+// because Zoom honours it. If a live gate ever hears the room, the escalation
+// is setExternalAudioSource() with a never-fed source -- deliberately not
+// taken here, because it would install a virtual mic into the same helper the
+// engine's show-critical RECEIVE subscribe uses, and that interaction is
+// untested.
+bool EngineTalkback::ensure_mic_open(const char *when)
+{
+    const std::string when_field = R"(,"when":")" + std::string(when) + "\"";
+    if (!m_svc) {
+        m_mic_open = false;
+        report_session("mic_open", R"("ok":false,"reason":"no_meeting_service")" + when_field);
+        return false;
+    }
+    auto *parts = m_svc->GetMeetingParticipantsController();
+    if (!parts) {
+        m_mic_open = false;
+        report_session("mic_open", R"("ok":false,"reason":"no_participants_controller")" +
+                       when_field);
+        return false;
+    }
+    // THE AUTHORITATIVE READ. IMeetingAudioController has no "am I muted"
+    // anywhere in meeting_audio_interface.h -- it has MuteAudio/UnMuteAudio and
+    // CanUnMuteBySelf and nothing that reports state. The state lives on
+    // IUserInfo::IsAudioMuted() for GetMySelfUser(), which is the participants
+    // controller's answer and the same one ZComms settled on.
+    ZOOMSDK::IUserInfo *self = parts->GetMySelfUser();
+    if (!self) {
+        m_mic_open = false;
+        report_session("mic_open", R"("ok":false,"reason":"no_self_user")" + when_field);
+        return false;
+    }
+    if (!self->IsAudioMuted()) {
+        m_mic_open = true;
+        // Reported on the KEY EDGE only. A latched key re-asserts every 2s for
+        // as long as it is held, and a line per assertion is 30 lines a minute
+        // saying nothing changed -- the message-storm shape this codebase has
+        // a live incident about. A tick that finds the mic SHUT still reports,
+        // below, because that one is news.
+        if (std::string(when) == "session_start")
+            report_session("mic_open", R"("ok":true,"was_muted":false)" + when_field);
+        return true;
+    }
+
+    auto *audio = m_svc->GetMeetingAudioController();
+    if (!audio) {
+        m_mic_open = false;
+        report_session("mic_open", R"("ok":false,"was_muted":true,)"
+                       R"("reason":"no_audio_controller")" + when_field);
+        return false;
+    }
+    const ZOOMSDK::SDKError e = audio->UnMuteAudio(self->GetUserID());
+    m_mic_open = (e == ZOOMSDK::SDKERR_SUCCESS);
+    // ALWAYS reported, tick or key: finding the bot muted is the event Law 1
+    // exists for, and a host re-muting it mid-key is precisely what the
+    // operator needs in the log afterwards.
+    report_session("mic_open", std::string(R"("ok":)") + (m_mic_open ? "true" : "false") +
+                   R"(,"was_muted":true,"code":)" + std::to_string(static_cast<int>(e)) +
+                   when_field);
+    // Remember to put it back, but only for a key that actually opened it.
+    // A failed unmute changed nothing, so there is nothing to restore -- and
+    // re-muting a bot we never unmuted would be this file inventing state.
+    if (m_mic_open) m_mic_restore_pending = true;
+    return m_mic_open;
+}
+
+void EngineTalkback::restore_mic_state()
+{
+    // See the declaration for the semantic and why there is no re-key
+    // exception. Best-effort, like the duck restore beside it: a failure here
+    // costs one line in the log, and refusing to release a key over it would
+    // cost the operator the feature.
+    if (!m_mic_restore_pending) return;
+    m_mic_restore_pending = false;
+    m_mic_open = false;
+    if (!m_svc) return;
+    auto *parts = m_svc->GetMeetingParticipantsController();
+    ZOOMSDK::IUserInfo *self = parts ? parts->GetMySelfUser() : nullptr;
+    auto *audio = m_svc->GetMeetingAudioController();
+    if (!self || !audio) {
+        report_session("mic_restore", R"("ok":false,"reason":"no_controller")");
+        return;
+    }
+    // allowUnmuteBySelf stays at the SDK default (true): this is us putting
+    // ourselves back the way the host left us, not us imposing a meeting
+    // policy we have no business setting.
+    const ZOOMSDK::SDKError e = audio->MuteAudio(self->GetUserID(), true);
+    report_session("mic_restore", std::string(R"("ok":)") +
+                   (e == ZOOMSDK::SDKERR_SUCCESS ? "true" : "false") +
+                   R"(,"code":)" + std::to_string(static_cast<int>(e)));
+}
+
+void EngineTalkback::mic_tick()
+{
+    // Rides main.cpp's command-loop idle pump beside nomination_tick(); see
+    // the declaration for why this is not a thread and not folded into
+    // nomination_tick() (that one is the MEMBERSHIP pacer and its whole
+    // discipline is that it does exactly one thing).
+    //
+    // Only while a key is LIVE. Re-asserting between presses would fight the
+    // host over a bot that is not talking to anyone -- the mic is opened
+    // because audio is about to flow, and closed again when it stops.
+    if (!m_session_live) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now < m_mic_next_assert_at) return;
+    m_mic_next_assert_at = now + kMicReassertInterval;
+    // The return value drives nothing here on purpose. The key is already
+    // live; a re-assert that fails has said so in its own report line, and
+    // closing a director's key from a background pump on one failed SDK call
+    // is a cure worse than the disease.
+    (void)ensure_mic_open("tick");
+}
+
 bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
                                    const std::string &target)
 {
@@ -3374,6 +3826,29 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
     m_session_target = target;
     m_session_live   = true;
 
+    // TALKBACK DELIVERY LAW 1 (2026-08-29): OPEN THIS CLIENT'S OWN MEETING
+    // AUDIO, or every buffer below is accepted and inaudible. See
+    // ensure_mic_open() for the law, the authoritative state read, and the
+    // answered leak question.
+    //
+    // ON THE KEY PATH, and yes that is in tension with the paragraph directly
+    // below about this being the one place work must not go. The tension is
+    // resolved by what the two calls actually cost. The COMMON case is one
+    // local state read (IUserInfo::IsAudioMuted() -- no round trip; the SDK
+    // already holds the roster) and nothing else, because mic_tick() has been
+    // re-asserting every 2s for the length of the last key. The SDK call
+    // happens only when the bot is genuinely muted RIGHT NOW -- and in that
+    // case there is nothing to protect: without it the press is silent no
+    // matter how fast it gets to the first buffer. A late first syllable beats
+    // a whole key nobody hears.
+    //
+    // Ordered BEFORE the duck arm and before both report lines so the reports
+    // can carry the answer, and structurally before any send: talkback_start
+    // and talkback_audio are branches of the same command loop, so this
+    // function completes before the first buffer is read.
+    m_mic_next_assert_at = std::chrono::steady_clock::now() + kMicReassertInterval;
+    const bool mic_open = ensure_mic_open("session_start");
+
     // Duck the main meeting for the people in these channels, so the director
     // is unambiguous rather than competing with meeting audio -- the same
     // 0.3 the probe's invite path has always used.
@@ -3423,8 +3898,15 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
                    R"(,"members_present":)" + std::to_string(members_present) +
                    R"(,"members_total":)" + std::to_string(members_total) +
                    R"(,"audio_path":")" + (m_audio_open ? "open" : "not_open") +
+                   R"(","mic":")" + (mic_open ? "open" : "blocked") +
                    R"(","channel_ids":")" + json_escape(selected_ids) + "\"");
-    report_session_state(true, "live");
+    // LAW 1: a key over a MUTED bot must not report plain "live". The session
+    // IS live -- the channels are selected, the audio path is real, and the
+    // moment a host unmutes the bot the very next buffer is heard, so refusing
+    // would take away the operator's only remaining move -- but "live" alone
+    // is the sentence that made the accepted-but-silent ghost invisible. The
+    // banner's job is "ON AIR -- but the bot is muted by the host".
+    report_session_state(true, "live", mic_open ? "open" : "blocked");
     return true;
 }
 
@@ -3457,6 +3939,18 @@ void EngineTalkback::session_stop()
                                       // drain never ducked; disarm it so the
                                       // NEXT press's drain cannot inherit it
     m_session_target.clear();
+
+    // LAW 1 (2026-08-29): put this client's own mute state back the way the
+    // key found it. BEFORE the early return below, and deliberately so: that
+    // return fires for a press that never selected a channel (or for a
+    // Leave/quit teardown), and this file may have unmuted the bot on ANY
+    // press that reached session_start()'s live section -- leaving it hot
+    // because the channel list happened to be empty is exactly the kind of
+    // "correct only by an argument about the other branches" state this file
+    // does not keep. Self-guarded on m_mic_restore_pending, so an idempotent
+    // second call (Leave and quit both call this unconditionally) does
+    // nothing.
+    restore_mic_state();
 
     if (channels.empty() || !m_ctrl) {
         report_session("session_stop", std::string(R"("ok":true,"reason":"no_channel","was_live":)") +

@@ -20,6 +20,19 @@
 #else
 #include <meeting_participants_ctrl_interface.h>
 #endif
+// TALKBACK DELIVERY LAW 3 (2026-08-29): IMeetingConfigurationEvent, and with
+// it onEndOtherMeetingToJoinMeetingNotification -- the same-account host
+// collision that hangs a join forever if nobody answers it. Guarded by
+// __has_include and a feature macro like its siblings above, because a
+// mac/linux SDK layout may place it elsewhere and this file must not fail to
+// compile over a callback it can live (badly) without.
+#if __has_include(<meeting_service_components/meeting_configuration_interface.h>)
+#include <meeting_service_components/meeting_configuration_interface.h>
+#define COREVIDEO_HAS_MEETING_CONFIG 1
+#elif __has_include(<meeting_configuration_interface.h>)
+#include <meeting_configuration_interface.h>
+#define COREVIDEO_HAS_MEETING_CONFIG 1
+#endif
 #if __has_include(<meeting_service_components/meeting_raw_archiving_interface.h>)
 #include <meeting_service_components/meeting_raw_archiving_interface.h>
 #define COREVIDEO_HAS_RAW_ARCHIVING 1
@@ -704,6 +717,64 @@ public:
                         std::string(vs->IsHDVideoEnabled() ? "true" : "false") +
                         "}");
                 }
+                // TALKBACK DELIVERY LAW 1's INSURANCE (2026-08-29). Talkback
+                // only delivers while this client's meeting audio is OPEN
+                // (see EngineTalkback::ensure_mic_open()), so a key press now
+                // UNMUTES this client. Read the code before deciding that is
+                // safe: main.cpp's Join sets isAudioOff = false and
+                // isMyVoiceInMix = true, and nothing in this repository calls
+                // IZoomSDKAudioRawDataHelper::setExternalAudioSource() -- the
+                // only raw-audio-helper use anywhere is engine-audio.cpp's
+                // subscribe()/unSubscribe(), which is the RECEIVE path. So the
+                // SDK would open the DEFAULT SYSTEM CAPTURE DEVICE of the
+                // machine running OBS, live into the meeting. In a control
+                // room that is a hot mic on air.
+                //
+                // So the mic is made dead BEFORE any join, once, here: point
+                // the SDK at a device id that matches nothing (its own
+                // fallback is "the default mic if there is no mic selected via
+                // SelectMic()", which is precisely what must not happen) and
+                // set the mic volume to zero as the second, independent half
+                // -- SetMicVol() is documented to act on the selected mic and
+                // covers the case where SelectMic() is refused.
+                //
+                // Reported with both codes, never silently: this is the guard
+                // between a talkback key and the control room's own
+                // microphone, and a guard that fails quietly is worse than no
+                // guard, because the unmute happens either way.
+                //
+                // WEAKER THAN ZCOMMS'S, stated rather than glossed: theirs is
+                // a never-fed SDK virtual mic (setExternalAudioSource), silent
+                // by construction rather than by Zoom honouring a setting.
+                // Deliberately not taken here -- it installs a virtual mic
+                // into the same helper this engine's show-critical receive
+                // subscribe uses, an interaction nothing has tested. If a live
+                // gate ever hears the room through this, that is the
+                // escalation.
+                {
+                    if (auto *as = settings->GetAudioSettings()) {
+#if defined(WIN32)
+                        const zchar_t *dead_id   = L"corevideo-no-microphone";
+                        const zchar_t *dead_name = L"CoreVideo (no microphone)";
+#else
+                        const zchar_t *dead_id   = "corevideo-no-microphone";
+                        const zchar_t *dead_name = "CoreVideo (no microphone)";
+#endif
+                        const ZOOMSDK::SDKError m_err =
+                            as->SelectMic(dead_id, dead_name);
+                        FLOAT silent = 0.0f;
+                        const ZOOMSDK::SDKError v_err = as->SetMicVol(silent);
+                        EngineIpc::write(
+                            R"({"cmd":"debug","stage":"mic_insurance","select_code":)" +
+                            std::to_string(static_cast<int>(m_err)) +
+                            R"(,"volume_code":)" +
+                            std::to_string(static_cast<int>(v_err)) + "}");
+                    } else {
+                        EngineIpc::write(
+                            R"({"cmd":"debug","stage":"mic_insurance","ok":false,)"
+                            R"("reason":"no_audio_settings"})");
+                    }
+                }
                 ZOOMSDK::DestroySettingService(settings);
             } else {
                 EngineIpc::write(
@@ -737,6 +808,9 @@ private:
 // ── Meeting event handler ─────────────────────────────────────────────────────
 
 class EngineMeetingEvent : public ZOOMSDK::IMeetingServiceEvent
+#if defined(COREVIDEO_HAS_MEETING_CONFIG)
+                         , public ZOOMSDK::IMeetingConfigurationEvent
+#endif
 #if defined(COREVIDEO_HAS_RECORDING_CTRL)
                          , public ZOOMSDK::IMeetingRecordingCtrlEvent
 #endif
@@ -1115,6 +1189,83 @@ public:
         default: break;
         }
     }
+#if defined(COREVIDEO_HAS_MEETING_CONFIG)
+    // ── TALKBACK DELIVERY LAW 3 (ZComms, 2026-08-29, live) ──────────────────
+    //
+    // A SAME-ACCOUNT HOST COLLISION HANGS THE JOIN FOREVER UNLESS IT IS
+    // ANSWERED. When this engine joins with a ZAK for an account that is
+    // ALREADY hosting a meeting elsewhere -- the operator's own Zoom client,
+    // in their own PMI, which is the ordinary way an operator tests -- the SDK
+    // does not fail the join. It asks, through this callback, whether to end
+    // the other meeting. With no IMeetingConfigurationEvent registered nobody
+    // answers, Join() never resolves, no MEETING_STATUS_FAILED ever arrives,
+    // and the dock sits on "joining" until someone kills the process. ZComms
+    // hit exactly this and it read as "the app isn't responding"; this is the
+    // 2026-08-25 displacement class in our own log.
+    //
+    // CANCEL, NEVER EndOtherMeeting(). The other meeting is the OPERATOR'S
+    // LIVE CLIENT. A bot that ends the show to join it is a worse outcome than
+    // any join failure, and the handler offers exactly those two answers.
+    //
+    // Then FAIL THE JOIN LOUDLY, through the same {"cmd":"error",
+    // "msg":"meeting_failed"} shape MEETING_STATUS_FAILED already uses, so the
+    // dock's error surface and the control API both light up with no new wire
+    // contract. The code is a LOCAL sentinel outside Zoom's MeetingFailCode
+    // space (909001, ZComms's own number for the same condition, matched
+    // deliberately so two projects' logs read alike) and the reason names the
+    // condition rather than a Zoom enum, because there is no Zoom enum for it:
+    // Zoom never failed the join, we did.
+    void onEndOtherMeetingToJoinMeetingNotification(
+        ZOOMSDK::IEndOtherMeetingToJoinMeetingHandler *handler) override
+    {
+        if (handler) handler->Cancel();
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"end_other_meeting_declined"})");
+        EngineIpc::write(
+            R"({"cmd":"error","msg":"meeting_failed","code":909001,)"
+            R"("reason":"account_busy_elsewhere"})");
+    }
+
+    // The rest of IMeetingConfigurationEvent. Named rather than silently
+    // stubbed where a stuck join is the consequence: this engine has no UI to
+    // prompt with, so the honest answer to each is a log line the operator can
+    // act on, not a swallowed callback that looks like a hang. (Answering the
+    // passcode/user-info prompts inline, the way ZComms does, needs a wire
+    // command and an operator surface that do not exist here yet -- stated as
+    // the gap it is rather than left to be rediscovered from a silent join.)
+    void onInputMeetingPasswordAndScreenNameNotification(
+        ZOOMSDK::IMeetingPasswordAndScreenNameHandler *) override
+    {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"meeting_needs_passcode_prompt"})");
+    }
+    void onWebinarNeedRegisterNotification(
+        ZOOMSDK::IWebinarNeedRegisterHandler *) override
+    {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"webinar_needs_registration"})");
+    }
+    void onWebinarNeedInputScreenName(
+        ZOOMSDK::IWebinarInputScreenNameHandler *) override {}
+    void onJoinMeetingNeedUserInfo(
+        ZOOMSDK::IMeetingInputUserInfoHandler *) override
+    {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"meeting_needs_user_info"})");
+    }
+    void onUserConfirmToStartArchive(
+        ZOOMSDK::IMeetingArchiveConfirmHandler *) override {}
+    void onUserConfirmRecoverMeeting(
+        ZOOMSDK::IMeetingConfirmRecoverHandler *) override {}
+    void onFreeMeetingRemainTime(unsigned int) override {}
+    void onFreeMeetingRemainTimeStopCountDown() override {}
+    void onFreeMeetingNeedToUpgrade(FreeMeetingNeedUpgradeType,
+                                    const zchar_t *) override {}
+    void onFreeMeetingUpgradeToGiftFreeTrialStart() override {}
+    void onFreeMeetingUpgradeToGiftFreeTrialStop() override {}
+    void onFreeMeetingUpgradeToProMeeting() override {}
+#endif  // COREVIDEO_HAS_MEETING_CONFIG
+
     void onMeetingStatisticsWarningNotification(ZOOMSDK::StatisticsWarningType) override {}
     void onMeetingParameterNotification(const ZOOMSDK::MeetingParameter *) override {}
     void onSuspendParticipantsActivities() override {}
@@ -1353,8 +1504,18 @@ int main()
         // nowhere else -- see EngineTalkback::nomination_tick()'s comment on
         // why tick() cannot host it. No-op (one mutex acquire) whenever no
         // ladder is mid-provisioning, which is almost always.
+        //
+        // TALKBACK DELIVERY LAWS 1 AND 2 (2026-08-29). nomination_tick() is now
+        // the shared MEMBERSHIP pacer -- creates and invites out of one 600ms
+        // budget, because Zoom's rate limit counts calls and not call kinds.
+        // mic_tick() is Law 1's re-assert: a host can mute the bot mid-key,
+        // and past that instant every send is accepted and inaudible, so a
+        // live key re-opens its own meeting audio every 2s. Both ride this one
+        // idle turn rather than any thread of their own; both are a single
+        // early-out read when there is nothing to do.
         if (!ipc_read_line_with_message_pump(
-                p2e, line, []() { talkback.nomination_tick(); }))
+                p2e, line,
+                []() { talkback.nomination_tick(); talkback.mic_tick(); }))
             break;
 #else
         if (!ipc_read_line(p2e, line)) break; // EOF or connection closed
@@ -1456,6 +1617,26 @@ int main()
             if (!meeting_svc) {
                 ZOOMSDK::CreateMeetingService(&meeting_svc);
                 if (meeting_svc) meeting_svc->SetEvent(&meeting_event);
+#if defined(COREVIDEO_HAS_MEETING_CONFIG)
+                // LAW 3 (2026-08-29): the configuration sink is a SEPARATE
+                // registration from SetEvent() above and lives on
+                // IMeetingConfiguration, not on the meeting service. Without
+                // it onEndOtherMeetingToJoinMeetingNotification is never
+                // delivered and a same-account host collision hangs the join
+                // forever with no status change of any kind -- see the handler
+                // for the live failure. Registered on the ONE path that
+                // creates the meeting service, so it is in place before the
+                // very first Join().
+                if (meeting_svc) {
+                    auto *cfg = meeting_svc->GetMeetingConfiguration();
+                    if (cfg) {
+                        cfg->SetEvent(&meeting_event);
+                    } else {
+                        EngineIpc::write(
+                            R"({"cmd":"debug","stage":"meeting_configuration","code":-1})");
+                    }
+                }
+#endif
             }
             if (meeting_svc && !meeting_id.empty()) {
                 // Store as persistent variables so JoinParam raw pointers

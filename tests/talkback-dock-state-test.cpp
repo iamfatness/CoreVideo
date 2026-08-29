@@ -267,6 +267,44 @@ int main()
               "the minimum cell width is not a width");
     }
 
+    // ── The minimum cell width is MEASURED, and 118 is only its floor ────
+    //
+    // The live defect this closes (operator's high-DPI screen, 2026-08-29):
+    // 118 px was derived from an offscreen render at 1:1 font metrics and
+    // then spent as a fixed budget. On a display that resolves the cell font
+    // larger it stops meaning "the narrowest cell a name is still readable
+    // in" -- it fits four characters -- and the grid confidently offers three
+    // columns of unreadable stumps. The caller measures a gauge string in the
+    // LIVE label's own metrics and adds the cell's own measured chrome; this
+    // function only refuses to go below the floor.
+    {
+        // A font whose gauge and chrome fit inside the floor leaves the floor
+        // in force, so nothing about the 1:1 layout moves.
+        check(talkback_dock_cell_min_px(78, 28, kTalkbackDockCellMinPx) ==
+                  kTalkbackDockCellMinPx,
+              "a small font did not keep the 118 px floor");
+        // Twice the font is nearly twice the minimum -- the whole point.
+        check(talkback_dock_cell_min_px(156, 56, kTalkbackDockCellMinPx) == 212,
+              "a large font did not widen the minimum cell");
+        // ...and a wider minimum is what stops three columns being offered in
+        // a dock that cannot read them.
+        check(talkback_dock_cell_columns(400, talkback_dock_cell_min_px(
+                  156, 56, kTalkbackDockCellMinPx), 8) == 2,
+              "a large font still got three columns in a 400 px dock");
+        // Nothing measured yet (before the first layout) must not produce a
+        // minimum smaller than the floor, which would offer three columns on
+        // the strength of a measurement that has not happened.
+        check(talkback_dock_cell_min_px(0, 0, kTalkbackDockCellMinPx) ==
+                  kTalkbackDockCellMinPx,
+              "an unmeasured font dropped the minimum below the floor");
+        check(talkback_dock_cell_min_px(-40, -10, kTalkbackDockCellMinPx) ==
+                  kTalkbackDockCellMinPx,
+              "a nonsense measurement dropped the minimum below the floor");
+        check(kTalkbackDockCellGauge != nullptr &&
+                  std::string(kTalkbackDockCellGauge).size() >= 8,
+              "the gauge is too short to stand for a display name");
+    }
+
     // ── Edit mode never costs the operator a key ─────────────────────
     //
     // The grid and the talent checklist share one slot, which is the whole

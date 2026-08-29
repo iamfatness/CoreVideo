@@ -288,6 +288,7 @@ if(COREVIDEO_BUILD_PLUGIN)
         src/zoom-iso-panel.cpp
         src/zoom-dock.cpp
         src/zoom-talkback-panel.cpp
+        src/talkback-cell-grid.cpp
         src/zoom-control-server.cpp
         src/zoom-osc-server.cpp
         src/obs-utils.cpp

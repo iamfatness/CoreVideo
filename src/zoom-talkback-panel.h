@@ -1,5 +1,6 @@
 #pragma once
 
+#include "talkback-cell-grid.h"
 #include "talkback-dock-state.h"
 
 #include <QWidget>
@@ -13,6 +14,7 @@ class QFrame;
 class QLabel;
 class QListWidget;
 class QPushButton;
+class QScrollArea;
 class QTimer;
 
 // The Talkback dock.
@@ -76,6 +78,11 @@ protected:
     // Column count and label elision both depend on how wide the dock is right
     // now, so both are re-decided here rather than fixed at build time.
     void resizeEvent(QResizeEvent *event) override;
+    // ...and on how big the fonts are, which a theme change or a move to a
+    // display with different scaling can change without any resize at all.
+    // Every size on this panel is derived from live metrics, so every one of
+    // them has to be re-derived when the metrics move.
+    void changeEvent(QEvent *event) override;
 
 private:
     void refresh();
@@ -114,16 +121,23 @@ private:
     // WA_TransparentForMouseEvents, so every press and release still lands on
     // the button and the keying machinery is untouched.
     struct KeyCell {
-        QPushButton *button = nullptr;
+        TalkbackCellButton *button = nullptr;
+        // Owned by the button, kept here because the panel's paint pass sets
+        // style properties directly on them (a QLabel inside a restyled
+        // QPushButton is not repolished by the button's own repolish).
         QLabel      *name   = nullptr;
         QLabel      *state  = nullptr;
-        // The UNELIDED name. The label's own text() is whatever fits, so it
-        // cannot be the source for the next re-flow: eliding an
-        // already-elided string compounds.
+        // The UNELIDED name, for the tooltip and the rebuild. The label's own
+        // text() is whatever fits, so it cannot be the source for the next
+        // re-flow: eliding an already-elided string compounds.
         QString      label;
         std::string  target;
         bool         all_talent = false;
     };
+    // The scroll area, kept only for its VIEWPORT width: that is the width the
+    // operator can actually see, and the one input the grid's own flow cannot
+    // measure for itself. See layout_cells().
+    QScrollArea *m_scroll = nullptr;
     QWidget   *m_grid_area = nullptr;
     QWidget   *m_cell_row  = nullptr;
     QCheckBox *m_latch_cb  = nullptr;

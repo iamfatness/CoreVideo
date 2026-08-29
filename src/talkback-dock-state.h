@@ -530,6 +530,29 @@ inline int talkback_dock_nominee_visible_rows(std::size_t row_count)
 // there, two otherwise, never one and never zero.
 constexpr int kTalkbackDockCellMinPx = 118;
 
+// ...AND WHY 118 IS ONLY A FLOOR (operator's high-DPI screen, 2026-08-29).
+// That number was derived from an offscreen render at 1:1 font metrics, and
+// on a display that resolves the cell font larger it stops describing "the
+// narrowest cell a name is still readable in" and starts describing "a cell
+// that fits four characters". Every pixel budget on this panel that was
+// derived once and spent later was wrong on that screen; this one is now
+// MEASURED at decision time instead -- the caller passes the width of a gauge
+// string in the live label's own QFontMetrics and the cell's own measured
+// chrome, and the constant survives only as the floor beneath them.
+//
+// The gauge is a lower-case run because that is what a display name mostly is,
+// and one capital because that is what it starts with. Ten characters: fewer
+// and two names that differ late read alike, more and a 320 px dock could not
+// hold two columns at any font size.
+constexpr const char *kTalkbackDockCellGauge = "Wnnnnnnnnn";
+
+inline int talkback_dock_cell_min_px(int gauge_text_px, int chrome_px,
+                                     int floor_px)
+{
+    const int measured = std::max(0, gauge_text_px) + std::max(0, chrome_px);
+    return std::max(floor_px, measured);
+}
+
 inline int talkback_dock_cell_columns(int available_px, int min_cell_px,
                                       int gap_px)
 {

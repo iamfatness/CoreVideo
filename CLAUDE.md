@@ -810,6 +810,52 @@ Every one of these is documented at length where it lives; the list is the map.
   dock, 2 columns, 48 px cells, 126 px of name room, one of the seven real
   names elided (end-only) and nothing clipped; at 420 px, 3 columns; 24 people
   at 320 px is 25 cells in 910 px inside the scroll area.
+- **...and that verification was worth exactly nothing, because it measured a
+  render the grid had sized itself** (operator's high-DPI display, 2026-08-29,
+  second look: names clipped MID-GLYPH with no ellipsis -- "Grant Whiteh",
+  "Jeffrey Wiltsh" -- and the last cell row cut in half across its state line).
+  The round above measured once and then spent the answer as a pixel budget
+  somewhere else: `layout_cells()` derived a column width arithmetically
+  (`(available - gaps) / columns`), elided every name against that number, and
+  let the QGridLayout hand the cell a different width. Measured off the
+  operator's own screenshot: the grid had re-flowed three columns to two and
+  `setColumnStretch()` had been written only for the columns the NEW flow uses,
+  so column 2 kept the wider flow's stretch and an EMPTY third of the dock held
+  the space -- All talent spanned 405 of 599 px, cells got 194 px each while
+  the elision had charged them 291, and "Grant Whitehead" needed 200 px in a
+  154 px label. Same cause vertically: the container kept the height it had
+  negotiated for the wider flow's four rows while the narrower flow needed
+  five. `available` was also read from the grid CONTAINER's own width, which is
+  downstream of the flow -- a loop that can only confirm whatever the grid
+  already did. The fix is that nothing predicts a pixel any more
+  (`src/talkback-cell-grid.{h,cpp}`, new, Qt-Widgets-only so an offscreen
+  harness can build the REAL cells): `TalkbackCellButton` elides in its own
+  event filter from `QFontMetrics` of the font the label actually has against
+  the width the label actually got, reports a HEIGHT from the layout inside it
+  (`QPushButton` derives both hints from its own `text()`, which is empty in a
+  cell) and NO WIDTH AT ALL -- because a cell elides, and a QLabel that
+  defends its full text is how the longest name in the room decides the dock's
+  width for everybody, the 400 px tower coming back through the layout's
+  minimum; `talkback_layout_cell_grid()` re-writes the stretch of EVERY column
+  the layout knows about, live and left-over; the minimum readable cell width
+  is measured (`talkback_dock_cell_min_px()`, a gauge string in the live
+  label's metrics plus the cell's own measured chrome) with 118 px demoted to
+  a floor; and the dock's width is read off the SCROLL AREA'S VIEWPORT, the
+  one number the grid cannot inflate. The panel also re-measures on
+  `FontChange`/`StyleChange` (OBS themes after construction, and a window
+  dragged to a display with different scaling), which nothing did before.
+  Pinned: the measured minimum is in `tests/talkback-dock-state-test.cpp`
+  (mutation-proved -- pinning it back to the 118 px constant fails two
+  assertions). The two layout fixes are proved by an offscreen harness that
+  builds the real cells at 1x/1.5x/2x font scale and MEASURES what they render
+  (stale stretch: legacy fills 203 of 300 px, fixed fills 300; cut row: legacy
+  container 216 px for a 272 px grid, fixed 272; every name complete or
+  END-ellipsized at all three scales). Two limits stated rather than hidden:
+  the container's explicit minimum-height line is NOT pinned -- deleting it
+  does not reproduce the cut, because the honest cell hints already carry it,
+  and it is kept only as the explicit statement of the rule for the OBS dock
+  the harness cannot reach; and **the harness is not the operator's screen** --
+  that is exactly the claim this entry exists to correct.
 
 ## Live testing against a real meeting
 

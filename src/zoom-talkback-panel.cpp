@@ -1,6 +1,7 @@
 #include "zoom-talkback-panel.h"
 #include "cv-combo-utils.h"
 #include "cv-style.h"
+#include "talkback-cell-grid.h"
 #include "talkback-controller.h"
 #include "talkback-dock-state.h"
 #include "talkback-key.h"
@@ -11,6 +12,7 @@
 #include <QAbstractItemView>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QEvent>
 #include <QFontMetrics>
 #include <QFrame>
 #include <QGridLayout>
@@ -26,7 +28,6 @@
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QStyle>
-#include <QStyleOptionButton>
 #include <QTimer>
 #include <QVariant>
 #include <QVBoxLayout>
@@ -56,15 +57,6 @@ static constexpr int kInnerGap    = 8;   // between controls in one section
 // The gap between cells in the grid, kept equal to kInnerGap and named
 // separately because talkback_dock_cell_columns() is given it as an argument.
 static constexpr int kCellGap = kInnerGap;
-
-// The horizontal breathing room inside a cell, applied as the cell layout's
-// own margin rather than as stylesheet padding -- a QPushButton with a layout
-// inside it lays that layout out over its whole rect, not over the style's
-// contents rect, so stylesheet padding would be counted by
-// sizeFromContents() and then not actually applied. layout_cells() charges
-// this against the room a name has, which is why it is a constant and not
-// two literals.
-static constexpr int kCellNamePad = 9;
 
 // The panel's own tick. Deliberately the same 100ms the Zoom Control dock used
 // when this surface lived inside it: the lost-release backstop
@@ -225,6 +217,10 @@ ZoomTalkbackPanel::ZoomTalkbackPanel(QWidget *parent)
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     outer->addWidget(scroll);
+    // Kept, because its VIEWPORT is the only honest answer to "how wide is the
+    // dock" -- see layout_cells(), where reading the grid container's own
+    // width instead was half of the 2026-08-29 clipping defect.
+    m_scroll = scroll;
 
     // Transparent, so the dock keeps whatever ground the OBS theme gives it
     // rather than gaining a panel-coloured rectangle where the scroll area is.
@@ -1035,8 +1031,11 @@ void ZoomTalkbackPanel::refresh()
             set_style_state(cell.button, "cell", cell_state);
             set_style_state(cell.name, "cell", cell_state);
             set_style_state(cell.state, "cell", cell_state);
-            if (cell.state->text() != QString::fromStdString(c.state_line))
-                cell.state->setText(QString::fromStdString(c.state_line));
+            // Through the cell, never straight at the label: the cell keeps
+            // the full string and re-elides it against the room the label
+            // actually has, and a setText() here would put an unelided line
+            // back on screen until the next resize.
+            cell.button->set_state_line(QString::fromStdString(c.state_line));
 
             // The tooltip is written BEFORE the never-disable guard below, so
             // a cell whose reason changed underneath a held key still says the
@@ -1152,31 +1151,21 @@ void ZoomTalkbackPanel::rebuild_cells(const std::vector<TalkbackDockCell> &cells
         cell.label      = QString::fromStdString(spec.label);
         cell.all_talent = spec.all_talent;
 
-        cell.button = new QPushButton(m_cell_row);
-        // role="cell" is what gives these their fixed height and their state
-        // colours (src/cv-style.h). kind="all" is set further down, with the
-        // labels that need it too.
-        cell.button->setProperty("role", "cell");
-        cell.button->setEnabled(spec.enabled);
-
         // TWO LABELS INSIDE THE BUTTON, not a two-line button text: the name
         // and the state line carry different type, and QPushButton draws one
         // font. Both are transparent for mouse events, so every press and
         // release still lands on the button itself -- the keying machinery
         // (press/release, the backstop's isDown(), the never-disable guard)
-        // is looking at exactly the widget it always was.
-        auto *cell_layout = new QVBoxLayout(cell.button);
-        cell_layout->setContentsMargins(kCellNamePad, 5, kCellNamePad, 5);
-        cell_layout->setSpacing(0);
-        cell.name = new QLabel(cell.button);
-        cell.name->setObjectName(QStringLiteral("talkbackCellName"));
-        cell.name->setAttribute(Qt::WA_TransparentForMouseEvents);
-        cell_layout->addWidget(cell.name);
-        cell.state = new QLabel(QString::fromStdString(spec.state_line),
-                                cell.button);
-        cell.state->setObjectName(QStringLiteral("talkbackCellState"));
-        cell.state->setAttribute(Qt::WA_TransparentForMouseEvents);
-        cell_layout->addWidget(cell.state);
+        // is looking at exactly the widget it always was. All of that, plus
+        // the reactive elision and the layout-derived height, is
+        // TalkbackCellButton (src/talkback-cell-grid.h).
+        cell.button = new TalkbackCellButton(m_cell_row);
+        cell.button->setEnabled(spec.enabled);
+        cell.button->set_all_talent(spec.all_talent);
+        cell.button->set_name(cell.label);
+        cell.button->set_state_line(QString::fromStdString(spec.state_line));
+        cell.name  = cell.button->name_label();
+        cell.state = cell.button->state_label();
 
         const char *const cell_state = cell_state_name(spec.state);
         cell.button->setProperty("cell", QString::fromLatin1(cell_state));
@@ -1237,9 +1226,25 @@ void ZoomTalkbackPanel::rebuild_cells(const std::vector<TalkbackDockCell> &cells
 // person, two names that differ only at the start reading identically is a
 // wrong-person hazard, and it is the START of a name that has to survive.
 //
-// All talent spans every column: it is not a person, it is the target a
-// director reaches for when something has gone wrong, and it stays in the same
-// place whatever the cast does.
+// THE FLOW AND THE ELISION ARE NOT DECIDED HERE ANY MORE (operator's high-DPI
+// screen, 2026-08-29, second look: names clipped mid-glyph with NO ellipsis,
+// last row cut in half). This function used to derive a column width
+// arithmetically and elide every name against that number, which was simply
+// not the width the QGridLayout went on to give the cell -- the pixel budget
+// and the geometry disagreed, and the geometry is what the operator sees.
+// Both jobs now belong to code that measures instead of predicting:
+// TalkbackCellButton elides in its own event filter from the font it actually
+// has against the width it actually got, and talkback_layout_cell_grid()
+// re-writes every column's stretch and hands the container the layout's own
+// minimum height (src/talkback-cell-grid.cpp, where the mechanism is written
+// up).
+//
+// What is still decided HERE is the one input neither of them can see: how
+// wide the DOCK is. It is read off the scroll area's viewport, never off the
+// grid container -- the container's width is downstream of the flow (Qt sizes
+// a widget from the layout inside it), so feeding it back in is a loop that
+// confirms whatever the grid already did, which is how a two-column grid
+// stayed two columns inside a container the cells themselves had widened.
 //
 // This function may run while the operator is HOLDING a key. It only moves
 // widgets and sets text, and neither can clear a QAbstractButton's `down`
@@ -1254,78 +1259,24 @@ void ZoomTalkbackPanel::layout_cells()
     if (!layout)
         return;
 
-    // m_cell_row's own width is only meaningful once the layout has run it, so
-    // fall back to the panel's until it has. refresh() calls this on the tick,
-    // which is what makes a first paint at the wrong width self-correct.
-    const int available = m_cell_row->width() > 1
-        ? m_cell_row->width()
-        : width() - 2 * kDockMargin;
-    int columns = talkback_dock_cell_columns(available, kTalkbackDockCellMinPx,
-                                             kCellGap);
-    // Never re-flow the grid out from under a held cell; the elision pass
-    // below still runs, so a name never stays clipped for the length of a
-    // press.
-    if (m_cell_columns != 0 && !m_dock_target.empty())
-        columns = m_cell_columns;
+    // The dock's own width, less the panel margins -- from the viewport,
+    // because that is the width the operator can actually see. The panel's
+    // own width is the fallback for the ticks before the scroll area has been
+    // laid out.
+    const int viewport_px = m_scroll && m_scroll->viewport()
+        ? m_scroll->viewport()->width()
+        : 0;
+    const int available =
+        (viewport_px > 1 ? viewport_px : width()) - 2 * kDockMargin;
 
-    if (columns != m_cell_columns) {
-        for (auto &cell : m_cells)
-            if (cell.button) layout->removeWidget(cell.button);
-        int column = 0, row = 0;
-        for (auto &cell : m_cells) {
-            if (!cell.button) continue;
-            if (cell.all_talent) {
-                // Its own row, full width, above everyone.
-                if (column != 0) { column = 0; ++row; }
-                layout->addWidget(cell.button, row, 0, 1, columns);
-                ++row;
-                continue;
-            }
-            layout->addWidget(cell.button, row, column);
-            if (++column == columns) { column = 0; ++row; }
-        }
-        for (int c = 0; c < columns; ++c)
-            layout->setColumnStretch(c, 1);
-        m_cell_columns = columns;
-    }
+    std::vector<TalkbackCellButton *> buttons;
+    buttons.reserve(m_cells.size());
+    for (const auto &cell : m_cells)
+        if (cell.button) buttons.push_back(cell.button);
 
-    // What one cell's NAME LABEL has to fit in: the column, less the button's
-    // own chrome (border + the cell layout's margins). The chrome is asked of
-    // the STYLE rather than measured off a live widget, because
-    // sizeFromContents() is where QStyleSheetStyle applies role="cell"'s
-    // border and unlike a button's own sizeHint() it cannot be inflated by a
-    // minimum width for a short label.
-    QStyleOptionButton opt;
-    opt.initFrom(m_cells.front().button);
-    const QString gauge = QStringLiteral("MMMMMMMMMMMM");
-    const QFontMetrics gauge_fm(m_cells.front().button->font());
-    const QSize gauge_content(gauge_fm.horizontalAdvance(gauge),
-                              gauge_fm.height());
-    opt.text = gauge;
-    const int chrome =
-        std::max(0, style()->sizeFromContents(QStyle::CT_PushButton, &opt,
-                                              gauge_content,
-                                              m_cells.front().button)
-                            .width() -
-                        gauge_content.width()) +
-        2 * kCellNamePad;
-
-    const int cell_px = columns > 0
-        ? (available - (columns - 1) * kCellGap) / columns
-        : available;
-    for (auto &cell : m_cells) {
-        if (!cell.name) continue;
-        // All talent spans the whole row, so it is measured against the whole
-        // row -- charging it one column's width would elide a label that fits.
-        const int room = std::max(
-            (cell.all_talent ? available : cell_px) - chrome, 0);
-        const QFontMetrics fm(cell.name->font());
-        const QString shown = fm.horizontalAdvance(cell.label) <= room
-            ? cell.label
-            : fm.elidedText(cell.label, Qt::ElideRight, room);
-        if (cell.name->text() != shown)
-            cell.name->setText(shown);
-    }
+    m_cell_columns = talkback_layout_cell_grid(
+        layout, buttons, available, kCellGap, m_cell_columns,
+        /*freeze_columns=*/!m_dock_target.empty());
 }
 
 // The editor and the grid share one slot, and keying wins. The decision is
@@ -1394,6 +1345,25 @@ void ZoomTalkbackPanel::size_nominee_list()
 void ZoomTalkbackPanel::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
+    layout_cells();
+}
+
+// A font or style change moves every measurement this panel is built out of --
+// the talent list's row height, the gauge the column count is decided from,
+// and what fits in a cell -- without moving the dock's geometry at all. OBS
+// applies a theme after the dock is constructed, and a window dragged to a
+// display with different scaling gets one of these too, so nothing here may
+// be measured only once at build time.
+void ZoomTalkbackPanel::changeEvent(QEvent *event)
+{
+    QWidget::changeEvent(event);
+    if (event->type() != QEvent::FontChange &&
+        event->type() != QEvent::StyleChange)
+        return;
+    // The row height it was sized from is now stale, and size_nominee_list()
+    // no-ops against its cache unless the cache is cleared.
+    m_nominee_sized_row_h = -1;
+    size_nominee_list();
     layout_cells();
 }
 

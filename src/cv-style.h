@@ -264,8 +264,15 @@ QLabel#talkbackBannerDetail[state="livemuted"] { color: #ffe3a3; }
    colour vocabulary is the rest of this sheet's: red ONLY for a key that is
    actually live to talent, amber for "you should look at this", grey-out for
    "nothing you do here reaches them". */
+/* NO min-height HERE, and that is deliberate: a cell's height is set once, in
+   C++, with setFixedHeight() from the labels' own live QFontMetrics
+   (kTalkbackCellMinHeightPx is the 46 px that used to live on this line, kept
+   as the floor under the measured value). A height decided in two places is a
+   height that disagrees with itself -- and this sheet's copy would lose anyway,
+   an explicit minimum beating a style hint in qSmartMinSize(). See
+   src/talkback-cell-grid.h, whose header is a history of what hand-written
+   height negotiation did to the operator's dock three times running. */
 QPushButton[role="cell"] {
-    min-height: 46px;
     padding: 0px;
     text-align: left;
     border: 1px solid #4a5260;

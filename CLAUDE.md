@@ -33,6 +33,12 @@ Gotchas: CMake wants forward slashes in `-DCMAKE_MODULE_PATH` (dies on `\U`);
 tests are plain executables with no framework, one `check()`-style file per
 invariant cluster in `tests/`.
 
+To look at the **Talkback dock's layout** without a meeting, launch OBS with
+`COREVIDEO_TALKBACK_LAYOUT_TEST=8` set: the dock fills itself with a fake cast
+covering every cell state and talks to no engine at all (see the talkback
+invariants below). Vertical layout on this dock is verified **only** this way —
+an offscreen Qt harness has certified it three times and been wrong three times.
+
 Installing to Program Files requires OBS closed, elevation (UAC), and **always
 both binaries as a pair** — `obs-zoom-plugin.dll` AND
 `zoom-runtime\ZoomObsEngine.exe`. Half the fixes in any release are
@@ -1047,6 +1053,67 @@ Every one of these is documented at length where it lives; the list is the map.
   and it is kept only as the explicit statement of the rule for the OBS dock
   the harness cannot reach; and **the harness is not the operator's screen** --
   that is exactly the claim this entry exists to correct.
+
+- **...so the custom sizing machinery is GONE, and verification moved into the
+  product** (operator's OBS, 2026-08-30: "still cut off, we gotta do better" --
+  the grid area got ~90 px, the single "All talent / assigning..." cell was cut
+  across its state line, and ~500 px of panel sat empty below it). THREE rounds
+  of hand-written height negotiation, THREE offscreen certifications, THREE
+  clipped renders on the operator's screen. The ruling is not "measure harder":
+  height negotiation written by hand in this codebase does not survive contact
+  with a real OBS dock -- the round above even reproduced its own defect under
+  Qt's "minimal" platform plugin and not under "windows", which is an
+  invalidation race, i.e. exactly what hand-written negotiation creates and a
+  harness cannot see. **Deleted from `src/talkback-cell-grid.{h,cpp}`**: the
+  `sizeHint()` and `minimumSizeHint()` overrides, the report-no-minimum-width
+  trick (`hint.setWidth(0)`), the per-column `setColumnStretch()` bookkeeping,
+  the `grid->invalidate()` + `container->setMinimumHeight()` +
+  `updateGeometry()` block, and the stylesheet's `min-height: 46px` on the cell
+  (a height decided in two places). **What replaces them is dumb on purpose**: a
+  cell is `setFixedHeight()` from the LABELS' OWN live `QFontMetrics` (the
+  taller line twice, plus the layout's vertical margin, floored at the 46 px the
+  sheet used to carry) -- fixed means minimum == maximum, so `qSmartMinSize()`
+  takes it verbatim and `QPushButton`'s text()-derived hints (empty in a cell,
+  which is why round 2 overrode them) get no say -- recomputed on every
+  font/style change, which is the whole DPI story with no scale factor read
+  anywhere. The grid is a plain `QGridLayout` of fixed-height widgets, and
+  standard layouts propagate correct minimums up to the scroll area through
+  `QWidget::minimumSizeHint()` with no help. A re-flow **deletes the whole
+  QGridLayout and builds a new one** rather than editing it: a fresh layout has
+  exactly the columns we put in it, so a wider flow's left-over column -- which
+  held a third of the operator's dock in round 2 through a stretch nobody
+  cleared -- cannot exist as state at all. Kept, because they work and neither
+  predicts a pixel: the cell's reactive end-elision in its own event filter, and
+  the MEASURED column-count input (`talkback_dock_cell_min_px()`), which is an
+  input to a discrete two-or-three choice, not a budget anything is sized
+  against. The talent list keeps its `sizeHintForRow()` height and is justified
+  in a comment rather than deleted: it is the same shape as the fix (measure one
+  live number, set a FIXED height), and a QListWidget's own hint is a scrollable
+  viewport's, i.e. the "however many rows fit in whatever it is given" answer
+  that showed two and a half rows for five people.
+- **...and the verification instrument that replaces the harness**:
+  `COREVIDEO_TALKBACK_LAYOUT_TEST` (optionally `=N`, default 8, capped at 64).
+  Set it and the Talkback dock populates ITSELF at construction with a fake cast
+  -- every cell state at once (ready / ON AIR / no channel / not in channel / no
+  talkback / assigning...), the names that have actually broken this grid (the
+  28-char Norwegian one with its real diacritics, a 38-char monster, two that
+  differ only late, one two-letter), a shortfall-shaped plan report and a LIVE
+  banner -- so the REAL panel can be looked at in the REAL OBS with no meeting,
+  no talent and no show. Unset, it is one `qEnvironmentVariableIsSet()` check
+  and nothing else changes. Set, `refresh()` returns before it reads the engine
+  (gating the DATA-driven sections, never the layout machinery -- `layout_cells()`
+  still runs on the tick and on every resize, because re-flowing as the dock is
+  dragged narrower is precisely what is being verified) and all three paths to
+  the engine -- a cell press, Assign channels, the probe -- refuse with a log
+  line, so there is no route from this mode to a Zoom SDK call. The cast itself
+  is pure (`src/talkback-layout-test-cells.h`) and its coverage claim is pinned
+  by `tests/talkback-layout-test-cells-test.cpp` (69 tests now): an instrument
+  that silently stopped emitting one state would let the verification pass while
+  that state stayed broken -- the same shape, one level up, as the three
+  offscreen certifications this replaces. The banner and plan painting were
+  extracted from `refresh()` (`paint_banner()`/`paint_plan()`) and are SHARED
+  rather than copied, because an instrument painting its own approximation would
+  verify a layout the product does not have.
 
 ## Live testing against a real meeting
 

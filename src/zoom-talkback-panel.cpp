@@ -5,6 +5,7 @@
 #include "talkback-controller.h"
 #include "talkback-dock-state.h"
 #include "talkback-key.h"
+#include "talkback-layout-test-cells.h"
 #include "talkback-plan.h"
 #include "zoom-engine-client.h"
 #include "zoom-settings.h"
@@ -15,7 +16,6 @@
 #include <QEvent>
 #include <QFontMetrics>
 #include <QFrame>
-#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -57,6 +57,26 @@ static constexpr int kInnerGap    = 8;   // between controls in one section
 // The gap between cells in the grid, kept equal to kInnerGap and named
 // separately because talkback_dock_cell_columns() is given it as an argument.
 static constexpr int kCellGap = kInnerGap;
+
+// ── The layout-verification instrument ──────────────────────────────────────
+//
+// Set COREVIDEO_TALKBACK_LAYOUT_TEST (optionally to a number of fake talent,
+// e.g. =8) and this panel populates ITSELF at construction and talks to
+// nothing: no engine, no meeting, no Zoom SDK, no keying. Unset -- which is
+// every ordinary run -- the whole thing is one qEnvironmentVariableIsSet()
+// check and nothing else changes.
+//
+// IT IS AN INSTRUMENT, NOT A DEMO MODE. It exists because three consecutive
+// rounds of work on this grid's vertical sizing were certified by an offscreen
+// Qt harness and then CLIPPED on the operator's real OBS dock -- the last one
+// (2026-08-30) gave the grid area ~90 px, cut the single "All talent /
+// assigning..." cell across its state line, and left 500 px of empty panel
+// underneath. A harness has a different platform plugin, style, DPI and parent
+// chain from an OBS dock, and every one of these defects has lived in exactly
+// those differences. So the only verification this project now accepts for
+// vertical layout is the real panel in real OBS, and this is what makes that
+// possible without a meeting, a talent list or a live show.
+static const char *const kTalkbackLayoutTestEnv = "COREVIDEO_TALKBACK_LAYOUT_TEST";
 
 // The panel's own tick. Deliberately the same 100ms the Zoom Control dock used
 // when this surface lived inside it: the lost-release backstop
@@ -290,10 +310,14 @@ ZoomTalkbackPanel::ZoomTalkbackPanel(QWidget *parent)
     grid_area_layout->setContentsMargins(0, 0, 0, 0);
     grid_area_layout->setSpacing(kInnerGap);
 
+    // NO LAYOUT IS CREATED HERE. talkback_layout_cell_grid() owns this
+    // container's QGridLayout and replaces it outright on every re-flow, so
+    // that no left-over column, stretch factor or invalidation state from a
+    // wider flow can survive a narrower one -- which is what held a third of
+    // the operator's dock in the round this replaces. An empty QWidget with no
+    // layout and no children asks for nothing, which is the correct answer
+    // until there are cells.
     m_cell_row = new QWidget(m_grid_area);
-    auto *cell_grid = new QGridLayout(m_cell_row);
-    cell_grid->setContentsMargins(0, 0, 0, 0);
-    cell_grid->setSpacing(kCellGap);
     grid_area_layout->addWidget(m_cell_row);
     layout->addWidget(m_grid_area);
 
@@ -549,6 +573,14 @@ ZoomTalkbackPanel::ZoomTalkbackPanel(QWidget *parent)
     connect(m_probe_btn, &QPushButton::clicked, this, [this]() {
         if (!m_probe_participant_combo)
             return;
+        // The third and last path from this panel to the engine, and the one
+        // that would put an audible tone in a real meeting.
+        if (m_layout_test) {
+            blog(LOG_INFO,
+                 "[obs-zoom-plugin] talkback dock: layout test mode -- probe "
+                 "ignored");
+            return;
+        }
         // Passing the NAME, never the id the combo could have carried
         // instead: Zoom user ids are meeting-scoped, so an id captured now
         // would point at nobody after a rejoin and at the wrong person once
@@ -573,7 +605,13 @@ ZoomTalkbackPanel::ZoomTalkbackPanel(QWidget *parent)
 
     // -- Apply stylesheet last so all properties are set before evaluation ----
     setStyleSheet(cv_stylesheet());
-    refresh();
+
+    // ONE CHECK, and it is the whole of the instrument's cost when unset.
+    m_layout_test = qEnvironmentVariableIsSet(kTalkbackLayoutTestEnv);
+    if (m_layout_test)
+        populate_layout_test();
+    else
+        refresh();
 }
 
 ZoomTalkbackPanel::~ZoomTalkbackPanel()
@@ -685,6 +723,18 @@ void ZoomTalkbackPanel::refresh()
 {
     if (!m_source_combo)
         return;
+
+    // THE INSTRUMENT'S ONLY EFFECT ON THE TICK, and it gates the DATA-DRIVEN
+    // sections, not the layout machinery: layout_cells() still runs on every
+    // tick and every resize, because re-flowing the grid as the dock is dragged
+    // narrower is precisely what is being verified. Everything below this line
+    // reads the engine and would overwrite the fake population with an empty
+    // one, so in this mode the panel touches no engine at all -- not the
+    // roster, not the controller, not the probe.
+    if (m_layout_test) {
+        layout_cells();
+        return;
+    }
 
     auto &engine = ZoomEngineClient::instance();
     const bool engine_running = engine.is_running();
@@ -838,36 +888,7 @@ void ZoomTalkbackPanel::refresh()
 
     // -- The confirmed plan, and what it cost ----------------------------------
     const auto plan = engine.talkback_nomination_status();
-    const auto report = talkback_dock_nomination_report(plan);
-    // The ANSWER on its own line, at normal weight; the names that support it
-    // underneath, secondary. One muted 11px block for both is what buried the
-    // headline in the first render.
-    const QString plan_headline = QString::fromStdString(report.headline);
-    QString plan_detail;
-    for (const auto &line : report.lines) {
-        if (!plan_detail.isEmpty()) plan_detail += "\n";
-        plan_detail += QString::fromStdString(line);
-    }
-    // The un-elided lists. talkback_dock_nomination_report() elides a name run
-    // past five so the block stays scannable; this is where the rest of the
-    // names go, so the elision never costs the operator a name. It hangs off
-    // BOTH labels, because either one is what the pointer will be over.
-    const QString full = QString::fromStdString(report.tooltip);
-    if (m_plan_label) {
-        if (m_plan_label->text() != plan_headline)
-            m_plan_label->setText(plan_headline);
-        if (m_plan_label->toolTip() != full)
-            m_plan_label->setToolTip(full);
-    }
-    if (m_plan_detail) {
-        if (m_plan_detail->text() != plan_detail)
-            m_plan_detail->setText(plan_detail);
-        if (m_plan_detail->toolTip() != full)
-            m_plan_detail->setToolTip(full);
-        m_plan_detail->setVisible(!plan_detail.isEmpty());
-    }
-    set_style_flag(m_plan_label, "warn", report.warn);
-    set_style_flag(m_plan_detail, "warn", report.warn);
+    paint_plan(talkback_dock_nomination_report(plan));
 
     // -- Whose key is open -----------------------------------------------------
     // Polled and parsed, the same treatment format_talkback_probe_status()
@@ -1105,13 +1126,31 @@ void ZoomTalkbackPanel::refresh()
 
     // -- ON AIR banner ---------------------------------------------------------
     // Decided above the key buttons (see there); this is only the painting.
-    //
-    // The tally dot is prepended here rather than in the pure header so that
-    // header stays plain ASCII, and it is built from a code point rather than
-    // typed as a glyph because these sources carry no BOM and this build passes
-    // MSVC no /utf-8 -- a raw non-ASCII character in a narrow string literal
-    // would be decoded as the system codepage. It is only ever shown for Live,
-    // which is the state it means.
+    paint_banner(banner);
+
+    if (m_notice) {
+        if (m_notice->text() != m_notice_text)
+            m_notice->setText(m_notice_text);
+        m_notice->setVisible(!m_notice_text.isEmpty());
+    }
+
+    refresh_probe();
+}
+
+// ── Painting, extracted so the instrument renders the REAL thing ────────────
+//
+// These two were inline in refresh() and are now called from there and from
+// populate_layout_test(). Extracted rather than copied: an instrument that
+// paints its own approximation of the banner would verify a layout the product
+// does not have, which is the whole failure mode this round exists to end.
+
+// The tally dot is prepended here rather than in the pure header so that header
+// stays plain ASCII, and it is built from a code point rather than typed as a
+// glyph because these sources carry no BOM and this build passes MSVC no
+// /utf-8 -- a raw non-ASCII character in a narrow string literal would be
+// decoded as the system codepage.
+void ZoomTalkbackPanel::paint_banner(const TalkbackDockBanner &banner)
+{
     QString banner_text = QString::fromStdString(banner.headline);
     // The tally dot means "the director is audible", so it belongs to Live and
     // ONLY Live. LiveMicBlocked is the one state where the key is open and
@@ -1135,14 +1174,125 @@ void ZoomTalkbackPanel::refresh()
     set_style_state(m_banner, "state", state_name);
     set_style_state(m_banner_line, "state", state_name);
     set_style_state(m_banner_detail, "state", state_name);
+}
 
-    if (m_notice) {
-        if (m_notice->text() != m_notice_text)
-            m_notice->setText(m_notice_text);
-        m_notice->setVisible(!m_notice_text.isEmpty());
+// The ANSWER on its own line, at normal weight; the names that support it
+// underneath, secondary. One muted 11px block for both is what buried the
+// headline in the first render.
+void ZoomTalkbackPanel::paint_plan(const TalkbackDockNominationReport &report)
+{
+    const QString plan_headline = QString::fromStdString(report.headline);
+    QString plan_detail;
+    for (const auto &line : report.lines) {
+        if (!plan_detail.isEmpty()) plan_detail += "\n";
+        plan_detail += QString::fromStdString(line);
+    }
+    // The un-elided lists. talkback_dock_nomination_report() elides a name run
+    // past five so the block stays scannable; this is where the rest of the
+    // names go, so the elision never costs the operator a name. It hangs off
+    // BOTH labels, because either one is what the pointer will be over.
+    const QString full = QString::fromStdString(report.tooltip);
+    if (m_plan_label) {
+        if (m_plan_label->text() != plan_headline)
+            m_plan_label->setText(plan_headline);
+        if (m_plan_label->toolTip() != full)
+            m_plan_label->setToolTip(full);
+    }
+    if (m_plan_detail) {
+        if (m_plan_detail->text() != plan_detail)
+            m_plan_detail->setText(plan_detail);
+        if (m_plan_detail->toolTip() != full)
+            m_plan_detail->setToolTip(full);
+        m_plan_detail->setVisible(!plan_detail.isEmpty());
+    }
+    set_style_flag(m_plan_label, "warn", report.warn);
+    set_style_flag(m_plan_detail, "warn", report.warn);
+}
+
+// ── The layout-verification instrument ──────────────────────────────────────
+//
+// Runs ONCE, at construction, and only when COREVIDEO_TALKBACK_LAYOUT_TEST is
+// set. It fills the real widget tree with a fake cast -- every cell state at
+// once, the long names that have actually broken this grid, a shortfall-shaped
+// plan report and a LIVE banner -- so the operator's own OBS can be looked at
+// instead of an offscreen harness. See the note beside kTalkbackLayoutTestEnv
+// for why an offscreen harness is not accepted for this any more.
+//
+// ZERO ENGINE INTERACTION, by construction rather than by care: everything here
+// comes from pure headers (src/talkback-layout-test-cells.h and the decision
+// functions it calls), refresh() returns before it touches ZoomEngineClient or
+// TalkbackController while this mode is on, and the three paths an operator
+// could still poke -- a cell press, Assign channels, the probe -- refuse with a
+// log line below. There is no path from this mode to a Zoom SDK call.
+void ZoomTalkbackPanel::populate_layout_test()
+{
+    const int requested = qEnvironmentVariableIntValue(kTalkbackLayoutTestEnv);
+    const int people = std::min(
+        requested > 0 ? requested : kTalkbackLayoutTestDefaultPeople,
+        kTalkbackLayoutTestMaxPeople);
+
+    blog(LOG_WARNING,
+         "[obs-zoom-plugin] talkback dock: LAYOUT TEST MODE (%s=%d). The grid "
+         "below is FAKE: no engine, no meeting, and every key press is a no-op. "
+         "Unset the variable for a working dock.",
+         kTalkbackLayoutTestEnv, people);
+
+    const auto cells = talkback_layout_test_cells(people);
+    rebuild_cells(cells);
+    // Anything but the empty string: the tick's rebuild gate is skipped in this
+    // mode, but leaving the record blank would describe a grid that is not
+    // there if the gate ever runs again.
+    m_key_signature = "layout-test";
+
+    // The talent editor is part of the layout too, and the plan block lives
+    // inside it -- so give it rows to stand at its measured height with, and
+    // the same cast the grid is showing.
+    if (m_nominee_list) {
+        m_nominee_list->clear();
+        for (const auto &cell : cells) {
+            if (cell.all_talent) continue;
+            auto *item = new QListWidgetItem(QString::fromStdString(cell.label));
+            item->setData(Qt::UserRole, QString::fromStdString(cell.target));
+            item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+            item->setCheckState(Qt::Checked);
+            m_nominee_list->addItem(item);
+        }
+        size_nominee_list();
+    }
+    if (m_nominate_btn) {
+        m_nominate_btn->setEnabled(false);
+        m_nominate_btn->setText(
+            QString("Assign channels (%1)").arg(people));
     }
 
-    refresh_probe();
+    paint_plan(talkback_dock_nomination_report(talkback_layout_test_plan()));
+
+    // The banner in its LIVE state, naming the person whose cell is painted ON
+    // AIR, with the member tally -- the tallest thing the strip ever renders.
+    TalkbackDockSessionView view;
+    view.key_open        = true;
+    view.target          = talkback_layout_test_live_target(cells);
+    view.engine_live     = true;
+    view.members_known   = true;
+    view.members_present = 3;
+    view.members_total   = 4;
+    paint_banner(talkback_dock_banner(view));
+
+    // The one-line source status, in its loudest (amber) form.
+    m_track_short = QStringLiteral(
+        "On air via track 1. The audience will hear this.");
+    m_track_text = QStringLiteral(
+        "LAYOUT TEST MODE: this line is fake, like everything else on this "
+        "panel right now.");
+    m_track_risk = true;
+    if (m_track_label) {
+        m_track_label->setText(m_track_short);
+        m_track_label->setToolTip(m_track_text);
+    }
+    set_style_flag(m_track_label, "risk", m_track_risk);
+
+    // Flowed last, once everything above has the size it is going to ask for.
+    layout_cells();
 }
 
 // Takes the cell specs its caller already computed rather than recomputing
@@ -1153,18 +1303,16 @@ void ZoomTalkbackPanel::rebuild_cells(const std::vector<TalkbackDockCell> &cells
 {
     if (!m_cell_row)
         return;
-    auto *layout = qobject_cast<QGridLayout *>(m_cell_row->layout());
-    if (!layout)
-        return;
 
     for (auto &cell : m_cells) {
         if (!cell.button) continue;
-        // hide() as well as removeWidget(): taking a widget out of a layout
-        // does not unmap it, so between here and the deferred delete an old
-        // cell would keep painting at its last geometry -- on top of the fresh
-        // grid, whose column count may have moved, so the stale and new
-        // positions no longer coincide and the overlap would show.
-        layout->removeWidget(cell.button);
+        // hide() before the deferred delete: a widget that is merely no longer
+        // in a layout is still MAPPED, so between here and the delete an old
+        // cell would keep painting at its last geometry, on top of the fresh
+        // grid whose column count may have moved. Nothing is removed from the
+        // layout by hand -- layout_cells() below throws the whole QGridLayout
+        // away and builds a new one, and Qt removes a destroyed widget's item
+        // from whatever layout still holds it in the meantime.
         cell.button->hide();
         cell.button->deleteLater();
     }
@@ -1253,17 +1401,23 @@ void ZoomTalkbackPanel::rebuild_cells(const std::vector<TalkbackDockCell> &cells
 // wrong-person hazard, and it is the START of a name that has to survive.
 //
 // THE FLOW AND THE ELISION ARE NOT DECIDED HERE ANY MORE (operator's high-DPI
-// screen, 2026-08-29, second look: names clipped mid-glyph with NO ellipsis,
-// last row cut in half). This function used to derive a column width
-// arithmetically and elide every name against that number, which was simply
-// not the width the QGridLayout went on to give the cell -- the pixel budget
-// and the geometry disagreed, and the geometry is what the operator sees.
-// Both jobs now belong to code that measures instead of predicting:
-// TalkbackCellButton elides in its own event filter from the font it actually
-// has against the width it actually got, and talkback_layout_cell_grid()
-// re-writes every column's stretch and hands the container the layout's own
-// minimum height (src/talkback-cell-grid.cpp, where the mechanism is written
-// up).
+// screen, 2026-08-29: names clipped mid-glyph with NO ellipsis, last row cut in
+// half). This function used to derive a column width arithmetically and elide
+// every name against that number, which was simply not the width the
+// QGridLayout went on to give the cell -- the pixel budget and the geometry
+// disagreed, and the geometry is what the operator sees. Elision belongs to the
+// cell's own event filter, from the font it actually has against the width it
+// actually got.
+//
+// AND THE HEIGHT IS NOBODY'S DECISION AT ALL ANY MORE (operator's OBS,
+// 2026-08-30: the grid area got ~90 px, the one "All talent / assigning..."
+// cell was cut across its state line, 500 px of panel sat empty below). Every
+// cell is setFixedHeight() from its own live metrics and the grid is a plain
+// QGridLayout of fixed-height widgets, so the minimum propagates up to the
+// scroll area through standard Qt with nothing here to get it wrong -- no
+// column stretch written by hand, no container told its height moved, no size
+// hints overridden. src/talkback-cell-grid.h's header is the history of why
+// those three are gone.
 //
 // What is still decided HERE is the one input neither of them can see: how
 // wide the DOCK is. It is read off the scroll area's viewport, never off the
@@ -1280,9 +1434,6 @@ void ZoomTalkbackPanel::rebuild_cells(const std::vector<TalkbackDockCell> &cells
 void ZoomTalkbackPanel::layout_cells()
 {
     if (!m_cell_row || m_cells.empty())
-        return;
-    auto *layout = qobject_cast<QGridLayout *>(m_cell_row->layout());
-    if (!layout)
         return;
 
     // The dock's own width, less the panel margins -- from the viewport,
@@ -1301,7 +1452,7 @@ void ZoomTalkbackPanel::layout_cells()
         if (cell.button) buttons.push_back(cell.button);
 
     m_cell_columns = talkback_layout_cell_grid(
-        layout, buttons, available, kCellGap, m_cell_columns,
+        m_cell_row, buttons, available, kCellGap, m_cell_columns,
         /*freeze_columns=*/!m_dock_target.empty());
 }
 
@@ -1346,6 +1497,18 @@ void ZoomTalkbackPanel::apply_edit_mode()
 // two and a half rows with a scrollbar. sizeHintForRow() asks the delegate,
 // which does know, and a fixed height is what stops a short dock from
 // squeezing the list to its minimum -- the scroll area now absorbs that.
+//
+// KEPT DELIBERATELY IN THE ROUND THAT DELETED THE GRID'S SIZING MACHINERY
+// (2026-08-30), and it is the same shape as what replaced it, not a survivor of
+// what was removed: nothing here overrides a size HINT, computes a budget other
+// code then spends, or tells a parent its geometry moved. It measures one live
+// number (the delegate's own row height) and sets a FIXED height from it, which
+// is exactly what a cell now does -- fixed means minimum == maximum, so the
+// layouts above have nothing to renegotiate and no invalidation to miss. The
+// list widget is the one thing on this panel Qt cannot size correctly on its
+// own: a QListWidget's own hint is a scrollable viewport's, i.e. arbitrary, so
+// "however many rows fit in whatever it is given" is precisely the answer that
+// showed two and a half rows for five people.
 void ZoomTalkbackPanel::size_nominee_list()
 {
     if (!m_nominee_list)
@@ -1397,6 +1560,14 @@ void ZoomTalkbackPanel::on_nominate_clicked()
 {
     if (!m_nominee_list)
         return;
+    // The other path from this panel to the engine. The button is disabled in
+    // this mode; this is the guard for a caller who re-enables it.
+    if (m_layout_test) {
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] talkback dock: layout test mode -- assign "
+             "channels ignored");
+        return;
+    }
 
     std::vector<std::string> nominees;
     for (int i = 0; i < m_nominee_list->count(); ++i) {
@@ -1451,6 +1622,18 @@ void ZoomTalkbackPanel::on_nominate_clicked()
 
 void ZoomTalkbackPanel::key_pressed(const std::string &target, bool latch)
 {
+    // THE INSTRUMENT DOES NOT KEY. Cells render, hover and depress exactly as
+    // they do in a show -- that is part of what is being looked at -- but the
+    // press goes nowhere: the cast is fake, so "talk to Sarah Kim" would be a
+    // key opened at whoever really holds that name, over whatever source the
+    // saved settings name, from a dock nobody is treating as live.
+    if (m_layout_test) {
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] talkback dock: layout test mode -- press on "
+             "\"%s\" ignored (latch=%d)",
+             target.c_str(), latch ? 1 : 0);
+        return;
+    }
     // THREAD NOTE, and the reason it is written here rather than assumed: this
     // handler runs on the Qt main thread -- Qt delivers QPushButton::pressed
     // from the widget's own thread -- which is the SAME thread
@@ -1525,6 +1708,17 @@ void ZoomTalkbackPanel::key_pressed(const std::string &target, bool latch)
 
 void ZoomTalkbackPanel::key_released(const std::string &target)
 {
+    // Nothing was ever opened in this mode, so there is nothing to close -- but
+    // it is refused explicitly rather than left to fall through the record
+    // checks below, so the instrument has exactly one way out of every keying
+    // entry point.
+    if (m_layout_test) {
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] talkback dock: layout test mode -- release on "
+             "\"%s\" ignored",
+             target.c_str());
+        return;
+    }
     // The same record the press path reads (M1): a latch releases nothing (the
     // next press on its own target closes it), a stray release for a target
     // this dock is not holding closes nothing, and a key another surface owns

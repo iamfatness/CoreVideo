@@ -1,70 +1,93 @@
 #pragma once
 //
 // talkback-cell-grid.h — the intercom grid's cell widget and its flow, made
-// SELF-TRUING.
+// DELIBERATELY DUMB.
 //
-// WHY THIS FILE EXISTS, and it is a live defect, not a refactor (operator's
-// high-DPI screen, 2026-08-29, second look):
+// WHY THIS FILE LOOKS LIKE IT DOES, and it is a history of four rounds rather
+// than a preference:
 //
-//   (1) names clipped MID-GLYPH with no ellipsis -- "Grant Whiteh", "Jeffrey
-//       Wiltsh", "Ronny Hofso" -- on a control that opens a live microphone to
-//       one named person, which is the wrong-person hazard the elision was
-//       added to close in the first place;
-//   (2) the last row of cells cut in half across its state line.
+//   Round 1 predicted a pixel budget ((available - gaps) / columns), elided
+//   every name against it, and let the QGridLayout hand the cell a different
+//   width. Names clipped mid-glyph.
+//   Round 2 replaced the prediction with measurement -- a cell elided from its
+//   own geometry, reported a height derived from the layout inside it and NO
+//   width at all, rewrote every column's stretch, and pushed a minimum height
+//   onto its container. An offscreen harness certified it.
+//   The operator's real OBS clipped it anyway: the grid area got ~90 px, the
+//   single "All talent / assigning..." cell was cut across its state line, and
+//   500 px of empty panel sat underneath (2026-08-30).
 //
-// Both came from the same habit: the panel MEASURED once, in one place, and
-// then spent the answer as a pixel budget somewhere else. It derived a column
-// width arithmetically ((available - gaps) / columns), elided each name
-// against that number, and let the QGridLayout hand the cell a different
-// width -- so the elision was computed for 147 px while the label was painted
-// in 103. The grid's own geometry is the only thing that knows what a cell
-// actually got, and it was not being asked.
+// THREE ROUNDS OF CUSTOM SIZING, THREE HARNESS CERTIFICATIONS, THREE CLIPPED
+// RENDERS ON THE OPERATOR'S SCREEN. The verdict is not "measure harder". It is
+// that height negotiation written by hand in this codebase does not survive
+// contact with a real OBS dock -- one of the previous rounds even reproduced a
+// defect under Qt's "minimal" platform plugin and not under "windows", which is
+// an invalidation race, i.e. exactly the class of bug hand-written negotiation
+// creates and a harness cannot see.
 //
-// The specific mechanism on the operator's screen, measured off the
-// screenshot: the grid re-flowed from three columns to two, and
-// setColumnStretch() was written only for the columns the NEW flow uses. The
-// third column kept the stretch the WIDER flow gave it, so an empty column
-// held a third of the dock: two cells were laid out across two thirds of the
-// width the elision pass had charged them for, and the row height the
-// container had negotiated for four rows was a row short for five.
+// So there is no negotiation left to get wrong:
 //
-// So nothing here predicts a pixel:
-//   * a cell elides in its OWN event filter, from QFontMetrics of the font the
-//     label actually has against the width the layout actually gave it;
-//   * a cell reports a height from the layout inside it, not from a constant,
-//     so it cannot be handed less room than its two lines need;
-//   * a cell reports NO minimum width at all, because it elides -- which is
-//     what stops one long Zoom display name from deciding the dock's width
-//     for everybody (the disease that produced the 400 px tower this grid
-//     replaced, coming back through the layout's minimum);
-//   * the flow re-writes the stretch of EVERY column the layout knows about,
-//     live ones and left-over ones, and hands the container the layout's own
-//     minimum height.
+//   * A CELL HAS A FIXED HEIGHT. setFixedHeight() from the labels' OWN live
+//     QFontMetrics, computed at construction and again on every font/style
+//     change, floored at the design height. Fixed means minimum == maximum, so
+//     qSmartMinSize() takes it verbatim and QPushButton's own hints (which are
+//     derived from text() -- empty in a cell -- and were the reason round 2
+//     overrode them) cannot get a say. DPI-safe because it is derived from live
+//     metrics; simple because it never renegotiates.
+//   * THE GRID IS A PLAIN QGridLayout OF FIXED-HEIGHT WIDGETS. Standard layouts
+//     compute correct minimums for fixed-height children and propagate them up
+//     through QWidget::minimumSizeHint() with no help. There is no sizeHint()
+//     override, no minimumSizeHint() override, no setColumnStretch()
+//     bookkeeping, no invalidate(), and nothing tells the container its height
+//     moved -- all four are gone, and all four were height/width negotiation.
+//   * A RE-FLOW THROWS THE LAYOUT AWAY AND BUILDS A NEW ONE. Not clear-and-
+//     re-add: a fresh QGridLayout has exactly the columns we put in it, so a
+//     wider flow's left-over column (which held a third of the operator's dock
+//     in round 2, through a stretch nobody cleared) cannot exist as state.
+//     At <= 25 cells this is cheap, and it is gated on the column count
+//     actually changing, so it does not run on the panel's 10 Hz tick.
 //
-// Qt Widgets only -- no libobs, no engine -- so an offscreen harness can build
-// the real cells, at a real font scale, and measure what they render. The
-// panel that uses this (src/zoom-talkback-panel.cpp) cannot be constructed
-// outside OBS, which is exactly why the previous round's "verified offscreen"
-// verdict did not survive contact with the operator's display.
+// What survived, because it works: the cell's REACTIVE end-elision -- it elides
+// in its own event filter, from QFontMetrics of the font the label actually has
+// against the width the label actually got, never from a budget computed
+// elsewhere. And the column count still adapts to the dock's width from
+// MEASURED inputs (a gauge string in the live label's metrics plus the cell's
+// own measured chrome, talkback_dock_cell_min_px()); that is an input to a
+// discrete choice between two and three, not a pixel anybody spends.
+//
+// Qt Widgets only -- no libobs, no engine. That is NOT so an offscreen harness
+// can certify the vertical layout: this file's own history says such a
+// certification is worth nothing. The panel that uses this
+// (src/zoom-talkback-panel.cpp) carries a layout-verification instrument
+// instead (COREVIDEO_TALKBACK_LAYOUT_TEST), which renders the REAL panel, with
+// every cell state, in the operator's REAL OBS.
 
 #include <QPushButton>
-#include <QSize>
 #include <QString>
 
 #include <vector>
 
 class QEvent;
-class QGridLayout;
 class QLabel;
 class QResizeEvent;
+class QWidget;
 
-// The horizontal breathing room inside a cell, applied as the cell layout's
-// own margin rather than as stylesheet padding: a QPushButton with a layout
-// inside it lays that layout out over its whole rect, not over the style's
-// contents rect, so stylesheet padding would be counted by sizeFromContents()
-// and then not actually applied.
+// The breathing room inside a cell, applied as the cell layout's own margin
+// rather than as stylesheet padding: a QPushButton with a layout inside it lays
+// that layout out over its whole rect, not over the style's contents rect, so
+// stylesheet padding would be counted by sizeFromContents() and then not
+// actually applied.
 constexpr int kTalkbackCellNamePad = 9;
 constexpr int kTalkbackCellVerticalPad = 5;
+
+// The floor under the measured height, and the design height at 1:1 metrics.
+// It used to be `min-height: 46px` in cv-style.h; the sheet no longer sets one,
+// because a height decided in two places is a height that disagrees with
+// itself -- and the stylesheet's copy would have lost anyway, setFixedHeight()
+// being an explicit minimum. Above 1:1 the measured value exceeds it and the
+// floor is inert, which is the same treatment kTalkbackDockCellMinPx gets
+// horizontally.
+constexpr int kTalkbackCellMinHeightPx = 46;
 
 // One person (or "All talent") in the intercom grid: a restyled QPushButton --
 // so every rule the key buttons earned still applies to it verbatim (press /
@@ -93,15 +116,8 @@ public:
     QLabel *name_label() const { return m_name; }
     QLabel *state_label() const { return m_state; }
 
-    // HEIGHT FROM THE LAYOUT, NOT FROM THE STYLE'S min-height. QPushButton
-    // derives both hints from its own text() -- which is empty here -- so a
-    // cell whose two labels need more room than the stylesheet's min-height
-    // would report a height that fits neither, and the row would be cut. The
-    // WIDTH is deliberately left at nothing: a cell elides, so it never has a
-    // minimum width to defend, and claiming one is how the longest name in
-    // the room would decide the layout for everybody again.
-    QSize sizeHint() const override;
-    QSize minimumSizeHint() const override;
+    // NO sizeHint()/minimumSizeHint() OVERRIDES, ON PURPOSE. See the file
+    // header: the height is fixed and the width is nobody's to defend.
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -112,6 +128,8 @@ protected:
 
 private:
     void re_elide();
+    // The whole of this cell's height policy, in one call, from live metrics.
+    void apply_fixed_height();
     static void elide_into(QLabel *label, const QString &full);
 
     QLabel *m_name  = nullptr;
@@ -124,18 +142,25 @@ private:
     bool    m_eliding = false;
 };
 
-// Flows the cells into `grid` and returns the column count now in force.
+// Flows the cells into `container` and returns the column count now in force.
 //
-// `available_px` must be the width the DOCK gives, never the grid container's
-// own width: the container's width is downstream of this decision (Qt sizes a
+// The container's QGridLayout is REPLACED on every re-flow rather than edited,
+// so no left-over column, stretch factor or invalidation state can survive one
+// (see the file header). The widgets are children of `container` and outlive
+// their layout untouched -- including one the operator is holding, whose `down`
+// state only an EnabledChange can clear.
+//
+// `available_px` must be the width the DOCK gives, never the container's own
+// width: the container's width is downstream of this decision (Qt sizes a
 // widget from the layout inside it), so feeding it back in is a loop that can
 // only ever confirm whatever the grid already did.
 //
 // `current_columns` is the count from the last call (0 when nothing has been
-// laid out yet). `freeze_columns` keeps that count whatever the width says --
-// the panel passes true while the operator is holding a key, because
-// re-parenting the widget under their finger is not worth a column.
-int talkback_layout_cell_grid(QGridLayout *grid,
+// laid out yet, which forces a build). `freeze_columns` keeps that count
+// whatever the width says -- the panel passes true while the operator is
+// holding a key, because re-parenting the widget under their finger is not
+// worth a column.
+int talkback_layout_cell_grid(QWidget *container,
                               const std::vector<TalkbackCellButton *> &cells,
                               int available_px, int gap_px,
                               int current_columns, bool freeze_columns);

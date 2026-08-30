@@ -1144,6 +1144,22 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoTalkbackDockState
              COMMAND CoreVideoTalkbackDockStateTest)
 
+    # The cast behind COREVIDEO_TALKBACK_LAYOUT_TEST, the dock's
+    # layout-verification instrument. Three rounds of grid sizing were certified
+    # by an offscreen Qt harness and clipped anyway on the operator's real OBS,
+    # so the verification moved into the product -- and the instrument's own
+    # coverage claim ("every state, the long names, the cell that was cut in
+    # half") is pinned here rather than asserted in a comment. See
+    # src/talkback-layout-test-cells.h.
+    add_executable(CoreVideoTalkbackLayoutTestCellsTest
+        tests/talkback-layout-test-cells-test.cpp
+    )
+    target_include_directories(CoreVideoTalkbackLayoutTestCellsTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTalkbackLayoutTestCells
+             COMMAND CoreVideoTalkbackLayoutTestCellsTest)
+
     # THE FIRST TEST TARGET THAT COMPILES AN ENGINE TRANSLATION UNIT.
     #
     # Every other talkback test above compiles a pure header with src/ on the

@@ -101,6 +101,17 @@ private:
     // Sets the talent list's height to exactly the rows it should show, from
     // the widget's own measured row height.
     void size_nominee_list();
+    // The two painting passes refresh() and the layout-test instrument share,
+    // so the instrument renders the product's banner and plan block rather than
+    // its own approximation of them.
+    void paint_banner(const TalkbackDockBanner &banner);
+    void paint_plan(const TalkbackDockNominationReport &report);
+    // COREVIDEO_TALKBACK_LAYOUT_TEST only. Fills the real widget tree with a
+    // fake cast covering every cell state, at construction, touching nothing
+    // outside this panel. See the note beside kTalkbackLayoutTestEnv in the
+    // .cpp for why an offscreen harness is no longer accepted as verification
+    // of this panel's vertical layout.
+    void populate_layout_test();
     void on_nominate_clicked();
     // `latch` is captured at PRESS time, not read at release: an operator who
     // toggles the Latch box while holding a button must not have the release
@@ -232,4 +243,10 @@ private:
 
     QTimer *m_refresh_timer = nullptr;
     bool    m_shutting_down = false;
+    // COREVIDEO_TALKBACK_LAYOUT_TEST was set when this panel was built. It
+    // never changes afterwards: read once, in the constructor, so no path can
+    // half-enter the mode. While true, refresh() returns before it reads the
+    // engine and every keying entry point refuses with a log line, so the
+    // instrument cannot reach a Zoom SDK call at all.
+    bool    m_layout_test   = false;
 };

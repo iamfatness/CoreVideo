@@ -254,9 +254,30 @@ Every one of these is documented at length where it lives; the list is the map.
      one that opened it — a bot left hot on the machine running the show is
      the worse failure. An unmute the meeting refuses does **not** refuse the
      key (the channels are real and a host can still unmute); it reports
-     `"mic":"blocked"` on the `talkback_session` `live` line so the dock can
-     say *"ON AIR — but the bot is muted by the host"* instead of plain
-     "live", which is the one word that made the ghost invisible.
+     `"mic":"blocked"` on the `talkback_session` `live` line, and the dock's
+     banner says **"ON AIR - BOT MUTED: \<target\>"** in amber on the live red
+     instead of plain "live", which is the one word that made the ghost
+     invisible. **The whole chain is named because the first version of this
+     entry claimed it and it did not exist** (fix round 1, M1 — the engine
+     emitted the field, three comments and this file asserted the dock
+     consumed it, and the plugin's parser read only `live`/`reason`):
+     `handle_event()`'s live-line branch → `talkback_session_mic_blocked()`
+     (`src/talkback-key.h`, beside `talkback_session_state_closes_key()`, and
+     extracted for the same reason — both Majors this feature shipped lived in
+     wiring no host test could reach) → `TalkbackSessionStatus::mic_blocked` →
+     `TalkbackDockSessionView::mic_blocked` → `TalkbackDockBannerState::
+     LiveMicBlocked`. Three consequences that are rulings, not accidents: the
+     member tally is **dropped** from that headline ("3 of 3 present" beside
+     "nobody can hear you" is the instrument that made the ghost look
+     healthy); the tally dot and the red CELL are withheld, because this
+     dock's standing rule is *red means the director is audible* and they are
+     not; and `mic_tick()` **re-emits the confirmed-state line on the EDGE**
+     (M1b — it used to report only a stage line, so a host muting the bot at
+     second 30 of a latched key left the stored `mic` at "open" for the rest
+     of the key). Edge, never every tick: a latched key re-asserts every 2 s
+     and the plugin's handler takes a mutex per line. `m_mic_open` exists to
+     be that comparison — before M1b it was written in six places and read in
+     none, under a comment describing the code above.
      **The leak question, answered from the code rather than assumed**: `Join`
      sets `isAudioOff = false` / `isMyVoiceInMix = true`
      (`engine/src/main.cpp`) and **nothing in this repository calls
@@ -337,6 +358,43 @@ Every one of these is documented at length where it lives; the list is the map.
   first survived because the floor was redundantly re-checked inside
   `membership_pump_invite()`; there is now exactly **one** floor check, in
   `nomination_tick()`.
+  **Fix round 1 (M2, Major): moving invite issuance onto a free-running pump
+  broke the probe/batch-API mutual exclusion.** `Begin/Add/ExecuteBatchInvite
+  Users` is a **fourth** Begin/Add/Execute sequence — `tick()`'s inventory
+  counted three — and the first on the command loop that does **not** sit
+  inside an `owner == Nomination` branch, so fact 2 of that inventory's
+  three-fact chain, which is what excludes all the others, never covered it.
+  Law 2 is precisely why: invites used to be issued inline from
+  `onCreateChannelResponse` (where fact 2 did cover them) and are now issued up
+  to ~22 s later. `membership_pump_invite()`'s own comment claimed the
+  exclusion was "held where it always was… the queue is only ever FILLED from
+  paths already gated on `has_pending_work()`" — true of the **fill**, false of
+  the **issue**, which Law 2 had just separated. The trigger is the natural
+  operator flow: `nominate_done` fires on the **last create's** response with
+  every invite still queued, so the arbiter is free and a dock **Talkback
+  probe** press passes every gate `probe()` has and spawns the driving thread.
+  Gated now at the top of the pump on `has_pending_work()` — the same question
+  `session_start()`/`nominate()`/`resolve_roster_change()` ask, and the right
+  polarity here: TRUE means the driving thread has work and may be inside an
+  SDK call. It is already correct about the two windows a phase check alone
+  gets wrong (`m_driving_thread_in_sdk_call`, and Destroying not storing
+  `Done` until after its own batch). The arbiter would be the **wrong** gate —
+  a probe holds it only until its create response lands, and the driving
+  thread outlives that by the whole tone-and-destroy tail, which is the part
+  that batches. It **defers, never drops**: nothing is dequeued, the next 50 ms
+  turn retries, and `tick()`'s inventory now counts the invite sequence as
+  fact 4, enforced at its call site rather than inferred from where it sits.
+  Two more mutation-proved gaps from the same round: **a queued invite
+  outliving its channel** (`m_invite_queue.clear()` in
+  `nomination_destroy_provisioned()` — the header calls it structural, and
+  removing it stayed 68/68 green), and **the invite-side code-18 backoff**,
+  unpinnable because `debug_expire_create_spacing_for_test()` expires *three*
+  things, not the two its comment named — the third being every queued
+  invite's own `not_before`, which every invite assertion in the file went
+  through 128 times per call. `debug_expire_membership_floor_for_test()` is the
+  narrow hook that can express "the pacer is open and this invite is still
+  backed off": the identical shape fixed for the create-side floor, one field
+  over, in the same change.
   **`nomination_tick()` is not `tick()` and must never be folded into it**:
   `tick()` has exactly one driver, the thread `main.cpp` spawns when `probe()`
   returns true, which by construction does not exist during a nomination — a

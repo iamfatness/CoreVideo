@@ -153,6 +153,13 @@ static const char *banner_state_name(TalkbackDockBannerState state)
 {
     switch (state) {
     case TalkbackDockBannerState::Live:    return "live";
+    // LAW 1 (2026-08-29): its OWN style state, not "live". The ground stays
+    // the LIVE red -- the key really is open -- while the border and type go
+    // amber, this sheet's "look at this" colour everywhere else. A blocked mic
+    // reading as a clean ON AIR is the failure the law exists to end, and
+    // letting it fall through to the default (quiet, idle-looking) styling
+    // would be the opposite error.
+    case TalkbackDockBannerState::LiveMicBlocked: return "livemuted";
     case TalkbackDockBannerState::Waiting: return "waiting";
     case TalkbackDockBannerState::Refused: return "refused";
     case TalkbackDockBannerState::Off:     break;
@@ -950,6 +957,11 @@ void ZoomTalkbackPanel::refresh()
     view.target = open_target;
     view.engine_live = session.live;
     view.engine_reason = session.reason;
+    // LAW 1 (2026-08-29): the engine reported this key live over a bot whose
+    // meeting audio it could not open. Carried, never inferred -- an engine
+    // older than Law 1 reports no mic state at all, leaving this false, and
+    // that rig renders exactly as it always did.
+    view.mic_blocked = session.mic_blocked;
     view.engine_recover = session.recover;
     view.members_known = session.members_known;
     view.members_present = session.members_present;
@@ -986,6 +998,16 @@ void ZoomTalkbackPanel::refresh()
     // control that cannot be pressed and does not belong to the person
     // looking at it. Where that key actually is, is already said in the
     // cell's refusal reason.
+    //
+    // LAW 1 (2026-08-29) MAKES THAT RULE BITE, and the consequence is
+    // deliberate rather than an oversight of the new state: a key held over a
+    // bot Zoom will not unmute is TalkbackDockBannerState::LiveMicBlocked, not
+    // Live, so the cell does NOT go red. It is not a red state, because the
+    // director is not audible -- that is the whole content of the rule stated
+    // three lines up, and carving out an exception here would make "red" mean
+    // "a key is open" instead, which is the plugin-intent test the C2 rule
+    // already forbids. The banner is the surface that carries the alarm, in
+    // amber, at the top of the panel, where an operator looks first.
     const std::string live_target =
         (banner.state == TalkbackDockBannerState::Live && ctx.open.dock_owned)
             ? ctx.open.target
@@ -1091,6 +1113,10 @@ void ZoomTalkbackPanel::refresh()
     // would be decoded as the system codepage. It is only ever shown for Live,
     // which is the state it means.
     QString banner_text = QString::fromStdString(banner.headline);
+    // The tally dot means "the director is audible", so it belongs to Live and
+    // ONLY Live. LiveMicBlocked is the one state where the key is open and
+    // nothing is heard; giving it the same dot would hand back exactly the
+    // reassurance Law 1 exists to take away.
     if (banner.state == TalkbackDockBannerState::Live)
         banner_text = QString(QChar(0x25CF)) + "  " + banner_text;
     if (m_banner_line && m_banner_line->text() != banner_text)

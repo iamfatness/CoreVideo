@@ -17,6 +17,9 @@
 // for that instead of re-deriving the rule, and this drives both against the
 // same plans so a re-derivation would show up as a disagreement here.
 #include "talkback-dock-state.h"
+// LAW 1 (2026-08-29): talkback_session_mic_blocked() -- the wire rule the
+// banner state is driven from, so the chain is pinned end to end.
+#include "talkback-key.h"
 
 #include <iostream>
 #include <string>
@@ -615,6 +618,41 @@ int main()
         check(talkback_dock_cell_state_line(TalkbackDockCellState::NoChannel,
                                             done) == "no channel",
               "a confirmed plan's shortfall was still called in progress");
+
+        // REVIEW ROUND 1, m7: ALL TALENT HAS NO CLIENT.
+        //
+        // talkback_dock_cell_state() legitimately returns Unreachable for the
+        // ALL-TALENT cell -- when a completed plan could not finish the
+        // fan-out (`done && !all_talent_complete`, the 16-channel cap) -- and
+        // the person-shaped copy for that state says "no talkback" with a hint
+        // blaming "their Zoom client". There is no client. The state is right;
+        // the words were a claim about somebody who does not exist, and they
+        // send the operator to debug a Zoom install instead of re-assigning
+        // channels for fewer people.
+        check(talkback_dock_cell_state_line(TalkbackDockCellState::Unreachable,
+                                            done, /*all_talent=*/true) !=
+                  "no talkback",
+              "the ALL-TALENT cell described a short fan-out as a person's "
+              "client lacking talkback support");
+        check(talkback_dock_cell_state_line(TalkbackDockCellState::Unreachable,
+                                            done, /*all_talent=*/false) ==
+                  "no talkback",
+              "a PERSON who cannot be reached lost their own copy -- the "
+              "all-talent wording must not leak onto the people it was carved "
+              "out from");
+        const std::string all_hint =
+            talkback_dock_cell_hint(TalkbackDockCellState::Unreachable, true);
+        check(!contains(all_hint, "their Zoom client"),
+              "the ALL-TALENT hint still blames a Zoom client that does not "
+              "exist for this cell");
+        check(contains(all_hint, "budget") && contains(all_hint, "Assign"),
+              "the ALL-TALENT hint does not name the real cause (the channel "
+              "budget) or the action that fixes it");
+        check(contains(talkback_dock_cell_hint(TalkbackDockCellState::Unreachable,
+                                               false),
+                       "their Zoom client"),
+              "a PERSON's unreachable hint lost the diagnosis that names the "
+              "actual cause");
     }
     {
         // UNKNOWN IS READY, not absent. An engine that reports none of the
@@ -924,6 +962,101 @@ int main()
               "the live banner does not name the target");
         check(contains(b.headline, "2 of 3 present"),
               "the live banner does not report membership");
+        check(!s.mic_blocked && b.state != TalkbackDockBannerState::LiveMicBlocked,
+              "a key with an OPEN mic was shown as muted -- the blocked state "
+              "must cost something to reach, or it means nothing when it fires");
+    }
+    // ── TALKBACK DELIVERY LAW 1 (2026-08-29): ON AIR TO NOBODY ──────────────
+    //
+    // Talkback delivers only while the engine's own meeting audio is open.
+    // Muted, Zoom ACCEPTS every SendAudioDataToChannel -- success codes,
+    // members confirmed, zero failures -- and every member hears silence. The
+    // operator's own production that day had the bot muted by the host, so
+    // this is the live case and not a hypothetical.
+    //
+    // The engine has reported `"mic":"blocked"` on its confirmed-state line
+    // since the laws landed. REVIEW ROUND 1, M1: nothing on this side read it
+    // -- no field on TalkbackSessionStatus, no input to the banner -- while
+    // three comments and a commit message asserted the banner said it out
+    // loud. This is the assertion that makes those true, and severing any link
+    // in the chain (parse -> status -> view -> banner) fails it.
+    {
+        // DRIVEN FROM THE WIRE TOKEN, not from the bool, so this pins the
+        // whole chain rather than only its last link: the engine writes
+        // "blocked", talkback_session_mic_blocked() is the rule the plugin's
+        // parser applies to it, and the banner renders the result. Severing
+        // the rule fails this.
+        check(talkback_session_mic_blocked("blocked"),
+              "the engine's own \"blocked\" token was not read as blocked");
+        check(!talkback_session_mic_blocked("open"),
+              "an OPEN mic was read as blocked");
+        check(!talkback_session_mic_blocked(""),
+              "an engine that reports no mic state at all was read as blocked "
+              "-- a DLL-only install is this project's canonical mistake, and "
+              "a permanent false alarm is one the operator learns to ignore");
+
+        TalkbackDockSessionView s;
+        s.key_open = true;
+        s.target = "Sarah";
+        s.engine_live = true;
+        s.mic_blocked = talkback_session_mic_blocked("blocked");
+        s.members_known = true;
+        s.members_present = 3;
+        s.members_total = 3;
+        const auto b = talkback_dock_banner(s);
+        check(b.state == TalkbackDockBannerState::LiveMicBlocked,
+              "A KEY LIVE OVER A MUTED BOT WAS SHOWN AS PLAIN ON AIR -- Zoom "
+              "accepts every buffer and delivers silence, so this is the "
+              "accepted-but-silent ghost reaching the operator as success");
+        check(b.state != TalkbackDockBannerState::Live,
+              "the blocked-mic state collapsed back into Live -- one enum "
+              "value for both is exactly the plain ON AIR that hid the ghost");
+        check(contains(b.headline, "ON AIR"),
+              "the blocked banner stopped saying ON AIR -- the key IS open and "
+              "the director IS talking; hiding that trades one wrong belief "
+              "for another");
+        check(contains(b.headline, "MUTED"),
+              "the blocked banner does not say the bot is muted");
+        check(contains(b.headline, "Sarah"),
+              "the blocked banner does not name the target");
+        check(!b.detail.empty() && contains(b.detail, "host"),
+              "the blocked banner does not name the ACTION -- the operator's "
+              "only move is to ask the host to unmute CoreVideo, and a state "
+              "with no remedy is an alarm they cannot answer");
+        check(!contains(b.headline, "3 of 3 present"),
+              "the blocked banner reported membership -- \"3 of 3 present\" "
+              "beside \"nobody can hear you\" reads as reassurance, and it is "
+              "the exact instrument that made the ghost look healthy");
+    }
+    {
+        // ...and it clears. A host unmuting the bot mid-key must put the
+        // banner back to a clean ON AIR, or the alarm is permanent and the
+        // operator learns to ignore it. (The engine re-emits its
+        // confirmed-state line on the EDGE; this is the rendering half.)
+        TalkbackDockSessionView s;
+        s.key_open = true;
+        s.target = "Sarah";
+        s.engine_live = true;
+        s.mic_blocked = false;
+        const auto b = talkback_dock_banner(s);
+        check(b.state == TalkbackDockBannerState::Live,
+              "a key whose mic was re-opened stayed in the blocked state");
+    }
+    {
+        // mic_blocked is meaningful only alongside engine_live. A REFUSED key
+        // has a reason of its own, and "you were refused AND the mic was shut"
+        // is two answers to a question with one.
+        TalkbackDockSessionView s;
+        s.key_open = true;
+        s.target = "Sarah";
+        s.engine_live = false;
+        s.engine_reason = "target_not_provisioned";
+        s.mic_blocked = true;
+        const auto b = talkback_dock_banner(s);
+        check(b.state == TalkbackDockBannerState::Refused,
+              "a REFUSED key was shown as on air because the mic flag was set "
+              "-- mic state must never promote a key the engine did not "
+              "confirm, which is the C2 rule through a new door");
     }
     {
         // The all-talent sentinel is a target, not a name: it must never reach

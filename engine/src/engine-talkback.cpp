@@ -154,10 +154,23 @@ constexpr float kBackgroundDucked = 0.3f;
 // one door further in.
 //
 // Everything else this file reports (channel_created, replacing,
-// create_channel, member_invited, channel_destroyed, ...) is a log-only trace
-// line the dispatcher never dispatches on -- it matches by stage name, and
-// those names are not in its table at all -- so an id there would be bytes
-// with no consumer.
+// create_channel, member_invited, channel_destroyed, ...) carries no id.
+//
+// REVIEW ROUND 1, m4: the reason stated here used to be "a log-only trace line
+// the dispatcher never dispatches on -- it matches by stage name, and those
+// names are not in its table at all". THAT IS FALSE, and has been since
+// Task 4: member_invited, invite, member_invite_failed, member_not_in_meeting,
+// member_left and participant_talkback_support are all IN the plugin's table
+// (talkback_channel_presence_apply_report(),
+// src/talkback-nomination-dispatch.h). The conclusion survives; the reason has
+// to change, and the difference matters to anyone reasoning from it again.
+// The real one: the PRESENCE dispatcher is deliberately attempt-BLIND. It maps
+// (channel, name) onto a membership fact, and a membership fact is true of the
+// channel whichever attempt invited into it -- there is only ever one standing
+// set, because every replace destroys the previous one before creating. What
+// attempt ids exist to prevent is one attempt's STAGING and TERMINAL records
+// being credited to another attempt's slot; presence keeps no such per-attempt
+// record, so there is nothing there to mis-credit.
 std::string attempt_field(uint32_t attempt)
 {
     if (attempt == 0) return std::string();
@@ -651,6 +664,27 @@ void EngineTalkback::tick()
     // loop) and the fifth call site (the session-cancelled branch) along with
     // the session's CreateChannel: a key release destroys nothing now, which
     // is the point of the milestone -- the channel has to survive it.
+    //
+    // LAW 2 / REVIEW ROUND 1, M2 (2026-08-29): THERE IS NOW A FOURTH
+    // SEQUENCE, and it is not a destroy. membership_pump_invite() runs
+    // BeginBatchInviteUsers/AddUserToInvite/ExecuteBatchInviteUsers on the
+    // COMMAND-LOOP THREAD, driven by main.cpp's 50ms idle hook. The hazard
+    // below is about Begin/Add/Execute sequences interleaving at all -- the
+    // controller holds implicit per-batch state -- so an INVITE batch and a
+    // DESTROY batch are exactly as dangerous a pair as two destroys.
+    //
+    // It is the first command-loop sequence in this file that does NOT sit
+    // inside an `owner == Nomination` branch, so fact 2 below -- which is what
+    // excludes all the others -- does not cover it. Law 2 is why: invites used
+    // to be issued inline from onCreateChannelResponse (where fact 2 did
+    // cover them) and are now issued from a free-running pump up to ~22s
+    // later. It is excluded instead by its OWN gate, the first thing
+    // membership_pump_invite() does: `if (has_pending_work()) return false;`.
+    // That is fact 4, and unlike facts 2 and 3 it is enforced at the call site
+    // rather than inferred from where the call sits. If you add a fifth
+    // sequence, give it a gate of its own too -- the chain below does not
+    // stretch to cover code that runs outside the branches it reasons about.
+    //
     // The hazard the old comment named is real and unchanged: the API shape
     // implies the controller holds implicit per-batch state, so two
     // Begin/Add/Execute sequences interleaving on different threads could
@@ -1849,7 +1883,7 @@ bool EngineTalkback::nominate(ZOOMSDK::IMeetingService *svc,
     // is merely SCHEDULED. Before the ladder was paced, "the arbiter is free"
     // and "no ladder is mid-provisioning" were the same fact -- the next
     // create was issued from inside the previous response, so there was no
-    // instant in between. kNominationCreateSpacing opens a ~300ms window where
+    // instant in between. kMembershipCallSpacing opens a ~600ms window where
     // the arbiter is genuinely free and a ladder is genuinely still running,
     // and a re-nomination landing in it would have started a second ladder
     // over the top of the first: the first's channels destroyed by the
@@ -2163,18 +2197,62 @@ bool EngineTalkback::membership_pump_invite()
     // nobody makes no call and must not spend the turn) and for the
     // round-robin rule.
     //
-    // Same thread rule as every other membership call in this file: the pump
-    // runs on the command loop, and Begin/Add/ExecuteBatchInviteUsers is the
-    // shape tick()'s own inventory documents as unsafe to interleave with the
-    // probe's driving thread. Unlike the create path there is no arbiter to
-    // consult -- invites carry their own channel id, so two in flight are
-    // never confusable -- but the probe-thread exclusion still matters, and it
-    // is held where it always was: the queue is only ever FILLED from paths
-    // already gated on has_pending_work() (resolve_roster_change()) or
-    // structurally excluded from one (onCreateChannelResponse's nomination
-    // branch, which by construction runs with no probe ladder alive).
     assert_command_loop_thread("membership_pump_invite");
     if (!m_ctrl) return false;
+
+    // REVIEW ROUND 1, M2 (Major): GATE THE ISSUE, NOT ONLY THE FILL.
+    //
+    // The comment that used to stand here claimed the probe/batch-API mutual
+    // exclusion "is held where it always was: the queue is only ever FILLED
+    // from paths already gated on has_pending_work() ... or structurally
+    // excluded from one". That is true of the FILL and false of the ISSUE --
+    // and Law 2 deliberately separated the two by up to ~22s, which is exactly
+    // what made the claim stop holding the moment it was written.
+    //
+    // THE REACHABLE SEQUENCE, and it is the natural operator flow: a
+    // 13-channel / 24-invite plan reports "nominate_done" as soon as the LAST
+    // CREATE responds, with ~24 invites still queued (~15s of pacer work). At
+    // that instant the arbiter is free, has_pending_work() is false and no
+    // session is live -- so the operator pressing Talkback probe in the dock
+    // passes every gate probe() has, returns true, and main.cpp spawns the
+    // driving thread. For the next ~15s this pump would issue
+    // Begin/Add/ExecuteBatchInviteUsers every 600ms from the command loop's
+    // 50ms idle hook while that thread may be mid batch-destroy.
+    //
+    // WHY THAT IS THE HAZARD AND NOT A NIT: the invite batch is a FOURTH
+    // Begin/Add/Execute sequence (tick()'s inventory counted three, and is
+    // updated to say so), and it is the first one on the command loop that
+    // does NOT sit inside an `owner == Nomination` branch -- so fact 2 of the
+    // inventory's three-fact chain, which is what excludes the other
+    // command-loop sequences, does not cover it at all. By this file's own
+    // hazard model the outcome is a merged or corrupted batch: an invite
+    // landing in a destroy batch, or a destroy taking a channel it was not
+    // given. A destroyed provisioned channel mid-show is precisely what the
+    // whole batch discipline exists to prevent.
+    //
+    // THE GATE, and why THIS one rather than the arbiter. has_pending_work()
+    // is the same question session_start(), nominate() and
+    // resolve_roster_change() already ask, and its polarity is what is needed
+    // here: TRUE means the probe's driving thread has work left and may be
+    // inside an SDK call, which is exactly when this must not batch. It is
+    // also already correct about the two windows a phase check alone gets
+    // wrong -- m_driving_thread_in_sdk_call covers drain_stray_channels()
+    // after it has swapped the queue out, and tick()'s Destroying phase does
+    // not store Done until strictly after its own Begin/Add/Execute -- so
+    // "false" genuinely means no batch sequence is in flight on that thread.
+    // See has_pending_work()'s own doc comment for why those two exist.
+    //
+    // The arbiter would be the WRONG gate: a probe holds it only until its
+    // create response lands, and the driving thread outlives that by the whole
+    // tone-and-destroy tail, which is the part that batches.
+    //
+    // DEFERRAL, NOT REFUSAL, and that is what makes this free: nothing is
+    // dequeued, nothing is marked resolved, and the next 50ms idle turn tries
+    // again. The worst case is a probe's ~30s bound added to a queue that is
+    // already paced in 600ms steps -- invisible next to a corrupted batch.
+    // Reported nowhere, deliberately: this fires on every one of the ~600 idle
+    // turns of a probe, and a line each would be the message-storm shape.
+    if (has_pending_work()) return false;
 
     for (;;) {
         TalkbackQueuedInvite job;
@@ -2233,14 +2311,40 @@ void EngineTalkback::debug_expire_create_spacing_for_test()
     // would. Same discipline as debug_expire_pending_create_for_test() and
     // debug_expire_pending_invites_for_test().
     //
-    // LAW 2: BOTH halves of the pacer, for the reason on the declaration --
-    // expiring only the create's own schedule would leave the shared
-    // membership floor closed and read as a stalled ladder.
+    // LAW 2: ALL THREE deadlines the pacer has -- the create's own schedule,
+    // the shared membership floor, and every queued invite's per-entry
+    // backoff. Expiring only the create's schedule would leave the floor
+    // closed and read as a stalled ladder.
+    //
+    // REVIEW ROUND 1, m1: the count is THREE, and saying "both halves" while
+    // silently expiring a third thing is how the invite-side backoff came to
+    // assert nothing. Every invite assertion in the select test reaches its
+    // "next turn" through this hook (drain_membership() calls it 128 times),
+    // so deleting the per-entry not_before check left 68/68 green -- the
+    // identical shape this same commit fixed for the create-side floor, in the
+    // same change, one field over. debug_expire_invite_backoff_for_test()
+    // below is the narrow hook that makes the invite backoff pinnable; this
+    // one stays wide, because ~50 call sites want exactly "advance everything".
     std::lock_guard<std::mutex> lock(m_chan_mtx);
     const auto now = std::chrono::steady_clock::now();
     m_nomination_next_create_at = now;
     m_membership_next_at = now;
     for (auto &q : m_invite_queue) q.not_before = now;
+}
+
+void EngineTalkback::debug_expire_membership_floor_for_test()
+{
+    // TEST-ONLY, no production call site. The narrow hook for the SHARED
+    // floor alone: it advances the pacer's turn WITHOUT touching any queued
+    // invite's own code-18 backoff.
+    //
+    // REVIEW ROUND 1, m1: without this there is no way to express "the pacer
+    // is open but this invite is still backed off", which is the entire
+    // content of Law 2's "an 18 is a wait" rule on the invite side. Sibling of
+    // debug_expire_create_schedule_for_test(), added for the same reason and
+    // found the same way -- by mutation, not by review.
+    std::lock_guard<std::mutex> lock(m_chan_mtx);
+    m_membership_next_at = std::chrono::steady_clock::now();
 }
 
 void EngineTalkback::debug_expire_create_schedule_for_test()
@@ -3614,11 +3718,36 @@ void EngineTalkback::mic_tick()
     const auto now = std::chrono::steady_clock::now();
     if (now < m_mic_next_assert_at) return;
     m_mic_next_assert_at = now + kMicReassertInterval;
-    // The return value drives nothing here on purpose. The key is already
-    // live; a re-assert that fails has said so in its own report line, and
-    // closing a director's key from a background pump on one failed SDK call
-    // is a cure worse than the disease.
-    (void)ensure_mic_open("tick");
+
+    // REVIEW ROUND 1, M1b (Major): the re-assert used to report only its own
+    // "mic_open" STAGE line, and report_session_state() was never called again
+    // after session_start(). So a host re-muting the bot mid-key -- in a
+    // meeting that then refuses our unmute -- left the plugin's stored `mic`
+    // at "open" from the opening press for the rest of the key, and the banner
+    // went on saying a clean ON AIR while nothing was audible. That is the
+    // accepted-but-silent ghost surviving the very law written to expose it,
+    // one door further in.
+    //
+    // m_mic_open is the LAST OBSERVED answer, and until this fix it was
+    // written in six places and read in none -- its own header comment
+    // described a field that carried the session report's `mic` value, which
+    // was not what the code did. It carries it now: this is the comparison.
+    //
+    // EDGE ONLY, never every tick. A latched key re-asserts every 2s for as
+    // long as it is held, and re-emitting the confirmed-state line 30 times a
+    // minute to say nothing changed is the message-storm shape this codebase
+    // has a live incident about -- and the plugin's handler is last-write-wins
+    // on a mutex, so the cost is not only bytes. The state change IS the news.
+    //
+    // The key is NOT closed on a failed re-assert. The channels are real, the
+    // audio path is real, and the instant a host unmutes the bot the next
+    // buffer is heard; closing a director's key from a background pump on one
+    // refused SDK call is a cure worse than the disease. Report and let the
+    // operator decide -- which is exactly what the banner is for.
+    const bool was_open = m_mic_open;
+    const bool now_open = ensure_mic_open("tick");
+    if (now_open == was_open) return;
+    report_session_state(true, "live", now_open ? "open" : "blocked");
 }
 
 bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
@@ -3904,8 +4033,13 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
     // IS live -- the channels are selected, the audio path is real, and the
     // moment a host unmutes the bot the very next buffer is heard, so refusing
     // would take away the operator's only remaining move -- but "live" alone
-    // is the sentence that made the accepted-but-silent ghost invisible. The
-    // banner's job is "ON AIR -- but the bot is muted by the host".
+    // is the sentence that made the accepted-but-silent ghost invisible.
+    //
+    // The consumer exists and is named so this can be checked rather than
+    // believed (review round 1, M1): the plugin parses this field into
+    // TalkbackSessionStatus::mic_blocked and talkback_dock_banner() turns it
+    // into TalkbackDockBannerState::LiveMicBlocked, headline
+    // "ON AIR - BOT MUTED: <target>", amber on the live red.
     report_session_state(true, "live", mic_open ? "open" : "blocked");
     return true;
 }

@@ -51,6 +51,25 @@ public:
         bool live = false;
         std::string reason;
 
+        // TALKBACK DELIVERY LAW 1 (2026-08-29): is this key live over a bot
+        // whose meeting audio the engine could NOT open?
+        //
+        // Talkback delivers only while the engine's own client is unmuted --
+        // muted, SendAudioDataToChannel is ACCEPTED and every member hears
+        // silence, which is the one failure this feature cannot afford to show
+        // as success. The engine reports `"mic":"open"|"blocked"` on the SAME
+        // confirmed-state line as `live` (report_session_state()), and
+        // re-emits it on a mid-key CHANGE, so a host muting the bot at second
+        // 30 of a latched key moves this too.
+        //
+        // ABSENT MEANS false, and that is the mixed-version rule, not an
+        // accident: an engine older than Law 1 sends no "mic" key at all, and
+        // a DLL-only install is this project's canonical mistake. Reading a
+        // missing field as "blocked" would put every such rig into a permanent
+        // false alarm; reading it as "open" is the same thing that engine
+        // already meant.
+        bool mic_blocked = false;
+
         // Milestone 7 (the dock). The three fields below come from the OTHER
         // shape on this cmd -- report_session()'s stage lines -- not from
         // report_session_state()'s confirmed-state line above, so they are

@@ -1,4 +1,10 @@
 #pragma once
+
+// <string> for talkback_session_mic_blocked()'s parameter (Law 1, 2026-08-29).
+// This header had no includes at all until then -- it was pure bools and
+// enums -- so it must carry its own now rather than inheriting one from
+// whichever translation unit happens to include it first.
+#include <string>
 //
 // talkback-key.h — when a talkback key may stay open, and every way it closes.
 //
@@ -130,4 +136,30 @@ inline bool talkback_session_state_closes_key(bool engine_live,
 {
     if (engine_live) return false;
     return engine_reason_present || grace_expired;
+}
+
+// TALKBACK DELIVERY LAW 1 (2026-08-29): what the engine's `"mic"` field on
+// that same confirmed-state line MEANS. `mic_field` is the raw string as
+// received; the answer is whether this key is live over a bot whose meeting
+// audio the engine could not open, i.e. whether Zoom is accepting every buffer
+// and delivering silence.
+//
+// EXTRACTED FOR THE SAME REASON its neighbour above was, and after the same
+// kind of finding. Review round 1, M1: the engine had emitted this field since
+// the laws landed, three comments asserted the plugin consumed it, a test
+// pinned the engine EMITTING it -- and the plugin's parser read only
+// `live`/`reason`, so Law 1's whole operator-facing half did not exist. Both
+// Majors this feature has shipped lived in wiring no host test could reach;
+// putting the RULE here means the banner test can drive it end to end.
+//
+// ABSENT (or anything unrecognised) MEANS NOT BLOCKED, and that is the
+// mixed-version rule rather than laxity: an engine older than Law 1 sends no
+// `"mic"` key at all, and a DLL-only install is this project's canonical
+// mistake. Reading silence as "blocked" would put every such rig into a
+// permanent false alarm, and an alarm that is always on is one the operator
+// stops seeing -- which is the very failure this field exists to prevent.
+// Only the exact token the engine emits arms it.
+inline bool talkback_session_mic_blocked(const std::string &mic_field)
+{
+    return mic_field == "blocked";
 }

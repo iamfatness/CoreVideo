@@ -95,7 +95,9 @@ public:
     // deadline has passed, and nothing else. Called from main.cpp's command
     // loop on every idle turn of ipc_read_line_with_message_pump() -- which
     // wakes on a 50ms MsgWaitForMultipleObjects timeout, so the pump's
-    // granularity is 50ms against a 300ms spacing. Cheap and safe to call on
+    // granularity is 50ms against a 600ms spacing (kMembershipCallSpacing --
+    // Law 2 raised it from 300ms and made it shared with the invites). Cheap
+    // and safe to call on
     // every turn: with nothing scheduled it is one mutex acquire and a
     // compare.
     //
@@ -222,19 +224,33 @@ public:
     // LIVE GATE RUN 1 (2026-08-26): the third TEST-ONLY deadline hook, and the
     // sibling of the two above. Forces the nomination ladder's create-SPACING
     // deadline (m_nomination_next_create_at) into the past so a test can drive
-    // the pacing without sleeping kNominationCreateSpacing per channel -- a
+    // the pacing without sleeping kMembershipCallSpacing per channel -- a
     // 13-channel plan would otherwise cost ~4s of real time in the suite. Like
     // its siblings it only moves the deadline; nomination_tick() is what
     // actually issues, exactly as the command loop's own pump would.
     //
-    // LAW 2 (2026-08-29): it now expires BOTH halves of the pacer -- the
-    // create's own not-before AND the shared membership-call not-before
-    // (m_membership_next_at) -- because once those two were unified a test
+    // LAW 2 (2026-08-29): it now expires ALL THREE deadlines the pacer has --
+    // the create's own not-before, the shared membership-call not-before
+    // (m_membership_next_at), and every QUEUED INVITE's per-entry code-18
+    // backoff -- because once creates and invites shared one budget, a test
     // that expired only the create half would find the pump still closed and
     // read the result as "the ladder stalled". Deliberately kept under its
-    // original name: same hook, same job, same reason, and renaming it would
-    // churn ~50 call sites in the select test for nothing.
+    // original name: same hook, same job, and renaming it would churn ~50 call
+    // sites in the select test for nothing.
+    //
+    // REVIEW ROUND 1, m1: this comment used to say "BOTH halves" while the
+    // code expired three things, and the unnamed third is what made the
+    // invite-side backoff unpinnable -- see
+    // debug_expire_membership_floor_for_test() below.
     void debug_expire_create_spacing_for_test();
+
+    // LAW 2 / REVIEW ROUND 1, m1: the narrow hook for the SHARED FLOOR alone.
+    // Advances the pacer's turn without touching any queued invite's own
+    // code-18 backoff, which is the only way to express "the pacer is open but
+    // this invite is still backed off" -- the entire content of "an 18 is a
+    // wait, not a failure" on the invite side. TEST-ONLY, same discipline as
+    // its siblings; it only moves a deadline, nomination_tick() still issues.
+    void debug_expire_membership_floor_for_test();
 
     // LAW 2 (2026-08-29): the NARROW sibling of the hook above -- it expires
     // ONLY the create's own not-before and leaves the shared membership floor
@@ -540,10 +556,19 @@ private:
     // LAW 1 (2026-08-29): `mic` is the third, OPTIONAL field. nullptr emits
     // nothing, so every one of the eleven pre-existing call sites is
     // byte-identical to before; session_start()'s live line passes "open" or
-    // "blocked". It rides THIS line rather than only the session_live stage
-    // line because this is the one the plugin's state machine consumes, and a
-    // key that is live over a MUTED bot is exactly the state the banner has to
-    // be able to say out loud ("ON AIR -- but the bot is muted by the host").
+    // "blocked", and mic_tick() re-emits on a mid-key CHANGE.
+    //
+    // It rides THIS line rather than only the session_live stage line because
+    // this is the one the plugin's state machine consumes. THE CONSUMER,
+    // named so this comment can be checked rather than believed (review round
+    // 1, M1: the previous version made this same claim while nothing on the
+    // plugin side read the field at all):
+    //   ZoomEngineClient::handle_event()'s talkback_session live-line branch
+    //   (src/zoom-engine-client.cpp) -> TalkbackSessionStatus::mic_blocked
+    //   (src/zoom-engine-client.h) -> TalkbackDockSessionView::mic_blocked ->
+    //   talkback_dock_banner() (src/talkback-dock-state.h), which returns
+    //   TalkbackDockBannerState::LiveMicBlocked and the headline
+    //   "ON AIR - BOT MUTED", pinned in tests/talkback-dock-state-test.cpp.
     // A missing field is tolerated on the plugin side, same mixed-version rule
     // as the nomination attempt id: a DLL-only install is this project's
     // canonical mistake.
@@ -727,7 +752,7 @@ private:
 
     // LIVE GATE RUN 1 (2026-08-26): arms the not-before deadline
     // nomination_tick() issues against. Two callers, both in this file:
-    // onCreateChannelResponse's Nomination branch (kNominationCreateSpacing,
+    // onCreateChannelResponse's Nomination branch (kMembershipCallSpacing,
     // for the next channel of the plan) and nomination_create_next() itself
     // (a doubling kNominationRateLimitBackoff, retrying the SAME channel).
     //
@@ -748,7 +773,7 @@ private:
     // (kAwaitTimeout) against a request that was never issued, so a spacing
     // wait would eventually read as a swallowed response and self-expire the
     // ladder it is pacing. The claim is therefore taken at ISSUE time, in
-    // nomination_create_next(), exactly as it always was; the ~300ms window
+    // nomination_create_next(), exactly as it always was; the ~600ms window
     // where the arbiter is free is closed on the one path that could abuse it
     // (nominate() refuses with "create_busy" while a create is scheduled, the
     // same non-destructive early refusal it already gives while one is
@@ -831,8 +856,22 @@ private:
     // client for THIS key, put it back on release.
     //
     // THE SEMANTIC, stated because the alternative is defensible and this is a
-    // choice: restore iff (a) the client was observed MUTED at the moment the
-    // key opened and (b) our UnMuteAudio() succeeded. A bot the host had muted
+    // choice: restore iff THIS FILE EVER TOOK THE CLIENT FROM MUTED TO
+    // UNMUTED DURING THIS KEY -- at session_start(), or at any mic_tick()
+    // re-assert after a host re-muted the bot mid-key -- and that unmute
+    // succeeded.
+    //
+    // REVIEW ROUND 1, m3: this used to say "observed MUTED at the moment the
+    // key opened", which described a narrower rule than ensure_mic_open()
+    // implements -- it arms m_mic_restore_pending regardless of `when`. The
+    // CODE is the better of the two and is what stands: a bot the host muted
+    // at second 30 of a latched key was still muted-by-the-host when the key
+    // closes, and leaving it hot because the mute happened after the press
+    // rather than before it would be an accident of timing deciding whether a
+    // control room's mic stays open. The comment is corrected to the code
+    // rather than the code narrowed to the comment.
+    //
+    // A bot the host had muted
     // must not be left hot after the key closes -- from the room's side an
     // open mic on a machine running a live production is the worse failure --
     // and a bot that was already unmuted is left exactly as found. There is no
@@ -1602,11 +1641,15 @@ private:
     // nothing off the command loop reads it.
     //
     // m_mic_open is the LAST OBSERVED answer to "can anything this key sends
-    // actually be heard", which is what the session report's "mic" field
-    // carries. m_mic_restore_pending is set only when THIS file took the
-    // client from muted to unmuted for the current key -- see
-    // restore_mic_state() for the semantic and why there is no re-key
-    // exception.
+    // actually be heard", and it is what the session report's "mic" field
+    // carries. It has exactly ONE reader, and that reader is what makes the
+    // sentence true rather than aspirational: mic_tick() compares it against
+    // the fresh answer and re-emits report_session_state() only on the EDGE
+    // (review round 1, M1b -- before that this field was written in six places
+    // and read in none, while this comment already described the code above).
+    // m_mic_restore_pending is set only when THIS file took the client from
+    // muted to unmuted during the current key -- see restore_mic_state() for
+    // the semantic and why there is no re-key exception.
     bool m_mic_open = false;
     bool m_mic_restore_pending = false;
     std::chrono::steady_clock::time_point m_mic_next_assert_at{};

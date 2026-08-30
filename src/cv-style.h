@@ -198,6 +198,17 @@ QFrame#talkbackBanner[state="live"] {
     border: 2px solid #ff4d4d;
     background-color: #8c1c1c;
 }
+/* TALKBACK DELIVERY LAW 1 (2026-08-29): on air, and NOBODY CAN HEAR IT --
+   Zoom accepts every buffer while this client's own meeting audio is muted and
+   delivers silence. Amber on the LIVE red: the ground stays red because the
+   key genuinely is open and the director is genuinely talking, and the border
+   and type go amber because this sheet's amber means "look at this" in every
+   other state. It must never be mistakable for the clean live rule above --
+   that mistake IS the defect. */
+QFrame#talkbackBanner[state="livemuted"] {
+    border: 2px solid #f0b429;
+    background-color: #8c1c1c;
+}
 /* Off air is what this strip shows for all but a few seconds of a show, so it
    is sized to be legible rather than to shout; the shouting is the LIVE rule
    below, which nearly doubles the type and fills the ground. A permanently
@@ -216,6 +227,14 @@ QLabel#talkbackBannerLine[state="live"] {
     font-size: 19px;
     font-weight: 800;
 }
+/* Same size and weight as LIVE -- this line has to be readable from across the
+   room exactly as urgently -- in amber, so the two states cannot be confused
+   at a glance. See the frame rule above. */
+QLabel#talkbackBannerLine[state="livemuted"] {
+    color: #ffd166;
+    font-size: 19px;
+    font-weight: 800;
+}
 QLabel#talkbackBannerDetail {
     background: transparent;
     border: none;
@@ -225,6 +244,9 @@ QLabel#talkbackBannerDetail {
 QLabel#talkbackBannerDetail[state="waiting"],
 QLabel#talkbackBannerDetail[state="refused"] { color: #e0a020; }
 QLabel#talkbackBannerDetail[state="live"]    { color: #ffd8d8; }
+/* The one detail line an operator has to ACT on ("ask the host to unmute
+   CoreVideo"), so it is brighter than the other detail states, not dimmer. */
+QLabel#talkbackBannerDetail[state="livemuted"] { color: #ffe3a3; }
 
 /* --- Talkback: the intercom grid ------------------------------------------
    ONE CELL PER PERSON, and the cell is both the status display and the talk

@@ -2560,6 +2560,278 @@ int main()
         EngineIpc::test_sink() = nullptr;
     }
 
+    // ═══ REVIEW ROUND 1 ═════════════════════════════════════════════════════
+
+    // M1b: A MID-KEY HOST MUTE RE-REPORTS THE SESSION STATE, on the edge.
+    //
+    // mic_tick() used to report only its own "mic_open" STAGE line, and
+    // report_session_state() was never called again after session_start(). So
+    // a host re-muting the bot at second 30 of a latched key, in a meeting
+    // that then refuses our unmute, left the plugin's stored `mic` at "open"
+    // from the opening press for the rest of the key: the banner went on
+    // saying a clean ON AIR while nothing was audible. That is the
+    // accepted-but-silent ghost surviving the law written to expose it.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        std::vector<std::string> lines;
+        EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
+
+        svc.participants.has_self = true;
+        svc.participants.self = make_user(7700, "CoreVideo Engine");
+        svc.participants.self.muted = false;     // opens clean
+        svc.participants.users.push_back(make_user(7001, "Sarah"));
+
+        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        respond(tb, chan_id(1).c_str(), kOk);
+        respond(tb, chan_id(2).c_str(), kOk);
+        check(tb.session_start(&svc, "Sarah"), "keying Sarah's channel was refused");
+
+        auto count_state_lines = [&](const char *mic) {
+            int n = 0;
+            for (const auto &l : lines)
+                if (line_has(l, "\"cmd\":\"talkback_session\"") &&
+                    line_has(l, "\"live\":true") &&
+                    line_has(l, std::string("\"mic\":\"") + mic + "\""))
+                    ++n;
+            return n;
+        };
+        check(count_state_lines("open") == 1,
+              "setup: the opening press did not report a live/open session");
+
+        // The host mutes the bot mid-key AND the meeting refuses our unmute.
+        svc.participants.self.muted = true;
+        svc.audio.unmute_result = ZOOMSDK::SDKERR_NO_PERMISSION;
+        tb.debug_expire_mic_assert_for_test();
+        tb.mic_tick();
+        check(count_state_lines("blocked") == 1,
+              "A HOST MUTED THE BOT MID-KEY AND THE SESSION STATE NEVER MOVED "
+              "-- the plugin keeps the \"open\" it stored at the press, the "
+              "banner keeps saying a clean ON AIR, and every buffer from here "
+              "is accepted and inaudible");
+
+        // EDGE ONLY. A latched key re-asserts every 2s for as long as it is
+        // held; a line per assertion is 30 a minute saying nothing changed,
+        // which is the message-storm shape this codebase has a live incident
+        // about -- and the plugin's handler takes a mutex per line.
+        for (int i = 0; i < 5; ++i) {
+            tb.debug_expire_mic_assert_for_test();
+            tb.mic_tick();
+        }
+        check(count_state_lines("blocked") == 1,
+              "the re-assert re-reported an UNCHANGED state -- it must fire on "
+              "the edge, not on every 2s tick");
+
+        // ...and it clears when the host relents, or the alarm is permanent
+        // and the operator learns to ignore it.
+        svc.audio.unmute_result = ZOOMSDK::SDKERR_SUCCESS;
+        tb.debug_expire_mic_assert_for_test();
+        tb.mic_tick();
+        check(count_state_lines("open") == 2,
+              "the mic re-opening mid-key never reported the recovery -- a "
+              "banner stuck on an alarm that has cleared is the same defect "
+              "pointing the other way");
+
+        EngineIpc::test_sink() = nullptr;
+        tb.session_stop();
+    }
+
+    // M2: THE INVITE PUMP MUST NOT BATCH WHILE THE PROBE'S DRIVING THREAD MAY.
+    //
+    // Begin/Add/ExecuteBatchInviteUsers is a FOURTH Begin/Add/Execute sequence
+    // (tick()'s inventory counted three) and the first on the command loop
+    // that does not sit inside an `owner == Nomination` branch -- so fact 2 of
+    // that inventory's chain, which excludes all the others, does not cover
+    // it. Law 2 is why: invites used to be issued inline from
+    // onCreateChannelResponse (where fact 2 did cover them) and are now issued
+    // from a free-running idle pump up to ~22s later.
+    //
+    // THE REACHABLE SEQUENCE, and it is the natural operator flow: a big plan
+    // reports nominate_done as soon as the LAST CREATE responds, with invites
+    // still queued; the arbiter is free and no session is live, so the
+    // operator pressing Talkback probe passes every gate probe() has and
+    // main.cpp spawns the driving thread. From then until the probe settles,
+    // this pump would batch against a thread that may be mid batch-destroy.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        svc.participants.users.push_back(make_user(8301, "Sarah"));
+        svc.participants.users.push_back(make_user(8302, "Luis"));
+
+        check(tb.nominate(&svc, {"Sarah", "Luis"}), "nominate refused a two-name plan");
+
+        // DRIVE THE LADDER TO ITS TERMINAL WITH THE INVITES STILL QUEUED --
+        // which is the whole trigger, and is what nominate_done means: it
+        // fires on the LAST CREATE's response, not on the last invite's. Every
+        // tick below issues a create (creates take priority within a turn), so
+        // the queue only grows.
+        //
+        // NOT respond(): that helper drains the pacer to quiescence, which is
+        // exactly the state this test must NOT be in.
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);   // all-talent: +2
+        tb.debug_expire_create_spacing_for_test();
+        tb.nomination_tick();                                   // create 2
+        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);   // Sarah private: +1
+        tb.debug_expire_create_spacing_for_test();
+        tb.nomination_tick();                                   // create 3
+        tb.onCreateChannelResponse(chan_id(3).c_str(), kOk);   // Luis private: +1
+        check(svc.ctrl.creates == 3, "setup: the plan did not provision 3 channels");
+        check(svc.ctrl.invited.empty(),
+              "setup: an invite escaped, so the queue this test needs is short");
+
+        // The arbiter is free, no create is scheduled, no session is live --
+        // so the operator pressing Talkback probe in the dock passes every
+        // gate probe() has, and main.cpp spawns the driving thread on this
+        // `true`. From here until the probe settles, the driving thread may be
+        // inside drain_stray_channels() or the Destroying phase's own
+        // batch-destroy at any moment.
+        check(tb.probe(&svc, "Sarah"),
+              "setup: the probe refused to start, so this proves nothing about "
+              "the exclusion -- and the refusal itself would be the M2 trigger "
+              "disappearing, not the hazard");
+        check(tb.has_pending_work(),
+              "setup: the probe left no pending work, so there is no driving "
+              "thread to be excluded from");
+
+        for (int i = 0; i < 20; ++i) {
+            tb.debug_expire_create_spacing_for_test();
+            tb.nomination_tick();
+        }
+        check(svc.ctrl.invited.empty(),
+              "THE INVITE PUMP BATCHED WHILE THE PROBE'S DRIVING THREAD WAS "
+              "ALIVE -- Begin/Add/ExecuteBatchInviteUsers from the 50ms idle "
+              "hook against a thread that may be mid batch-destroy on the same "
+              "controller. By this file's own hazard model that merges or "
+              "corrupts batches: an invite landing in a destroy batch, or a "
+              "destroy taking a channel it was not given, which is a "
+              "provisioned channel torn down mid-show");
+
+        // DEFERRED, NOT DROPPED -- and that is what makes the gate free. The
+        // queue is untouched, so the moment the probe settles the same invites
+        // go out. A gate that dropped them would trade a batch hazard for
+        // silently unconfirmed talent, which is the worse of the two.
+        tb.onCreateChannelResponse(
+            chan_id(9).c_str(),
+            IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_NOPERMISSION);
+        check(!tb.has_pending_work(),
+              "setup: the probe did not settle, so the deferral half below "
+              "would pass for the wrong reason");
+        for (int i = 0; i < 20; ++i) {
+            tb.debug_expire_create_spacing_for_test();
+            tb.nomination_tick();
+        }
+        check(svc.ctrl.invited.size() == 4,
+              "THE QUEUED INVITES WERE LOST, not deferred -- the talent have "
+              "channels and no membership, and nothing will ever retry them");
+    }
+
+    // m2 (mutation-proved by the reviewer): A QUEUED INVITE MUST NEVER OUTLIVE
+    // ITS CHANNEL.
+    //
+    // The header calls this a STRUCTURAL guarantee -- "not a state that exists
+    // rather than one argued to be unreachable" -- and removing
+    // m_invite_queue.clear() from nomination_destroy_provisioned() left 68/68
+    // green. It is load-bearing: without it, a ladder abort or a re-nomination
+    // leaves the queue naming destroyed channel ids and the pump issues
+    // membership calls into channels Zoom no longer has, spending pacer turns
+    // the LIVE channels' invites need.
+    //
+    // Driven through a code-18 REQUEUED invite specifically, because that is
+    // the entry most likely to still be sitting in the queue when a ladder
+    // dies: it has a backoff deadline in the future and nothing else to do.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        svc.participants.users.push_back(make_user(8401, "Sarah"));
+        svc.participants.users.push_back(make_user(8402, "Luis"));
+
+        check(tb.nominate(&svc, {"Sarah", "Luis"}), "nominate refused a two-name plan");
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);   // 2 invites queued
+
+        // Zoom refuses every invite, so both stay queued behind a backoff.
+        svc.ctrl.invite_rate_limit_next = 2;
+        tb.debug_expire_create_spacing_for_test();
+        tb.nomination_tick();                                   // create 2
+        tb.debug_expire_create_spacing_for_test();
+        tb.nomination_tick();                                   // invite -> 18
+        tb.debug_expire_create_spacing_for_test();
+        tb.nomination_tick();                                   // invite -> 18
+        check(svc.ctrl.invite_rate_limited == 2,
+              "setup: the fake never refused the invites, so nothing is queued "
+              "behind a backoff and this proves nothing");
+        check(svc.ctrl.invited.empty(), "setup: a refused invite was recorded");
+
+        // The ladder dies and takes its channels with it.
+        const std::size_t destroyed_before = svc.ctrl.destroyed.size();
+        tb.onCreateChannelResponse(chan_id(2).c_str(),
+                                   IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_NOPERMISSION);
+        check(svc.ctrl.destroyed.size() > destroyed_before,
+              "setup: the failing ladder did not tear its channels down");
+
+        // Every turn the pacer will ever have. Nothing may be invited: those
+        // channel ids do not exist any more.
+        for (int i = 0; i < 40; ++i) {
+            tb.debug_expire_create_spacing_for_test();
+            tb.nomination_tick();
+        }
+        check(svc.ctrl.invited.empty(),
+              "A QUEUED INVITE OUTLIVED ITS CHANNEL -- the ladder aborted and "
+              "destroyed these ids, and the pump then issued membership calls "
+              "into channels Zoom no longer has, spending the pacer's turns on "
+              "them");
+    }
+
+    // m1 (mutation-proved by the reviewer): AN INVITE'S CODE-18 BACKOFF IS
+    // ACTUALLY HELD.
+    //
+    // "18 is a wait, not a failure" has two halves: requeue (pinned above) and
+    // DO NOT RETRY INSTANTLY. The second was unpinnable, because the only hook
+    // that advanced the pacer -- debug_expire_create_spacing_for_test() --
+    // also expired every queued invite's own backoff, and every invite
+    // assertion in this file goes through it 128 times per call. Deleting the
+    // per-entry not_before check left 68/68 green.
+    //
+    // debug_expire_membership_floor_for_test() is the narrow hook that can
+    // express the one state this rule is about: the pacer is OPEN and this
+    // invite is still backed off. Exactly the shape this commit already fixed
+    // for the create-side floor, one field over, in the same change.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        svc.participants.users.push_back(make_user(8501, "Sarah"));
+
+        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);   // 1 invite queued
+
+        svc.ctrl.invite_rate_limit_next = 1;
+        tb.debug_expire_create_spacing_for_test();
+        tb.nomination_tick();                                   // create 2
+        tb.debug_expire_create_spacing_for_test();
+        tb.nomination_tick();                                   // invite -> 18
+        check(svc.ctrl.invite_rate_limited == 1,
+              "setup: the fake never refused the invite");
+        check(svc.ctrl.invited.empty(), "setup: a refused invite was recorded");
+
+        // Open the PACER, and only the pacer. The invite's own backoff stands.
+        for (int i = 0; i < 10; ++i) {
+            tb.debug_expire_membership_floor_for_test();
+            tb.nomination_tick();
+        }
+        check(svc.ctrl.invited.empty(),
+              "A RATE-LIMITED INVITE WAS RETRIED INSTANTLY -- Zoom said \"not "
+              "yet\" and the pump asked again on the very next turn, which is "
+              "the burst that drew the 18 in the first place");
+
+        // ...and it is a WAIT, not a wedge: once the backoff itself passes,
+        // the invite goes. Without this half the check above is also true of a
+        // queue that simply stopped.
+        tb.debug_expire_create_spacing_for_test();
+        tb.nomination_tick();
+        check(svc.ctrl.invited.size() == 1,
+              "the backed-off invite never issued once its own deadline passed "
+              "-- that is a stalled queue, not a paced one");
+    }
+
     if (failures == 0)
         std::cout << "engine-talkback-select: all tests passed\n";
     return failures == 0 ? 0 : 1;

@@ -1,6 +1,7 @@
 #include "zoom-engine-client.h"
 #include "speaker-director.h"
 #include "talkback-nomination-dispatch.h" // Task 5 fix round 2, N5
+#include "talkback-key.h"  // talkback_session_mic_blocked() -- Law 1
 #include "talkback-plan.h" // talkback_dedup_preserve_order() -- Task 5 fix round 1, F4
 #include "zoom-join-decision.h"
 #include "zoom-reconnect.h"
@@ -1397,12 +1398,38 @@ void ZoomEngineClient::handle_event(const std::string &line)
         if (obj.contains("live")) {
             const bool live = obj.value("live").toBool();
             const std::string reason = obj.value("reason").toString().toStdString();
+            // TALKBACK DELIVERY LAW 1 (2026-08-29). The engine puts
+            // "mic":"open"|"blocked" on THIS line -- the confirmed-state one --
+            // precisely so the dock can tell "on air" from "on air but nobody
+            // can hear you". Muted, SendAudioDataToChannel is ACCEPTED and
+            // every member hears silence, so without this field the banner
+            // says a clean ON AIR over a key that delivers nothing.
+            //
+            // ABSENT MEANS NOT BLOCKED. An engine older than Law 1 sends no
+            // "mic" key, and a DLL-only install is this project's canonical
+            // mistake -- reading a missing field as blocked would put every
+            // such rig into a permanent false alarm. Same tolerance rule as
+            // the nomination attempt id.
+            //
+            // REVIEW ROUND 1, M1 (Major): this branch read only live/reason.
+            // The engine had emitted "mic" since the laws landed, three
+            // comments asserted the plugin consumed it, a test pinned the
+            // engine emitting it -- and nothing on this side had ever looked
+            // at it, so Law 1's entire operator-facing half did not exist.
+            const std::string mic = obj.value("mic").toString().toStdString();
+            // The rule itself lives in src/talkback-key.h beside
+            // talkback_session_state_closes_key(), so a host test can drive it
+            // into the banner end to end -- see its comment for why that
+            // matters here specifically.
+            const bool mic_blocked = talkback_session_mic_blocked(mic);
             blog(LOG_INFO,
-                 "[obs-zoom-plugin] talkback_session: live=%s reason=%s",
-                 live ? "true" : "false", reason.c_str());
+                 "[obs-zoom-plugin] talkback_session: live=%s reason=%s mic=%s",
+                 live ? "true" : "false", reason.c_str(),
+                 mic.empty() ? "(unreported)" : mic.c_str());
             std::lock_guard<std::mutex> lk(m_mtx);
-            m_talkback_session_status.live   = live;
-            m_talkback_session_status.reason = reason;
+            m_talkback_session_status.live        = live;
+            m_talkback_session_status.reason      = reason;
+            m_talkback_session_status.mic_blocked = mic_blocked;
             return;
         }
         blog(LOG_INFO, "[obs-zoom-plugin] talkback_session: %s", line.c_str());

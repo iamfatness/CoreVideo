@@ -279,12 +279,24 @@ inline TalkbackDockCellState talkback_dock_cell_state(
 // The words on the cell. Kept beside the state so a new state cannot ship
 // without one, and plain ASCII because these sources carry no BOM and the
 // build passes MSVC no /utf-8 (the same rule the banner's tally dot follows).
+// REVIEW ROUND 1, m7: `all_talent` is a parameter because the ALL-TALENT cell
+// can legitimately reach Unreachable -- talkback_dock_cell_state() returns it
+// when a completed plan could not finish the fan-out (`confirmed.done &&
+// !confirmed.all_talent_complete`, i.e. the 16-channel cap) -- and the
+// person-shaped copy for that state says "no talkback" over a hint about
+// "their Zoom client". ALL TALENT HAS NO CLIENT. The state is right; only the
+// words were wrong, because one enum value legitimately means two different
+// things depending on whether the cell is a person or a fan-out.
 inline std::string talkback_dock_cell_state_line(
-    TalkbackDockCellState state, const TalkbackNominationPlan &confirmed)
+    TalkbackDockCellState state, const TalkbackNominationPlan &confirmed,
+    bool all_talent = false)
 {
     switch (state) {
     case TalkbackDockCellState::OnAir:        return "ON AIR";
-    case TalkbackDockCellState::Unreachable:  return "no talkback";
+    case TalkbackDockCellState::Unreachable:
+        // Not "no talkback" for the fan-out: what is short is the PLAN, which
+        // the operator can act on, not a property of anybody's client.
+        return all_talent ? "some missed" : "no talkback";
     case TalkbackDockCellState::NotInChannel: return "not in channel";
     case TalkbackDockCellState::NoChannel:
         // A ladder that has not reported a terminal yet is genuinely still
@@ -303,8 +315,19 @@ inline std::string talkback_dock_cell_state_line(
 // guess: it is what happened on 2026-08-29, and Zoom's talkback reaches only
 // the room the inviting client is in. It is worded as a possibility ("may
 // be") because the plugin sees a refused invite, not a room list.
-inline std::string talkback_dock_cell_hint(TalkbackDockCellState state)
+inline std::string talkback_dock_cell_hint(TalkbackDockCellState state,
+                                           bool all_talent = false)
 {
+    // REVIEW ROUND 1, m7: see talkback_dock_cell_state_line() above. The
+    // all-talent cell reaches Unreachable through the PLAN's fan-out
+    // shortfall, never through a client's capability, so it needs the plan's
+    // sentence and an action -- "their Zoom client reported no talkback
+    // support" is a claim about somebody who does not exist.
+    if (all_talent && state == TalkbackDockCellState::Unreachable) {
+        return "The channel budget could not cover everybody, so this key "
+               "does not reach all of them. Assign channels again with fewer "
+               "people, or key the missing talent individually.";
+    }
     switch (state) {
     case TalkbackDockCellState::NotInChannel:
         return "They have a channel but are not in it. They may be in a "
@@ -345,8 +368,9 @@ inline std::vector<TalkbackDockCell> talkback_dock_cells(
             b.target, b.all_talent, confirmed,
             !live_target.empty() && live_target == b.target,
             talkback_presence_for(presence, b.target));
-        cell.state_line = talkback_dock_cell_state_line(cell.state, confirmed);
-        cell.hint       = talkback_dock_cell_hint(cell.state);
+        cell.state_line = talkback_dock_cell_state_line(cell.state, confirmed,
+                                                        cell.all_talent);
+        cell.hint       = talkback_dock_cell_hint(cell.state, cell.all_talent);
         cells.push_back(std::move(cell));
     }
     return cells;
@@ -810,6 +834,21 @@ enum class TalkbackDockBannerState {
     Waiting,
     // Open AND engine-confirmed. The only state that may be shown as on air.
     Live,
+    // TALKBACK DELIVERY LAW 1 (2026-08-29): open, engine-confirmed, and the
+    // engine could NOT open its own meeting audio -- so the channels are real,
+    // the key is real, and NOBODY CAN HEAR IT. Muted, Zoom ACCEPTS every
+    // SendAudioDataToChannel (success codes, members confirmed) and delivers
+    // silence, which is why this cannot be folded into Live: "on air" and "on
+    // air to nobody" are the two states this whole law exists to separate, and
+    // one enum value for both is exactly the plain ON AIR that hid the ghost.
+    //
+    // A SEPARATE VALUE RATHER THAN A bool ON THE BANNER, because the panel
+    // paints from this enum via a style property, and a bool would have to be
+    // remembered at every paint site instead of being impossible to drop.
+    // Its consequence at the cell level is deliberate: this dock's standing
+    // rule is RED MEANS THE DIRECTOR IS AUDIBLE, and they are not, so a cell
+    // keyed into a blocked mic does not go red -- see zoom-talkback-panel.cpp.
+    LiveMicBlocked,
     // A key was refused, or the last one that closed had failed.
     Refused,
 };
@@ -833,6 +872,18 @@ struct TalkbackDockSessionView {
     // inferred (`"recover":"re-nominate"` on a provisioning_incomplete
     // refusal). Empty when the engine offered none.
     std::string engine_recover;
+    // TALKBACK DELIVERY LAW 1 (2026-08-29): the engine reported this key live
+    // over a bot whose meeting audio it could not open (a meeting that locks
+    // mute, or a host who muted the bot). The key is real and the channels are
+    // real; nothing is audible. Straight from
+    // ZoomEngineClient::TalkbackSessionStatus::mic_blocked, which is false
+    // when the engine never reported a mic state at all -- so an engine older
+    // than Law 1 renders exactly as it always did.
+    //
+    // Only meaningful while engine_live is true. A key that is not live has a
+    // reason of its own, and "you were refused AND the mic was shut" is two
+    // answers to a question with one.
+    bool mic_blocked = false;
     // From the engine's session_live line, as of the moment the key opened.
     // NOT refreshed while the key is held: the engine reports these once per
     // key press, so a talent who rejoins mid-press is not counted until the
@@ -885,6 +936,29 @@ inline TalkbackDockBanner talkback_dock_banner(const TalkbackDockSessionView &s)
 
     const std::string label = talkback_dock_target_label(s.target);
     if (s.engine_live) {
+        // TALKBACK DELIVERY LAW 1 (2026-08-29): LIVE IS NOT ENOUGH.
+        //
+        // Talkback delivers only while the engine's own meeting audio is open.
+        // Muted, every SendAudioDataToChannel is ACCEPTED -- success codes,
+        // members confirmed, zero failures -- and every member hears silence.
+        // The operator's own production on 2026-08-29 had the bot muted by the
+        // host, so this is the live case, not a hypothetical.
+        //
+        // The headline says it FIRST, before the target, because that is the
+        // word order an operator reads under pressure and the thing they have
+        // to act on is the mute, not who they were keying. It deliberately
+        // still contains "ON AIR": the key IS open and the director IS
+        // talking, so hiding that would trade one wrong belief for another.
+        // The member tally is dropped here on purpose -- "3 of 4 present" next
+        // to "nobody can hear you" reads as reassurance and is the exact
+        // instrument that made the ghost look healthy.
+        if (s.mic_blocked) {
+            b.state = TalkbackDockBannerState::LiveMicBlocked;
+            b.headline = "ON AIR - BOT MUTED: " + label;
+            b.detail = "Zoom will not let CoreVideo unmute, so nobody hears "
+                       "this key. Ask the host to unmute CoreVideo.";
+            return b;
+        }
         b.state = TalkbackDockBannerState::Live;
         b.headline = "ON AIR: " + label;
         if (s.members_known) {

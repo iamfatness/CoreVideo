@@ -764,15 +764,56 @@ public:
                             as->SelectMic(dead_id, dead_name);
                         FLOAT silent = 0.0f;
                         const ZOOMSDK::SDKError v_err = as->SetMicVol(silent);
+                        // REVIEW ROUND 1, m6: BOTH HALVES REFUSED IS A HOT MIC,
+                        // and it used to be reported as a "debug" line with two
+                        // numbers in it -- filtered by stage, read by nobody.
+                        // These two calls are the only thing standing between a
+                        // talkback key and the control room's own microphone
+                        // going live into the meeting, so a failure has to be
+                        // loud on the channel the operator actually sees, and
+                        // has to say what to DO about it. Either half alone
+                        // still silences the device, which is why this is an
+                        // AND: SelectMic sends the SDK at a device that does not
+                        // exist, SetMicVol zeroes whatever it settles on.
+                        const bool insured = (m_err == ZOOMSDK::SDKERR_SUCCESS) ||
+                                             (v_err == ZOOMSDK::SDKERR_SUCCESS);
                         EngineIpc::write(
-                            R"({"cmd":"debug","stage":"mic_insurance","select_code":)" +
+                            std::string(R"({"cmd":"debug","stage":"mic_insurance","ok":)") +
+                            (insured ? "true" : "false") +
+                            R"(,"select_code":)" +
                             std::to_string(static_cast<int>(m_err)) +
                             R"(,"volume_code":)" +
                             std::to_string(static_cast<int>(v_err)) + "}");
+                        if (!insured) {
+                            EngineIpc::write(
+                                R"({"cmd":"error","msg":"mic_insurance_failed",)"
+                                R"("reason":"hot_mic_risk","select_code":)" +
+                                std::to_string(static_cast<int>(m_err)) +
+                                R"(,"volume_code":)" +
+                                std::to_string(static_cast<int>(v_err)) +
+                                R"(,"action":"Zoom refused both attempts to )"
+                                R"(silence this machine's microphone. A talkback )"
+                                R"(key will unmute CoreVideo in the meeting, so )"
+                                R"(the default capture device may be heard. Set )"
+                                R"(Zoom's microphone to a disconnected device, )"
+                                R"(or mute it at the OS, before keying."})");
+                        }
                     } else {
+                        // Same severity, one door earlier: with no audio
+                        // settings there is no insurance at all, and the unmute
+                        // still happens on the first key.
                         EngineIpc::write(
                             R"({"cmd":"debug","stage":"mic_insurance","ok":false,)"
                             R"("reason":"no_audio_settings"})");
+                        EngineIpc::write(
+                            R"({"cmd":"error","msg":"mic_insurance_failed",)"
+                            R"("reason":"no_audio_settings",)"
+                            R"("action":"Zoom exposed no audio settings, so )"
+                            R"(CoreVideo could not silence this machine's )"
+                            R"(microphone. A talkback key will unmute CoreVideo )"
+                            R"(in the meeting. Set Zoom's microphone to a )"
+                            R"(disconnected device, or mute it at the OS, before )"
+                            R"(keying."})");
                     }
                 }
                 ZOOMSDK::DestroySettingService(settings);

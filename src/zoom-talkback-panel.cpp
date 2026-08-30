@@ -223,6 +223,11 @@ ZoomTalkbackPanel::ZoomTalkbackPanel(QWidget *parent)
 {
     setMinimumWidth(320);
 
+    // ONE CHECK, read before anything is built and never again, so no path can
+    // half-enter the mode. It is the whole of the instrument's cost when the
+    // variable is unset.
+    m_layout_test = qEnvironmentVariableIsSet(kTalkbackLayoutTestEnv);
+
     const ZoomPluginSettings initial_settings = ZoomPluginSettings::load();
 
     // EVERYTHING IS INSIDE A SCROLL AREA, and that is a fix, not a
@@ -561,9 +566,18 @@ ZoomTalkbackPanel::ZoomTalkbackPanel(QWidget *parent)
     m_probe_btn->setEnabled(false);
     probe_layout->addWidget(m_probe_btn);
 
+    // The last stage line the probe reported. This is the ONLY read of
+    // ZoomEngineClient anywhere in the construction path, which is why the
+    // instrument's gate is read at the top of this function rather than at the
+    // bottom: "no engine interaction" has to be true of every line, not of most
+    // of them. (The accessor is a mutexed read of a cached string -- no IPC and
+    // no SDK -- so this is about the claim, not about a hazard.)
     m_probe_status_label = new QLabel(
-        format_talkback_probe_status(
-            ZoomEngineClient::instance().talkback_probe_status()),
+        m_layout_test
+            ? QStringLiteral("Layout test mode: nothing here talks to the "
+                             "engine.")
+            : format_talkback_probe_status(
+                  ZoomEngineClient::instance().talkback_probe_status()),
         m_probe_body);
     m_probe_status_label->setWordWrap(true);
     m_probe_status_label->setObjectName(QStringLiteral("talkbackProbeStatus"));
@@ -606,8 +620,6 @@ ZoomTalkbackPanel::ZoomTalkbackPanel(QWidget *parent)
     // -- Apply stylesheet last so all properties are set before evaluation ----
     setStyleSheet(cv_stylesheet());
 
-    // ONE CHECK, and it is the whole of the instrument's cost when unset.
-    m_layout_test = qEnvironmentVariableIsSet(kTalkbackLayoutTestEnv);
     if (m_layout_test)
         populate_layout_test();
     else

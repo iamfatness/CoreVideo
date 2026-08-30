@@ -410,6 +410,9 @@ ZoomPluginSettings ZoomPluginSettings::load()
     s.talkback_source = talkback_source ? talkback_source : "";
     if (config_has_user_value(cfg, SECTION, "TalkbackLatch"))
         s.talkback_latch = config_get_int(cfg, SECTION, "TalkbackLatch") != 0;
+    if (config_has_user_value(cfg, SECTION, "TalkbackProbeExpanded"))
+        s.talkback_probe_expanded =
+            config_get_int(cfg, SECTION, "TalkbackProbeExpanded") != 0;
 
     const int speaker_sensitivity =
         config_get_int(cfg, SECTION, "SpeakerSensitivityMs");
@@ -562,6 +565,7 @@ void ZoomPluginSettings::save() const
     config_set_int   (cfg, SECTION, "IsoRecordProgram",       iso_record_program ? 1 : 0);
     config_set_string(cfg, SECTION, "TalkbackSource",        talkback_source.c_str());
     config_set_int   (cfg, SECTION, "TalkbackLatch",         talkback_latch ? 1 : 0);
+    config_set_int   (cfg, SECTION, "TalkbackProbeExpanded", talkback_probe_expanded ? 1 : 0);
     config_set_int   (cfg, SECTION, "SpeakerSensitivityMs",
                       static_cast<int>(speaker_sensitivity_ms));
     config_set_int   (cfg, SECTION, "SpeakerHoldMs",

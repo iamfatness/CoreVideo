@@ -298,6 +298,135 @@ int main()
               "the confirmed plan describing channels the engine has destroyed");
     }
 
+    // -- Per-person channel presence (Milestone 7, the intercom grid) -------
+    //
+    // Same reason this file exists at all: this is a stage-name-to-transition
+    // MAPPING, and every defect in this feature has lived in one. The shapes
+    // below are copied from the OBS log of the 2026-08-29 show the redesign
+    // came out of -- a seven-person Zoom Events production with breakout
+    // rooms -- not invented.
+    {
+        TalkbackChannelPresence presence;
+
+        // Chris Fritsche: invited, then Zoom confirmed the join.
+        talkback_channel_presence_apply_report(presence, "invite",
+            QJsonObject{{"stage", "invite"}, {"name", "Chris Fritsche"},
+                        {"channel", "F2A3F769"}, {"code", 0}});
+        talkback_channel_presence_apply_report(presence, "member_invited",
+            QJsonObject{{"stage", "member_invited"}, {"name", "Chris Fritsche"},
+                        {"channel", "F2A3F769"}, {"already_member", false}});
+        check(talkback_presence_for(presence, "Chris Fritsche") ==
+                  TalkbackPersonPresence::Present,
+              "a confirmed join was not recorded as present");
+
+        // John Wallace: a channel of his own, a completed plan, and every
+        // invite refused SDKERR_WRONG_USAGE (2) -- he was in a different
+        // breakout room from the engine. THE case this whole record exists
+        // for: before it, his cell was a ready, pressable key on a man who
+        // could hear nothing.
+        talkback_channel_presence_apply_report(presence, "invite",
+            QJsonObject{{"stage", "invite"}, {"name", "John Wallace"},
+                        {"channel", "F2A3F769"}, {"code", 2}});
+        check(talkback_presence_for(presence, "John Wallace") ==
+                  TalkbackPersonPresence::NotInChannel,
+              "a refused invite left the person looking ready to key");
+
+        // Grant Whitehead: his client reported no talkback support, and the
+        // invite was then refused SDKERR_INVALID_PARAMETER (3). The SPECIFIC
+        // diagnosis has to survive the generic consequence, or the operator
+        // is sent to re-assign channels that cannot help.
+        talkback_channel_presence_apply_report(presence,
+            "participant_talkback_support",
+            QJsonObject{{"stage", "participant_talkback_support"},
+                        {"name", "Grant Whitehead"}, {"supported", false}});
+        talkback_channel_presence_apply_report(presence, "invite",
+            QJsonObject{{"stage", "invite"}, {"name", "Grant Whitehead"},
+                        {"channel", "F2A3F769"}, {"code", 3}});
+        check(talkback_presence_for(presence, "Grant Whitehead") ==
+                  TalkbackPersonPresence::NoTalkback,
+              "a client that cannot do talkback was downgraded to a generic "
+              "absence by its own invite failure");
+
+        // Jeffrey Wiltshire: refused SDKERR_TOO_FREQUENT_CALL (18) on the
+        // all-talent invite, admitted to his own channel two seconds later.
+        // The last edge wins, which is what his own key button does.
+        talkback_channel_presence_apply_report(presence, "invite",
+            QJsonObject{{"stage", "invite"}, {"name", "Jeffrey Wiltshire"},
+                        {"channel", "F2A3F769"}, {"code", 18}});
+        check(talkback_presence_for(presence, "Jeffrey Wiltshire") ==
+                  TalkbackPersonPresence::NotInChannel,
+              "a rate-limited invite was treated as a success");
+        talkback_channel_presence_apply_report(presence, "member_invited",
+            QJsonObject{{"stage", "member_invited"},
+                        {"name", "Jeffrey Wiltshire"}, {"channel", "4F10B647"}});
+        check(talkback_presence_for(presence, "Jeffrey Wiltshire") ==
+                  TalkbackPersonPresence::Present,
+              "a later confirmed join did not clear an earlier refusal");
+
+        // A supported:true report is NOT presence: it is emitted before the
+        // invite is even issued. Treating it as one is how a cell would say
+        // "ready" for somebody Zoom then refused.
+        talkback_channel_presence_apply_report(presence,
+            "participant_talkback_support",
+            QJsonObject{{"stage", "participant_talkback_support"},
+                        {"name", "Paul Walhus"}, {"supported", true}});
+        check(talkback_presence_for(presence, "Paul Walhus") ==
+                  TalkbackPersonPresence::Unknown,
+              "a capability report was mistaken for a confirmed join");
+
+        // The three async absences.
+        talkback_channel_presence_apply_report(presence, "member_invite_failed",
+            QJsonObject{{"stage", "member_invite_failed"}, {"name", "Ana"},
+                        {"error", 5}});
+        check(talkback_presence_for(presence, "Ana") ==
+                  TalkbackPersonPresence::NotInChannel,
+              "an async invite failure was not recorded");
+        talkback_channel_presence_apply_report(presence, "member_not_in_meeting",
+            QJsonObject{{"stage", "member_not_in_meeting"}, {"name", "Bo"}});
+        check(talkback_presence_for(presence, "Bo") ==
+                  TalkbackPersonPresence::NotInChannel,
+              "a nominee who is not in the meeting was not recorded");
+        talkback_channel_presence_apply_report(presence, "member_left",
+            QJsonObject{{"stage", "member_left"}, {"name", "Chris Fritsche"},
+                        {"channel", "F2A3F769"}});
+        check(talkback_presence_for(presence, "Chris Fritsche") ==
+                  TalkbackPersonPresence::NotInChannel,
+              "somebody removed from a channel was still counted as in it");
+    }
+    {
+        // MIXED-VERSION TOLERANCE, the same rule the attempt id follows: a
+        // MISSING field must mean "nothing happened", never a failure. This
+        // project's canonical install mistake is a DLL-only copy, so a plugin
+        // newer than its engine has to read an older report harmlessly.
+        TalkbackChannelPresence presence;
+        talkback_channel_presence_apply_report(presence, "invite",
+            QJsonObject{{"stage", "invite"}, {"name", "Ana"}});
+        check(talkback_presence_for(presence, "Ana") ==
+                  TalkbackPersonPresence::Unknown,
+              "an invite line with no \"code\" was read as a refusal");
+        talkback_channel_presence_apply_report(presence,
+            "participant_talkback_support",
+            QJsonObject{{"stage", "participant_talkback_support"},
+                        {"name", "Ana"}});
+        check(talkback_presence_for(presence, "Ana") ==
+                  TalkbackPersonPresence::Unknown,
+              "a support line with no \"supported\" was read as no support");
+        // A stage with no name at all cannot be about anybody.
+        talkback_channel_presence_apply_report(presence, "member_invited",
+            QJsonObject{{"stage", "member_invited"}});
+        check(presence.people.empty(),
+              "a nameless report invented an entry");
+        // Every other stage is inert -- the nomination plan's own stages must
+        // not leak into this record.
+        talkback_channel_presence_apply_report(presence, "uncovered_private",
+            QJsonObject{{"stage", "uncovered_private"}, {"name", "Ana"}});
+        talkback_channel_presence_apply_report(presence, "channel_created",
+            QJsonObject{{"stage", "channel_created"}, {"name", "Ana"}});
+        check(presence.people.empty(),
+              "a stage that says nothing about membership was recorded as if "
+              "it did");
+    }
+
     if (failures == 0)
         std::cout << "talkback-nomination-dispatch: all tests passed\n";
     return failures == 0 ? 0 : 1;

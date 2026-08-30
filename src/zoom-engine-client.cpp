@@ -1,6 +1,7 @@
 #include "zoom-engine-client.h"
 #include "speaker-director.h"
 #include "talkback-nomination-dispatch.h" // Task 5 fix round 2, N5
+#include "talkback-key.h"  // talkback_session_mic_blocked() -- Law 1
 #include "talkback-plan.h" // talkback_dedup_preserve_order() -- Task 5 fix round 1, F4
 #include "zoom-join-decision.h"
 #include "zoom-reconnect.h"
@@ -514,6 +515,7 @@ bool ZoomEngineClient::start(const std::string &jwt_token,
         std::lock_guard<std::mutex> lk(m_mtx);
         talkback_nomination_reset(m_talkback_nomination_status);
         m_talkback_nomination_pending = TalkbackNominationPending{};
+        talkback_presence_reset(m_talkback_channel_presence);
     }
 
     // Fresh engine session: no init retry is owed. This must come AFTER the
@@ -655,6 +657,7 @@ void ZoomEngineClient::stop_for_reconnect()
         std::lock_guard<std::mutex> lk(m_mtx);
         talkback_nomination_reset(m_talkback_nomination_status);
         m_talkback_nomination_pending = TalkbackNominationPending{};
+        talkback_presence_reset(m_talkback_channel_presence);
     }
 }
 
@@ -962,6 +965,14 @@ void ZoomEngineClient::talkback_nominate(const std::vector<std::string> &nominee
         std::lock_guard<std::mutex> lk(m_mtx);
         attempt = ++m_talkback_nominate_attempt;
         talkback_nomination_begin(m_talkback_nomination_pending, deduped, attempt);
+        // Milestone 7: the standing channel set is about to be REPLACED
+        // (nominate()'s replace path destroys it before planning), so every
+        // presence observation this record holds is about channels that are
+        // going away. Clearing to Unknown fails soft -- the grid reads
+        // "ready" until the new ladder's own invites report -- which is the
+        // right direction for a display-only record. See
+        // talkback_presence_reset().
+        talkback_presence_reset(m_talkback_channel_presence);
     }
     // Task 5 fix round 1 (F5, documented not fixed): json_escape() below
     // escapes '\n'/'\r'/'\t' as two-character sequences ("\\n" etc.), but the
@@ -1212,6 +1223,12 @@ ZoomEngineClient::TalkbackNominationStatus ZoomEngineClient::talkback_nomination
     return m_talkback_nomination_status;
 }
 
+TalkbackChannelPresence ZoomEngineClient::talkback_channel_presence() const
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    return m_talkback_channel_presence;
+}
+
 void ZoomEngineClient::fail_after_init_retries_exhausted()
 {
     // Monitor thread only.
@@ -1381,12 +1398,38 @@ void ZoomEngineClient::handle_event(const std::string &line)
         if (obj.contains("live")) {
             const bool live = obj.value("live").toBool();
             const std::string reason = obj.value("reason").toString().toStdString();
+            // TALKBACK DELIVERY LAW 1 (2026-08-29). The engine puts
+            // "mic":"open"|"blocked" on THIS line -- the confirmed-state one --
+            // precisely so the dock can tell "on air" from "on air but nobody
+            // can hear you". Muted, SendAudioDataToChannel is ACCEPTED and
+            // every member hears silence, so without this field the banner
+            // says a clean ON AIR over a key that delivers nothing.
+            //
+            // ABSENT MEANS NOT BLOCKED. An engine older than Law 1 sends no
+            // "mic" key, and a DLL-only install is this project's canonical
+            // mistake -- reading a missing field as blocked would put every
+            // such rig into a permanent false alarm. Same tolerance rule as
+            // the nomination attempt id.
+            //
+            // REVIEW ROUND 1, M1 (Major): this branch read only live/reason.
+            // The engine had emitted "mic" since the laws landed, three
+            // comments asserted the plugin consumed it, a test pinned the
+            // engine emitting it -- and nothing on this side had ever looked
+            // at it, so Law 1's entire operator-facing half did not exist.
+            const std::string mic = obj.value("mic").toString().toStdString();
+            // The rule itself lives in src/talkback-key.h beside
+            // talkback_session_state_closes_key(), so a host test can drive it
+            // into the banner end to end -- see its comment for why that
+            // matters here specifically.
+            const bool mic_blocked = talkback_session_mic_blocked(mic);
             blog(LOG_INFO,
-                 "[obs-zoom-plugin] talkback_session: live=%s reason=%s",
-                 live ? "true" : "false", reason.c_str());
+                 "[obs-zoom-plugin] talkback_session: live=%s reason=%s mic=%s",
+                 live ? "true" : "false", reason.c_str(),
+                 mic.empty() ? "(unreported)" : mic.c_str());
             std::lock_guard<std::mutex> lk(m_mtx);
-            m_talkback_session_status.live   = live;
-            m_talkback_session_status.reason = reason;
+            m_talkback_session_status.live        = live;
+            m_talkback_session_status.reason      = reason;
+            m_talkback_session_status.mic_blocked = mic_blocked;
             return;
         }
         blog(LOG_INFO, "[obs-zoom-plugin] talkback_session: %s", line.c_str());
@@ -1433,8 +1476,15 @@ void ZoomEngineClient::handle_event(const std::string &line)
         // logic back here; extend the dispatcher and its test instead.
         blog(LOG_INFO, "[obs-zoom-plugin] talkback_nominate: %s", line.c_str());
         std::lock_guard<std::mutex> lk(m_mtx);
+        const QString nominate_stage = obj.value("stage").toString();
         talkback_nomination_apply_report(m_talkback_nomination_status,
-            m_talkback_nomination_pending, obj.value("stage").toString(), obj);
+            m_talkback_nomination_pending, nominate_stage, obj);
+        // Milestone 7: the per-person presence view, from the SAME stage
+        // lines and under the same lock. A separate call rather than a third
+        // out-parameter above, because these stages carry no "attempt" id --
+        // see talkback_channel_presence_apply_report()'s header comment.
+        talkback_channel_presence_apply_report(m_talkback_channel_presence,
+                                               nominate_stage, obj);
         return;
     }
     if (cmd == "awaiting_admission") {
@@ -1472,6 +1522,7 @@ void ZoomEngineClient::handle_event(const std::string &line)
             // refuse with "no_nomination".
             talkback_nomination_reset(m_talkback_nomination_status);
             m_talkback_nomination_pending = TalkbackNominationPending{};
+            talkback_presence_reset(m_talkback_channel_presence);
             keep_failed = !m_last_error.empty() &&
                 !m_user_leaving.load(std::memory_order_acquire);
         }

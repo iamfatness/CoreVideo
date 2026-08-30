@@ -240,3 +240,119 @@ inline void talkback_nomination_reset(TalkbackNominationPlan &confirmed)
 {
     confirmed = TalkbackNominationPlan{};
 }
+
+// ── Per-person channel presence (Milestone 7, the intercom-grid dock) ───────
+//
+// WHY THIS EXISTS. The confirmed plan above answers "does this person have a
+// channel". It cannot answer the question the operator actually had on
+// 2026-08-29, looking at a grid of seven talent: "is this person IN it".
+// Those are different, and the difference was live that morning. From the
+// engine's own nomination stage lines for that show:
+//
+//     "stage":"invite","name":"John Wallace",...,"code":2
+//     "stage":"participant_talkback_support","name":"Grant Whitehead","supported":false
+//     "stage":"invite","name":"Grant Whitehead",...,"code":3
+//     "stage":"member_invited","name":"Chris Fritsche",...
+//
+// John Wallace had a private channel and a completed plan (nominate_done,
+// 7 channels) and could hear NOTHING: every invite for him was refused
+// SDKERR_WRONG_USAGE (2), because he was in a different breakout room from
+// the engine and Zoom's talkback reaches only the room the inviter is in.
+// Grant Whitehead's client does not support talkback at all
+// (supported:false, then SDKERR_INVALID_PARAMETER (3) on the invite). Both
+// looked identical to a dock that only knew the plan: a ready, pressable
+// key, on a person who hears silence.
+//
+// WHAT THIS IS NOT. It is not authority over keying. Nothing here gates
+// key_on(); the enablement rules in src/talkback-dock-state.h are unchanged
+// and this only decides what a cell SAYS about a person. That is deliberate:
+// this view is assembled from edges (see
+// talkback_channel_presence_apply_report(), src/talkback-nomination-dispatch.h)
+// and can lag or be Unknown, and refusing a key on a stale absence would be
+// strictly worse than letting a press fail closed the way it already does.
+//
+// TWO LIMITS, both stated rather than hidden:
+//   * it is per PERSON, not per channel. Someone can be in their private
+//     channel and not in the all-talent one -- the 2026-08-29 log has three
+//     such people, refused SDKERR_TOO_FREQUENT_CALL (18) on the all-talent
+//     invite and admitted to their own channel a second later. The last
+//     edge for a name wins, so those read Present, which is what their own
+//     key button does.
+//   * Unknown is the starting state and is rendered as "ready", NOT as
+//     absent. An engine that reports none of these stages, or a plugin that
+//     has simply not seen them yet, must not paint every person amber.
+enum class TalkbackPersonPresence {
+    // Nothing observed. Rendered as ready: this record never manufactures a
+    // doubt it has no evidence for.
+    Unknown,
+    // Zoom confirmed them into a talkback channel (member_invited, which
+    // includes TALKBACK_ERROR_ALREADY_EXIST -- see engine-talkback.cpp).
+    Present,
+    // An invite for them was refused, they were not in the meeting to
+    // invite, or they left a channel they had been in.
+    NotInChannel,
+    // Their Zoom client reported no talkback support
+    // (participant_talkback_support "supported":false). Strictly worse than
+    // NotInChannel: nothing the director does reaches them.
+    NoTalkback,
+};
+
+// The live per-person view. A small flat vector, not a map: this is at most
+// the nominee list (16 channels x 10 people is the hard ceiling) and it is
+// read once per person per dock tick.
+struct TalkbackChannelPresence {
+    struct Entry {
+        std::string name;
+        TalkbackPersonPresence state = TalkbackPersonPresence::Unknown;
+    };
+    std::vector<Entry> people;
+};
+
+inline TalkbackPersonPresence talkback_presence_for(
+    const TalkbackChannelPresence &presence, const std::string &name)
+{
+    for (const auto &e : presence.people)
+        if (e.name == name) return e.state;
+    return TalkbackPersonPresence::Unknown;
+}
+
+// Records one observation. Last edge wins, with ONE exception:
+// NoTalkback survives a later NotInChannel.
+//
+// That exception is not a preference, it is what the wire does. A client
+// with no talkback support produces BOTH stages, in this order:
+// participant_talkback_support "supported":false, then the invite refused
+// SDKERR_INVALID_PARAMETER. Plain last-wins would throw away the specific
+// diagnosis ("their Zoom cannot do this") and keep the generic consequence
+// ("they are not in the channel"), telling the operator to re-assign
+// channels for someone no re-assignment can reach. Only a confirmed
+// Present clears it -- that is real evidence the client CAN, and it
+// outranks a stale capability report.
+inline void talkback_presence_note(TalkbackChannelPresence &presence,
+                                   const std::string &name,
+                                   TalkbackPersonPresence state)
+{
+    if (name.empty() || state == TalkbackPersonPresence::Unknown) return;
+    for (auto &e : presence.people) {
+        if (e.name != name) continue;
+        if (state != TalkbackPersonPresence::Present &&
+            e.state == TalkbackPersonPresence::NoTalkback)
+            return;
+        e.state = state;
+        return;
+    }
+    presence.people.push_back(TalkbackChannelPresence::Entry{name, state});
+}
+
+// The world-reset, wired into exactly the points talkback_nomination_reset()
+// already is (a Leave, an engine restart) plus the send of a new nominate.
+// The send is included because a nomination REPLACES the standing channel
+// set: every observation this record holds is about channels the engine is
+// destroying, and carrying them forward would describe the new ladder with
+// the old one's failures. Clearing to Unknown fails SOFT -- everyone reads
+// "ready" until the new ladder's own invites report -- which is the right
+// direction for a record that is display-only.
+inline void talkback_presence_reset(TalkbackChannelPresence &presence)
+{
+    presence = TalkbackChannelPresence{};
+}

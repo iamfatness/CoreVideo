@@ -13,6 +13,7 @@
 #include "zoom-dock.h"
 #include "zoom-iso-recorder.h"
 #include "zoom-iso-panel.h"
+#include "zoom-talkback-panel.h"
 #include "zoom-control-server.h"
 #include "zoom-osc-server.h"
 #include "cv-ffmpeg-loader.h"
@@ -35,10 +36,12 @@ static QPointer<ZoomDock> g_dock;
 static QPointer<ZoomIsoPanel> g_iso_panel;
 static QPointer<ZoomOutputDialog> g_output_panel;
 static QPointer<ZoomDiagnosticsDialog> g_diagnostics_panel;
+static QPointer<ZoomTalkbackPanel> g_talkback_panel;
 static QPointer<QDockWidget> g_zoom_dock_host;
 static QPointer<QDockWidget> g_iso_dock_host;
 static QPointer<QDockWidget> g_output_dock_host;
 static QPointer<QDockWidget> g_diagnostics_dock_host;
+static QPointer<QDockWidget> g_talkback_dock_host;
 static bool g_frontend_callback_registered = false;
 static bool g_shutdown_started = false;
 
@@ -46,6 +49,7 @@ static ZoomDock *ensure_zoom_dock();
 static ZoomIsoPanel *ensure_iso_panel();
 static ZoomOutputDialog *ensure_output_panel();
 static ZoomDiagnosticsDialog *ensure_diagnostics_panel();
+static ZoomTalkbackPanel *ensure_talkback_panel();
 static QMainWindow *obs_main_window();
 
 static QMainWindow *obs_main_window()
@@ -67,6 +71,10 @@ static void shutdown_corevideo()
         g_output_panel->prepare_shutdown();
     if (g_diagnostics_panel)
         g_diagnostics_panel->prepare_shutdown();
+    // Before TalkbackController::stop() below: the panel closes a key it
+    // opened itself, while its buttons and the tap are still there to close.
+    if (g_talkback_panel)
+        g_talkback_panel->prepare_shutdown();
     ZoomControlServer::instance().stop();
     ZoomOscServer::instance().stop();
     ZoomIsoRecorder::instance().stop();
@@ -84,6 +92,7 @@ static void frontend_event_callback(enum obs_frontend_event event, void *)
         ensure_iso_panel();
         ensure_output_panel();
         ensure_diagnostics_panel();
+        ensure_talkback_panel();
         // Touch the singleton so its QTimer is constructed here, on the Qt
         // main thread, rather than lazily on whatever thread first calls in.
         TalkbackController::instance();
@@ -383,6 +392,43 @@ static void show_diagnostics_panel()
                          g_diagnostics_dock_host);
 }
 
+// The Talkback dock. Registered exactly like the three above -- same
+// add-by-id, same host observation, same object name -- so OBS persists its
+// position and visibility with the rest of them. It shipped as two group boxes
+// inside the Zoom Control dock; the owner's verdict after the first live render
+// was that keying is the mid-show action and does not belong under a column of
+// setup controls, so it is its own panel now (see src/zoom-talkback-panel.h).
+static ZoomTalkbackPanel *ensure_talkback_panel()
+{
+    auto *main_win = obs_main_window();
+    if (!main_win) {
+        blog(LOG_WARNING, "[obs-zoom-plugin] obs_frontend_get_main_window() returned null - Talkback dock not created");
+        return nullptr;
+    }
+
+    if (!g_talkback_panel) {
+        g_talkback_panel = new ZoomTalkbackPanel(main_win);
+        g_talkback_panel->setObjectName(QStringLiteral("ZoomTalkbackDock"));
+        obs_frontend_add_dock_by_id("ZoomTalkbackDock", "Zoom Talkback", g_talkback_panel);
+        g_talkback_dock_host = dock_host_for(g_talkback_panel);
+        observe_dock_widget(g_talkback_panel, g_talkback_dock_host,
+                            g_talkback_panel, "ZoomTalkbackDock");
+        observe_dock_host(g_talkback_dock_host, g_talkback_dock_host,
+                          "ZoomTalkbackDock");
+        blog(LOG_INFO, "[obs-zoom-plugin] Registered dock: ZoomTalkbackDock");
+    }
+    return g_talkback_panel;
+}
+
+static void show_talkback_panel()
+{
+    ZoomTalkbackPanel *panel = ensure_talkback_panel();
+    if (panel)
+        panel->refresh_now();
+    show_registered_dock("ZoomTalkbackDock", "Zoom Talkback", panel,
+                         g_talkback_dock_host);
+}
+
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("obs-zoom-plugin", "en-US")
 
@@ -450,6 +496,10 @@ bool obs_module_load(void)
         show_iso_panel();
     }, nullptr);
 
+    obs_frontend_add_tools_menu_item("Zoom Talkback", [](void *) {
+        show_talkback_panel();
+    }, nullptr);
+
     obs_frontend_add_event_callback(frontend_event_callback, nullptr);
     g_frontend_callback_registered = true;
 
@@ -470,8 +520,10 @@ void obs_module_unload(void)
     g_iso_panel.clear();
     g_output_panel.clear();
     g_diagnostics_panel.clear();
+    g_talkback_panel.clear();
     g_zoom_dock_host.clear();
     g_iso_dock_host.clear();
     g_output_dock_host.clear();
     g_diagnostics_dock_host.clear();
+    g_talkback_dock_host.clear();
 }

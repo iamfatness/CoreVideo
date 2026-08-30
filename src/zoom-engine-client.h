@@ -51,6 +51,25 @@ public:
         bool live = false;
         std::string reason;
 
+        // TALKBACK DELIVERY LAW 1 (2026-08-29): is this key live over a bot
+        // whose meeting audio the engine could NOT open?
+        //
+        // Talkback delivers only while the engine's own client is unmuted --
+        // muted, SendAudioDataToChannel is ACCEPTED and every member hears
+        // silence, which is the one failure this feature cannot afford to show
+        // as success. The engine reports `"mic":"open"|"blocked"` on the SAME
+        // confirmed-state line as `live` (report_session_state()), and
+        // re-emits it on a mid-key CHANGE, so a host muting the bot at second
+        // 30 of a latched key moves this too.
+        //
+        // ABSENT MEANS false, and that is the mixed-version rule, not an
+        // accident: an engine older than Law 1 sends no "mic" key at all, and
+        // a DLL-only install is this project's canonical mistake. Reading a
+        // missing field as "blocked" would put every such rig into a permanent
+        // false alarm; reading it as "open" is the same thing that engine
+        // already meant.
+        bool mic_blocked = false;
+
         // Milestone 7 (the dock). The three fields below come from the OTHER
         // shape on this cmd -- report_session()'s stage lines -- not from
         // report_session_state()'s confirmed-state line above, so they are
@@ -176,6 +195,15 @@ public:
     // talkback_session_status() above -- see TalkbackNominationStatus's doc
     // comment for what each field means and where it comes from.
     TalkbackNominationStatus talkback_nomination_status() const;
+    // Milestone 7 (the intercom grid): who the engine has actually confirmed
+    // INTO a talkback channel, which the plan above cannot say. Assembled
+    // from the same "cmd":"talkback_nominate" stage lines, by
+    // talkback_channel_presence_apply_report()
+    // (src/talkback-nomination-dispatch.h). Polled and copied under m_mtx
+    // like every status above, and display-only: nothing in the keying path
+    // reads it. See TalkbackChannelPresence in src/talkback-nomination.h for
+    // the live defect it exists for and the two limits it carries.
+    TalkbackChannelPresence talkback_channel_presence() const;
 
     // Milestone 5's live-talkback senders. All five follow talkback_probe's
     // shape exactly: guarded by m_running, fire-and-forget, no result
@@ -406,6 +434,13 @@ private:
     // leaves this field untouched).
     TalkbackNominationStatus m_talkback_nomination_status;
     TalkbackNominationPending m_talkback_nomination_pending;
+    // Milestone 7: the per-person channel presence view, guarded by m_mtx
+    // like everything above it. Cleared at exactly the points
+    // talkback_nomination_reset() is called (a Leave, an engine restart) and
+    // additionally at the send of a new nominate -- a nomination replaces
+    // the standing channel set, so every observation in here is about
+    // channels the engine is destroying.
+    TalkbackChannelPresence m_talkback_channel_presence;
     // C1 (CRITICAL, final whole-branch review 2026-08-26): the identity
     // stamped into each talkback_nominate request and echoed back in that
     // attempt's terminal reports, so a report can be matched to the staging

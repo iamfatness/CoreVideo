@@ -139,3 +139,57 @@ inline void talkback_nomination_apply_report(TalkbackNominationPlan &confirmed,
         }
     }
 }
+
+// The presence half of the same wiring, and here for the same reason the
+// function above is: it is a stage-name-to-transition mapping, which is
+// where every defect in this feature has actually lived. Deliberately a
+// SEPARATE function rather than a third out-parameter on
+// talkback_nomination_apply_report() -- these stages carry no "attempt" id
+// (they are edges about the CURRENT channel set, not staged reports of an
+// attempt's outcome), so folding them in would put two different matching
+// rules behind one call and invite exactly the C1 confusion the attempt id
+// exists to prevent.
+//
+// Mapped, from engine/src/engine-talkback.cpp's own report_nomination()
+// call sites:
+//
+//   "member_invited"                -> Present      (Zoom confirmed the join)
+//   "participant_talkback_support"  -> NoTalkback   (only when supported:false)
+//   "invite" with a non-zero "code" -> NotInChannel (the SDK refused the batch)
+//   "member_invite_failed"          -> NotInChannel (Zoom refused it async)
+//   "member_not_in_meeting"         -> NotInChannel (nobody to invite)
+//   "member_left"                   -> NotInChannel (removed from the channel)
+//
+// Every other stage is inert. `code`/`supported` are read with defaults that
+// make a MISSING field mean "nothing happened" (code 0, supported true), so
+// an engine older than a field cannot be read as a failure -- the same
+// mixed-version rule the attempt id follows above, and this project's
+// canonical install mistake is a DLL-only copy.
+inline void talkback_channel_presence_apply_report(
+    TalkbackChannelPresence &presence, const QString &stage,
+    const QJsonObject &obj)
+{
+    const std::string name = obj.value("name").toString().toStdString();
+    if (name.empty()) return;
+
+    if (stage == QLatin1String("member_invited")) {
+        talkback_presence_note(presence, name, TalkbackPersonPresence::Present);
+    } else if (stage == QLatin1String("participant_talkback_support")) {
+        // Only the negative. A "supported":true is not evidence that anyone
+        // is IN a channel -- it is reported before the invite is even
+        // issued -- and treating it as presence is how a cell would say
+        // "ready" for someone Zoom then refused.
+        if (!obj.value("supported").toBool(true))
+            talkback_presence_note(presence, name,
+                                   TalkbackPersonPresence::NoTalkback);
+    } else if (stage == QLatin1String("invite")) {
+        if (obj.value("code").toInt(0) != 0)
+            talkback_presence_note(presence, name,
+                                   TalkbackPersonPresence::NotInChannel);
+    } else if (stage == QLatin1String("member_invite_failed") ||
+               stage == QLatin1String("member_not_in_meeting") ||
+               stage == QLatin1String("member_left")) {
+        talkback_presence_note(presence, name,
+                               TalkbackPersonPresence::NotInChannel);
+    }
+}

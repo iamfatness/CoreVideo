@@ -681,9 +681,19 @@ void EngineTalkback::tick()
     // later. It is excluded instead by its OWN gate, the first thing
     // membership_pump_invite() does: `if (has_pending_work()) return false;`.
     // That is fact 4, and unlike facts 2 and 3 it is enforced at the call site
-    // rather than inferred from where the call sits. If you add a fifth
+    // rather than inferred from where the call sits. If you add a new
     // sequence, give it a gate of its own too -- the chain below does not
     // stretch to cover code that runs outside the branches it reasons about.
+    //
+    // KNOWN RESIDUAL, not covered by facts 1-4: the PROBE's own rung-4 invite
+    // (the Begin/Add/Execute around line 1518) runs on the SDK CALLBACK thread
+    // inside onCreateChannelResponse, and nothing above excludes it from
+    // drain_stray_channels() on the driving thread. The window is narrow --
+    // it needs a stray queued from an earlier probe, a new probe's create
+    // response arriving, and the driving thread mid-batch, all at once -- and
+    // it predates every review of this file, but it is a fifth sequence and
+    // this inventory would be lying by omission not to count it. (Hold-clear
+    // review, 2026-08-30, Minor a.)
     //
     // The hazard the old comment named is real and unchanged: the API shape
     // implies the controller holds implicit per-batch state, so two
@@ -2239,7 +2249,14 @@ bool EngineTalkback::membership_pump_invite()
     // wrong -- m_driving_thread_in_sdk_call covers drain_stray_channels()
     // after it has swapped the queue out, and tick()'s Destroying phase does
     // not store Done until strictly after its own Begin/Add/Execute -- so
-    // "false" genuinely means no batch sequence is in flight on that thread.
+    // "false" genuinely means no batch sequence is in flight on that thread
+    // AT THE INSTANT OF THE READ -- the same single-instant caveat main.cpp
+    // writes up for its sibling gate, which main.cpp closes by joining the
+    // thread. This pump cannot join, so what actually rules out a batch
+    // STARTING after our read is that every path spawning the driving thread
+    // (a new probe) first passes through main.cpp's join-and-gate on the
+    // command loop -- the same thread this pump runs on, so it cannot happen
+    // between our read and our Execute.
     // See has_pending_work()'s own doc comment for why those two exist.
     //
     // The arbiter would be the WRONG gate: a probe holds it only until its

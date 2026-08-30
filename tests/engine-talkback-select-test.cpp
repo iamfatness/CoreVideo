@@ -648,7 +648,7 @@ static FakeUserInfo make_user(unsigned int id, const std::string &name,
 //
 // Why it exists: the ladder no longer issues channel N+1 from inside channel
 // N's response -- Zoom refused that with SDKERR_TOO_FREQUENT_CALL (18) in the
-// live gate -- it schedules it kNominationCreateSpacing (300ms) later and
+// live gate -- it schedules it kMembershipCallSpacing (600ms; was kNominationCreateSpacing at 300ms before the ZComms per-call measurement) later and
 // nomination_tick() issues it from the command loop. A test that only
 // delivered responses would provision channel 1 and then stop. The two extra
 // calls here are the test's stand-in for 300ms of command-loop idle time:
@@ -1718,7 +1718,7 @@ int main()
     // mid-provisioning" were the same fact -- the next create left from inside
     // the previous response, so there was no instant in between, and
     // nominate()'s arbiter gate refused every mid-ladder re-nomination for
-    // free. kNominationCreateSpacing opens ~300ms per rung where the arbiter
+    // free. kMembershipCallSpacing opens ~600ms per rung where the arbiter
     // is genuinely free and a ladder is genuinely still running. A
     // re-nomination landing there would pass the gate, run its replace path,
     // destroy the running ladder's channels and start a second ladder over the

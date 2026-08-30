@@ -412,7 +412,7 @@ Every one of these is documented at length where it lives; the list is the map.
   not held across the wait — a scheduled create is not outstanding, and
   claiming early would arm `kAwaitTimeout` against a request Zoom has never
   seen, so the spacing wait would self-expire the ladder it is pacing. The
-  ~300 ms window that opens is closed where it matters: `nominate()` refuses
+  ~600 ms window that opens (kMembershipCallSpacing) is closed where it matters: `nominate()` refuses
   `create_busy` while a create is *scheduled* as well as outstanding, or a
   re-nomination landing in that window would destroy a running ladder's
   channels and leave it with no terminal report — the one rule the whole abort

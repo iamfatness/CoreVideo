@@ -982,10 +982,14 @@ int main()
     // in the chain (parse -> status -> view -> banner) fails it.
     {
         // DRIVEN FROM THE WIRE TOKEN, not from the bool, so this pins the
-        // whole chain rather than only its last link: the engine writes
-        // "blocked", talkback_session_mic_blocked() is the rule the plugin's
-        // parser applies to it, and the banner renders the result. Severing
-        // the rule fails this.
+        // RULE end to end: the engine writes "blocked",
+        // talkback_session_mic_blocked() is the rule the plugin's parser
+        // applies to it, and the banner renders the result. Severing the rule
+        // fails this. Two links it does NOT pin, because their TUs compile in
+        // no host test: the parse assignment in zoom-engine-client.cpp and
+        // the view.mic_blocked copy in zoom-talkback-panel.cpp -- those are
+        // review-guarded, the same documented limit as every other wiring
+        // call site in this feature.
         check(talkback_session_mic_blocked("blocked"),
               "the engine's own \"blocked\" token was not read as blocked");
         check(!talkback_session_mic_blocked("open"),

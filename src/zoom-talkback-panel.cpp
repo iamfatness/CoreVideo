@@ -431,6 +431,12 @@ ZoomTalkbackPanel::ZoomTalkbackPanel(QWidget *parent)
     connect(m_latch_cb, &QCheckBox::toggled, this, [this](bool on) {
         if (m_shutting_down)
             return;
+        // Layout-test mode renders fake state; letting its controls persist
+        // would overwrite the operator's real saved choices from a session
+        // whose whole premise is "touches nothing". Same gate on all three
+        // persist handlers (latch, source, probe disclosure).
+        if (m_layout_test)
+            return;
         auto s = ZoomPluginSettings::load();
         s.talkback_latch = on;
         s.save();
@@ -465,6 +471,8 @@ ZoomTalkbackPanel::ZoomTalkbackPanel(QWidget *parent)
                 // Only a real operator change reaches here:
                 // replace_combo_items() blocks this combo's signals while it
                 // rebuilds and while it restores the selection.
+                if (m_layout_test)
+                    return;
                 auto s = ZoomPluginSettings::load();
                 s.talkback_source =
                     m_source_combo->currentData().toString().toStdString();
@@ -536,7 +544,7 @@ ZoomTalkbackPanel::ZoomTalkbackPanel(QWidget *parent)
     connect(m_probe_toggle, &QPushButton::toggled, this,
             [this, apply_probe_disclosure](bool on) {
         apply_probe_disclosure(on);
-        if (m_shutting_down)
+        if (m_shutting_down || m_layout_test)
             return;
         auto s = ZoomPluginSettings::load();
         s.talkback_probe_expanded = on;

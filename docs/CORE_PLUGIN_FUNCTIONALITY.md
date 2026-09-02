@@ -2,7 +2,14 @@
 
 This guide covers the main CoreVideo OBS plugin workflows. It intentionally
 focuses on the OBS plugin, `ZoomObsEngine`, Zoom source assignment, control APIs,
-audio routing, and ISO recording.
+audio routing, talkback, and ISO recording.
+
+Current release: **v0.1.44**. Where a section describes something newer than
+that, it says so.
+
+One naming quirk to get out of the way: the OBS **sources** this plugin
+registers are called `CoreVideo ...`, but its **docks and Tools menu entries**
+are still called `Zoom ...`. Both are this plugin.
 
 ## Media Architecture
 
@@ -31,10 +38,15 @@ alternative transport in the future.
 The CoreVideo plugin is operated from inside OBS. These diagrams mirror the
 current core plugin controls: the Zoom Control dock, regular OBS scenes/sources,
 the Active Speaker Director controls, the dockable profile-oriented Zoom Output
-Manager, and the Zoom Participant source properties. Exact styling can vary by
-OBS theme and platform, but the controls and labels should match the current
+Manager, and the CoreVideo Participant source properties. Exact styling can vary
+by OBS theme and platform, but the controls and labels should match the current
 plugin. This guide intentionally describes the OBS plugin path; optional
 Sidecar control-surface features are tracked separately in the roadmap.
+
+The plugin registers five docks, each with a matching **Tools** menu entry that
+focuses it: **Zoom Control**, **Zoom Output Manager**, **Zoom Diagnostics**,
+**Zoom ISO Recorder**, and **Zoom Talkback**. **Tools > Zoom Plugin Settings**
+opens the settings dialog, which is where Zoom sign-in lives.
 
 ![CoreVideo OBS workspace with Zoom Control dock](images/corevideo-obs-workspace.svg)
 
@@ -53,10 +65,21 @@ show can be routed without opening individual source properties.
 Active-speaker, spotlight, and screen-share routing gaps are reported as
 specific health states, so operators can tell the difference between "waiting
 for the next directed speaker" and a stale or missing video feed.
-In `v0.1.18` it is a persistent OBS dock, so operators can keep assignments,
-live previews, and feed health visible while working in normal OBS scenes.
-Profile loading reports matched outputs and any saved source names that are not
-present in the current OBS scene/source set before the operator clicks Apply.
+It is a persistent OBS dock, so operators can keep assignments, live previews,
+and feed health visible while working in normal OBS scenes. Profile loading
+reports matched outputs and any saved source names that are not present in the
+current OBS scene/source set before the operator clicks Apply.
+
+Two columns exist for audio timing: **Delay (embedded)** and **A/V Offset
+(embedded)**. Both act on a video source's own embedded audio track and neither
+touches the dedicated CoreVideo Audio sources - see the Audio Routing section
+below. **Hide participants without video** filters the
+participant table, the output assignment lists, and the participant source
+picker; someone with their camera off cannot be routed to an output or a tile at
+all. It never hides a participant who is already assigned, so switching a camera
+off cannot make a picker lose its own selection. Audio source pickers are
+deliberately unaffected - a camera-off participant is often exactly who you want
+a dedicated audio source for.
 
 Open the **Zoom Diagnostics** dock, or use **Tools > Zoom Diagnostics** to focus it,
 during a live session to see requested versus
@@ -67,40 +90,54 @@ resubscribed by recovery logic. Use **Create Support Bundle** from this dock to
 write a redacted troubleshooting bundle with engine status, output health,
 recent debug events, plugin settings with tokens removed, ISO recorder and
 FFmpeg encoder/session status, runtime/package validation, and the latest OBS
-log when available. On Windows, CoreVideo also creates a `.zip` next to the
-support bundle folder when PowerShell is available. OBS log data is written as a
-recent redacted excerpt; OAuth codes, access
-tokens, refresh tokens, ZAK/JWT values, passcodes, client secrets, and
-authorization headers are removed before the bundle is written.
+log when available. Bundles are written to
+`%APPDATA%\obs-studio\plugin_config\obs-zoom-plugin\support-bundles\CoreVideo-support-<timestamp>\`,
+and on Windows CoreVideo also creates a `.zip` beside that folder when
+PowerShell is available; the dialog reports both paths. OBS log data is written
+as a redacted excerpt of the last 500 lines; OAuth codes, access tokens, refresh
+tokens, ZAK/JWT values, passcodes, client secrets, and authorization headers are
+removed before the bundle is written. Meeting and participant names, participant
+IDs, and ISO file paths are **not** redacted - read the bundle before attaching
+it to a public issue.
 
-![CoreVideo Zoom Participant source properties](images/corevideo-source-properties.svg)
+![CoreVideo Participant source properties](images/corevideo-source-properties.svg)
 
-Each Zoom Participant source can be configured independently for fixed
+Each CoreVideo Participant source can be configured independently for fixed
 participants, active speaker, spotlight slot, screen share, isolated audio,
 audience audio, resolution, video-loss behavior, and hardware conversion.
 
 ## Joining Meetings
 
 1. Open OBS.
-2. Open **Tools > Zoom Control**.
-3. Enter a Zoom meeting ID or full Zoom join URL.
-4. Enter a display name.
-5. Use **Auto Zoom sign-in** for the published broker-backed flow.
-6. Click **Join**.
-7. Use the visible Zoom Meeting SDK window for waiting-room admission, self
-   video/audio, and normal meeting controls.
-8. Click **Start Engine** after joining to request raw media from Zoom.
+2. Sign in once from **Tools > Zoom Plugin Settings** with **Sign in with
+   Zoom**. There is no sign-in button on the Zoom Control dock.
+3. Open **Tools > Zoom Control**.
+4. Enter a Zoom meeting ID or full Zoom join URL, a passcode if the meeting has
+   one, and a display name.
+5. Leave the join-token dropdown on **Zoom sign-in**. `User ZAK` and `App
+   privilege token` are for tokens Zoom support has issued you specifically; the
+   token field stays disabled and reads "Automatic from Zoom sign-in" otherwise.
+6. Tick **Join as Webinar / Zoom Events** for a webinar - the SDK uses a
+   different entry point for those.
+7. Click **Join**.
+8. Use the visible Zoom Meeting SDK window for waiting-room admission, self
+   video/audio, and normal meeting controls. CoreVideo waits out a waiting room
+   rather than giving up on it (v0.1.44); the two-minute join watchdog holds its
+   window open for as long as the wait lasts, and is armed by this **Join**
+   button only - a join issued over the control API is not watched.
+9. Click **Start Engine** after joining to request raw media from Zoom.
 
-For external-account meetings, configure OAuth in **Tools > Zoom Plugin
-Settings**. Published builds use the embedded CoreVideo broker URL: the browser
-sign-in uses Zoom Public Client OAuth + PKCE, CoreVideo fetches the signed-in
-user's ZAK, and the helper authenticates the Meeting SDK with the embedded
-Marketplace Public Client ID as `AuthContext.publicAppKey`. End users do not
-enter client IDs or secrets.
+Published builds use the embedded CoreVideo broker: the browser sign-in uses
+Zoom Public Client OAuth + PKCE against `https://corevideo.iamfatness.us/oauth/start`,
+CoreVideo fetches the signed-in user's ZAK, and the helper authenticates the
+Meeting SDK with the embedded Marketplace Public Client ID as
+`AuthContext.publicAppKey`. End users do not enter client IDs or secrets. The
+site itself is `corevideo.io`; both names route to the same worker, and the
+iamfatness host is the one compiled into shipped builds.
 
 ## Source Assignment
 
-Add one or more **Zoom Participant** sources in OBS. Each source can follow a
+Add one or more **CoreVideo Participant** sources in OBS. Each source can follow a
 different assignment mode:
 
 | Mode | Behavior | Common Use |
@@ -310,17 +347,234 @@ directed, candidate, or manual speaker changes.
 
 ## Audio Routing
 
-CoreVideo supports three audio modes for participant outputs:
+CoreVideo has **two independent audio paths**, and knowing which one you are on
+decides what guarantees you get. No code connects them.
+
+**The dedicated path** is the audio-only OBS sources: **CoreVideo Participant
+Audio**, **CoreVideo Active Speaker Audio**, and the legacy **CoreVideo Audience
+Audio**. These drain the engine's 8-slot shared-memory ring in order, derive
+timestamps from a running sample count rather than from arrival, count and report
+anything they lose (`list_audio_sources` -> `overrun_slots`, which should stay at
+`0`), and honour the global audio delay trim. **Route these to program for
+anything that matters.**
+
+**The embedded path** is the audio track a CoreVideo video source publishes
+alongside its picture, configured from that source's own properties. It reads the
+newest buffer only, is stamped at arrival, and has no loss accounting. It is
+convenient, not lossless.
+
+Audio modes for a video source's embedded track:
 
 | Routing | Behavior |
 |---|---|
 | Mixed | Full meeting mix |
-| Isolated | Only the assigned participant's one-way audio |
+| Isolated | Only the assigned participant's one-way audio (**Isolate selected participant's audio (suppress mix)**) |
 | Audience | Residual one-way audio for participants not assigned to isolated outputs |
 
-Use **Isolated** when you need the assigned participant only. Use **Audience**
-for a remaining-room or overflow mic channel after dedicated isolated sources
-have claimed named participants.
+Use **Isolated** when you need the assigned participant only. **Audience** is
+kept for existing shows - its OBS source is labelled `(legacy)` - as a
+remaining-room or overflow mic channel after dedicated isolated sources have
+claimed named participants.
+
+### Delay and the measured A/V offset
+
+Video is the slower path in any software production chain, so audio arrives at
+OBS ahead of its matching picture and needs delaying to line back up. There is
+one control per path, and each moves only its own:
+
+- **Tools > Zoom Plugin Settings > Audio > Audio delay (dedicated sources)** is a
+  single global trim, 0-500 ms, for every dedicated CoreVideo Audio source. It
+  takes effect on the next audio buffer, including on sources already running.
+- The Output Manager's per-row **Delay (embedded)** trims one video source's own
+  embedded track, and **A/V Offset (embedded)** is the measured number to trim it
+  against. The offset is `video_latency_us - audio_latency_us` measured from
+  engine capture to OBS publish: positive means audio is early by that many
+  milliseconds, which is what to dial into Delay. It reads `-` until both
+  latencies have actually been measured.
+
+Delay can only ever push audio later; it can never advance it. Trim off air -
+lowering a delay pushes the timestamp backward once and briefly glitches the
+affected source.
+
+The same field is settable over TCP. Omit it entirely on unrelated calls, such as
+a plain reassignment, or it resets to 0:
+
+```json
+{"cmd":"assign_output","source":"CoreVideo Participant 1","participant_id":123456,"audio_delay_ms":80}
+```
+
+### Silence is a Zoom property, not a dropout
+
+Zoom only calls audio back for a participant who is currently making sound, so a
+silent stretch produces no buffers at all rather than buffers of silence. Two
+consequences CoreVideo handles and one it cannot: the master clock resyncs rather
+than letting a quiet participant walk steadily into the past; the first buffer
+after a run of true digital silence is ramped in over a few milliseconds so the
+resumption does not click; and speech the far end never sent stays missing.
+
+## Talkback (Intercom)
+
+**Newer than v0.1.44.** The Talkback dock is on `main` and ships in the next
+release; it is not in the v0.1.44 installer.
+
+Talkback is private director-to-talent audio carried over Zoom's own talkback
+channels - the operator can talk to one person, or to everyone, without the
+meeting or the program mix hearing it. Open it from **Tools > Zoom Talkback**,
+or as the **Zoom Talkback** dock.
+
+The dock is modelled on a Clear-Com/RTS intercom panel rather than on a list of
+settings: one grid, **All talent** across the top, then one compact cell per
+person. A cell is the talk key and the status display at the same time.
+
+### Assigning channels first
+
+Zoom channels are **created at assignment time, never at key time**. A key press
+only looks its target up in the standing channel set and starts sending, because
+creating a channel on the press costs a create round trip plus an invite round
+trip - measured live as the director's first syllable being discarded on every
+press.
+
+1. Press **Edit talent**. The grid is replaced by a tick-box list of the roster,
+   so exactly one list of people is on screen at a time.
+2. Tick everyone you may need to talk to.
+3. Press **Assign channels (N)**, or **Clear all channels** when nothing is
+   ticked.
+4. Press **Done** and read the plan report.
+
+Zoom allows **16 channels and 10 people per channel**. The plan report says how
+many channels are in use, who has a private channel, who has no private channel
+and must be reached through All talent, and who is on no channel at all and
+therefore hears nothing. Anyone the budget cannot cover is named rather than
+silently dropped.
+
+Assignment is not instant. Zoom rate-limits channel and membership calls -
+undocumented, and refused with `SDKERR_TOO_FREQUENT_CALL` - so CoreVideo paces
+every create and every invite at one call per 600 ms. A large talent list can
+take around twenty seconds to fully provision and confirm. That cost is paid once
+at assignment and never at key time.
+
+Talent are stored **by display name**, never by Zoom user ID: IDs are
+meeting-scoped, so someone who drops and rejoins gets a new one. CoreVideo
+re-resolves membership from the roster with no operator action.
+
+### Keying
+
+- Choose the OBS audio source you talk through in the dock's source combo. No key
+  is pressable until you do. Use a dedicated source with every program track
+  unchecked in Advanced Audio Properties.
+- The line under the combo says whether that source is going out on a program
+  track - `Off program (safe)`, or `On air via track N. The audience will hear
+  this.`
+- Hold a cell to talk. Tick **Latch** to make one press open the key and the next
+  close it. Whether a press closes an open key is decided from the mode it was
+  opened with, so changing Latch mid-key cannot strand it.
+- **Only one key is open at a time, anywhere** - including a key opened by the
+  control API or Companion, which the dock shows but will not close.
+- A short tone confirms open and close, on the engine's confirmed live edge
+  rather than on the button press.
+- The banner at the top is the authority on whether you are audible. It reads
+  `Off air`, `Keying <target>`, `ON AIR: <target>`, `Key refused: <target>`, or
+  `ON AIR - BOT MUTED: <target>`.
+
+### What a cell says
+
+| Cell state | Means |
+|---|---|
+| `ready` | They have a channel and are in it. |
+| `ON AIR` | The key is open and the engine has confirmed it. |
+| `assigning...` | The channel ladder is still provisioning. Keys are refused, never half-honoured. |
+| `no channel` | The budget could not cover them. Assign channels again with fewer people. |
+| `not in channel` | They have a channel but are not in it - most often a different breakout room. |
+| `no talkback` | Their Zoom client reported no talkback support, or nothing reaches them. |
+| `some missed` | On the All talent cell: the plan is short, so this key does not reach everybody. |
+
+### Three delivery rules that are silent in the failure direction
+
+None of these is documented by Zoom. Each was found live, and each fails quietly.
+
+1. **Talkback delivers only while CoreVideo's own meeting audio is open.** Muted,
+   `SendAudioDataToChannel` returns success, members are confirmed, and everyone
+   hears silence. CoreVideo unmutes itself at key time and re-asserts every two
+   seconds in case a host re-mutes it. If Zoom refuses the unmute the key is
+   still allowed - the channels are real and a host can still unmute - but the
+   banner reads **ON AIR - BOT MUTED** and drops the member tally, because "3 of
+   3 present" beside "nobody can hear you" is the instrument that made this
+   invisible in the first place.
+2. **Talkback reaches only the breakout room the engine is in.** A talent in
+   another room shows `not in channel` and hears nothing, no matter how healthy
+   the channel looks.
+3. **Sends are mono.** The SDK accepts stereo and silently delivers nothing, so
+   CoreVideo downmixes at the boundary. Only the sample rates the SDK documents
+   are accepted; anything else is refused loudly rather than resampled.
+
+Channel membership is acoustically neutral until a key is pressed. Zoom appears
+to create channels already ducked, so CoreVideo sets each channel's background
+volume to unity at creation, before any invite, and ducks to 30% only while a key
+is live.
+
+### Talkback over the control API
+
+The dock and the TCP control API are the only keying surfaces today - there are
+no OSC addresses, no Companion actions, and no OBS hotkey for talkback yet.
+
+`talkback_nominate` and `talkback_key` are fire-and-acknowledge: the response
+only confirms the trigger was accepted. The plan outcome arrives asynchronously
+as `"cmd":"talkback_nominate"` lines in the OBS log, and is polled through
+`talkback_status`.
+
+```json
+{"cmd":"talkback_nominate","nominees":["Alex Rivera","Sarah Muller"]}
+```
+
+```json
+{"cmd":"talkback_key","state":"on","target":"Alex Rivera","source":"Director Mic","mode":"push_to_talk"}
+```
+
+```json
+{"cmd":"talkback_key","state":"off"}
+```
+
+`target` is `"all"` or a nominee's display name. `mode` is `push_to_talk`
+(default) or `latch`. A key opened this way must be renewed with
+`{"cmd":"talkback_renew"}` - a surface whose release can be lost in transit has
+to prove it is still there. `{"state":"off"}` always succeeds.
+
+```json
+{"cmd":"talkback_status"}
+```
+
+The reply carries the live key state and a `nomination` object holding the
+**confirmed** plan - who has a private channel, who is uncovered, who is
+unreachable - plus `last_attempt_ok` and `last_attempt_reason`, which describe the
+most recent attempt separately and can disagree with the confirmed plan without
+corrupting it.
+
+`{"cmd":"talkback_probe","participant":"<display name>"}` is a diagnostic, also
+reachable from the collapsed **Diagnostic: talkback probe** section at the bottom
+of the dock. It opens a channel, invites that one participant, sends a
+three-second 440 Hz tone **that they will hear**, ducks their meeting audio for
+its duration, and destroys the channel. It requires host or co-host; a plain
+participant is refused with `SDKERR_NO_PERMISSION`.
+
+## Companion / Stream Deck
+
+`companion/companion-module-corevideo-obs` is a Bitfocus Companion module
+speaking the same TCP control API. It requires **Companion v5 or later** -
+earlier builds cap the module API at 1.12 and cannot load it at all.
+
+Actions are `zoom_join`, `zoom_leave`, `zoom_assign`, `zoom_assign_spotlight`,
+`zoom_assign_screen_share`, and `zoom_cancel_recovery`. Both the output and the
+participant are dropdowns on `zoom_assign`, populated from the module's own live
+state, and the same output picker is on the spotlight and screen-share actions.
+Participants are offered and stored **by name**,
+because Zoom user IDs are meeting-scoped: a button holding a raw ID points at
+nobody after a rejoin, and at the wrong face once IDs are recycled. The ID is
+resolved from the name against the live roster at press time; a name not in the
+meeting resolves to nobody and logs a warning rather than guessing. Raw numeric
+IDs still work, and buttons built before this change still work through the
+legacy `participant_id` option.
+
+There are no Companion actions for talkback yet.
 
 ## Auto ISO Recording
 
@@ -395,6 +649,30 @@ Output files are written as:
 - `*.mp4` for encoded I420 video through FFmpeg using the selected H.264
   encoder
 - `*.wav` for matching PCM audio
+- `*.ffmpeg.log` beside them, holding FFmpeg's own account of the session. Read
+  this first when a file is missing or truncated.
+
+### Timing
+
+Both files are paced to real elapsed time against the same clock, so each is
+individually accurate and the two stay in sync with each other.
+
+That is not free, and it is worth knowing why. Raw video carries no per-frame
+timestamps, and Zoom's per-source delivery fluctuates between roughly 10 and
+60 fps with conditions outside CoreVideo's control - so frames are paced to a
+fixed cadence before they reach FFmpeg, duplicating the held frame to backfill a
+stall and dropping excess from a burst. Audio has the mirror-image problem for a
+different reason: Zoom only calls audio back for someone currently making sound,
+so silence is backfilled across every gap or the WAV shrinks by the total silent
+duration. Both were wrong before v0.1.42/v0.1.43 - a source averaging 15 fps
+recorded under a declared 30 fps finished in about half the real duration, and an
+over-eager first gap-fill briefly doubled every WAV. If you see either symptom,
+check your version first.
+
+The hardware encoder fallback chain is NVENC -> QSV -> AMF -> libx264, and it
+walks the whole chain: a source demoted off NVENC on a machine with no working
+QSV or AMF runtime now reaches libx264, the tier with no hardware dependency to
+fail on.
 
 When `record_program` is true, CoreVideo also starts the normal OBS program
 recording and stops it when ISO recording stops, but only if CoreVideo started
@@ -443,13 +721,13 @@ Quality retries are skipped when a feed is already observed at 1080p.
 Assign a source to a fixed participant with isolated mono audio:
 
 ```json
-{"cmd":"assign_output_ex","source":"Zoom Participant 1","mode":"participant","participant_id":123456,"isolate_audio":true,"audio_channels":"mono","video_resolution":"1080p"}
+{"cmd":"assign_output_ex","source":"CoreVideo Participant 1","mode":"participant","participant_id":123456,"isolate_audio":true,"audio_channels":"mono","video_resolution":"1080p"}
 ```
 
 Assign a source to active speaker:
 
 ```json
-{"cmd":"assign_output_ex","source":"Zoom Participant 2","mode":"active_speaker","audio_channels":"mono","video_resolution":"1080p"}
+{"cmd":"assign_output_ex","source":"CoreVideo Participant 2","mode":"active_speaker","audio_channels":"mono","video_resolution":"1080p"}
 ```
 
 Inspect and control the Active Speaker Director:
@@ -473,7 +751,7 @@ Inspect and control the Active Speaker Director:
 Assign a source to spotlight slot 1:
 
 ```json
-{"cmd":"assign_output_ex","source":"Zoom Participant 3","mode":"spotlight","spotlight_slot":1,"audio_channels":"mono","video_resolution":"1080p"}
+{"cmd":"assign_output_ex","source":"CoreVideo Participant 3","mode":"spotlight","spotlight_slot":1,"audio_channels":"mono","video_resolution":"1080p"}
 ```
 
 ## OSC Control Examples
@@ -528,19 +806,19 @@ hold remaining, two exclusion IDs, and status text such as `holding`,
 Assign a source:
 
 ```text
-/zoom/output/assign_ex "Zoom Participant 1" "participant" 123456 1
+/zoom/output/assign_ex "CoreVideo Participant 1" "participant" 123456 1
 ```
 
 Assign active speaker:
 
 ```text
-/zoom/assign_output/active_speaker "Zoom Participant 1"
+/zoom/assign_output/active_speaker "CoreVideo Participant 1"
 ```
 
 Set isolated audio:
 
 ```text
-/zoom/isolate_audio "Zoom Participant 1" 1
+/zoom/isolate_audio "CoreVideo Participant 1" 1
 ```
 
 Start and stop ISO recording:
@@ -557,6 +835,13 @@ Start and stop ISO recording:
 |---|---|
 | Color bars only | Confirm the meeting is joined, raw media is started, and the source has a participant/role assignment. |
 | No isolated audio | Confirm the source is assigned to a real participant and `isolate_audio` is true. |
-| ISO recording does not start | Confirm `ffmpeg` is on PATH or provide `ffmpeg_path`. |
+| ISO recording does not start | Confirm `ffmpeg` is on PATH or provide `ffmpeg_path`; read the session's `.ffmpeg.log`. |
 | External meeting rejected | Confirm the Meeting SDK app/client ID is approved or published for external meeting joins. |
-| Plugin cannot launch engine | Confirm `ZoomObsEngine.exe` and Zoom SDK runtime DLLs are installed under `obs-plugins/64bit/zoom-runtime`. |
+| Plugin cannot launch engine | Confirm `ZoomObsEngine.exe` and the Zoom SDK runtime DLLs are installed under `obs-plugins/64bit/zoom-runtime`. The plugin looks there first, then beside its own DLL. A DLL-only copy is the most common self-inflicted failure - install both binaries as a pair. |
+| Every source black after a breakout room | Zoom revokes the raw-recording privilege on breakout entry without disconnecting you. Re-requested automatically since v0.1.40; on older builds, stop and start raw media. |
+| Audio breaks up on every source at once | Look for an orphaned `ZoomObsEngine.exe` from a previous OBS session ghost-writing the same shared memory. Swept automatically at launch since v0.1.41. |
+| Talkback key says live but nobody hears | Read the banner. **ON AIR - BOT MUTED** means Zoom refused the unmute; a cell reading `not in channel` usually means a different breakout room. |
+| Join sits on "joining" forever | Either a waiting room (normal - CoreVideo waits) or your own account already hosting elsewhere, which now fails loudly with `account_busy_elsewhere` / `909001`. |
+
+Full troubleshooting, log collection, and the support-bundle walkthrough are on
+the [Support page](https://corevideo.io/support/).

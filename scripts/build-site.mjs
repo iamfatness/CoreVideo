@@ -100,7 +100,7 @@ const pages = [
     source: "Terms-of-Use.md",
     title: "Terms of Use",
     description:
-      "Terms of Use for the CoreVideo OBS Studio plugin and CoreVideo Pro, covering licensing, acceptable use, and Zoom Marketplace requirements.",
+      "Terms of Use for the CoreVideo OBS Studio plugin: licensing, Zoom Meeting SDK limits, participant consent, talkback, and acceptable use.",
     output: "terms/index.html",
     aliases: ["terms-of-use/index.html", "Terms-of-Use/index.html"],
   },

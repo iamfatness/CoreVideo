@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Terms of Use | CoreVideo</title>
-  <meta name="description" content="Terms of Use for the CoreVideo OBS Studio plugin and CoreVideo Pro, covering licensing, acceptable use, and Zoom Marketplace requirements.">
+  <meta name="description" content="Terms of Use for the CoreVideo OBS Studio plugin: licensing, Zoom Meeting SDK limits, participant consent, talkback, and acceptable use.">
   <meta name="theme-color" content="#0a0b0c">
   <link rel="icon" href="/favicon.svg">
   <link rel="preload" href="/assets/fonts/SpaceGrotesk-var.woff2" as="font" type="font/woff2" crossorigin>
@@ -13,7 +13,7 @@
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="CoreVideo">
   <meta property="og:title" content="Terms of Use | CoreVideo">
-  <meta property="og:description" content="Terms of Use for the CoreVideo OBS Studio plugin and CoreVideo Pro, covering licensing, acceptable use, and Zoom Marketplace requirements.">
+  <meta property="og:description" content="Terms of Use for the CoreVideo OBS Studio plugin: licensing, Zoom Meeting SDK limits, participant consent, talkback, and acceptable use.">
   <meta property="og:image" content="https://corevideo.io/assets/corevideo-share.jpg">
   <meta property="og:image:alt" content="CoreVideo - Zoom participant video and audio as native OBS Studio sources">
   <meta property="og:image:width" content="1200">
@@ -22,7 +22,7 @@
   <meta property="og:url" content="https://corevideo.io/terms/">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Terms of Use | CoreVideo">
-  <meta name="twitter:description" content="Terms of Use for the CoreVideo OBS Studio plugin and CoreVideo Pro, covering licensing, acceptable use, and Zoom Marketplace requirements.">
+  <meta name="twitter:description" content="Terms of Use for the CoreVideo OBS Studio plugin: licensing, Zoom Meeting SDK limits, participant consent, talkback, and acceptable use.">
   <meta name="twitter:image" content="https://corevideo.io/assets/corevideo-share.jpg">
   <meta name="twitter:image:alt" content="CoreVideo - Zoom participant video and audio as native OBS Studio sources">
   <link rel="stylesheet" href="/assets/site.css">
@@ -34,12 +34,12 @@
   </header>
   <main class="content">
     <h1>Terms of Use</h1>
-<p><em>Last updated: May 2026</em></p>
+<p><em>Last updated: September 2026</em></p>
 <h2>1. Acceptance</h2>
 <p>By installing, configuring, or using CoreVideo (&quot;the Plugin&quot;), you agree to these Terms of Use and to all applicable third-party terms referenced herein. If you do not agree, do not use the Plugin.</p>
 <hr>
 <h2>2. License</h2>
-<p>CoreVideo is released under the terms of its open-source license (see <a href="https://github.com/iamfatness/CoreVideo/blob/main/LICENSE">LICENSE</a> in the repository). You are free to use, modify, and redistribute the Plugin in accordance with that license.</p>
+<p>CoreVideo is released under the <strong>MIT License</strong> (see <a href="https://github.com/iamfatness/CoreVideo/blob/main/LICENSE">LICENSE</a> in the repository). You are free to use, modify, and redistribute the Plugin in accordance with that license.</p>
 <hr>
 <h2>3. Zoom Meeting SDK Raw Data and Account Limits</h2>
 <p>CoreVideo uses the Zoom Meeting SDK's <strong>raw data APIs</strong> to capture uncompressed video and audio. Raw data access is available through Meeting SDK apps, but negotiated quality, bandwidth, meeting duration, and concurrent stream count are governed by the signed-in Zoom account, the meeting configuration, and app/developer entitlements.</p>
@@ -55,22 +55,27 @@
 <h2>5. Meeting Participant Consent</h2>
 <p>You are solely responsible for ensuring that all meeting participants have been informed of, and have consented to, any recording or live capture of their video, audio, or screen-share content. Requirements vary by jurisdiction. Consult legal counsel if unsure.</p>
 <hr>
-<h2>6. Permitted Use</h2>
+<h2>6. Talkback and Outbound Audio</h2>
+<p>CoreVideo's talkback feature transmits audio <strong>into</strong> the meeting. When you hold or latch a talkback key, the audio source you selected is sent over the Zoom Meeting SDK's talkback channels to the participants you selected, and those participants hear it. Talkback also requires CoreVideo's own meeting microphone to be open, and CoreVideo opens it for the duration of a key.</p>
+<p>You are responsible for what you transmit and to whom. In particular:</p>
+<ul><li>Do not transmit audio you do not have the right to distribute to the participants receiving it.</li><li>The talkback diagnostic probe sends an audible test tone to a selected participant and briefly lowers their meeting audio. Run it only on someone who is expecting it.</li><li>Talkback is a production tool, not a guarantee of privacy. Delivery, retention, and any recording of channel audio are governed by Zoom and by the meeting's own configuration, not by CoreVideo.</li></ul>
+<hr>
+<h2>7. Permitted Use</h2>
 <p>The Plugin may be used for:</p>
 <ul><li>Professional broadcast, live production, and event streaming</li><li>Conference and event recording (with appropriate consent)</li><li>Internal corporate communications and hybrid events</li><li>Educational and research purposes</li></ul>
 <p>The Plugin may <strong>not</strong> be used for:</p>
 <ul><li>Unauthorized recording or surveillance of meeting participants</li><li>Capturing content in violation of applicable wiretapping, recording, or privacy laws</li><li>Any purpose that violates Zoom's terms of service or the Zoom Marketplace Developer Agreement</li></ul>
 <hr>
-<h2>7. No Warranty</h2>
+<h2>8. No Warranty</h2>
 <p>The Plugin is provided <strong>&quot;as is&quot;</strong>, without warranty of any kind, express or implied, including but not limited to warranties of merchantability, fitness for a particular purpose, or non-infringement. The authors make no guarantee that the Plugin will operate without interruption or error.</p>
 <hr>
-<h2>8. Limitation of Liability</h2>
+<h2>9. Limitation of Liability</h2>
 <p>To the maximum extent permitted by applicable law, the authors of CoreVideo shall not be liable for any indirect, incidental, special, consequential, or punitive damages arising from your use of or inability to use the Plugin, even if advised of the possibility of such damages.</p>
 <hr>
-<h2>9. Changes</h2>
+<h2>10. Changes</h2>
 <p>These terms may be updated at any time. Continued use of the Plugin after changes are posted constitutes acceptance of the revised terms. Material changes will be noted in the <a href="https://github.com/iamfatness/CoreVideo/releases">release notes</a>.</p>
 <hr>
-<h2>10. Contact</h2>
+<h2>11. Contact</h2>
 <p>Questions about these terms may be directed to <a href="https://github.com/iamfatness/CoreVideo/issues">github.com/iamfatness/CoreVideo/issues</a>.</p>
   </main>
   <footer class="site-footer">

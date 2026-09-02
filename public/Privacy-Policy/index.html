@@ -34,7 +34,7 @@
   </header>
   <main class="content">
     <h1>Privacy Policy</h1>
-<p><em>Last updated: May 2026</em></p>
+<p><em>Last updated: September 2026</em></p>
 <h2>Overview</h2>
 <p>CoreVideo is an open-source OBS Studio plugin. This privacy policy explains what data the plugin processes, where it goes, and what is stored.</p>
 <hr>
@@ -45,10 +45,17 @@
 <h3>Participant Roster</h3>
 <p>CoreVideo receives participant metadata from the Zoom SDK (display names, user IDs, mute/video/talking state, host/co-host status, spotlight position). This information is:</p>
 <ul><li>Held in memory only for the duration of the meeting session</li><li>Displayed within OBS for source assignment purposes</li><li>Not transmitted outside the local machine by CoreVideo</li></ul>
+<h3>Talkback (Intercom) Audio</h3>
+<p>CoreVideo's talkback feature is the one path where audio travels <strong>outward</strong>. When the operator holds or latches a talkback key, CoreVideo reads the OBS audio source the operator selected and sends it to Zoom over the Zoom Meeting SDK's own talkback channels, so that the selected participants hear it. This audio goes to Zoom and to no one else; it is not sent to any CoreVideo server or third party, and CoreVideo does not record it.</p>
+<p>Two properties are worth stating plainly because they are not obvious:</p>
+<ul><li>Talkback requires CoreVideo's own meeting microphone to be unmuted, so CoreVideo unmutes itself for the duration of a key and restores the previous state on release if it was the one that opened it.</li><li>The talkback diagnostic probe sends an audible three-second test tone to the selected participant and briefly lowers their meeting audio. Only run it on someone who is expecting it.</li></ul>
+<h3>Recordings You Make</h3>
+<p>CoreVideo's ISO recorder writes MP4 video and WAV audio files, plus an FFmpeg log per session, to a folder the operator chooses. Diagnostic support bundles are written to the OBS plugin configuration directory. All of these stay on the operator's machine; CoreVideo never uploads them. A support bundle redacts credentials but does contain meeting and participant display names, participant IDs, and recording file paths - review one before sharing it.</p>
+<p>The Zoom Meeting SDK is initialised with its own logging and crash dumps enabled, which it writes locally under its own control. CoreVideo does not set or override that location and does not collect those files.</p>
 <h3>Credentials and Tokens</h3>
 <p>Published CoreVideo builds use Zoom Public Client OAuth + PKCE through the CoreVideo broker. End users do not enter Zoom app client secrets.</p>
 <p>The following local settings may be saved by the plugin:</p>
-<table><thead><tr><th>Credential / setting</th><th>Storage location</th><th>Purpose</th></tr></thead><tbody><tr><td>Zoom OAuth access/refresh tokens</td><td>OBS plugin config directory</td><td>Zoom sign-in, token refresh, and ZAK requests</td></tr><tr><td>Control server token</td><td>OBS plugin config directory</td><td>Authenticating TCP/OSC API clients</td></tr><tr><td>Control server ports</td><td>OBS plugin config directory</td><td>TCP JSON and UDP OSC port configuration</td></tr><tr><td>Output profiles</td><td>OBS plugin config directory</td><td>Optional participant-to-source mappings</td></tr></tbody></table>
+<table><thead><tr><th>Credential / setting</th><th>Storage location</th><th>Purpose</th></tr></thead><tbody><tr><td>Zoom OAuth access/refresh tokens</td><td>OBS global configuration, <code>[ZoomPlugin]</code> section</td><td>Zoom sign-in, token refresh, and ZAK requests</td></tr><tr><td>Control server token</td><td>OBS global configuration, <code>[ZoomPlugin]</code> section</td><td>Authenticating TCP API clients</td></tr><tr><td>Control server ports</td><td>OBS global configuration, <code>[ZoomPlugin]</code> section</td><td>TCP JSON and UDP OSC port configuration</td></tr><tr><td>Talkback preferences</td><td>OBS global configuration, <code>[ZoomPlugin]</code> section</td><td>The chosen talkback audio source name and latch setting</td></tr><tr><td>Output profiles</td><td>OBS plugin config directory</td><td>Optional participant-to-source mappings</td></tr><tr><td>Support bundles</td><td>OBS plugin config directory</td><td>Local troubleshooting exports, written only when the operator asks</td></tr></tbody></table>
 <p>On Windows, OAuth tokens are DPAPI-protected before storage. Meeting SDK client secrets are not stored in the plugin or broker for the public-client production path.</p>
 <hr>
 <h2>Third-Party Services</h2>
@@ -57,12 +64,14 @@
 <ul><li><a href="https://explore.zoom.us/en/privacy/">Zoom Privacy Policy</a></li><li><a href="https://marketplace.zoom.us/docs/api-reference/developer-agreement">Zoom Marketplace Developer Agreement</a></li></ul>
 <h3>CoreVideo OAuth Broker</h3>
 <p>The broker at <code>corevideo.iamfatness.us</code> is used only for Zoom OAuth token exchange and refresh. It does not receive or process meeting audio, video, screen share, or participant media.</p>
+<h3>GitHub (Update Check)</h3>
+<p>Once per OBS session, CoreVideo makes a single anonymous HTTPS GET request to the public GitHub Releases API (<code>api.github.com/repos/iamfatness/CoreVideo/releases/latest</code>) to see whether a newer release is available. The request carries no meeting data, credentials, telemetry, or CoreVideo-specific identifiers - only what GitHub already logs for any anonymous HTTP request, such as an IP address, governed by GitHub's own privacy statement. The check never blocks startup, never downloads or installs anything, and fails silently when offline. It can be turned off in <strong>Tools -&gt; Zoom Plugin Settings -&gt; Check for updates on startup</strong>, which is enabled by default.</p>
 <h3>Cloudflare and GitHub (Documentation)</h3>
 <p>The documentation site at <code>corevideo.io</code> is served through Cloudflare and sourced from the public CoreVideo GitHub repository. Cloudflare's and GitHub's privacy policies apply to visits to that site:</p>
 <ul><li><a href="https://www.cloudflare.com/privacypolicy/">Cloudflare Privacy Policy</a></li><li><a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">GitHub Privacy Statement</a></li></ul>
 <hr>
 <h2>Data Retention</h2>
-<ul><li><strong>No meeting media is retained by CoreVideo</strong> beyond the local OBS session unless the operator records or streams through OBS.</li><li>OAuth tokens persist until the user signs out, revokes access, or removes the plugin configuration.</li><li>Credentials saved in the OBS config directory persist until deleted via the Settings dialog or plugin removal.</li><li>OBS itself may retain scenes, sources, and recordings per its own configuration - outside the scope of this policy.</li></ul>
+<ul><li><strong>No meeting media is retained by CoreVideo</strong> beyond the local OBS session unless the operator records or streams through OBS, or uses CoreVideo's own ISO recorder.</li><li>ISO recordings, their FFmpeg logs, and support bundles persist on disk until the operator deletes them. CoreVideo never removes them and never uploads them.</li><li>OAuth tokens persist until the user signs out, revokes access, or removes the plugin configuration.</li><li>Credentials saved in the OBS config directory persist until deleted via the Settings dialog or plugin removal.</li><li>OBS itself may retain scenes, sources, and recordings per its own configuration - outside the scope of this policy.</li></ul>
 <hr>
 <h2>Children's Privacy</h2>
 <p>CoreVideo is a professional broadcast tool not directed at children. No data from minors is knowingly collected.</p>

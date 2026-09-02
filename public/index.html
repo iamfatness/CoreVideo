@@ -36,7 +36,7 @@
       "alternateName": "CoreVideo OBS Plugin",
       "applicationCategory": "MultimediaApplication",
       "applicationSubCategory": "OBS Studio plugin",
-      "operatingSystem": "Windows 10, Windows 11, macOS (Apple Silicon beta)",
+      "operatingSystem": "Windows 10, Windows 11",
       "description": "OBS Studio plugin that captures Zoom meeting participants as native OBS sources - per-participant video and audio, screen share, interpretation audio, and ISO recording - using the Zoom Meeting SDK rather than NDI, a virtual camera, or screen capture.",
       "url": "https://corevideo.io/",
       "downloadUrl": "https://corevideo.io/download/",
@@ -51,7 +51,7 @@
         "priceCurrency": "USD",
         "availability": "https://schema.org/InStock"
       },
-      "softwareVersion": "0.1.41"
+      "softwareVersion": "0.1.44"
     },
     {
       "@type": "WebSite",
@@ -65,7 +65,7 @@
 <body class="home-page">
   <header class="site-header">
     <a class="brand" href="/"><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
-    <nav><a href="/" aria-current="page">Home</a><a href="/pro/">CoreVideo Pro</a><a href="/pro/documentation/">Pro Docs</a><a href="/documentation/">Plugin Docs</a><a href="/core-plugin/">Core Plugin</a><a href="/download/">Download</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a></nav>
+    <nav><a href="/" aria-current="page">Home</a><a href="/pro/">CoreVideo Pro</a><a href="/zcomms/">ZComms</a><a href="/pro/documentation/">Pro Docs</a><a href="/documentation/">Plugin Docs</a><a href="/core-plugin/">Core Plugin</a><a href="/download/">Download</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a></nav>
   </header>
   <main class="content">
     <section class="hero">
@@ -80,7 +80,7 @@
     <h1>Bring Zoom participants into OBS as native sources.</h1>
     <p class="lede">CoreVideo joins the meeting through the Zoom Meeting SDK and hands OBS each participant's own video and audio as a real source &mdash; no NDI, no virtual camera, no screen capture, and no second machine. Follow the active speaker, pin spotlight slots, take the screen share, and record every guest to an isolated file.</p>
     <div class="hero-actions">
-      <a class="button primary" href="/download/">Download v0.1.41 for Windows</a>
+      <a class="button primary" href="/download/">Download v0.1.44 for Windows</a>
       <a class="button" href="/core-plugin/">How it works</a>
       <a class="button" href="https://github.com/iamfatness/CoreVideo">View source</a>
     </div>
@@ -91,19 +91,29 @@
   <div><strong>Active speaker &amp; spotlight</strong><span>Point a source at whoever is talking, at Zoom spotlight slot 1&hellip;N, or at a fixed guest with an automatic failover if they drop.</span></div>
   <div><strong>Screen share &amp; interpretation</strong><span>Subscribe to the live screen share, and pull existing Zoom interpretation audio channels in as dedicated sources.</span></div>
   <div><strong>ISO recording</strong><span>Record every assigned participant to their own muxed MP4 with matching PCM audio, alongside the main program recording.</span></div>
+  <div><strong>Active Speaker Director</strong><span>An automatic take with a hold time, a sensitivity threshold, an exclusion list, and a &ldquo;require video&rdquo; rule &mdash; so the cut follows the conversation without chattering.</span></div>
+  <div><strong>Output profiles</strong><span>The Output Manager saves and reloads a whole assignment set, so last week&rsquo;s routing comes back on the next show instead of being rebuilt by hand.</span></div>
+  <div><strong>Stream Deck &amp; Companion</strong><span>A Bitfocus Companion module (v5 or newer) picks the output and the participant <em>by name</em> from the live roster, so a button keeps working after somebody rejoins.</span></div>
+  <div><strong>Remote control</strong><span>A TCP and OSC control surface drives joins, assignments, and recording from whatever already runs your show.</span></div>
 </section>
 <figure class="doc-image">
   <img src="/assets/obs-multiview.webp" alt="OBS Studio multiview: preview and program above four scenes built from individual Zoom participant sources - the host alone, the host with a reader, the host with the active speaker, and the active speaker full frame" loading="lazy">
   <figcaption>Every guest arrives as their own OBS source, so scenes, transitions, and the multiview all work the way they already do &mdash; this is stock OBS, cutting between Zoom participants.</figcaption>
 </figure>
+<section>
+  <h2>Talkback, without leaving the meeting</h2>
+  <p>Every show that runs on Zoom eventually needs a way to speak to one person without speaking to the room. The Zoom Meeting SDK carries a private talkback path alongside the meeting floor &mdash; 16 channels, up to 10 people each, and members duck under your voice rather than being muted &mdash; and both products here are built on it.</p>
+  <p><a href="/zcomms/">ZComms</a> is the standalone answer: a full intercom desk with named talk keys, ALL CALL, latch, extern feeds from a multichannel interface, and breakout-aware routing. It ships today. Inside the OBS plugin, an intercom dock that puts the same keys next to your video routing is <strong>in development on <code>main</code> and is not part of any release yet</strong> &mdash; when it lands it will be in a tagged build and in these notes, not before.</p>
+</section>
 <section class="link-grid products" aria-label="CoreVideo products">
   <a href="/download/"><span class="tier">Free &middot; OBS plugin</span><strong>CoreVideo for OBS</strong><span>The plugin on this page: Zoom participant video, audio, screen share, interpretation, and ISO recording as native sources in the OBS you already run. MIT licensed.</span></a>
-  <a class="featured" href="/pro/"><span class="tier tier-premium">Premium &middot; Standalone app</span><strong>CoreVideo Pro</strong><span>Want the whole console instead of a plugin? Pro is a standalone studio: multi-scene production, participant management, AI auto-direct, recording, and multi-destination streaming.</span></a>
+  <a class="featured" href="/pro/"><span class="tier tier-premium">Premium &middot; Standalone app</span><strong>CoreVideo Pro</strong><span>Want the whole console instead of a plugin? Pro is the standalone studio being built around the same capture core: multi-scene production, participant management, recording, and streaming.</span></a>
+  <a href="/zcomms/"><span class="tier">Standalone &middot; Talkback</span><strong>ZComms</strong><span>The intercom on its own. Named talk keys into Zoom&rsquo;s private talkback channels, extern feeds from a multichannel interface, and honest key states. Windows.</span></a>
 </section>
 <section class="link-grid" aria-label="CoreVideo resources">
   <a href="/documentation/"><strong>Plugin Docs</strong><span>Architecture, setup, control APIs, and operating notes.</span></a>
-  <a href="/documentation/#mac-beta"><strong>macOS Beta (Apple Silicon)</strong><span>Install the CoreVideo OBS plugin beta on Apple Silicon Macs.</span></a>
   <a href="/core-plugin/"><strong>Core Plugin Guide</strong><span>OBS workflows, participant routing, isolated audio, and ISO recording.</span></a>
+  <a href="/zcomms/"><strong>ZComms</strong><span>Standalone talkback and IFB station for Zoom productions.</span></a>
   <a href="/pro/"><strong>CoreVideo Pro</strong><span>Standalone production app for live and recorded conversations.</span></a>
   <a href="/pro/documentation/"><strong>CoreVideo Pro Architecture</strong><span>Native media core, typed IPC, capture, AI direction, and outputs &mdash; with diagrams.</span></a>
   <a href="/terms/"><strong>Terms of Use</strong><span>Marketplace-ready usage terms and license requirements.</span></a>

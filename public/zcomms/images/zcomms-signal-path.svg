@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="470" viewBox="0 0 1120 470" role="img" aria-labelledby="zcsp-t zcsp-d">
+  <title id="zcsp-t">ZComms talkback signal path</title>
+  <desc id="zcsp-d">The operator microphone runs through input gain, a limiter, a ramped push-to-talk envelope, echo cancellation, and a sidetone tap, then is sent to one Zoom talkback channel that reaches only that channel's members. An extern feed - one channel or a stereo pair of a multichannel interface, downmixed to mono - can be latched into a channel alongside it. The meeting microphone is held open, because Zoom requires an open mic to deliver talkback, but is fed nothing, so the meeting floor hears nothing.</desc>
+  <defs>
+    <style>
+      .bg{fill:#0a0b0c}
+      .card{fill:#101315;stroke:rgba(255,255,255,.16);stroke-width:1.2}
+      .live{fill:#101315;stroke:#22c86e;stroke-width:1.6}
+      .field{fill:#0e1112;stroke:rgba(255,255,255,.12);stroke-width:1.2}
+      .t{font-family:'Space Grotesk',Segoe UI,Arial,sans-serif;fill:#e9edef;font-size:15px;font-weight:600}
+      .m{font-family:'IBM Plex Mono',Consolas,monospace;fill:#8b949b;font-size:12px}
+      .lbl{font-family:'IBM Plex Mono',Consolas,monospace;fill:#22c86e;font-size:11px;letter-spacing:.08em}
+      .dim{font-family:'IBM Plex Mono',Consolas,monospace;fill:#8b949b;font-size:11px;letter-spacing:.08em}
+      .flow{stroke:#22c86e;stroke-width:2;fill:none;marker-end:url(#zcsp-a)}
+      .flow-dim{stroke:#5c656b;stroke-width:2;fill:none;marker-end:url(#zcsp-b);stroke-dasharray:5 4}
+    </style>
+    <marker id="zcsp-a" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L8,3 z" fill="#22c86e"/></marker>
+    <marker id="zcsp-b" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L8,3 z" fill="#5c656b"/></marker>
+  </defs>
+  <rect class="bg" width="1120" height="470"/>
+
+  <rect class="card" x="28" y="52" width="176" height="96" rx="10"/>
+  <text class="t" x="48" y="86">Your mic</text>
+  <text class="m" x="48" y="110">operator position,</text>
+  <text class="m" x="48" y="128">headset recommended</text>
+
+  <rect class="card" x="252" y="34" width="252" height="132" rx="10"/>
+  <text class="lbl" x="272" y="60">CAPTURE CHAIN</text>
+  <text class="m" x="272" y="84">input gain</text>
+  <text class="m" x="272" y="104">look-ahead limiter</text>
+  <text class="m" x="272" y="124">ramped PTT envelope</text>
+  <text class="m" x="272" y="144">echo cancellation &#xB7; sidetone tap</text>
+
+  <rect class="live" x="552" y="34" width="216" height="132" rx="10"/>
+  <text class="lbl" x="572" y="60">TALKBACK CHANNEL</text>
+  <text class="t" x="572" y="88">One of 16</text>
+  <text class="m" x="572" y="112">up to 10 listeners</text>
+  <text class="m" x="572" y="132">addressed on its own path,</text>
+  <text class="m" x="572" y="150">not through the room</text>
+
+  <rect class="live" x="816" y="52" width="276" height="96" rx="10"/>
+  <text class="t" x="836" y="86">The panelist&#x2019;s ear</text>
+  <text class="m" x="836" y="110">stock Zoom desktop or mobile,</text>
+  <text class="m" x="836" y="128">nothing installed on their side</text>
+
+  <path class="flow" d="M204 100 L246 100"/>
+  <path class="flow" d="M504 100 L546 100"/>
+  <path class="flow" d="M768 100 L810 100"/>
+
+  <rect class="field" x="252" y="216" width="252" height="112" rx="10"/>
+  <text class="dim" x="272" y="242">EXTERN FEED</text>
+  <text class="m" x="272" y="266">one channel or a stereo pair</text>
+  <text class="m" x="272" y="286">of a multichannel interface,</text>
+  <text class="m" x="272" y="306">downmixed to mono, latched</text>
+  <path class="flow" d="M504 260 C540 260 546 200 558 172"/>
+
+  <rect class="field" x="28" y="366" width="740" height="76" rx="10"/>
+  <text class="dim" x="48" y="392">MEETING MIC</text>
+  <text class="m" x="48" y="416">held open, because Zoom delivers talkback only from an open mic &#x2014; and fed nothing,</text>
+  <text class="m" x="48" y="434">through the SDK&#x2019;s own external audio source. No driver, no loopback device.</text>
+  <rect class="field" x="816" y="366" width="276" height="76" rx="10"/>
+  <text class="dim" x="836" y="392">THE MEETING FLOOR</text>
+  <text class="m" x="836" y="416">hears nothing you key.</text>
+  <text class="m" x="836" y="434">Members duck, they do not mute.</text>
+  <path class="flow-dim" d="M768 404 L810 404"/>
+</svg>

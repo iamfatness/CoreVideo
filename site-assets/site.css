@@ -294,7 +294,8 @@ nav a[aria-current="page"] {
   gap: 12px;
   margin-top: 18px;
 }
-.link-grid.products { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+/* Three products now (plugin, Pro, ZComms), so the product row is a 3-up. */
+.link-grid.products { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .link-grid.products a { min-height: 184px; }
 .link-grid a,
 .link-grid > div {

@@ -988,7 +988,7 @@ writeText(
     {
       title: "CoreVideo Pro",
       description:
-        "CoreVideo Pro is a standalone Windows and macOS studio for live Zoom production - scenes, participant management, recording, streaming, and AI auto-direct. In development; not yet released.",
+        "A standalone Windows studio for live Zoom production: scenes, participant management, recording, streaming and AI auto-direct. In development, not yet released.",
     },
     proPageContent(),
     {
@@ -1028,7 +1028,7 @@ writeText(
       title: "ZComms",
       seoTitle: "ZComms - Zoom Talkback & Intercom Station for Live Production",
       description:
-        "ZComms is a standalone Windows talkback and IFB station for Zoom productions: named talk keys, 16 private talkback channels, extern feeds from a multichannel interface, and breakout-aware routing.",
+        "Standalone Windows talkback and IFB station for Zoom: named talk keys, 16 private channels, extern feeds from a multichannel interface, breakout-aware.",
     },
     zcommsPageContent(),
     {

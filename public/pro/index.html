@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CoreVideo Pro | CoreVideo</title>
-  <meta name="description" content="CoreVideo Pro: a standalone macOS and Windows studio for live Zoom production - scenes, participant management, recording, streaming, and AI auto-direct.">
+  <meta name="description" content="CoreVideo Pro is a standalone Windows and macOS studio for live Zoom production - scenes, participant management, recording, streaming, and AI auto-direct. In development; not yet released.">
   <meta name="theme-color" content="#0a0b0c">
   <link rel="icon" href="/favicon.svg">
   <link rel="preload" href="/assets/fonts/SpaceGrotesk-var.woff2" as="font" type="font/woff2" crossorigin>
@@ -13,7 +13,7 @@
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="CoreVideo">
   <meta property="og:title" content="CoreVideo Pro | CoreVideo">
-  <meta property="og:description" content="CoreVideo Pro: a standalone macOS and Windows studio for live Zoom production - scenes, participant management, recording, streaming, and AI auto-direct.">
+  <meta property="og:description" content="CoreVideo Pro is a standalone Windows and macOS studio for live Zoom production - scenes, participant management, recording, streaming, and AI auto-direct. In development; not yet released.">
   <meta property="og:image" content="https://corevideo.io/assets/corevideo-share.jpg">
   <meta property="og:image:alt" content="CoreVideo - Zoom participant video and audio as native OBS Studio sources">
   <meta property="og:image:width" content="1200">
@@ -22,7 +22,7 @@
   <meta property="og:url" content="https://corevideo.io/pro/">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="CoreVideo Pro | CoreVideo">
-  <meta name="twitter:description" content="CoreVideo Pro: a standalone macOS and Windows studio for live Zoom production - scenes, participant management, recording, streaming, and AI auto-direct.">
+  <meta name="twitter:description" content="CoreVideo Pro is a standalone Windows and macOS studio for live Zoom production - scenes, participant management, recording, streaming, and AI auto-direct. In development; not yet released.">
   <meta name="twitter:image" content="https://corevideo.io/assets/corevideo-share.jpg">
   <meta name="twitter:image:alt" content="CoreVideo - Zoom participant video and audio as native OBS Studio sources">
   <link rel="stylesheet" href="/assets/site.css">
@@ -30,7 +30,7 @@
 <body class="home-page">
   <header class="site-header">
     <a class="brand" href="/"><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
-    <nav><a href="/">Home</a><a href="/pro/" aria-current="page">CoreVideo Pro</a><a href="/pro/documentation/">Pro Docs</a><a href="/documentation/">Plugin Docs</a><a href="/core-plugin/">Core Plugin</a><a href="/download/">Download</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a></nav>
+    <nav><a href="/">Home</a><a href="/pro/" aria-current="page">CoreVideo Pro</a><a href="/zcomms/">ZComms</a><a href="/pro/documentation/">Pro Docs</a><a href="/documentation/">Plugin Docs</a><a href="/core-plugin/">Core Plugin</a><a href="/download/">Download</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a></nav>
   </header>
   <main class="content">
     <section class="hero">
@@ -41,12 +41,13 @@
     </div>
   </figure>
   <div class="hero-copy">
-    <p class="eyebrow">The complete CoreVideo production studio</p>
+    <p class="eyebrow">In development &middot; standalone studio</p>
     <h1>Produce polished live conversations from your Zoom calls.</h1>
-    <p class="lede">CoreVideo Pro is the premium, all-in-one studio for live Zoom production: everything the CoreVideo plugin captures, plus multi-scene production, participant management, recording and multi-destination streaming, and an AI auto-director &mdash; in one standalone app for producers who want a dedicated, ready-to-go console.</p>
+    <p class="lede">CoreVideo Pro is the premium, all-in-one studio being built for live Zoom production: everything the CoreVideo plugin captures, plus multi-scene production, participant management, recording and multi-destination streaming, and an AI auto-director &mdash; in one standalone app for producers who want a dedicated console rather than a plugin.</p>
+    <p class="lede"><strong>Pro is not released yet.</strong> There is no download and no price. This page and the architecture notes describe what is being built; the <a href="/download/">free OBS plugin</a> is the shipping product today, and <a href="/zcomms/">ZComms</a> is the shipping talkback desk.</p>
     <div class="hero-actions">
       <a class="button primary" href="/pro/documentation/">Read the architecture docs</a>
-      <a class="button" href="/core-plugin/">Compare with the OBS plugin</a>
+      <a class="button" href="/download/">Get the free OBS plugin</a>
     </div>
   </div>
 </section>
@@ -58,7 +59,7 @@
 </section>
 <section>
   <h2>The complete production studio</h2>
-  <p>CoreVideo Pro is a cross-platform (macOS and Windows) Zoom-native studio. Here is the full capability set the product is built toward &mdash; everything you need to take a Zoom call to a finished, broadcast-quality show:</p>
+  <p>Pro is designed as a Zoom-native studio for Windows and macOS. Everything below is the capability set the product is being <strong>built toward</strong> &mdash; a target, not an inventory of what runs today. Individual items land, and get announced, one at a time.</p>
   <div class="feature-set">
     <div>
       <h3>Zoom capture &amp; media core</h3>
@@ -135,13 +136,14 @@
   </div>
 </section>
 <section>
-  <h2>Free plugin or full studio?</h2>
-  <p>CoreVideo fits both workflows. Already run your shows in OBS? The free <a href="/core-plugin/">OBS plugin</a> brings clean Zoom participants in as native sources. Want a more polished, dedicated way to produce a show? CoreVideo Pro is the premium standalone studio that includes that same Zoom capture and adds the full production layer.</p>
+  <h2>Which one do I use?</h2>
+  <p>Already run your shows in OBS? The free <a href="/core-plugin/">OBS plugin</a> brings clean Zoom participants in as native sources, and it is available today. Need to talk to one person without talking to the room? <a href="/zcomms/">ZComms</a> is the standalone talkback desk, also available today. CoreVideo Pro is the dedicated console being built on the same capture core &mdash; when it is ready to install, it will be on this page with a download button, not a paragraph.</p>
   <table>
     <thead><tr><th>Tier</th><th>Form factor</th><th>Best for</th></tr></thead>
     <tbody>
-      <tr><td><strong>CoreVideo Pro</strong> &mdash; Premium</td><td>Standalone app</td><td>Producers who want a dedicated, ready-to-go studio &mdash; scenes, participants, outputs, recording, and AI auto-direct in one polished app.</td></tr>
-      <tr><td><strong>CoreVideo</strong> &mdash; Free</td><td>OBS Studio plugin</td><td>Operators already running shows in OBS who want clean Zoom participants as native sources, ISO recording, and an Active Speaker Director.</td></tr>
+      <tr><td><strong>CoreVideo</strong> &mdash; Free, available now</td><td>OBS Studio plugin</td><td>Operators already running shows in OBS who want clean Zoom participants as native sources, ISO recording, an Active Speaker Director, and Stream Deck control.</td></tr>
+      <tr><td><strong>ZComms</strong> &mdash; Available now</td><td>Standalone Windows app</td><td>Productions that need talkback: named keys into Zoom&apos;s private talkback channels, with its own operator position. See <a href="/zcomms/">ZComms</a>.</td></tr>
+      <tr><td><strong>CoreVideo Pro</strong> &mdash; In development</td><td>Standalone app</td><td>Producers who want a dedicated studio &mdash; scenes, participants, outputs, recording, and AI auto-direct in one app. Not yet released.</td></tr>
     </tbody>
   </table>
 </section>

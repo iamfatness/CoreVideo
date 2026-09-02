@@ -1,6 +1,6 @@
 # Terms of Use
 
-_Last updated: May 2026_
+_Last updated: September 2026_
 
 ## 1. Acceptance
 
@@ -10,7 +10,7 @@ By installing, configuring, or using CoreVideo ("the Plugin"), you agree to thes
 
 ## 2. License
 
-CoreVideo is released under the terms of its open-source license (see [LICENSE](https://github.com/iamfatness/CoreVideo/blob/main/LICENSE) in the repository). You are free to use, modify, and redistribute the Plugin in accordance with that license.
+CoreVideo is released under the **MIT License** (see [LICENSE](https://github.com/iamfatness/CoreVideo/blob/main/LICENSE) in the repository). You are free to use, modify, and redistribute the Plugin in accordance with that license.
 
 ---
 

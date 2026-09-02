@@ -205,7 +205,7 @@
   <a href="#features">Features</a>
   <div class="nav-section">Get Started</div>
   <a href="#adding">Adding the App</a>
-  <a href="#mac-beta">macOS Beta</a>
+  <a href="#mac-beta">macOS</a>
   <a href="#signin">Sign in with Zoom</a>
   <a href="#requirements">Requirements</a>
   <div class="nav-section">Using CoreVideo</div>
@@ -251,10 +251,10 @@
     </p>
     <div class="callout warning" style="margin-top:18px;">
       <div class="callout-title">🧪 Beta status</div>
-      CoreVideo is in <strong>public beta</strong>. Supported platforms are
-      <strong>Windows x64</strong> (installer or ZIP) and
-      <strong>macOS on Apple Silicon</strong> (plugin bundle —
-      see <a href="#mac-beta">Installing the macOS beta</a>) — see
+      CoreVideo is in <strong>public beta</strong>. The supported platform is
+      <strong>Windows x64</strong> (installer or ZIP); macOS and Linux build from
+      source and ship no package
+      (<a href="#mac-beta">details</a>) — see
       <a href="https://github.com/iamfatness/CoreVideo/blob/main/docs/ROADMAP.md">the Roadmap</a> for known limitations and what's
       planned next. To report a problem, use
       <a href="https://github.com/iamfatness/CoreVideo/issues/new/choose">GitHub Issues</a>
@@ -275,13 +275,12 @@
       <span class="badge green">Free</span>
       <span class="badge green">OBS Studio 30+</span>
       <span class="badge orange">Windows installer</span>
-      <span class="badge orange">macOS (Apple Silicon) beta</span>
       <span class="badge purple">Sign in with Zoom</span>
       <span class="badge blue">OAuth 2.0 PKCE</span>
     </div>
     <div style="margin-top:18px;">
       <a href="https://corevideo.io/download" style="display:inline-block;background:var(--accent);color:#06170d;font-weight:700;padding:11px 20px;border-radius:8px;text-decoration:none;">Download for Windows</a>
-      &nbsp;<a href="#mac-beta" style="display:inline-block;padding:11px 18px;border:1px solid var(--border);border-radius:8px;text-decoration:none;">Download for Mac (beta)</a>
+      &nbsp;<a href="#mac-beta" style="display:inline-block;padding:11px 18px;border:1px solid var(--border);border-radius:8px;text-decoration:none;">macOS: build from source</a>
       &nbsp;<a href="#adding" style="display:inline-block;padding:11px 18px;border:1px solid var(--border);border-radius:8px;text-decoration:none;">How to install</a>
     </div>
   </div>
@@ -378,7 +377,7 @@
       <div class="card"><div class="card-icon">ISO</div><h4>Auto ISO Recording</h4>
         <p>Record assigned participant video/audio tracks to separate files while optionally recording the main OBS program output.</p></div>
       <div class="card"><div class="card-icon">💻</div><h4>Multi-Platform</h4>
-        <p>Windows is the primary release channel; macOS on Apple Silicon is a public beta (<a href="#mac-beta">install guide</a>). Linux remains a source-build path, subject to local SDK and dependency setup.</p></div>
+        <p>Windows is the release channel. macOS and Linux build from source and ship no package (<a href="#mac-beta">details</a>), subject to local SDK and dependency setup.</p></div>
     </div>
   </section>
 
@@ -462,56 +461,26 @@
     </div>
   </section>
 
-  <!-- ── Installing the macOS beta ──────────────────────────────── -->
+  <!-- ── macOS status ─────────────────────────────────── -->
   <section id="mac-beta">
-    <h2>Installing the macOS beta</h2>
+    <h2>macOS: build from source</h2>
     <p>
-      CoreVideo for macOS is in <strong>public beta</strong> and supports
-      <strong>Apple Silicon Macs only</strong> (M1 or later — Intel Macs are not supported).
-      It ships as an OBS plugin bundle rather than an installer.
+      <strong>There is no macOS package to download.</strong> Windows is the release channel;
+      macOS configures and builds from source, subject to local SDK and dependency setup.
     </p>
     <div class="callout warning">
-      <div class="callout-title">🧪 Beta notice</div>
-      The beta bundle is not yet notarized by Apple, so installation includes a one-time
-      Terminal command to clear macOS's quarantine flag. A signed and notarized build that
-      removes this step is planned before the stable release.
-    </div>
-    <div class="steps">
-      <div class="step"><div class="step-body">
-        <h4>1. Download the macOS bundle</h4>
-        <p>Get the latest <code>CoreVideo-…-macOS-arm64.zip</code> from
-        <a href="https://github.com/iamfatness/CoreVideo/releases">GitHub Releases</a>
-        (beta builds are marked <em>Pre-release</em>) and unzip it. The zip also contains
-        <code>INSTALL.txt</code> with these same steps.</p>
-      </div></div>
-      <div class="step"><div class="step-body">
-        <h4>2. Copy the plugin into OBS's plugin folder</h4>
-        <p>Quit OBS Studio, then copy <code>obs-zoom-plugin.plugin</code> into
-        <code>~/Library/Application&nbsp;Support/obs-studio/plugins/</code>
-        (create the <code>plugins</code> folder if it doesn't exist).</p>
-      </div></div>
-      <div class="step"><div class="step-body">
-        <h4>3. Clear the quarantine flag (one time)</h4>
-        <p>Open Terminal and run:</p>
-        <p><code>xattr -dr com.apple.quarantine ~/Library/Application\ Support/obs-studio/plugins/obs-zoom-plugin.plugin</code></p>
-        <p>Without this, macOS Gatekeeper blocks the unsigned beta from loading.</p>
-      </div></div>
-      <div class="step"><div class="step-body">
-        <h4>4. Start OBS and sign in</h4>
-        <p>Launch OBS Studio 30 or newer (Apple Silicon build). The <strong>Zoom Control</strong>
-        dock appears (enable it under <strong>Docks&nbsp;→&nbsp;Zoom Control</strong> if hidden) —
-        click <strong>Sign in with Zoom</strong> as described in
-        <a href="#signin">Sign in with Zoom</a>. On your first meeting join, macOS will ask to
-        allow camera and microphone access for the Zoom engine — approve both.</p>
-      </div></div>
+      <div class="callout-title">Why this page changed</div>
+      A one-off Apple Silicon preview was published against
+      <code>v0.1.32-beta.1</code> and has not been maintained since — every release after it
+      is Windows-only. This page previously told you to download the latest
+      <code>macOS-arm64.zip</code> from Releases; there isn't one, and the old preview is
+      many releases behind. If you are running it, treat it as unsupported.
     </div>
     <p>
-      The macOS beta carries the full engine: join, roster, active speaker, participant video and
-      audio, and remote screen share. Your return feed reaches the meeting through the
-      <strong>OBS Virtual Camera</strong> — start it in OBS, then select it as the camera in the
-      Zoom meeting window. To capture your own screen into OBS, use OBS's built-in
-      <strong>macOS Screen Capture</strong> source (the CoreVideo share source carries
-      <em>other participants'</em> shares).
+      To build on macOS, follow the source build in the
+      <a href="https://github.com/iamfatness/CoreVideo">repository README</a>. The engine is
+      portable and the mac port is developed on a branch, but nothing is packaged, signed, or
+      notarized, and there is no published date for when that changes.
     </p>
   </section>
 
@@ -549,7 +518,7 @@
     <h2>Requirements</h2>
     <table>
       <tr><th>Requirement</th><th>Notes</th></tr>
-      <tr><td>Windows 10 / 11 (64-bit)<br>or macOS on Apple Silicon</td><td>Windows is the primary release channel (installer or ZIP). macOS is a public beta plugin bundle for Apple Silicon only — see <a href="#mac-beta">Installing the macOS beta</a>. Intel Macs are not supported.</td></tr>
+      <tr><td>Windows 10 / 11 (64-bit)</td><td>Windows is the release channel (installer or ZIP). There is no macOS or Linux package — both build from source; see <a href="#mac-beta">macOS: build from source</a>.</td></tr>
       <tr><td>OBS Studio 30+</td><td>Install OBS first; CoreVideo loads as a plugin.</td></tr>
       <tr><td>A Zoom account</td><td>Any account you can sign in with. No developer account, SDK key, or client secret required.</td></tr>
       <tr><td>Network bandwidth</td><td>Plan roughly 4-6 Mbps per 1080p participant feed. Your Zoom account and app entitlements affect maximum quality and stream count (standard accounts are commonly limited to ~30 Mbps incoming video; Enhanced Media / HBM can raise that to ~100 Mbps).</td></tr>

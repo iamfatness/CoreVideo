@@ -1263,6 +1263,92 @@ int main()
               "the backstop fired with no key open at all");
     }
 
+    // ── TALKBACK IS NOT ON THE macOS ENGINE (2026-09-04) ───────────────────
+    //
+    // engine-talkback.cpp is in ENGINE_SOURCES, which only the Windows engine
+    // target uses; the macOS engine is main-macos.mm and never compiles it.
+    // The DOCK is cross-platform and compiles either way, so on macOS it is a
+    // panel whose every control would send a command nothing answers.
+    //
+    // The gate is a field rather than an #ifdef in this header on purpose:
+    // this file is Qt/OBS-free and builds everywhere, so the macOS behaviour
+    // is pinned by a Windows or Linux CI run -- which is the only way a
+    // macOS-only code path gets tested at all on this project's CI.
+    {
+        // The banner. Unsupported wins over EVERY other state, including a key
+        // the engine has confirmed live: it is checked first and returns, so
+        // Live and Unavailable cannot both be reachable. That is what makes
+        // "the roadmap line can never sit in the ON AIR strip" structural
+        // rather than a promise -- on macOS nothing can key, so nothing can be
+        // live, and the precedence proves it instead of relying on it.
+        TalkbackDockSessionView s;
+        s.platform_supported = false;
+        s.key_open = true;
+        s.target = "Sarah";
+        s.engine_live = true;
+        const auto b = talkback_dock_banner(s);
+        check(b.state == TalkbackDockBannerState::Unavailable,
+              "an unsupported platform did not say so in the banner");
+        check(b.state != TalkbackDockBannerState::Live,
+              "a platform with no talkback engine was shown ON AIR -- the "
+              "banner's one job is that red means the director is audible");
+        check(contains(b.headline, "macOS"),
+              "the unavailable banner does not name the platform");
+        check(!contains(b.headline, "ON AIR"),
+              "the unavailable banner kept the ON AIR wording");
+    }
+    {
+        // ...and it still says so with nothing keyed, which is the state a
+        // macOS operator actually sees.
+        TalkbackDockSessionView s;
+        s.platform_supported = false;
+        const auto b = talkback_dock_banner(s);
+        check(b.state == TalkbackDockBannerState::Unavailable,
+              "an idle unsupported panel fell back to plain Off air");
+        check(!b.detail.empty(),
+              "the unavailable banner gave no detail line to explain itself");
+    }
+    {
+        // The keys. Refused for the PLATFORM, ahead of engine/meeting/source
+        // -- all three of which are also false on a macOS box and would each
+        // send the operator to debug something that is not the problem.
+        TalkbackNominationPlan plan;
+        plan.requested = {"Sarah"};
+        TalkbackDockKeyContext ctx;
+        ctx.platform_supported = false;
+        ctx.engine_running = true;
+        ctx.in_meeting     = true;
+        ctx.source_chosen  = true;
+        const auto buttons = talkback_dock_key_buttons(plan, ctx);
+        check(!buttons.empty(), "the unsupported dock produced no buttons");
+        for (const auto &b : buttons) {
+            check(!b.enabled,
+                  "a key was offered on a platform with no talkback engine");
+            check(contains(b.reason, "macOS"),
+                  "the refusal does not name the platform, so the operator is "
+                  "sent to debug the engine instead");
+        }
+    }
+    {
+        // The gate must not fire on the platform that HAS talkback: a default
+        // context is supported, or this whole feature turns itself off.
+        TalkbackNominationPlan plan;
+        plan.requested = {"Sarah"};
+        TalkbackDockKeyContext ctx;
+        ctx.engine_running = true;
+        ctx.in_meeting     = true;
+        ctx.source_chosen  = true;
+        const auto buttons = talkback_dock_key_buttons(plan, ctx);
+        bool any_enabled = false;
+        for (const auto &b : buttons) any_enabled = any_enabled || b.enabled;
+        check(any_enabled,
+              "the platform gate defaults to unsupported and disabled a "
+              "working Windows dock");
+        TalkbackDockSessionView s;
+        check(talkback_dock_banner(s).state == TalkbackDockBannerState::Off,
+              "the platform gate defaults to unsupported in the banner too");
+    }
+
     if (failures == 0) std::cout << "talkback-dock-state-test: all checks passed\n";
     return failures == 0 ? 0 : 1;
 }

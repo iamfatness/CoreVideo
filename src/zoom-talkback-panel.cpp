@@ -50,6 +50,22 @@
 // zoom-iso-panel.cpp both open with 8 px and space at 6-8). kGroupPad is gone
 // with the group boxes it padded: the intercom grid IS the panel, and wrapping
 // it in a captioned frame only spent height saying so.
+// Does THIS BUILD's engine carry talkback at all? engine-talkback.cpp is in
+// ENGINE_SOURCES, which only the Windows engine target uses; the macOS engine
+// is main-macos.mm and never compiles it. This panel is cross-platform and
+// builds either way, so without this every control here would send a command
+// nothing on the other end answers.
+//
+// The #if lives HERE and not in talkback-dock-state.h on purpose: that header
+// is Qt/OBS-free and compiles everywhere, so keeping the decision a plain bool
+// field lets a Windows or Linux CI run pin the macOS rendering. A macOS-only
+// #ifdef branch would be tested by nothing this project runs.
+#if defined(__APPLE__)
+static constexpr bool kTalkbackPlatformSupported = false;
+#else
+static constexpr bool kTalkbackPlatformSupported = true;
+#endif
+
 static constexpr int kDockMargin  = 10;  // panel edge to content
 static constexpr int kSectionGap  = 14;  // between the panel's own sections
 static constexpr int kInnerGap    = 8;   // between controls in one section
@@ -182,6 +198,13 @@ static const char *banner_state_name(TalkbackDockBannerState state)
     case TalkbackDockBannerState::LiveMicBlocked: return "livemuted";
     case TalkbackDockBannerState::Waiting: return "waiting";
     case TalkbackDockBannerState::Refused: return "refused";
+    // This build's engine has no talkback, so nothing is keyed and nothing is
+    // pending: it is an idle strip and takes the idle styling. Named rather
+    // than left to fall through, both to match every other value here and
+    // because a new style state with no rule in cv_stylesheet() would render
+    // unstyled -- the headline carries the meaning, the colour must not
+    // suggest something is happening.
+    case TalkbackDockBannerState::Unavailable: return "off";
     case TalkbackDockBannerState::Off:     break;
     }
     return "off";
@@ -721,7 +744,7 @@ void ZoomTalkbackPanel::refresh_probe()
         // placeholder item carries an invalid/empty data(), which
         // currentData().toString() reports as empty.
         m_probe_btn->setEnabled(
-            in_meeting &&
+            kTalkbackPlatformSupported && in_meeting &&
             !m_probe_participant_combo->currentData().toString().isEmpty());
     }
     if (m_probe_status_label) {
@@ -895,7 +918,11 @@ void ZoomTalkbackPanel::refresh()
         // Both conditions, not just InMeeting: talkback_nominate() is a silent
         // no-op when the engine pipe is not up, which is why the control API
         // acks "engine_not_running" separately from "not_in_meeting".
-        m_nominate_btn->setEnabled(engine_running && in_meeting);
+        // ...and the platform, ahead of both: on a build whose engine has no
+        // talkback there is nothing to assign channels on, and offering the
+        // press would be the same empty gesture as an enabled key.
+        m_nominate_btn->setEnabled(kTalkbackPlatformSupported &&
+                                   engine_running && in_meeting);
         // An empty nomination is a deliberate denominate (the engine's
         // nominate() documents it as such), not a mistake to block -- but it
         // must not be labelled as setting channels up.
@@ -994,6 +1021,7 @@ void ZoomTalkbackPanel::refresh()
     // control under it would come to disagree.
     const auto session = engine.talkback_session_status();
     TalkbackDockSessionView view;
+    view.platform_supported = kTalkbackPlatformSupported;
     view.key_open = key_open;
     view.target = open_target;
     view.engine_live = session.live;
@@ -1011,6 +1039,7 @@ void ZoomTalkbackPanel::refresh()
 
     // -- The grid --------------------------------------------------------------
     TalkbackDockKeyContext ctx;
+    ctx.platform_supported = kTalkbackPlatformSupported;
     ctx.engine_running = engine_running;
     ctx.in_meeting = in_meeting;
     ctx.source_chosen = !source_name.isEmpty();
@@ -1289,6 +1318,16 @@ void ZoomTalkbackPanel::populate_layout_test()
 
     // The banner in its LIVE state, naming the person whose cell is painted ON
     // AIR, with the member tally -- the tallest thing the strip ever renders.
+    //
+    // DELIBERATELY NOT GATED on kTalkbackPlatformSupported, unlike the two
+    // product call sites above. This is the layout instrument
+    // (COREVIDEO_TALKBACK_LAYOUT_TEST), whose whole job is to render every
+    // state at once so the real panel can be eyeballed in the real OBS with no
+    // meeting; taking the gate here would collapse it to the Unavailable strip
+    // on the one platform where a developer is most likely to be running it,
+    // and the tallest banner -- the thing the layout is actually verified
+    // against -- would stop being reachable. Nothing here can reach the engine
+    // regardless: the env-var mode refuses all three paths to it.
     TalkbackDockSessionView view;
     view.key_open        = true;
     view.target          = talkback_layout_test_live_target(cells);

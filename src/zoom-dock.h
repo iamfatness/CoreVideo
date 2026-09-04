@@ -6,7 +6,9 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <thread>
+#include <vector>
 
 class QLabel;
 class QLineEdit;
@@ -91,6 +93,13 @@ private:
     QLineEdit   *m_participant_filter = nullptr;
     QListWidget *m_participant_list   = nullptr;
 
+    // Talkback -- both the operator surface and the Milestone 1 probe -- has
+    // its own dock now (src/zoom-talkback-panel.h, "ZoomTalkbackDock"). It
+    // shipped as two group boxes at the bottom of this one; after the first
+    // live render the owner's verdict was that keying is the mid-show action
+    // and does not belong under a column of setup controls. This dock is back
+    // to join / engine / routing / speaker-director only.
+
     // Recovery status panel (shown only while Recovering)
     QFrame      *m_recovery_frame  = nullptr;
     QLabel      *m_recovery_label  = nullptr;
@@ -100,6 +109,9 @@ private:
 
     qint64       m_join_started_ms      = 0;
     bool         m_join_timeout_reported = false;
+    // Log the "held for a waiting room" explanation once per join attempt, not
+    // on every 100ms refresh tick.
+    bool         m_join_wait_logged = false;
     std::thread  m_join_thread;
     std::atomic<bool>     m_join_in_progress{false};
     std::atomic<uint64_t> m_join_generation{0};

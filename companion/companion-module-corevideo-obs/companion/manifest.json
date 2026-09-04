@@ -1,0 +1,36 @@
+{
+  "$schema": "https://raw.githubusercontent.com/bitfocus/companion-module-base/main/assets/manifest.schema.json",
+  "type": "connection",
+  "id": "corevideo-obs",
+  "name": "corevideo-obs",
+  "shortname": "CoreVideo",
+  "description": "Unified control for CoreVideo: Zoom participant routing, OBS Studio, and Sidecar show phase management \u2014 all in one module.",
+  "version": "1.0.2",
+  "license": "MIT",
+  "repository": "https://github.com/iamfatness/CoreVideo",
+  "bugs": "https://github.com/iamfatness/CoreVideo/issues",
+  "maintainers": [
+    {
+      "name": "CoreVideo",
+      "github": "iamfatness"
+    }
+  ],
+  "legacyIds": [],
+  "runtime": {
+    "type": "node22",
+    "api": "nodejs-ipc",
+    "apiVersion": "2.1.3",
+    "entrypoint": "../dist/index.js"
+  },
+  "manufacturer": "CoreVideo",
+  "products": [
+    "CoreVideo OBS Plugin"
+  ],
+  "keywords": [
+    "obs",
+    "zoom",
+    "corevideo",
+    "broadcast",
+    "softwarecontrol"
+  ]
+}

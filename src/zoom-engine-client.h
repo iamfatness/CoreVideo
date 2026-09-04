@@ -2,6 +2,7 @@
 
 #include "engine-ipc.h"
 #include "media-event-queue.h"
+#include "talkback-nomination.h"
 #include "zoom-types.h"
 #include <atomic>
 #include <condition_variable>
@@ -30,6 +31,83 @@ public:
         uint32_t participant_id = 0;
         std::string message;
     };
+
+    // F2 review-round fix (CRITICAL): the engine's own CONFIRMED state for
+    // the persistent talkback session -- distinct from both the plugin's
+    // local intent (TalkbackKeyState::open) and the tap's local liveness
+    // signal (TalkbackTap::last_audio_ms(), which stays fresh even when the
+    // Zoom channel never opened at all, because the tap keeps publishing
+    // audio into the ring regardless of whether anything on the far end can
+    // hear it). Written by handle_event()'s talkback_session branch from the
+    // engine's {"cmd":"talkback_session","live":...,"reason":"..."} line
+    // (engine/src/engine-talkback.cpp's report_session_state()); read by
+    // TalkbackController::status_json()/evaluate(). live=false with a
+    // non-empty reason means an explicit failure; live=false with an empty
+    // reason means no session has ever reported in yet (the initial state,
+    // or right after talkback_start() resets it -- see talkback_start()
+    // below) -- the two must not be conflated, which is why evaluate()'s
+    // grace period keys off reason being non-empty, not off live alone.
+    struct TalkbackSessionStatus {
+        bool live = false;
+        std::string reason;
+
+        // TALKBACK DELIVERY LAW 1 (2026-08-29): is this key live over a bot
+        // whose meeting audio the engine could NOT open?
+        //
+        // Talkback delivers only while the engine's own client is unmuted --
+        // muted, SendAudioDataToChannel is ACCEPTED and every member hears
+        // silence, which is the one failure this feature cannot afford to show
+        // as success. The engine reports `"mic":"open"|"blocked"` on the SAME
+        // confirmed-state line as `live` (report_session_state()), and
+        // re-emits it on a mid-key CHANGE, so a host muting the bot at second
+        // 30 of a latched key moves this too.
+        //
+        // ABSENT MEANS false, and that is the mixed-version rule, not an
+        // accident: an engine older than Law 1 sends no "mic" key at all, and
+        // a DLL-only install is this project's canonical mistake. Reading a
+        // missing field as "blocked" would put every such rig into a permanent
+        // false alarm; reading it as "open" is the same thing that engine
+        // already meant.
+        bool mic_blocked = false;
+
+        // Milestone 7 (the dock). The three fields below come from the OTHER
+        // shape on this cmd -- report_session()'s stage lines -- not from
+        // report_session_state()'s confirmed-state line above, so they are
+        // written by a different branch of handle_event() and can lag or lead
+        // `live` by one line. All three are cleared with the rest of this
+        // struct at talkback_start(), so nothing here can describe a previous
+        // key.
+        //
+        // members_present/members_total are the keyed target's membership AS
+        // OF THE MOMENT THE KEY OPENED: the engine reports them once, in its
+        // "session_live" stage line, and does not re-report them while the key
+        // is held. A talent who rejoins mid-press is therefore not counted
+        // until the next press. members_known distinguishes "0 of 0" from
+        // "no session_live has arrived", which is not the same thing.
+        bool members_known = false;
+        uint32_t members_present = 0;
+        uint32_t members_total = 0;
+        // The engine's own recovery hint for a refusal, echoed rather than
+        // inferred: session_start's refusal line carries
+        // "recover":"re-nominate" for provisioning_incomplete, and nothing at
+        // all for the other reasons. The plugin never invents a remedy the
+        // engine did not name.
+        std::string recover;
+    };
+
+    // Task 5: the plugin's own record of the last CONFIRMED talkback_nominate()
+    // plan. Fix round 1 (F1/F2): this used to be written optimistically at
+    // send time and never invalidated, which both falsely refused a key on a
+    // still-standing channel after a refused re-nomination (F1) and kept
+    // advertising a plan a Leave/engine-restart had already destroyed (F2).
+    // It is now the pure TalkbackNominationPlan type from
+    // src/talkback-nomination.h -- see that header's comment for the full
+    // account and why it had to move out of Qt/OBS reach to be pinned by a
+    // test. `requested`/`uncovered_private` are the ONLY fields
+    // TalkbackController::key_on() may read (via
+    // talkback_target_known_unprovisioned(), src/talkback-plan.h);
+    // `last_attempt_ok`/`last_attempt_reason` are diagnostic only.
+    using TalkbackNominationStatus = TalkbackNominationPlan;
 
     struct SourceCallbacks {
         // shm_generation: engine-side generation of the SHM region backing the
@@ -87,6 +165,66 @@ public:
     void leave();
     void start_media();
     void stop_media();
+    // Triggers the Milestone 1 talkback probe for one named participant. The
+    // probe's progress reports arrive asynchronously as "talkback_probe"
+    // lines and are logged verbatim in handle_event(); this call itself does
+    // not block or return a result.
+    void talkback_probe(const std::string &participant_name);
+    // Latest talkback_probe stage line (raw compact JSON), for the dock's
+    // status label. Written by handle_event()'s talkback_probe branch and
+    // polled by the dock's existing 100ms refresh timer -- the same pattern
+    // last_error() and roster() already use -- rather than a dedicated
+    // signal/slot path, so this diagnostic doesn't need its own plumbing on
+    // top of what every other dock readout already relies on.
+    std::string talkback_probe_status() const;
+
+    // F2 review-round fix: the engine-confirmed session state -- see the
+    // TalkbackSessionStatus doc comment above. Same polled-not-signalled
+    // pattern as talkback_probe_status() above, for the same reason.
+    TalkbackSessionStatus talkback_session_status() const;
+
+    // Task 5: forwards a nomination's name list to the engine's nominate()
+    // (engine/src/engine-talkback.cpp). Fire-and-forget like talkback_probe --
+    // the plan outcome (channel count, who is uncovered, who is unreachable)
+    // arrives asynchronously as "cmd":"talkback_nominate" stage lines, logged
+    // verbatim in handle_event() and summarised in
+    // talkback_nomination_status() below. An empty list is a deliberate
+    // denominate (see nominate()'s own doc comment), not a no-op.
+    void talkback_nominate(const std::vector<std::string> &nominees);
+    // Same polled-not-signalled pattern as talkback_probe_status() /
+    // talkback_session_status() above -- see TalkbackNominationStatus's doc
+    // comment for what each field means and where it comes from.
+    TalkbackNominationStatus talkback_nomination_status() const;
+    // Milestone 7 (the intercom grid): who the engine has actually confirmed
+    // INTO a talkback channel, which the plan above cannot say. Assembled
+    // from the same "cmd":"talkback_nominate" stage lines, by
+    // talkback_channel_presence_apply_report()
+    // (src/talkback-nomination-dispatch.h). Polled and copied under m_mtx
+    // like every status above, and display-only: nothing in the keying path
+    // reads it. See TalkbackChannelPresence in src/talkback-nomination.h for
+    // the live defect it exists for and the two limits it carries.
+    TalkbackChannelPresence talkback_channel_presence() const;
+
+    // Milestone 5's live-talkback senders. All five follow talkback_probe's
+    // shape exactly: guarded by m_running, fire-and-forget, no result
+    // returned here -- the engine's dispatch/response, if any, arrives async
+    // like every other command on this pipe.
+    //
+    // Task 5: `target` is "all" (kTalkbackAllTalentTarget) or a nominee's
+    // name -- session_start() on the engine side SELECTS an
+    // already-provisioned channel, it does not create one. Sent as the
+    // "target" JSON field; the engine's "participant" fallback
+    // (engine/src/main.cpp) is a compatibility shim for pre-Task-5 senders
+    // only, not a second spelling this plugin uses.
+    void talkback_start(const std::string &target);
+    void talkback_stop();
+    // Must be sent only after the caller's ring header is fully laid out
+    // (talkback_ring_init has run): the engine validates slot_count/
+    // slot_bytes from the header when it maps the region, and would reject
+    // one it mapped before the header was written.
+    void talkback_open(const std::string &region, uint32_t rate, uint16_t channels);
+    void talkback_audio();
+    void talkback_close();
 
     // Subscribe a source to a "spotlight slot" (1-based) instead of a fixed
     // participant. The engine resolves which participant owns that slot.
@@ -136,6 +274,19 @@ public:
     // when the monitor thread replays the init.
     bool is_init_retry_pending() const {
         return m_init_retry_due_ms.load(std::memory_order_acquire) != 0;
+    }
+    // True while Zoom has us in a waiting room, or the meeting has not started
+    // yet (MEETING_STATUS_IN_WAITING_ROOM / _WAITINGFORHOST, reported by the
+    // engine on every status change).
+    //
+    // Exposed for the same watchdog and for the same reason as
+    // is_init_retry_pending() above: this wait happens *inside* the Joining
+    // window and is open-ended, because it ends only when a host acts. Charged
+    // against the join deadline it auto-left a live meeting after 114s in a
+    // waiting room (2026-08-22); see src/join-watchdog.h. Point-in-time read,
+    // safe from any thread.
+    bool is_awaiting_admission() const {
+        return m_awaiting_admission.load(std::memory_order_acquire);
     }
     bool is_media_active() const { return m_media_active.load(std::memory_order_acquire); }
     std::string last_error() const;
@@ -256,6 +407,7 @@ private:
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_authenticated{false};
     std::atomic<bool> m_media_active{false};
+    std::atomic<bool> m_awaiting_admission{false};
     std::atomic<MeetingState> m_state{MeetingState::Idle};
     // Wall-clock ms (os_gettime_ns()/1e6) of the last line received from the
     // engine. Used by monitor_loop() to detect a hung-but-alive engine.
@@ -266,6 +418,42 @@ private:
     std::unordered_map<void *, RosterCallback> m_roster_callbacks;
     std::unordered_map<void *, ErrorCallback> m_error_callbacks;
     std::string m_last_error;
+    // Raw compact JSON of the most recent talkback_probe stage line; see
+    // talkback_probe_status() above.
+    std::string m_talkback_probe_status;
+    // F2 review-round fix: the engine-confirmed session state; see
+    // TalkbackSessionStatus and talkback_session_status() above. Guarded by
+    // m_mtx, same as m_talkback_probe_status.
+    TalkbackSessionStatus m_talkback_session_status;
+    // Task 5: guarded by m_mtx, same as the two statuses above. This is the
+    // CONFIRMED plan only -- see TalkbackNominationStatus's doc comment and
+    // src/talkback-nomination.h. `m_talkback_nomination_pending` stages an
+    // in-flight attempt's stage reports until they either commit into this
+    // field (talkback_nomination_commit(), on "nominate_done") or are
+    // discarded on a refusal (talkback_nomination_note_refused(), which
+    // leaves this field untouched).
+    TalkbackNominationStatus m_talkback_nomination_status;
+    TalkbackNominationPending m_talkback_nomination_pending;
+    // Milestone 7: the per-person channel presence view, guarded by m_mtx
+    // like everything above it. Cleared at exactly the points
+    // talkback_nomination_reset() is called (a Leave, an engine restart) and
+    // additionally at the send of a new nominate -- a nomination replaces
+    // the standing channel set, so every observation in here is about
+    // channels the engine is destroying.
+    TalkbackChannelPresence m_talkback_channel_presence;
+    // C1 (CRITICAL, final whole-branch review 2026-08-26): the identity
+    // stamped into each talkback_nominate request and echoed back in that
+    // attempt's terminal reports, so a report can be matched to the staging
+    // slot it belongs to instead of to whatever happens to be staged when it
+    // arrives. Guarded by m_mtx, like the two records above.
+    //
+    // PROCESS-WIDE MONOTONIC, deliberately NOT reset by any world-reset
+    // (Leave, engine restart) that resets the two records above: an id that
+    // can be re-used is an id that can make a report from before the reset
+    // match a staging slot from after it, which is the same class of bug the
+    // id exists to close. Pre-incremented, so live ids are always >= 1 and 0
+    // reads unambiguously as "nothing staged".
+    uint32_t m_talkback_nominate_attempt = 0;
     std::deque<DebugEvent> m_debug_events;
     // Tracks whether the user deliberately requested a leave/stop (suppresses recovery).
     std::atomic<bool> m_user_leaving{false};

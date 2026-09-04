@@ -7,6 +7,155 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.44] - 2026-08-22
+
+### Fixed
+- **Participants flashed brighter for a single frame, at random, several
+  times a minute across the whole grid — the long-standing "gamma flash".**
+  The engine asks the Zoom SDK for full-range colour
+  (`VideoRawdataColorspace_BT709_F`) and the plugin declares
+  `VIDEO_RANGE_FULL` on every frame it hands OBS, but the SDK does not
+  always honour that request. Measured live by attaching to the video
+  shared memory read-only from a third process and histogramming luma:
+  16 frames out of 15,203 arrived limited-range (16–235) instead, spread
+  across 5 of 6 participants — floor lifted off 0, ceiling capped near
+  235, and the ~13,600 sub-16 samples the neighbouring frames carried
+  collapsing to single digits, for exactly one frame. Declared full but
+  actually limited, such a frame renders with lifted blacks and crushed
+  whites: a ~33 ms brightness pop, landing somewhere on an 8-tile grid
+  every 20–30 seconds. `YUVRawDataI420::IsLimitedI420()` reports this per
+  frame and had never been called anywhere in the codebase. The engine now
+  checks it and expands those frames to full range before they reach
+  shared memory, so the range declared downstream is true for every frame.
+  This is also the cause of program output measuring washed out against
+  mimoLive on 2026-08-11. Deliberately fixed by normalising pixels rather
+  than forwarding the flag to `obs_source_frame::full_range`: libobs keys
+  async texture allocation on that field and destroys and recreates every
+  texture whenever it changes, so per-frame flipping would trade a
+  one-frame pop for a texture-rebuild storm. The full-range path — the
+  overwhelming majority of frames — is unchanged and does no extra copy.
+
+- **The join watchdog auto-left a Zoom waiting room while the host was
+  still admitting us.** Live 2026-08-22: the plugin sat in a waiting room
+  for 114 s, the two-minute watchdog counted that as "no join progress",
+  auto-left at 120 s and marked the attempt Failed — and the host admitted
+  the retry 49 s later. Joining early and waiting to be admitted is the
+  normal broadcast workflow, so the watchdog was most likely to fire
+  precisely when nothing was wrong, minutes before a show. Nothing in the
+  codebase handled `MEETING_STATUS_IN_WAITING_ROOM` or
+  `_WAITINGFORHOST`; the engine now reports both as their own
+  `awaiting_admission` event on every status change, rather than leaving
+  the plugin to infer them from a debug line (debug output is for humans,
+  is filtered by stage, and control flow must not depend on it). The
+  window is *held open* while a legitimate wait is in progress rather
+  than extended — no timeout is both safely longer than "a host taking
+  their time" (which has no upper bound) and short enough to catch a
+  wedge — so the full two minutes become available again the moment the
+  wait ends, and a join that wedges *after* admission is still caught.
+  The decision moved to `src/join-watchdog.h` so both failure directions
+  are pinned by tests without Qt. Note the watchdog is armed by the dock's
+  Join button only; joins issued through the TCP/OSC control API have
+  never armed it, and still don't.
+
+- **The Companion module could not be loaded by Companion at all.**
+  Installing it into a real Companion (v5.0.3) surfaced three blockers,
+  none visible from the source: no `companion/manifest.json` (required
+  since Companion v3 — the module carried only the legacy v2-style
+  `companion` block in `package.json`); CommonJS output from a source
+  tree already written for ESM, which made the bundler wrap the
+  entrypoint in an interop factory so its default export came back as the
+  namespace object and Companion's loader rejected it with "Module
+  entrypoint did not return a valid constructor function"; and a version
+  that had to be bumped because Companion refuses to overwrite a module
+  version already on disk, silently keeping the broken bundle. Now builds
+  as ESM (`Node16`, `"type": "module"`) and reports "Module initialized
+  successfully" with its variables resolving live on button faces.
+  Requires Companion v5+ — earlier builds cap the module API at 1.12 and
+  cannot run `@companion-module/base` 2.x.
+
+### Added
+- **Companion: pick the output and the participant by name.** Assigning
+  someone to an output was effectively unusable from a Stream Deck —
+  "OBS Source Name" was a free-text box and "Participant ID" a raw
+  number, so putting Sarah on Participant 3 meant typing the source name
+  exactly and knowing she was user 16788480. Operator feedback, live:
+  "I'd like to pick an output and select a name. I don't understand the
+  routing." Both fields are dropdowns now, populated from the module's
+  own live state, and `zoom_assign_spotlight` / `zoom_assign_screen_share`
+  get the same output picker. Participants are offered — and stored — **by
+  name**, because Zoom user ids are meeting-scoped: the same person
+  rejoining, or next week's run of the same show, gets a new id, so a
+  button holding a raw id silently points at nobody, and once ids get
+  recycled it points at the wrong face on air. The id is resolved from
+  the name against the live roster at press time; a name not in the
+  meeting resolves to 0 (source shows unassigned) and logs a warning
+  rather than guessing. Raw numeric ids still work via `allowCustom`, and
+  buttons built before this change still work through the legacy
+  `participant_id` option. Verified live: a button storing only "Sarah
+  Muller" moved Participant 3 from Luis Rodriguez (16784384) to Sarah
+  Muller (16788480), and still resolved correctly after a leave/rejoin.
+
+## [0.1.43] - 2026-08-21
+
+### Fixed
+- **The ISO audio fix below shipped with a bug of its own that doubled
+  every WAV's length.** Caught immediately in the same live verification
+  pass that confirmed the video fix: a 152s video paired a 305s WAV,
+  almost exactly double. The gap-fill reference point was snapped to each
+  call's raw arrival timestamp after every write, so ordinary per-call
+  dispatch/IPC latency — a delayed wakeup whose backlog then arrives in a
+  burst right after it, this plugin's own documented coalescing dispatch
+  behavior — got backfilled as silence on nearly every buffer, with no
+  real silence ever having occurred. Fixed by tracking a content-driven
+  playhead instead (advances by audio actually written, never snapped to
+  arrival time) plus a 50ms jitter-tolerance gate before any gap counts as
+  real silence at all, mirroring this codebase's own `audio-timeline.h`
+  precedent for the same distinction on the live path. Re-verified live
+  against the same meeting: two sources measured video/audio within
+  0.3–0.6% of each other, both tracking real elapsed time.
+
+- **A crash that didn't auto-recover left no trace of why.** Every way the
+  engine's crash-recovery path declines to reconnect — policy disabled,
+  auth failure, max attempts, no stored session — logs its own reason,
+  except one: if the plugin already believed the operator was leaving, it
+  gave up silently. Live, that meant a meeting which had already
+  self-healed from one earlier crash hit a second crash that produced only
+  the exit-code line and then nothing, with no way to tell afterward
+  whether a genuine Leave/Stop action, a stale flag, or the dock's 120s
+  join-timeout watchdog (which already shows a warning dialog but left no
+  log trace) was responsible. Added logging at the point recovery gives up
+  and at every site that can set the flag, so this is now answerable from
+  the log alone.
+
+- **ISO recording duration didn't match real elapsed time, and audio could
+  drift out of sync with its own paired video.** Zoom's per-source video
+  delivery fluctuates roughly 10-60fps with network/encoder conditions
+  outside our control, but the ISO video pipe declared a flat "-r 30" input
+  rate to ffmpeg with no other way to time each frame (raw video carries no
+  per-frame timestamps) — a source averaging 15fps recorded under that
+  declared 30fps played back at roughly 2x speed and finished in about half
+  the real meeting's duration; a sustained 60fps source would run at half
+  speed. Measured live 2026-08-19: every participant in a normal
+  verification meeting showed 16-18fps, meaning every ISO file from that
+  session was materially short. Fixed by pacing frames to a fixed cadence
+  ourselves before they reach ffmpeg — duplicating the held frame to
+  backfill a stall, dropping excess frames from a burst — rather than
+  asking ffmpeg to infer timing it cannot actually derive from a raw byte
+  stream (`-use_wallclock_as_timestamps`, the obvious first attempt, was
+  confirmed via `ffprobe -show_frames` to have no effect at all on this
+  project's ffmpeg build's rawvideo demuxer).
+
+  The paired WAV had an independent, unrelated duration bug with the same
+  symptom: Zoom only calls back audio for a participant currently
+  producing sound, so silent stretches wrote zero bytes and permanently
+  shortened the file by the total silent duration. Fixed by backfilling
+  silence across every gap, so the WAV's own byte position also tracks
+  wall-clock time. Both fixes anchor to the same `os_gettime_ns()` clock
+  the ISO recorder has always used, so video and audio — each now
+  individually accurate to real elapsed time — also stay in sync with each
+  other from the moment they enter the plugin (Zoom's own upstream A/V sync
+  is a separate concern, outside this fix's scope).
+
 ## [0.1.42] - 2026-08-19
 
 ### Fixed
@@ -751,7 +900,12 @@ sign-in, per-participant and screen-share sources, the Active Speaker
 Director, auto-reconnect, TCP/OSC control APIs, ISO recording, the Output
 Manager, and the initial Windows release packaging and CI pipeline.
 
-[Unreleased]: https://github.com/iamfatness/CoreVideo/compare/v0.1.39...HEAD
+[Unreleased]: https://github.com/iamfatness/CoreVideo/compare/v0.1.44...HEAD
+[0.1.44]: https://github.com/iamfatness/CoreVideo/compare/v0.1.43...v0.1.44
+[0.1.43]: https://github.com/iamfatness/CoreVideo/compare/v0.1.42...v0.1.43
+[0.1.42]: https://github.com/iamfatness/CoreVideo/compare/v0.1.41...v0.1.42
+[0.1.41]: https://github.com/iamfatness/CoreVideo/compare/v0.1.40...v0.1.41
+[0.1.40]: https://github.com/iamfatness/CoreVideo/compare/v0.1.39...v0.1.40
 [0.1.39]: https://github.com/iamfatness/CoreVideo/compare/v0.1.38...v0.1.39
 [0.1.38]: https://github.com/iamfatness/CoreVideo/compare/v0.1.37...v0.1.38
 [0.1.37]: https://github.com/iamfatness/CoreVideo/compare/v0.1.36...v0.1.37

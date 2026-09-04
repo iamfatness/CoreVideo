@@ -1,9 +1,11 @@
 #include "zoom-dock.h"
+#include "cv-combo-utils.h"
 #include "cv-style.h"
 #include "cv-update-check.h"
 #include "cv-widgets.h"
 #include "obs-utils.h"
 #include "speaker-director.h"
+#include "join-watchdog.h"
 #include "zoom-engine-client.h"
 #include "zoom-join-decision.h"
 #include "zoom-oauth.h"
@@ -29,6 +31,9 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonValue>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -215,15 +220,6 @@ static const char *state_label_text(MeetingState s)
     return "";
 }
 
-static QString participant_label(const ParticipantInfo &p)
-{
-    QString label = p.display_name.empty()
-        ? QString("ID %1").arg(p.user_id)
-        : QString::fromStdString(p.display_name);
-    if (p.has_video) label += " [video]";
-    return label;
-}
-
 static QString participant_roster_label(const ParticipantInfo &p)
 {
     QString label = p.display_name.empty()
@@ -249,57 +245,6 @@ static QString participant_label_for_id(
             return participant_label(p);
     }
     return QString("ID %1 (not in roster)").arg(participant_id);
-}
-
-static bool combo_popup_open(const QComboBox *combo)
-{
-    return combo && combo->view() && combo->view()->isVisible();
-}
-
-static bool combo_items_match(
-    const QComboBox *combo,
-    const std::vector<std::pair<QString, QVariant>> &items)
-{
-    if (!combo || combo->count() != static_cast<int>(items.size()))
-        return false;
-    for (int i = 0; i < combo->count(); ++i) {
-        if (combo->itemText(i) != items[static_cast<size_t>(i)].first ||
-            combo->itemData(i) != items[static_cast<size_t>(i)].second)
-            return false;
-    }
-    return true;
-}
-
-static void replace_combo_items(
-    QComboBox *combo,
-    const std::vector<std::pair<QString, QVariant>> &items,
-    const QVariant &preferred)
-{
-    if (!combo)
-        return;
-
-    const QVariant current = combo->currentData();
-    const QVariant target = preferred.isValid() ? preferred : current;
-    const bool same_items = combo_items_match(combo, items);
-
-    if (!same_items) {
-        combo->blockSignals(true);
-        combo->clear();
-        for (const auto &item : items)
-            combo->addItem(item.first, item.second);
-        combo->blockSignals(false);
-    }
-
-    const int idx = combo->findData(target);
-    if (idx >= 0 && idx != combo->currentIndex()) {
-        combo->blockSignals(true);
-        combo->setCurrentIndex(idx);
-        combo->blockSignals(false);
-    } else if (idx < 0 && combo->currentIndex() < 0 && combo->count() > 0) {
-        combo->blockSignals(true);
-        combo->setCurrentIndex(0);
-        combo->blockSignals(false);
-    }
 }
 
 static bool item_list_contains_data(
@@ -1033,14 +978,45 @@ void ZoomDock::update_state_indicator()
     // indefinitely: the retry schedule is capped at kSdkInitRetryMaxAttempts,
     // and exhausting it tears the engine down and moves the state to Failed,
     // which clears m_join_started_ms below.
-    if (s == MeetingState::Joining && m_join_started_ms > 0 &&
-        ZoomEngineClient::instance().is_init_retry_pending())
-        m_join_started_ms = QDateTime::currentMSecsSinceEpoch();
+    // The other open-ended wait inside the Joining window is Zoom holding us in
+    // a waiting room, or the meeting not having started yet. That one is not
+    // bounded by anything we control -- it ends when a host acts -- and on
+    // 2026-08-22 it auto-left a live meeting after 114s of waiting. Both
+    // suppressors and the deadline itself are decided by
+    // join_watchdog_action() so they can be tested without Qt; see
+    // src/join-watchdog.h.
+    const JoinWatchdogAction watchdog = join_watchdog_action(
+        s == MeetingState::Joining,
+        m_join_timeout_reported,
+        static_cast<uint64_t>(m_join_started_ms),
+        static_cast<uint64_t>(QDateTime::currentMSecsSinceEpoch()),
+        ZoomEngineClient::instance().is_init_retry_pending(),
+        ZoomEngineClient::instance().is_awaiting_admission(),
+        kJoinWatchdogTimeoutMs);
 
-    if (s == MeetingState::Joining && m_join_started_ms > 0 &&
-        !m_join_timeout_reported &&
-        QDateTime::currentMSecsSinceEpoch() - m_join_started_ms > 120000) {
+    if (watchdog == JoinWatchdogAction::HoldWindow) {
+        if (!m_join_wait_logged &&
+            ZoomEngineClient::instance().is_awaiting_admission()) {
+            m_join_wait_logged = true;
+            blog(LOG_INFO,
+                 "[obs-zoom-plugin] Join watchdog held: Zoom has us in a "
+                 "waiting room (or the meeting has not started yet). This is "
+                 "not a stalled join and will not be auto-cancelled");
+        }
+        m_join_started_ms = QDateTime::currentMSecsSinceEpoch();
+    }
+
+    if (watchdog == JoinWatchdogAction::Fire) {
         m_join_timeout_reported = true;
+        // The warning dialog below is visible in the moment but leaves no
+        // trace in the log — a real gap when this fires (as opposed to a
+        // deliberate Leave click) is exactly what silently set
+        // m_user_leaving and suppressed the next crash's auto-recovery in
+        // a 2026-08-21 live incident that took real archaeology to explain
+        // after the fact. blog() first so the log alone tells the story.
+        blog(LOG_WARNING,
+             "[obs-zoom-plugin] Join watchdog: no join progress in 120s -- "
+             "auto-leaving and marking this attempt Failed");
         ZoomEngineClient::instance().leave();
         ZoomEngineClient::instance().set_state(MeetingState::Failed);
         QMessageBox::warning(this, "Zoom Join",
@@ -1051,6 +1027,7 @@ void ZoomDock::update_state_indicator()
     if (s != MeetingState::Joining) {
         m_join_started_ms = 0;
         m_join_timeout_reported = false;
+        m_join_wait_logged = false;
     }
 
     m_state_dot->setState(s);
@@ -1221,6 +1198,7 @@ void ZoomDock::update_state_indicator()
         m_speaker_label->setToolTip(status);
         m_director_speaker_label->setToolTip(m_speaker_label->toolTip());
     }
+
 }
 
 void ZoomDock::refresh()
@@ -1299,6 +1277,12 @@ void ZoomDock::refresh_outputs()
                 !QString::number(p.user_id).contains(filter)) continue;
             auto *item = new QListWidgetItem(participant_roster_label(p));
             item->setData(Qt::UserRole, QString::number(p.user_id));
+            // Store the name alongside the id: Zoom user ids are
+            // meeting-scoped, so any by-name action (e.g. the talkback probe)
+            // must resolve off this, never off Qt::UserRole's id -- an id
+            // captured now points at nobody after a rejoin and at the wrong
+            // person once ids get recycled.
+            item->setData(Qt::UserRole + 1, name);
             m_participant_list->addItem(item);
             const QString id = item->data(Qt::UserRole).toString();
             if (selected_participants.contains(id))
@@ -1827,6 +1811,7 @@ void ZoomDock::on_leave_clicked()
     m_join_started_ms = 0;
     m_join_timeout_reported = false;
     m_join_generation.fetch_add(1, std::memory_order_acq_rel);
+    blog(LOG_INFO, "[obs-zoom-plugin] Leave button clicked");
     ZoomEngineClient::instance().leave();
     update_state_indicator();
 }
@@ -1870,6 +1855,7 @@ void ZoomDock::on_launch_sidecar_clicked()
 
 void ZoomDock::on_cancel_recovery_clicked()
 {
+    blog(LOG_INFO, "[obs-zoom-plugin] Cancel Recovery button clicked");
     ZoomEngineClient::instance().stop();
     update_state_indicator();
 }

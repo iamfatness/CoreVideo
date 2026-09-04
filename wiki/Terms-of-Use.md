@@ -1,6 +1,6 @@
 # Terms of Use
 
-_Last updated: May 2026_
+_Last updated: September 2026_
 
 ## 1. Acceptance
 
@@ -10,7 +10,7 @@ By installing, configuring, or using CoreVideo ("the Plugin"), you agree to thes
 
 ## 2. License
 
-CoreVideo is released under the terms of its open-source license (see [LICENSE](https://github.com/iamfatness/CoreVideo/blob/main/LICENSE) in the repository). You are free to use, modify, and redistribute the Plugin in accordance with that license.
+CoreVideo is released under the **MIT License** (see [LICENSE](https://github.com/iamfatness/CoreVideo/blob/main/LICENSE) in the repository). You are free to use, modify, and redistribute the Plugin in accordance with that license.
 
 ---
 
@@ -46,7 +46,19 @@ You are solely responsible for ensuring that all meeting participants have been 
 
 ---
 
-## 6. Permitted Use
+## 6. Talkback and Outbound Audio
+
+CoreVideo's talkback feature transmits audio **into** the meeting. When you hold or latch a talkback key, the audio source you selected is sent over the Zoom Meeting SDK's talkback channels to the participants you selected, and those participants hear it. Talkback also requires CoreVideo's own meeting microphone to be open, and CoreVideo opens it for the duration of a key.
+
+You are responsible for what you transmit and to whom. In particular:
+
+- Do not transmit audio you do not have the right to distribute to the participants receiving it.
+- The talkback diagnostic probe sends an audible test tone to a selected participant and briefly lowers their meeting audio. Run it only on someone who is expecting it.
+- Talkback is a production tool, not a guarantee of privacy. Delivery, retention, and any recording of channel audio are governed by Zoom and by the meeting's own configuration, not by CoreVideo.
+
+---
+
+## 7. Permitted Use
 
 The Plugin may be used for:
 
@@ -63,24 +75,24 @@ The Plugin may **not** be used for:
 
 ---
 
-## 7. No Warranty
+## 8. No Warranty
 
 The Plugin is provided **"as is"**, without warranty of any kind, express or implied, including but not limited to warranties of merchantability, fitness for a particular purpose, or non-infringement. The authors make no guarantee that the Plugin will operate without interruption or error.
 
 ---
 
-## 8. Limitation of Liability
+## 9. Limitation of Liability
 
 To the maximum extent permitted by applicable law, the authors of CoreVideo shall not be liable for any indirect, incidental, special, consequential, or punitive damages arising from your use of or inability to use the Plugin, even if advised of the possibility of such damages.
 
 ---
 
-## 9. Changes
+## 10. Changes
 
 These terms may be updated at any time. Continued use of the Plugin after changes are posted constitutes acceptance of the revised terms. Material changes will be noted in the [release notes](https://github.com/iamfatness/CoreVideo/releases).
 
 ---
 
-## 10. Contact
+## 11. Contact
 
 Questions about these terms may be directed to [github.com/iamfatness/CoreVideo/issues](https://github.com/iamfatness/CoreVideo/issues).

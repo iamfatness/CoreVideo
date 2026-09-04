@@ -47,6 +47,25 @@ struct ZoomPluginSettings {
     std::string         iso_video_encoder = "auto";
     bool                iso_record_program = true;
 
+    // Talkback dock (Milestone 7). The OBS audio source the director talks
+    // through, stored BY NAME because that is what TalkbackTap::open() and
+    // obs_get_source_by_name() take -- and because a source uuid does not
+    // survive the operator rebuilding their scene collection, which is the
+    // ordinary way a talkback mic gets re-created between shows.
+    std::string         talkback_source;
+    // Latch (tap on, tap off) instead of push-to-talk. Persisted because it
+    // is a per-operator working preference, not a per-show decision -- but a
+    // latch still never survives a reconnect (src/talkback-key.h); this
+    // remembers the MODE, never an open key.
+    bool                talkback_latch = false;
+    // Is the Talkback dock's Milestone 1 probe section unfolded? Persisted for
+    // one reason only: while it is folded the panel skips the probe's roster
+    // poll entirely, so this is what decides whether that work happens after a
+    // restart -- not merely which way an arrow points. Defaults false because
+    // the probe is a diagnostic (it plays an audible tone at a participant),
+    // not part of running a show.
+    bool                talkback_probe_expanded = false;
+
     // Active speaker director defaults.
     uint32_t            speaker_sensitivity_ms = 500;
     uint32_t            speaker_hold_ms = 2000;

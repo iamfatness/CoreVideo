@@ -91,6 +91,9 @@ private:
         uint64_t started_ns = 0;
         uint64_t last_video_ns = 0;
         uint64_t last_audio_ns = 0;
+        // The video pacer's schedule (src/iso-video-pacer.h): the next
+        // frame slot this session has not yet filled. Seeded to started_ns.
+        uint64_t video_next_due_ns = 0;
         QString base_path;
         QString video_path;
         QString audio_path;

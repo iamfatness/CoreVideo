@@ -55,6 +55,16 @@ function latestReleaseVersion() {
 const RELEASE_VERSION = latestReleaseVersion();
 const RELEASES_LATEST = "https://github.com/iamfatness/CoreVideo/releases/latest";
 
+// ZComms ships from its own repository, so this site cannot read its version
+// from a file the way CoreVideo's comes out of CHANGELOG.md. The constant is
+// printed as prose only - every ZComms download link points at releases/latest,
+// so a stale constant reads as an out-of-date sentence and never as a 404.
+// Bump it (or set ZCOMMS_RELEASE_VERSION) when ZComms cuts a release.
+const ZCOMMS_VERSION =
+  process.env.ZCOMMS_RELEASE_VERSION?.trim().replace(/^v/, "") || "0.1.14";
+const ZCOMMS_REPO = "https://github.com/iamfatness/ZComms";
+const ZCOMMS_RELEASES_LATEST = `${ZCOMMS_REPO}/releases/latest`;
+
 // The CoreVideo "Multiview" brand mark (mirrors Controls/MultiviewMark.xaml in
 // the app): a 16:9 monitor frame split 2x2 with the top-right tile live-green.
 const MULTIVIEW_MARK =
@@ -63,6 +73,19 @@ const MULTIVIEW_MARK =
   `<line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/>` +
   `<line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/>` +
   `<rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg>`;
+
+// The ZComms mark: an intercom panel of six talk keys with one key lit, the
+// same idiom as the Multiview mark (a grid with one live cell) applied to a
+// hardware talkback desk rather than a monitor wall.
+const TALKBACK_MARK =
+  `<svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true">` +
+  `<rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/>` +
+  `<rect x="4.6" y="4.6" width="7" height="5.6" rx="1.4" fill="currentColor" opacity=".38"/>` +
+  `<rect x="12.5" y="4.6" width="7" height="5.6" rx="1.4" fill="currentColor" opacity=".38"/>` +
+  `<rect x="20.4" y="4.6" width="7" height="5.6" rx="1.4" fill="#22c86e"/>` +
+  `<rect x="4.6" y="13.8" width="7" height="5.6" rx="1.4" fill="currentColor" opacity=".38"/>` +
+  `<rect x="12.5" y="13.8" width="7" height="5.6" rx="1.4" fill="currentColor" opacity=".38"/>` +
+  `<rect x="20.4" y="13.8" width="7" height="5.6" rx="1.4" fill="currentColor" opacity=".38"/></svg>`;
 
 const pages = [
   {
@@ -77,7 +100,7 @@ const pages = [
     source: "Terms-of-Use.md",
     title: "Terms of Use",
     description:
-      "Terms of Use for the CoreVideo OBS Studio plugin and CoreVideo Pro, covering licensing, acceptable use, and Zoom Marketplace requirements.",
+      "Terms of Use for the CoreVideo OBS Studio plugin: licensing, Zoom Meeting SDK limits, participant consent, talkback, and acceptable use.",
     output: "terms/index.html",
     aliases: ["terms-of-use/index.html", "Terms-of-Use/index.html"],
   },
@@ -206,19 +229,29 @@ function homeContent() {
   <div><strong>Active speaker &amp; spotlight</strong><span>Point a source at whoever is talking, at Zoom spotlight slot 1&hellip;N, or at a fixed guest with an automatic failover if they drop.</span></div>
   <div><strong>Screen share &amp; interpretation</strong><span>Subscribe to the live screen share, and pull existing Zoom interpretation audio channels in as dedicated sources.</span></div>
   <div><strong>ISO recording</strong><span>Record every assigned participant to their own muxed MP4 with matching PCM audio, alongside the main program recording.</span></div>
+  <div><strong>Active Speaker Director</strong><span>An automatic take with a hold time, a sensitivity threshold, an exclusion list, and a &ldquo;require video&rdquo; rule &mdash; so the cut follows the conversation without chattering.</span></div>
+  <div><strong>Output profiles</strong><span>The Output Manager saves and reloads a whole assignment set, so last week&rsquo;s routing comes back on the next show instead of being rebuilt by hand.</span></div>
+  <div><strong>Stream Deck &amp; Companion</strong><span>A Bitfocus Companion module (v5 or newer) picks the output and the participant <em>by name</em> from the live roster, so a button keeps working after somebody rejoins.</span></div>
+  <div><strong>Remote control</strong><span>A TCP and OSC control surface drives joins, assignments, and recording from whatever already runs your show.</span></div>
 </section>
 <figure class="doc-image">
   <img src="/assets/obs-multiview.webp" alt="OBS Studio multiview: preview and program above four scenes built from individual Zoom participant sources - the host alone, the host with a reader, the host with the active speaker, and the active speaker full frame" loading="lazy">
   <figcaption>Every guest arrives as their own OBS source, so scenes, transitions, and the multiview all work the way they already do &mdash; this is stock OBS, cutting between Zoom participants.</figcaption>
 </figure>
+<section>
+  <h2>Talkback, without leaving the meeting</h2>
+  <p>Every show that runs on Zoom eventually needs a way to speak to one person without speaking to the room. The Zoom Meeting SDK carries a private talkback path alongside the meeting floor &mdash; 16 channels, up to 10 people each, and members duck under your voice rather than being muted &mdash; and both products here are built on it.</p>
+  <p><a href="/zcomms/">ZComms</a> is the standalone answer: a full intercom desk with named talk keys, ALL CALL, latch, extern feeds from a multichannel interface, and breakout-aware routing. It ships today. Inside the OBS plugin, an intercom dock that puts the same keys next to your video routing is <strong>in development on <code>main</code> and is not part of any release yet</strong> &mdash; when it lands it will be in a tagged build and in these notes, not before.</p>
+</section>
 <section class="link-grid products" aria-label="CoreVideo products">
   <a href="/download/"><span class="tier">Free &middot; OBS plugin</span><strong>CoreVideo for OBS</strong><span>The plugin on this page: Zoom participant video, audio, screen share, interpretation, and ISO recording as native sources in the OBS you already run. MIT licensed.</span></a>
-  <a class="featured" href="/pro/"><span class="tier tier-premium">Premium &middot; Standalone app</span><strong>CoreVideo Pro</strong><span>Want the whole console instead of a plugin? Pro is a standalone studio: multi-scene production, participant management, AI auto-direct, recording, and multi-destination streaming.</span></a>
+  <a class="featured" href="/pro/"><span class="tier tier-premium">Premium &middot; Standalone app</span><strong>CoreVideo Pro</strong><span>Want the whole console instead of a plugin? Pro is the standalone studio being built around the same capture core: multi-scene production, participant management, recording, and streaming.</span></a>
+  <a href="/zcomms/"><span class="tier">Standalone &middot; Talkback</span><strong>ZComms</strong><span>The intercom on its own. Named talk keys into Zoom&rsquo;s private talkback channels, extern feeds from a multichannel interface, and honest key states. Windows.</span></a>
 </section>
 <section class="link-grid" aria-label="CoreVideo resources">
   <a href="/documentation/"><strong>Plugin Docs</strong><span>Architecture, setup, control APIs, and operating notes.</span></a>
-  <a href="/documentation/#mac-beta"><strong>macOS Beta (Apple Silicon)</strong><span>Install the CoreVideo OBS plugin beta on Apple Silicon Macs.</span></a>
   <a href="/core-plugin/"><strong>Core Plugin Guide</strong><span>OBS workflows, participant routing, isolated audio, and ISO recording.</span></a>
+  <a href="/zcomms/"><strong>ZComms</strong><span>Standalone talkback and IFB station for Zoom productions.</span></a>
   <a href="/pro/"><strong>CoreVideo Pro</strong><span>Standalone production app for live and recorded conversations.</span></a>
   <a href="/pro/documentation/"><strong>CoreVideo Pro Architecture</strong><span>Native media core, typed IPC, capture, AI direction, and outputs &mdash; with diagrams.</span></a>
   <a href="/terms/"><strong>Terms of Use</strong><span>Marketplace-ready usage terms and license requirements.</span></a>
@@ -236,12 +269,13 @@ function proPageContent() {
     </div>
   </figure>
   <div class="hero-copy">
-    <p class="eyebrow">The complete CoreVideo production studio</p>
+    <p class="eyebrow">In development &middot; standalone studio</p>
     <h1>Produce polished live conversations from your Zoom calls.</h1>
-    <p class="lede">CoreVideo Pro is the premium, all-in-one studio for live Zoom production: everything the CoreVideo plugin captures, plus multi-scene production, participant management, recording and multi-destination streaming, and an AI auto-director &mdash; in one standalone app for producers who want a dedicated, ready-to-go console.</p>
+    <p class="lede">CoreVideo Pro is the premium, all-in-one studio being built for live Zoom production: everything the CoreVideo plugin captures, plus multi-scene production, participant management, recording and multi-destination streaming, and an AI auto-director &mdash; in one standalone app for producers who want a dedicated console rather than a plugin.</p>
+    <p class="lede"><strong>Pro is not released yet.</strong> There is no download and no price. This page and the architecture notes describe what is being built; the <a href="/download/">free OBS plugin</a> is the shipping product today, and <a href="/zcomms/">ZComms</a> is the shipping talkback desk.</p>
     <div class="hero-actions">
       <a class="button primary" href="/pro/documentation/">Read the architecture docs</a>
-      <a class="button" href="/core-plugin/">Compare with the OBS plugin</a>
+      <a class="button" href="/download/">Get the free OBS plugin</a>
     </div>
   </div>
 </section>
@@ -253,7 +287,7 @@ function proPageContent() {
 </section>
 <section>
   <h2>The complete production studio</h2>
-  <p>CoreVideo Pro is a cross-platform (macOS and Windows) Zoom-native studio. Here is the full capability set the product is built toward &mdash; everything you need to take a Zoom call to a finished, broadcast-quality show:</p>
+  <p>Pro is designed as a Zoom-native studio for Windows and macOS. Everything below is the capability set the product is being <strong>built toward</strong> &mdash; a target, not an inventory of what runs today. Individual items land, and get announced, one at a time.</p>
   <div class="feature-set">
     <div>
       <h3>Zoom capture &amp; media core</h3>
@@ -330,13 +364,14 @@ function proPageContent() {
   </div>
 </section>
 <section>
-  <h2>Free plugin or full studio?</h2>
-  <p>CoreVideo fits both workflows. Already run your shows in OBS? The free <a href="/core-plugin/">OBS plugin</a> brings clean Zoom participants in as native sources. Want a more polished, dedicated way to produce a show? CoreVideo Pro is the premium standalone studio that includes that same Zoom capture and adds the full production layer.</p>
+  <h2>Which one do I use?</h2>
+  <p>Already run your shows in OBS? The free <a href="/core-plugin/">OBS plugin</a> brings clean Zoom participants in as native sources, and it is available today. Need to talk to one person without talking to the room? <a href="/zcomms/">ZComms</a> is the standalone talkback desk, also available today. CoreVideo Pro is the dedicated console being built on the same capture core &mdash; when it is ready to install, it will be on this page with a download button, not a paragraph.</p>
   <table>
     <thead><tr><th>Tier</th><th>Form factor</th><th>Best for</th></tr></thead>
     <tbody>
-      <tr><td><strong>CoreVideo Pro</strong> &mdash; Premium</td><td>Standalone app</td><td>Producers who want a dedicated, ready-to-go studio &mdash; scenes, participants, outputs, recording, and AI auto-direct in one polished app.</td></tr>
-      <tr><td><strong>CoreVideo</strong> &mdash; Free</td><td>OBS Studio plugin</td><td>Operators already running shows in OBS who want clean Zoom participants as native sources, ISO recording, and an Active Speaker Director.</td></tr>
+      <tr><td><strong>CoreVideo</strong> &mdash; Free, available now</td><td>OBS Studio plugin</td><td>Operators already running shows in OBS who want clean Zoom participants as native sources, ISO recording, an Active Speaker Director, and Stream Deck control.</td></tr>
+      <tr><td><strong>ZComms</strong> &mdash; Available now</td><td>Standalone Windows app</td><td>Productions that need talkback: named keys into Zoom&apos;s private talkback channels, with its own operator position. See <a href="/zcomms/">ZComms</a>.</td></tr>
+      <tr><td><strong>CoreVideo Pro</strong> &mdash; In development</td><td>Standalone app</td><td>Producers who want a dedicated studio &mdash; scenes, participants, outputs, recording, and AI auto-direct in one app. Not yet released.</td></tr>
     </tbody>
   </table>
 </section>`;
@@ -344,7 +379,7 @@ function proPageContent() {
 
 function proDocsContent() {
   return `<h1>CoreVideo Pro Architecture</h1>
-<p>CoreVideo Pro is a cross-platform (macOS and Windows) live-production studio built around a native media core. This guide describes how the product is architected end to end &mdash; how Zoom participants and local cameras are captured, how frames are composited and directed, and how program, ISO, and streaming outputs are produced. For the OBS plugin&apos;s internals, see the <a href="/core-plugin/">Core Plugin guide</a>.</p>
+<p>CoreVideo Pro is a live-production studio for Windows and macOS, built around a native media core. It is <strong>in development and not released</strong>: this guide is a design document describing how the product is architected, in the present tense the way architecture is normally written, and not a claim that every stage below is finished. It describes end to end &mdash; how Zoom participants and local cameras are captured, how frames are composited and directed, and how program, ISO, and streaming outputs are produced. For the OBS plugin&apos;s internals, see the <a href="/core-plugin/">Core Plugin guide</a>.</p>
 <h2>Design principles</h2>
 <ul>
 <li><strong>Native media core, web renderer.</strong> A C++ media core owns the real-time pipeline; the React/Vite renderer drives the UI and never touches media frames directly.</li>
@@ -373,6 +408,129 @@ function proDocsContent() {
 <p>CoreVideo Pro records the program to MP4/MOV (up to 4K, 30/60fps) and captures per-guest ISO feeds for clean re-edits. Streaming targets RTMP, NDI, and SRT with YouTube, Twitch, and custom presets and a multi-destination model that tracks armed/live state, bitrate, latency, and health per destination. Hardware encoders (NVENC, Quick Sync, AMF on Windows; VideoToolbox on macOS) keep CPU load low, and an output preflight blocks streaming when a destination is missing an endpoint, key, or compatible URL.</p>
 <h2>Platform and shell</h2>
 <p>The renderer is shell-agnostic: it runs inside whatever native host is present (Electron, Tauri, or a custom shell) and falls back to mock engines only for local development. Engine bundles are injected, so the UI swaps simulated engines for the native Zoom, media, and output implementations without importing mock singletons. The native media core stays the durable part of the product; the shell and renderer can evolve independently behind the typed IPC contracts.</p>`;
+}
+
+function zcommsPageContent() {
+  return `<section class="hero">
+  <figure class="hero-media">
+    <div class="console">
+      <div class="console-bar"><span class="tally tally-live">Key</span><span>All Call</span><span class="tc">16 ch &middot; 10 per ch</span></div>
+      <div class="console-screen center"><div class="brand-lockup">${TALKBACK_MARK}<div class="wordmark">ZComms</div><div class="brand-sub">Talkback &amp; IFB station for Zoom</div></div></div>
+    </div>
+  </figure>
+  <div class="hero-copy">
+    <p class="eyebrow">Standalone Windows intercom station</p>
+    <h1>Talk to one panelist. The room hears nothing.</h1>
+    <p class="lede">ZComms is a talkback and IFB station for productions that run on Zoom. The panel is a grid of keys, and a key wears a person&apos;s name &mdash; hold it and your voice lands in that person&apos;s ear alone, while the meeting floor, the recording, and everyone else carry on unaware. It rides the Zoom Meeting SDK&apos;s own talkback channels: no virtual audio cable, no second machine, no bot account.</p>
+    <div class="hero-actions">
+      <a class="button primary" href="${ZCOMMS_RELEASES_LATEST}">Download for Windows</a>
+      <a class="button" href="#how-it-works">How it works</a>
+      <a class="button" href="${ZCOMMS_REPO}">View source</a>
+    </div>
+  </div>
+</section>
+<section class="link-grid" aria-label="What ZComms does">
+  <div><strong>A named key per person</strong><span>Every talkback-capable participant gets a standing channel of their own, and the key wears their name. ALL CALL spans the panel; latch makes a press stick.</span></div>
+  <div><strong>Private, not disruptive</strong><span>Talkback is its own path, so nothing you say reaches the meeting floor. Members duck under your voice while you are keyed and return to unity when you let go &mdash; ducked, not muted.</span></div>
+  <div><strong>Extern feeds</strong><span>Latch one channel &mdash; or a stereo pair &mdash; of a multichannel interface into a talkback channel, so a larger intercom, a console bus, or a Dante feed uses Zoom as its last mile.</span></div>
+  <div><strong>Honest keys</strong><span>A key reads live only while someone is actually hearing you. Keyed into an empty channel reads amber; a person in another breakout room reads dark, names the room, and refuses the press.</span></div>
+</section>
+<section>
+  <h2 id="how-it-works">How a key reaches one ear</h2>
+  <p>Zoom&apos;s Meeting SDK carries a talkback path alongside the meeting floor: up to <strong>16 channels</strong>, each holding up to <strong>10 people</strong>, addressed independently of the room. ZComms provisions the whole bank once when it joins and then assigns people to it &mdash; keying selects a channel, it never tears one down and rebuilds it. Your voice goes down the channel you keyed and nowhere else; the meeting mic stays open, because Zoom requires an open mic to deliver talkback at all, but it is fed nothing, so the room stays silent. That is a pure SDK arrangement &mdash; no audio driver is installed and no loopback device is created.</p>
+  <figure class="doc-image"><img src="/zcomms/images/zcomms-signal-path.svg" alt="ZComms signal path diagram: the operator microphone runs through input gain, a limiter, a ramped push-to-talk envelope, echo cancellation, and a sidetone tap, and is sent to one Zoom talkback channel that reaches only that channel's members; an extern feed from a multichannel interface can be latched into a channel alongside it, while the meeting mic is held open but fed nothing so the meeting floor hears nothing."></figure>
+  <p>Members of the channel you key are <em>ducked</em> rather than muted: their meeting audio drops under your voice and comes back to unity the moment you release, so talent never loses the room. The duck is gated on the signal actually present, not on the state of the key &mdash; a latched extern feed that happens to be silent leaves the room at full level.</p>
+</section>
+<section>
+  <h2>What is on the panel</h2>
+  <div class="feature-set">
+    <div>
+      <h3>Keys and the grid</h3>
+      <ul>
+        <li>One cell per talkback-capable participant, carrying their Zoom name</li>
+        <li>Hold to talk, latch to stick, and LATCH ALL for a standing open line</li>
+        <li>ALL CALL across every provisioned channel in one press</li>
+        <li>Numbered slots for direct keys, reassignable from the panel</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Channels and privacy</h3>
+      <ul>
+        <li>16 talkback channels, up to 10 listeners each, provisioned in one pass</li>
+        <li>Channel isolation verified live &mdash; a listener on one channel hears nothing from another</li>
+        <li>Members ducked while you key and returned to unity on release</li>
+        <li>The meeting mic held open but fed nothing, and re-asserted as housekeeping</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Extern feeds</h3>
+      <ul>
+        <li>Any channel or stereo pair of a multichannel interface, latched into a channel</li>
+        <li>Per-feed gain and limiter, downmixed to mono because SDK sends are mono-only</li>
+        <li>Input meter reading &minus;60 to 0 dBFS across 12 segments, pre-envelope and post-gain</li>
+        <li>The &minus;50 dBFS signal gate drawn on the scale, so &quot;present&quot; and &quot;counts as signal&quot; are distinguishable</li>
+        <li>Feeds persist across launches</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Capture chain</h3>
+      <ul>
+        <li>Input gain, look-ahead limiter, then a ramped PTT envelope &mdash; edges ramp, they do not gate</li>
+        <li>Echo cancellation referenced against ZComms&apos; own monitor output, defeatable</li>
+        <li>Sidetone tapped after the envelope, so it monitors what is actually being sent</li>
+        <li>Device pickers that switch live, plus a built-in test tone</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Breakout rooms</h3>
+      <ul>
+        <li>Zoom talkback cannot cross breakout rooms &mdash; the panel says so rather than failing quietly</li>
+        <li>Cells for people in another room go dark, name the room, and refuse the press</li>
+        <li>The station can move itself between rooms from Settings</li>
+        <li>Chat used as a signalling side-channel for cues and notifications</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Joining and control</h3>
+      <ul>
+        <li>Sign in with Zoom once through the browser (PKCE) &mdash; every join happens as your account</li>
+        <li>Paste any meeting link or ID; no bot account and nothing for panelists to install</li>
+        <li>The panel is served on <code>127.0.0.1:7350</code> with an SSE state stream</li>
+        <li>A one-line action API on the same port &mdash; the seam a Stream Deck or Companion module drives</li>
+      </ul>
+    </div>
+  </div>
+</section>
+<section>
+  <h2>What it needs</h2>
+  <ul>
+    <li><strong>Windows 10 or Windows 11</strong> (x64). The installer is per-user and needs no administrator rights; the Zoom Meeting SDK ships inside it. There is no macOS build yet.</li>
+    <li><strong>A Zoom account you can sign in with.</strong> ZComms joins as you, through the same OAuth broker CoreVideo uses. There are no anonymous joins.</li>
+    <li><strong>Panelists on a native Zoom client</strong>, desktop or mobile, with nothing installed on their side. The Zoom <em>web</em> client cannot receive talkback at all &mdash; the panel labels those people rather than pretending the key works.</li>
+    <li><strong>A headset on the operator position</strong> is still best practice, echo cancellation notwithstanding.</li>
+  </ul>
+</section>
+<section>
+  <h2>Early software, honestly</h2>
+  <p>ZComms is at <strong>v${ZCOMMS_VERSION}</strong> and is early. Talkback delivery, channel isolation, the duck behaviour, and breakout awareness have all been verified in real meetings. <strong>Extern feeds have not yet been proven in a live meeting</strong> &mdash; they are covered by unit tests and bench-verified against real hardware, but the in-meeting gates are still open. Expect rough edges, and please report them on the <a href="${ZCOMMS_REPO}/issues">issue tracker</a>.</p>
+  <p>The build is <strong>not code-signed</strong>, so Windows SmartScreen warns the first time you run the installer &mdash; &quot;More info&quot;, then &quot;Run anyway&quot;. Signing is waiting on a developer account, not on a decision.</p>
+  <div class="hero-actions">
+    <a class="button primary" href="${ZCOMMS_RELEASES_LATEST}">Download ZComms for Windows</a>
+    <a class="button" href="${ZCOMMS_REPO}">Source &amp; release notes</a>
+  </div>
+</section>
+<section>
+  <h2>Where it fits</h2>
+  <p>ZComms and CoreVideo are separate products that came out of the same problem &mdash; running a real show inside somebody else&apos;s Zoom meeting &mdash; and they share the Zoom Meeting SDK and the same sign-in broker. ZComms is the standalone desk: it is what you run when the intercom is the job, on its own machine or beside a switcher that has nothing to do with Zoom.</p>
+  <p>The <a href="/core-plugin/">CoreVideo plugin</a> is growing an intercom dock of its own so an operator already cutting a show in OBS can key talent without leaving it &mdash; that work is on <code>main</code> and has not shipped in a release yet. ZComms is the answer when talkback wants its own operator, its own position, or a feed from a bigger comms system, and it is the only one of the two you can download today.</p>
+  <table>
+    <thead><tr><th>Product</th><th>Form factor</th><th>Talkback</th></tr></thead>
+    <tbody>
+      <tr><td><strong>ZComms</strong></td><td>Standalone Windows app</td><td>The whole product &mdash; a full desk, extern feeds, and its own operator position. Shipping now.</td></tr>
+      <tr><td><strong>CoreVideo</strong> for OBS</td><td>OBS Studio plugin</td><td>An intercom dock beside the video routing, for the operator already cutting the show. In development, unreleased.</td></tr>
+    </tbody>
+  </table>
+</section>`;
 }
 
 function renderTable(lines) {
@@ -589,8 +747,8 @@ function downloadPageContent() {
     : "Download for Windows";
 
   const versionNote = v
-    ? `<p class="lede">Latest release <strong>v${v}</strong> &mdash; signed Windows installer for OBS Studio 30 and newer. Free and open source under the MIT license.</p>`
-    : `<p class="lede">Signed Windows installer for OBS Studio 30 and newer. Free and open source under the MIT license.</p>`;
+    ? `<p class="lede">Latest release <strong>v${v}</strong> &mdash; Windows installer for OBS Studio 30 and newer. Free and open source under the MIT license.</p>`
+    : `<p class="lede">Windows installer for OBS Studio 30 and newer. Free and open source under the MIT license.</p>`;
 
   const fileRows = v
     ? `<section class="link-grid" aria-label="Release files">
@@ -598,6 +756,7 @@ function downloadPageContent() {
   <a href="${asset(`CoreVideo-Windows-x64-v${v}.zip`)}"><strong>Portable ZIP (x64)</strong><span>Unpack into the OBS plugin directory yourself &mdash; for locked-down or portable OBS setups.</span></a>
   <a href="${asset(`CoreVideo-Setup-v${v}.exe.sha256`)}"><strong>Installer checksum</strong><span>SHA-256 for the installer, to verify the download before running it.</span></a>
   <a href="${asset(`CoreVideo-Windows-x64-v${v}.zip.sha256`)}"><strong>ZIP checksum</strong><span>SHA-256 for the portable archive.</span></a>
+  <a href="${RELEASES_LATEST}"><strong>Companion module</strong><span>The Bitfocus Companion module (<code>corevideo-obs</code>) ships with each release. Requires Companion v5 or newer.</span></a>
 </section>`
     : "";
 
@@ -622,7 +781,7 @@ ${fileRows}
 <h2>Requirements</h2>
 <ul>
 <li><strong>OBS Studio 30 or newer</strong>, 64-bit.</li>
-<li><strong>Windows 10 or Windows 11</strong> (x64). An Apple Silicon macOS build is in beta &mdash; see the <a href="/documentation/#mac-beta">macOS beta notes</a>.</li>
+<li><strong>Windows 10 or Windows 11</strong> (x64). This is the only platform the project packages, tests, and runs in production. macOS and Linux configure and build from source but ship no official package &mdash; a one-off Apple Silicon preview was published against v0.1.32-beta.1 and has not been maintained since.</li>
 <li><strong>A Zoom account you can sign in with.</strong> CoreVideo joins meetings through the Zoom Meeting SDK, so the video quality and number of simultaneous feeds you get follow your Zoom account entitlements.</li>
 <li><strong>Downstream bandwidth</strong> for the feeds you subscribe to &mdash; roughly 4-6 Mbps per 1080p participant. Standard accounts are typically capped around 30 Mbps incoming; Enhanced Media / HBM raises that to roughly 100 Mbps.</li>
 </ul>
@@ -633,7 +792,8 @@ ${fileRows}
 <li>Start OBS and open <strong>Docks -&gt; CoreVideo</strong> to sign in and join a meeting.</li>
 <li>Add a <strong>CoreVideo</strong> source to any scene, then assign it to a participant, the active speaker, a spotlight slot, or the screen share.</li>
 </ol>
-<p>The <a href="/core-plugin/">Core Plugin Guide</a> walks through participant routing, isolated audio, and ISO recording in detail.</p>
+<p>The installer is <strong>not code-signed yet</strong>, so Windows SmartScreen warns the first time you run it &mdash; &quot;More info&quot;, then &quot;Run anyway&quot;. Verify the SHA-256 below if you would rather check the file than trust the dialog.</p>
+<p>CoreVideo is in public beta. The <a href="/core-plugin/">Core Plugin Guide</a> walks through participant routing, isolated audio, and ISO recording in detail, and <a href="/support/">Support</a> covers log collection and reporting a bug.</p>
 <h2>Verify your download</h2>
 <p>Each release ships a SHA-256 file alongside the binary. On Windows, compare the hashes with PowerShell:</p>
 <pre><code class="language-powershell">Get-FileHash .\\CoreVideo-Setup-${v ? `v${v}` : "vX.Y.Z"}.exe -Algorithm SHA256</code></pre>
@@ -650,7 +810,7 @@ function pluginJsonLd() {
     alternateName: "CoreVideo OBS Plugin",
     applicationCategory: "MultimediaApplication",
     applicationSubCategory: "OBS Studio plugin",
-    operatingSystem: "Windows 10, Windows 11, macOS (Apple Silicon beta)",
+    operatingSystem: "Windows 10, Windows 11",
     description:
       "OBS Studio plugin that captures Zoom meeting participants as native OBS sources - per-participant video and audio, screen share, interpretation audio, and ISO recording - using the Zoom Meeting SDK rather than NDI, a virtual camera, or screen capture.",
     url: `${PRIMARY_ORIGIN}/`,
@@ -682,10 +842,31 @@ function pluginJsonLd() {
   };
 }
 
+// Structured data for ZComms. Windows-only and no price claim: the product
+// carries no announced pricing, and an invented price-0 offer would be a
+// commitment the site is not in a position to make.
+function zcommsJsonLd() {
+  return {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    name: "ZComms",
+    applicationCategory: "MultimediaApplication",
+    applicationSubCategory: "Intercom / talkback station",
+    operatingSystem: "Windows 10, Windows 11",
+    softwareVersion: ZCOMMS_VERSION,
+    description:
+      "Standalone Windows talkback and IFB station for Zoom productions: named talk keys over the Zoom Meeting SDK's private talkback channels, extern feeds from a multichannel interface, and breakout-aware routing.",
+    url: `${PRIMARY_ORIGIN}/zcomms/`,
+    downloadUrl: ZCOMMS_RELEASES_LATEST,
+    image: OG_IMAGE,
+  };
+}
+
 function layout(page, content, options = {}) {
   const nav = [
     ["Home", "/"],
     ["CoreVideo Pro", "/pro/"],
+    ["ZComms", "/zcomms/"],
     ["Pro Docs", "/pro/documentation/"],
     ["Plugin Docs", "/documentation/"],
     ["Core Plugin", "/core-plugin/"],
@@ -789,8 +970,8 @@ writeText(
       title: "Download",
       seoTitle: "Download CoreVideo - Free Zoom Plugin for OBS Studio",
       description: RELEASE_VERSION
-        ? `Download CoreVideo v${RELEASE_VERSION}, the free open-source OBS Studio plugin for Zoom. Signed Windows installer, checksums, requirements, and install steps.`
-        : "Download CoreVideo, the free open-source OBS Studio plugin for Zoom. Signed Windows installer, checksums, requirements, and install steps.",
+        ? `Download CoreVideo v${RELEASE_VERSION}, the free open-source OBS Studio plugin for Zoom. Windows installer, checksums, requirements, and install steps.`
+        : "Download CoreVideo, the free open-source OBS Studio plugin for Zoom. Windows installer, checksums, requirements, and install steps.",
     },
     downloadPageContent(),
     {
@@ -807,7 +988,7 @@ writeText(
     {
       title: "CoreVideo Pro",
       description:
-        "CoreVideo Pro: a standalone macOS and Windows studio for live Zoom production - scenes, participant management, recording, streaming, and AI auto-direct.",
+        "A standalone Windows studio for live Zoom production: scenes, participant management, recording, streaming and AI auto-direct. In development, not yet released.",
     },
     proPageContent(),
     {
@@ -835,6 +1016,101 @@ writeText(
         "CoreVideo and CoreVideo Pro are independent products and are not affiliated with Zoom Video Communications, Inc.",
     },
   ),
+);
+
+// ZComms landing page. ZComms is its own product with its own repository and
+// its own release cadence; the site carries it because it is the third thing
+// the same audience buys into, alongside the plugin and Pro.
+writeText(
+  "zcomms/index.html",
+  layout(
+    {
+      title: "ZComms",
+      seoTitle: "ZComms - Zoom Talkback & Intercom Station for Live Production",
+      description:
+        "Standalone Windows talkback and IFB station for Zoom: named talk keys, 16 private channels, extern feeds from a multichannel interface, breakout-aware.",
+    },
+    zcommsPageContent(),
+    {
+      home: true,
+      canonical: canonicalUrl("zcomms/index.html"),
+      jsonLd: zcommsJsonLd(),
+      footerText:
+        "ZComms is an independent product and is not affiliated with Zoom Video Communications, Inc.",
+    },
+  ),
+);
+
+// ZComms talkback signal path. Drawn in the site's own tokens (unlike the two
+// older Pro diagrams, which predate the console design language).
+writeText(
+  "zcomms/images/zcomms-signal-path.svg",
+  `<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="470" viewBox="0 0 1120 470" role="img" aria-labelledby="zcsp-t zcsp-d">
+  <title id="zcsp-t">ZComms talkback signal path</title>
+  <desc id="zcsp-d">The operator microphone runs through input gain, a limiter, a ramped push-to-talk envelope, echo cancellation, and a sidetone tap, then is sent to one Zoom talkback channel that reaches only that channel's members. An extern feed - one channel or a stereo pair of a multichannel interface, downmixed to mono - can be latched into a channel alongside it. The meeting microphone is held open, because Zoom requires an open mic to deliver talkback, but is fed nothing, so the meeting floor hears nothing.</desc>
+  <defs>
+    <style>
+      .bg{fill:#0a0b0c}
+      .card{fill:#101315;stroke:rgba(255,255,255,.16);stroke-width:1.2}
+      .live{fill:#101315;stroke:#22c86e;stroke-width:1.6}
+      .field{fill:#0e1112;stroke:rgba(255,255,255,.12);stroke-width:1.2}
+      .t{font-family:'Space Grotesk',Segoe UI,Arial,sans-serif;fill:#e9edef;font-size:15px;font-weight:600}
+      .m{font-family:'IBM Plex Mono',Consolas,monospace;fill:#8b949b;font-size:12px}
+      .lbl{font-family:'IBM Plex Mono',Consolas,monospace;fill:#22c86e;font-size:11px;letter-spacing:.08em}
+      .dim{font-family:'IBM Plex Mono',Consolas,monospace;fill:#8b949b;font-size:11px;letter-spacing:.08em}
+      .flow{stroke:#22c86e;stroke-width:2;fill:none;marker-end:url(#zcsp-a)}
+      .flow-dim{stroke:#5c656b;stroke-width:2;fill:none;marker-end:url(#zcsp-b);stroke-dasharray:5 4}
+    </style>
+    <marker id="zcsp-a" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L8,3 z" fill="#22c86e"/></marker>
+    <marker id="zcsp-b" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L8,3 z" fill="#5c656b"/></marker>
+  </defs>
+  <rect class="bg" width="1120" height="470"/>
+
+  <rect class="card" x="28" y="52" width="176" height="96" rx="10"/>
+  <text class="t" x="48" y="86">Your mic</text>
+  <text class="m" x="48" y="110">operator position,</text>
+  <text class="m" x="48" y="128">headset recommended</text>
+
+  <rect class="card" x="252" y="34" width="252" height="132" rx="10"/>
+  <text class="lbl" x="272" y="60">CAPTURE CHAIN</text>
+  <text class="m" x="272" y="84">input gain</text>
+  <text class="m" x="272" y="104">look-ahead limiter</text>
+  <text class="m" x="272" y="124">ramped PTT envelope</text>
+  <text class="m" x="272" y="144">echo cancellation &#xB7; sidetone tap</text>
+
+  <rect class="live" x="552" y="34" width="216" height="132" rx="10"/>
+  <text class="lbl" x="572" y="60">TALKBACK CHANNEL</text>
+  <text class="t" x="572" y="88">One of 16</text>
+  <text class="m" x="572" y="112">up to 10 listeners</text>
+  <text class="m" x="572" y="132">addressed on its own path,</text>
+  <text class="m" x="572" y="150">not through the room</text>
+
+  <rect class="live" x="816" y="52" width="276" height="96" rx="10"/>
+  <text class="t" x="836" y="86">The panelist&#x2019;s ear</text>
+  <text class="m" x="836" y="110">stock Zoom desktop or mobile,</text>
+  <text class="m" x="836" y="128">nothing installed on their side</text>
+
+  <path class="flow" d="M204 100 L246 100"/>
+  <path class="flow" d="M504 100 L546 100"/>
+  <path class="flow" d="M768 100 L810 100"/>
+
+  <rect class="field" x="252" y="216" width="252" height="112" rx="10"/>
+  <text class="dim" x="272" y="242">EXTERN FEED</text>
+  <text class="m" x="272" y="266">one channel or a stereo pair</text>
+  <text class="m" x="272" y="286">of a multichannel interface,</text>
+  <text class="m" x="272" y="306">downmixed to mono, latched</text>
+  <path class="flow" d="M504 260 C540 260 546 200 558 172"/>
+
+  <rect class="field" x="28" y="366" width="740" height="76" rx="10"/>
+  <text class="dim" x="48" y="392">MEETING MIC</text>
+  <text class="m" x="48" y="416">held open, because Zoom delivers talkback only from an open mic &#x2014; and fed nothing,</text>
+  <text class="m" x="48" y="434">through the SDK&#x2019;s own external audio source. No driver, no loopback device.</text>
+  <rect class="field" x="816" y="366" width="276" height="76" rx="10"/>
+  <text class="dim" x="836" y="392">THE MEETING FLOOR</text>
+  <text class="m" x="836" y="416">hears nothing you key.</text>
+  <text class="m" x="836" y="434">Members duck, they do not mute.</text>
+  <path class="flow-dim" d="M768 404 L810 404"/>
+</svg>`,
 );
 
 // CoreVideo Pro system architecture diagram

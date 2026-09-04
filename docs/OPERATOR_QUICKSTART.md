@@ -14,6 +14,9 @@ source-build and Marketplace setup details unless they affect day-to-day use.
    - **Zoom Output Manager**
    - **Zoom Diagnostics**
    - **Zoom ISO Recorder**
+   - **Zoom Talkback**
+
+Each has a matching entry under **Tools**, alongside **Zoom Plugin Settings**.
 
 Published installers include the OBS plugin, `ZoomObsEngine`, Zoom SDK runtime,
 Qt runtime, TLS plugins, OAuth callback helper, and locale files. End users do
@@ -21,22 +24,29 @@ not need to download the Zoom SDK or enter Zoom app credentials.
 
 ## Sign In
 
-1. Open **Zoom Control**.
-2. Click **Sign in with Zoom**.
+1. Open **Tools > Zoom Plugin Settings**.
+2. Click **Sign in with Zoom**. This button is in the settings dialog, not on the
+   Zoom Control dock.
 3. Approve CoreVideo in the browser.
-4. Return to OBS and confirm the status shows connected.
+4. Return to OBS and confirm the dialog's status line shows you are signed in.
+   **Sign out** is beside it if you ever need to start a fresh flow.
 
 CoreVideo uses the published app's Public Client OAuth and Meeting SDK public
 app key. There should be no prompt for a client secret in a production build.
 
 ## Join A Meeting
 
-1. Enter the meeting ID.
+1. Enter the meeting ID, or paste a full Zoom join URL.
 2. Enter the passcode if needed.
 3. Choose the join display name.
-4. Click **Join**.
-5. Use the visible Zoom Meeting SDK window for waiting room admit, self audio,
-   self video, and normal in-meeting controls.
+4. Leave the join-token dropdown on **Zoom sign-in** unless Zoom support has
+   given you a ZAK or an app privilege token to paste.
+5. Tick **Join as Webinar / Zoom Events** for a webinar.
+6. Click **Join**, then **Start Engine** once you are in.
+7. Use the visible Zoom Meeting SDK window for waiting room admit, self audio,
+   self video, and normal in-meeting controls. Joining early and waiting to be
+   admitted is fine - CoreVideo holds its join window open for the length of a
+   legitimate waiting-room wait rather than giving up on it.
 
 If join fails, open **Zoom Diagnostics** and export a support bundle before
 changing settings. The bundle redacts tokens and includes OBS/engine/ISO status.
@@ -100,6 +110,46 @@ that follows the current directed speaker.
 
 The director is CoreVideo's own speaker-follow logic. It is not the same thing
 as Zoom's active-speaker video feed.
+
+## Audio
+
+Route the dedicated **CoreVideo Participant Audio** and **CoreVideo Active
+Speaker Audio** sources to program rather than relying on a video source's own
+embedded audio track. The dedicated path drains the engine's ring in order,
+stamps from a master clock, and counts what it loses; the embedded track reads
+only the newest buffer and accounts for nothing.
+
+Audio arrives ahead of picture, so trim it back - **Tools > Zoom Plugin Settings
+> Audio > Audio delay (dedicated sources)** for the dedicated sources, and the
+Output Manager's per-row **Delay (embedded)** for one video source's own track,
+against the **A/V Offset (embedded)** column beside it. Trim off air: lowering a
+delay pushes the timestamp backward once and glitches that source.
+
+## Talkback
+
+**Newer than v0.1.44 - on `main`, not in the v0.1.44 installer.**
+
+Open **Zoom Talkback** to talk privately to talent over Zoom's own talkback
+channels.
+
+1. Choose the OBS audio source you talk through in the dock's source combo. Use
+   a dedicated source with every program track unchecked in Advanced Audio
+   Properties, and read the line under the combo - it tells you whether the
+   audience would hear it.
+2. Press **Edit talent**, tick everyone you may need to talk to, press **Assign
+   channels**, then **Done**. Channels are created now so a key press has only to
+   open the microphone. Zoom rate-limits this, so a large list can take around
+   twenty seconds. Do it before the show, not during it.
+3. Read the plan report. Zoom allows 16 channels and 10 people per channel;
+   anyone the budget could not cover is named.
+4. Hold a cell to talk, or tick **Latch** for press-on/press-off. **All talent**
+   is the full-width cell on top.
+5. Trust the banner, not the button. `ON AIR` means the engine confirmed it;
+   `ON AIR - BOT MUTED` means Zoom will not let CoreVideo unmute and nobody hears
+   you - ask the host to unmute CoreVideo.
+
+Talkback reaches only the breakout room the engine is in. A cell reading `not in
+channel` usually means the talent is in a different room.
 
 ## ISO Recording
 

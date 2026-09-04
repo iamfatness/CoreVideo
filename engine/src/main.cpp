@@ -4,6 +4,8 @@
 #include "engine-video.h"
 #include "engine-share.h"
 #include "engine-audio.h"
+#include "engine-json.h"
+#include "engine-talkback.h"
 #include <zoom_sdk.h>
 #include <auth_service_interface.h>
 #include <setting_service_interface.h>
@@ -17,6 +19,19 @@
 #include <meeting_service_components/meeting_participants_ctrl_interface.h>
 #else
 #include <meeting_participants_ctrl_interface.h>
+#endif
+// TALKBACK DELIVERY LAW 3 (2026-08-29): IMeetingConfigurationEvent, and with
+// it onEndOtherMeetingToJoinMeetingNotification -- the same-account host
+// collision that hangs a join forever if nobody answers it. Guarded by
+// __has_include and a feature macro like its siblings above, because a
+// mac/linux SDK layout may place it elsewhere and this file must not fail to
+// compile over a callback it can live (badly) without.
+#if __has_include(<meeting_service_components/meeting_configuration_interface.h>)
+#include <meeting_service_components/meeting_configuration_interface.h>
+#define COREVIDEO_HAS_MEETING_CONFIG 1
+#elif __has_include(<meeting_configuration_interface.h>)
+#include <meeting_configuration_interface.h>
+#define COREVIDEO_HAS_MEETING_CONFIG 1
 #endif
 #if __has_include(<meeting_service_components/meeting_raw_archiving_interface.h>)
 #include <meeting_service_components/meeting_raw_archiving_interface.h>
@@ -43,6 +58,7 @@
 #include <exception>
 #include <cstdlib>
 #include <chrono>
+#include <functional>   // ipc_read_line_with_message_pump()'s on_idle hook
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -161,7 +177,17 @@ static void pump_windows_messages()
     }
 }
 
+// `on_idle` (LIVE GATE RUN 1, 2026-08-26) runs on every turn this function
+// spends WAITING rather than reading -- i.e. on the 50ms
+// MsgWaitForMultipleObjects timeout and on every message-available wake, right
+// after the SDK's messages have been pumped. That makes it the engine's only
+// periodic hook that runs on the COMMAND-LOOP THREAD, which is what the
+// nomination ladder's create pacing needs and what tick() (probe-driving
+// thread, and only alive during a probe) cannot provide. Keep whatever runs
+// here cheap and non-blocking: this thread is also the SDK's message pump, so
+// anything slow here delays every callback in the engine.
 static bool ipc_read_line_with_message_pump(IpcFd fd, std::string &out,
+                                            const std::function<void()> &on_idle = {},
                                             size_t max_len = 65536)
 {
     out.clear();
@@ -184,6 +210,12 @@ static bool ipc_read_line_with_message_pump(IpcFd fd, std::string &out,
                 }
                 if (wait == WAIT_OBJECT_0 + 1 || wait == WAIT_TIMEOUT) {
                     pump_windows_messages();
+                    // AFTER the pump, never before: an SDK callback dispatched
+                    // by that pump (onCreateChannelResponse) is what arms the
+                    // deadline this hook then checks, so pumping first costs
+                    // nothing and saves a whole 50ms turn on every rung of the
+                    // nomination ladder.
+                    if (on_idle) on_idle();
                     continue;
                 }
                 CancelIo(fd);
@@ -264,25 +296,9 @@ static void ipc_teardown(IpcFd p2e, IpcFd e2p)
 #endif // platform
 
 // ── Minimal JSON field extraction (no external dependency) ───────────────────
-
-static std::string json_str(const std::string &json, const std::string &key)
-{
-    const std::string needle = "\"" + key + "\":\"";
-    auto pos = json.find(needle);
-    if (pos == std::string::npos) return {};
-    pos += needle.size();
-    std::string result;
-    while (pos < json.size()) {
-        char c = json[pos++];
-        if (c == '\\') {
-            if (pos < json.size()) pos++; // skip escaped character
-            continue;
-        }
-        if (c == '"') break;
-        result += c;
-    }
-    return result;
-}
+// json_str / json_escape / zchar_to_utf8 live in engine-json.h now, shared
+// with engine-talkback.cpp (they were `static` here, invisible outside this
+// translation unit).
 
 static uint32_t json_uint(const std::string &json, const std::string &key)
 {
@@ -297,20 +313,59 @@ static uint32_t json_uint(const std::string &json, const std::string &key)
     }
 }
 
-static std::string json_escape(const std::string &in)
+// Extracts a JSON array of strings, e.g. "nominees":["Sarah Muller","Luis
+// Ortiz"]. Only talkback_nominate uses this today, so it lives here rather
+// than in engine-json.h (json_str/json_escape/zchar_to_utf8 moved there
+// because engine-talkback.cpp needed them too; this one is main.cpp-only,
+// same as json_uint above). Escape handling mirrors json_str(): a backslash
+// consumes the next character verbatim rather than decoding it, so a forged
+// value cannot collapse into something that matches another string by
+// accident. Malformed input (missing key, missing closing bracket, a
+// non-string element) yields whatever prefix parsed cleanly rather than
+// looping or throwing -- a hostile or buggy peer gets a short/empty list,
+// not a hung engine.
+//
+// TASK 3 FIX ROUND 1 (review, Minor 1): that "short/empty list" was harmless
+// while a re-nomination was REFUSED. It is not any more -- an empty list now
+// means DENOMINATE, so a truncated pipe line, an absent key, or a display name
+// carrying an unescaped quote or bracket would destroy the standing talent
+// channels and report the same nominate_done a deliberate denominate reports.
+// The destructive interpretation must not also be the FAILURE interpretation.
+// `*well_formed` (when non-null) is true only when the key was present as an
+// array AND the scan closed on `]` with every element a complete string --
+// i.e. only when an empty list the caller is about to act on is one the peer
+// actually sent.
+static std::vector<std::string> json_str_array(const std::string &json, const std::string &key,
+                                               bool *well_formed = nullptr)
 {
-    std::string out;
-    out.reserve(in.size() + 8);
-    for (char c : in) {
-        switch (c) {
-        case '\\': out += "\\\\"; break;
-        case '"': out += "\\\""; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
-        default: out += c; break;
+    std::vector<std::string> out;
+    if (well_formed) *well_formed = false;
+    const std::string needle = "\"" + key + "\":[";
+    auto pos = json.find(needle);
+    if (pos == std::string::npos) return out;
+    pos += needle.size();
+    while (pos < json.size() && json[pos] != ']') {
+        if (json[pos] == ',' || json[pos] == ' ') { ++pos; continue; }
+        if (json[pos] != '"') return out;   // non-string element: malformed
+        ++pos;
+        std::string s;
+        bool closed = false;
+        while (pos < json.size()) {
+            char c = json[pos++];
+            if (c == '\\') {
+                if (pos < json.size()) s += json[pos++];
+                continue;
+            }
+            if (c == '"') { closed = true; break; }
+            s += c;
         }
+        // An unterminated string means the line was truncated (or a name
+        // carried an unescaped quote): everything after it is guesswork.
+        if (!closed) return out;
+        out.push_back(std::move(s));
     }
+    if (pos >= json.size()) return out;     // ran off the end: no closing ']'
+    if (well_formed) *well_formed = true;
     return out;
 }
 
@@ -388,30 +443,25 @@ struct ParticipantInfo {
     bool is_sharing_screen = false;
 };
 
-static std::string zchar_to_utf8(const zchar_t *name)
-{
-    if (!name) return {};
-#if defined(WIN32)
-    int len = WideCharToMultiByte(CP_UTF8, 0, name, -1,
-                                  nullptr, 0, nullptr, nullptr);
-    if (len <= 0) return {};
-    std::string out(static_cast<size_t>(len - 1), '\0');
-    if (!out.empty()) {
-        WideCharToMultiByte(CP_UTF8, 0, name, -1, &out[0], len,
-                            nullptr, nullptr);
-    }
-    return out;
-#else
-    return name;
-#endif
-}
-
 class EngineParticipants : public ZOOMSDK::IMeetingParticipantsCtrlEvent,
                            public ZOOMSDK::IMeetingAudioCtrlEvent,
                            public ZOOMSDK::IMeetingVideoCtrlEvent,
                            public EngineShareRosterSink {
 public:
     explicit EngineParticipants(IpcFd e2p) : m_e2p(e2p) {}
+
+    // Task 4: wires the roster-change path to EngineTalkback's re-resolution
+    // without giving this class its own copy of the meeting-service pointer.
+    // `meeting_svc_ptr` mirrors EngineMeetingEvent's `&meeting_svc` pattern
+    // (main()'s local is reassigned across Join calls; storing the address
+    // rather than a snapshot keeps this reading whatever is current). Called
+    // once from main() right after both `talkback` and `meeting_svc` exist.
+    void attach_talkback(EngineTalkback *talkback,
+                         ZOOMSDK::IMeetingService * const *meeting_svc_ptr)
+    {
+        m_talkback = talkback;
+        m_meeting_svc_ptr = meeting_svc_ptr;
+    }
 
     void attach(ZOOMSDK::IMeetingParticipantsController *part_ctrl,
                 ZOOMSDK::IMeetingAudioController *audio_ctrl,
@@ -461,10 +511,10 @@ public:
         send_roster();
     }
 
-    void onUserJoin(ZOOMSDK::IList<unsigned int> *, const zchar_t *) override { rebuild_roster(); send_roster(); }
-    void onUserLeft(ZOOMSDK::IList<unsigned int> *, const zchar_t *) override { rebuild_roster(); send_roster(); }
-    void onUserNamesChanged(ZOOMSDK::IList<unsigned int> *) override { rebuild_roster(); send_roster(); }
-    void onUserAudioStatusChange(ZOOMSDK::IList<ZOOMSDK::IUserAudioStatus *> *, const zchar_t *) override { rebuild_roster(); send_roster(); }
+    void onUserJoin(ZOOMSDK::IList<unsigned int> *, const zchar_t *) override { roster_changed(); }
+    void onUserLeft(ZOOMSDK::IList<unsigned int> *, const zchar_t *) override { roster_changed(); }
+    void onUserNamesChanged(ZOOMSDK::IList<unsigned int> *) override { roster_changed(); }
+    void onUserAudioStatusChange(ZOOMSDK::IList<ZOOMSDK::IUserAudioStatus *> *, const zchar_t *) override { roster_changed(); }
 
     void onUserActiveAudioChange(ZOOMSDK::IList<unsigned int> *lst) override
     {
@@ -492,7 +542,7 @@ public:
         send_roster();
     }
 
-    void onUserVideoStatusChange(unsigned int, ZOOMSDK::VideoStatus) override { rebuild_roster(); send_roster(); }
+    void onUserVideoStatusChange(unsigned int, ZOOMSDK::VideoStatus) override { roster_changed(); }
     void onActiveSpeakerVideoUserChanged(unsigned int userId) override
     {
         {
@@ -556,6 +606,26 @@ private:
         return info;
     }
 
+    // Task 4: the single entry point for all five roster-change SDK
+    // callbacks (onUserJoin, onUserLeft, onUserNamesChanged,
+    // onUserAudioStatusChange, onUserVideoStatusChange). Collapsing the
+    // previous "rebuild_roster(); send_roster();" pair each callback wrote
+    // by hand into one place is what makes adding the talkback re-resolution
+    // a one-line change here instead of five. resolve_roster_change() reads
+    // the roster itself (via the participants controller, same as
+    // rebuild_roster() above) rather than being handed this class's
+    // ParticipantInfo list -- EngineTalkback has no reason to depend on this
+    // class's roster shape, and the two already agree on the only fact that
+    // matters (who is in the meeting, by name) because both ask the same SDK
+    // controller.
+    void roster_changed()
+    {
+        rebuild_roster();
+        send_roster();
+        if (m_talkback && m_meeting_svc_ptr)
+            m_talkback->resolve_roster_change(*m_meeting_svc_ptr);
+    }
+
     void rebuild_roster()
     {
         // Call SDK getters outside our mutex to avoid re-entrant deadlock:
@@ -615,6 +685,12 @@ private:
     std::vector<ParticipantInfo> m_roster;
     uint32_t m_active_speaker = 0;
     std::atomic<uint32_t> m_active_share_user{0};
+    // Task 4: set once by attach_talkback() after both `talkback` and
+    // `meeting_svc` exist in main(). Never owned here -- see
+    // attach_talkback()'s own comment for why a pointer-to-pointer instead
+    // of a snapshot.
+    EngineTalkback *m_talkback = nullptr;
+    ZOOMSDK::IMeetingService * const *m_meeting_svc_ptr = nullptr;
 };
 
 // ── Auth event handler ────────────────────────────────────────────────────────
@@ -640,6 +716,105 @@ public:
                         R"(,"enabled":)" +
                         std::string(vs->IsHDVideoEnabled() ? "true" : "false") +
                         "}");
+                }
+                // TALKBACK DELIVERY LAW 1's INSURANCE (2026-08-29). Talkback
+                // only delivers while this client's meeting audio is OPEN
+                // (see EngineTalkback::ensure_mic_open()), so a key press now
+                // UNMUTES this client. Read the code before deciding that is
+                // safe: main.cpp's Join sets isAudioOff = false and
+                // isMyVoiceInMix = true, and nothing in this repository calls
+                // IZoomSDKAudioRawDataHelper::setExternalAudioSource() -- the
+                // only raw-audio-helper use anywhere is engine-audio.cpp's
+                // subscribe()/unSubscribe(), which is the RECEIVE path. So the
+                // SDK would open the DEFAULT SYSTEM CAPTURE DEVICE of the
+                // machine running OBS, live into the meeting. In a control
+                // room that is a hot mic on air.
+                //
+                // So the mic is made dead BEFORE any join, once, here: point
+                // the SDK at a device id that matches nothing (its own
+                // fallback is "the default mic if there is no mic selected via
+                // SelectMic()", which is precisely what must not happen) and
+                // set the mic volume to zero as the second, independent half
+                // -- SetMicVol() is documented to act on the selected mic and
+                // covers the case where SelectMic() is refused.
+                //
+                // Reported with both codes, never silently: this is the guard
+                // between a talkback key and the control room's own
+                // microphone, and a guard that fails quietly is worse than no
+                // guard, because the unmute happens either way.
+                //
+                // WEAKER THAN ZCOMMS'S, stated rather than glossed: theirs is
+                // a never-fed SDK virtual mic (setExternalAudioSource), silent
+                // by construction rather than by Zoom honouring a setting.
+                // Deliberately not taken here -- it installs a virtual mic
+                // into the same helper this engine's show-critical receive
+                // subscribe uses, an interaction nothing has tested. If a live
+                // gate ever hears the room through this, that is the
+                // escalation.
+                {
+                    if (auto *as = settings->GetAudioSettings()) {
+#if defined(WIN32)
+                        const zchar_t *dead_id   = L"corevideo-no-microphone";
+                        const zchar_t *dead_name = L"CoreVideo (no microphone)";
+#else
+                        const zchar_t *dead_id   = "corevideo-no-microphone";
+                        const zchar_t *dead_name = "CoreVideo (no microphone)";
+#endif
+                        const ZOOMSDK::SDKError m_err =
+                            as->SelectMic(dead_id, dead_name);
+                        FLOAT silent = 0.0f;
+                        const ZOOMSDK::SDKError v_err = as->SetMicVol(silent);
+                        // REVIEW ROUND 1, m6: BOTH HALVES REFUSED IS A HOT MIC,
+                        // and it used to be reported as a "debug" line with two
+                        // numbers in it -- filtered by stage, read by nobody.
+                        // These two calls are the only thing standing between a
+                        // talkback key and the control room's own microphone
+                        // going live into the meeting, so a failure has to be
+                        // loud on the channel the operator actually sees, and
+                        // has to say what to DO about it. Either half alone
+                        // still silences the device, which is why this is an
+                        // AND: SelectMic sends the SDK at a device that does not
+                        // exist, SetMicVol zeroes whatever it settles on.
+                        const bool insured = (m_err == ZOOMSDK::SDKERR_SUCCESS) ||
+                                             (v_err == ZOOMSDK::SDKERR_SUCCESS);
+                        EngineIpc::write(
+                            std::string(R"({"cmd":"debug","stage":"mic_insurance","ok":)") +
+                            (insured ? "true" : "false") +
+                            R"(,"select_code":)" +
+                            std::to_string(static_cast<int>(m_err)) +
+                            R"(,"volume_code":)" +
+                            std::to_string(static_cast<int>(v_err)) + "}");
+                        if (!insured) {
+                            EngineIpc::write(
+                                R"({"cmd":"error","msg":"mic_insurance_failed",)"
+                                R"("reason":"hot_mic_risk","select_code":)" +
+                                std::to_string(static_cast<int>(m_err)) +
+                                R"(,"volume_code":)" +
+                                std::to_string(static_cast<int>(v_err)) +
+                                R"(,"action":"Zoom refused both attempts to )"
+                                R"(silence this machine's microphone. A talkback )"
+                                R"(key will unmute CoreVideo in the meeting, so )"
+                                R"(the default capture device may be heard. Set )"
+                                R"(Zoom's microphone to a disconnected device, )"
+                                R"(or mute it at the OS, before keying."})");
+                        }
+                    } else {
+                        // Same severity, one door earlier: with no audio
+                        // settings there is no insurance at all, and the unmute
+                        // still happens on the first key.
+                        EngineIpc::write(
+                            R"({"cmd":"debug","stage":"mic_insurance","ok":false,)"
+                            R"("reason":"no_audio_settings"})");
+                        EngineIpc::write(
+                            R"({"cmd":"error","msg":"mic_insurance_failed",)"
+                            R"("reason":"no_audio_settings",)"
+                            R"("action":"Zoom exposed no audio settings, so )"
+                            R"(CoreVideo could not silence this machine's )"
+                            R"(microphone. A talkback key will unmute CoreVideo )"
+                            R"(in the meeting. Set Zoom's microphone to a )"
+                            R"(disconnected device, or mute it at the OS, before )"
+                            R"(keying."})");
+                    }
                 }
                 ZOOMSDK::DestroySettingService(settings);
             } else {
@@ -674,6 +849,9 @@ private:
 // ── Meeting event handler ─────────────────────────────────────────────────────
 
 class EngineMeetingEvent : public ZOOMSDK::IMeetingServiceEvent
+#if defined(COREVIDEO_HAS_MEETING_CONFIG)
+                         , public ZOOMSDK::IMeetingConfigurationEvent
+#endif
 #if defined(COREVIDEO_HAS_RECORDING_CTRL)
                          , public ZOOMSDK::IMeetingRecordingCtrlEvent
 #endif
@@ -921,6 +1099,26 @@ public:
         EngineIpc::write(R"({"cmd":"debug","stage":"meeting_status","status":)" +
             std::to_string(static_cast<int>(status)) +
             R"(,"result":)" + std::to_string(iResult) + "}");
+
+        // A waiting room, or a meeting that has not started yet, is an
+        // open-ended wait on a human -- not a stalled join. Neither state
+        // produces any further status change until someone acts, so the
+        // plugin's join watchdog could not tell them apart from a wedge and
+        // auto-left a real meeting after two minutes in the waiting room
+        // (2026-08-22). Reported as its own event rather than left for the
+        // plugin to infer from the debug line above: debug output is for
+        // humans and is filtered by stage, and control flow must not depend
+        // on it. Sent on EVERY status change, including the ones that end the
+        // wait, so the flag needs no edge tracking on either side.
+        {
+            const bool awaiting =
+                status == ZOOMSDK::MEETING_STATUS_IN_WAITING_ROOM ||
+                status == ZOOMSDK::MEETING_STATUS_WAITINGFORHOST;
+            EngineIpc::write(
+                std::string(R"({"cmd":"awaiting_admission","active":)") +
+                (awaiting ? "true" : "false") + "}");
+        }
+
         switch (status) {
         case ZOOMSDK::MEETING_STATUS_INMEETING:
             EngineIpc::write( R"({"cmd":"joined"})");
@@ -1032,6 +1230,83 @@ public:
         default: break;
         }
     }
+#if defined(COREVIDEO_HAS_MEETING_CONFIG)
+    // ── TALKBACK DELIVERY LAW 3 (ZComms, 2026-08-29, live) ──────────────────
+    //
+    // A SAME-ACCOUNT HOST COLLISION HANGS THE JOIN FOREVER UNLESS IT IS
+    // ANSWERED. When this engine joins with a ZAK for an account that is
+    // ALREADY hosting a meeting elsewhere -- the operator's own Zoom client,
+    // in their own PMI, which is the ordinary way an operator tests -- the SDK
+    // does not fail the join. It asks, through this callback, whether to end
+    // the other meeting. With no IMeetingConfigurationEvent registered nobody
+    // answers, Join() never resolves, no MEETING_STATUS_FAILED ever arrives,
+    // and the dock sits on "joining" until someone kills the process. ZComms
+    // hit exactly this and it read as "the app isn't responding"; this is the
+    // 2026-08-25 displacement class in our own log.
+    //
+    // CANCEL, NEVER EndOtherMeeting(). The other meeting is the OPERATOR'S
+    // LIVE CLIENT. A bot that ends the show to join it is a worse outcome than
+    // any join failure, and the handler offers exactly those two answers.
+    //
+    // Then FAIL THE JOIN LOUDLY, through the same {"cmd":"error",
+    // "msg":"meeting_failed"} shape MEETING_STATUS_FAILED already uses, so the
+    // dock's error surface and the control API both light up with no new wire
+    // contract. The code is a LOCAL sentinel outside Zoom's MeetingFailCode
+    // space (909001, ZComms's own number for the same condition, matched
+    // deliberately so two projects' logs read alike) and the reason names the
+    // condition rather than a Zoom enum, because there is no Zoom enum for it:
+    // Zoom never failed the join, we did.
+    void onEndOtherMeetingToJoinMeetingNotification(
+        ZOOMSDK::IEndOtherMeetingToJoinMeetingHandler *handler) override
+    {
+        if (handler) handler->Cancel();
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"end_other_meeting_declined"})");
+        EngineIpc::write(
+            R"({"cmd":"error","msg":"meeting_failed","code":909001,)"
+            R"("reason":"account_busy_elsewhere"})");
+    }
+
+    // The rest of IMeetingConfigurationEvent. Named rather than silently
+    // stubbed where a stuck join is the consequence: this engine has no UI to
+    // prompt with, so the honest answer to each is a log line the operator can
+    // act on, not a swallowed callback that looks like a hang. (Answering the
+    // passcode/user-info prompts inline, the way ZComms does, needs a wire
+    // command and an operator surface that do not exist here yet -- stated as
+    // the gap it is rather than left to be rediscovered from a silent join.)
+    void onInputMeetingPasswordAndScreenNameNotification(
+        ZOOMSDK::IMeetingPasswordAndScreenNameHandler *) override
+    {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"meeting_needs_passcode_prompt"})");
+    }
+    void onWebinarNeedRegisterNotification(
+        ZOOMSDK::IWebinarNeedRegisterHandler *) override
+    {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"webinar_needs_registration"})");
+    }
+    void onWebinarNeedInputScreenName(
+        ZOOMSDK::IWebinarInputScreenNameHandler *) override {}
+    void onJoinMeetingNeedUserInfo(
+        ZOOMSDK::IMeetingInputUserInfoHandler *) override
+    {
+        EngineIpc::write(
+            R"({"cmd":"debug","stage":"meeting_needs_user_info"})");
+    }
+    void onUserConfirmToStartArchive(
+        ZOOMSDK::IMeetingArchiveConfirmHandler *) override {}
+    void onUserConfirmRecoverMeeting(
+        ZOOMSDK::IMeetingConfirmRecoverHandler *) override {}
+    void onFreeMeetingRemainTime(unsigned int) override {}
+    void onFreeMeetingRemainTimeStopCountDown() override {}
+    void onFreeMeetingNeedToUpgrade(FreeMeetingNeedUpgradeType,
+                                    const zchar_t *) override {}
+    void onFreeMeetingUpgradeToGiftFreeTrialStart() override {}
+    void onFreeMeetingUpgradeToGiftFreeTrialStop() override {}
+    void onFreeMeetingUpgradeToProMeeting() override {}
+#endif  // COREVIDEO_HAS_MEETING_CONFIG
+
     void onMeetingStatisticsWarningNotification(ZOOMSDK::StatisticsWarningType) override {}
     void onMeetingParameterNotification(const ZOOMSDK::MeetingParameter *) override {}
     void onSuspendParticipantsActivities() override {}
@@ -1198,6 +1473,31 @@ int main()
     EngineShare        share_engine(&participants);
     EngineMeetingEvent meeting_event(e2p, &meeting_svc, &participants,
                                      &video_engine, &share_engine);
+    // Static storage duration, not a plain local: the TalkbackProbe branch
+    // below runs a thread that calls talkback.tick()/is_idle() for up to
+    // ~30s. A plain local's lifetime ends when main() returns, and a thread
+    // still running against it at that point is a use-after-free; static
+    // duration means the object outlives that, so the driving thread can
+    // never dangle a reference to it (Ruling B, task-5-brief).
+    static EngineTalkback talkback;
+    // Task 4: wire the roster-change path (EngineParticipants' five SDK
+    // callbacks) to EngineTalkback's re-resolution. Deferred until here
+    // because it needs `talkback`, which is declared on this line -- and
+    // `&meeting_svc` rather than its current value, since Join reassigns it
+    // and this must always see the meeting the roster events belong to (same
+    // pattern as EngineMeetingEvent's own `&meeting_svc` above).
+    participants.attach_talkback(&talkback, &meeting_svc);
+    // The thread is kept joinable (never detached) and joined explicitly --
+    // both before starting a fresh one and, critically, before any SDK
+    // teardown call at process exit (see the Quit path below). talkback.tick()
+    // calls through m_ctrl/m_svc, raw ZOOMSDK pointers that CleanUPSDK()
+    // invalidates; a detached thread has no point at which the engine can
+    // prove it is no longer touching those pointers before tearing the SDK
+    // down (review round 4 finding).
+    static std::thread talkback_thread;
+    // Lets the driving loop exit promptly on Quit instead of running out its
+    // full ~30s bound before main() can join it.
+    static std::atomic<bool> talkback_stop{false};
 
     // Persistent wide-string storage for async SDK calls (JoinParam / AuthContext
     // hold raw pointers — these must outlive the Join/SDKAuth call).
@@ -1240,7 +1540,24 @@ int main()
 
     while (running) {
 #if defined(WIN32)
-        if (!ipc_read_line_with_message_pump(p2e, line)) break;
+        // LIVE GATE RUN 1 (2026-08-26): the nomination ladder's create pacing
+        // runs here, on the command-loop thread, because CreateChannel may run
+        // nowhere else -- see EngineTalkback::nomination_tick()'s comment on
+        // why tick() cannot host it. No-op (one mutex acquire) whenever no
+        // ladder is mid-provisioning, which is almost always.
+        //
+        // TALKBACK DELIVERY LAWS 1 AND 2 (2026-08-29). nomination_tick() is now
+        // the shared MEMBERSHIP pacer -- creates and invites out of one 600ms
+        // budget, because Zoom's rate limit counts calls and not call kinds.
+        // mic_tick() is Law 1's re-assert: a host can mute the bot mid-key,
+        // and past that instant every send is accepted and inaudible, so a
+        // live key re-opens its own meeting audio every 2s. Both ride this one
+        // idle turn rather than any thread of their own; both are a single
+        // early-out read when there is nothing to do.
+        if (!ipc_read_line_with_message_pump(
+                p2e, line,
+                []() { talkback.nomination_tick(); talkback.mic_tick(); }))
+            break;
 #else
         if (!ipc_read_line(p2e, line)) break; // EOF or connection closed
 #endif
@@ -1341,6 +1658,26 @@ int main()
             if (!meeting_svc) {
                 ZOOMSDK::CreateMeetingService(&meeting_svc);
                 if (meeting_svc) meeting_svc->SetEvent(&meeting_event);
+#if defined(COREVIDEO_HAS_MEETING_CONFIG)
+                // LAW 3 (2026-08-29): the configuration sink is a SEPARATE
+                // registration from SetEvent() above and lives on
+                // IMeetingConfiguration, not on the meeting service. Without
+                // it onEndOtherMeetingToJoinMeetingNotification is never
+                // delivered and a same-account host collision hangs the join
+                // forever with no status change of any kind -- see the handler
+                // for the live failure. Registered on the ONE path that
+                // creates the meeting service, so it is in place before the
+                // very first Join().
+                if (meeting_svc) {
+                    auto *cfg = meeting_svc->GetMeetingConfiguration();
+                    if (cfg) {
+                        cfg->SetEvent(&meeting_event);
+                    } else {
+                        EngineIpc::write(
+                            R"({"cmd":"debug","stage":"meeting_configuration","code":-1})");
+                    }
+                }
+#endif
             }
             if (meeting_svc && !meeting_id.empty()) {
                 // Store as persistent variables so JoinParam raw pointers
@@ -1386,7 +1723,261 @@ int main()
                     std::to_string(static_cast<int>(err)) + "}");
             }
 
+        } else if (command == IpcCommand::TalkbackProbe) {
+            const std::string who = json_str(line, "participant");
+            if (!meeting_svc) {
+                EngineIpc::write(
+                    R"({"cmd":"talkback_probe","stage":"controller","ok":false,)"
+                    R"("reason":"not_in_meeting"})");
+            } else if (!talkback.is_idle()) {
+                // A ladder is live. Refuse immediately -- no join, no block.
+                // Joining first (an earlier round of this change did exactly
+                // that) blocks THIS command -- the single ipc_read_line
+                // thread -- for up to the full ~30s driving-thread bound,
+                // during which leave/stop_engine/quit (quit only sets a flag
+                // this same loop must come back around to see) all stall.
+                // Refusing is correct for a probe; blocking the one reader
+                // thread to wait one out is not (review round 3 finding).
+                //
+                // INVARIANT: this branch must touch NOTHING but the pipe --
+                // no talkback.probe() call, no talkback_thread, no
+                // talkback_stop. "Not idle" is exactly the state that can
+                // change out from under this branch: a callback thread can
+                // flip phase to Done between the is_idle() check above and
+                // any further action here (the same onCreateChannelResponse
+                // early-failure path the idle branch below cites). A
+                // talkback.probe() call made from here would then see
+                // Idle/Done, pass ITS OWN guard, and silently start a real
+                // ladder -- CreateChannel goes out to Zoom -- with no driving
+                // thread ever spawned for it (we're in the refusal branch).
+                // That ladder can never time out or self-destroy (tick() is
+                // what runs kAwaitTimeout and the Destroying retries), so it
+                // leaks a live Zoom channel for the rest of the meeting and
+                // wedges every later talkback_probe in this same branch
+                // forever -- and the operator sees no "busy", so nothing
+                // even hints a probe was silently dropped (review round 4
+                // finding). A bare pipe write has no guard for a callback
+                // thread to race, so it's the only action here that's safe
+                // regardless of what phase does after the check above.
+                EngineIpc::write(
+                    R"({"cmd":"talkback_probe","stage":"busy",)"
+                    R"("reason":"a talkback probe is already in progress"})");
+            } else {
+                // is_idle() is a plain, non-atomic-compound check-then-act
+                // here, and that is safe ONLY because of two facts specific
+                // to this call site: (1) this command loop is the sole
+                // caller of probe() -- no other thread can start a new
+                // ladder between the check above and the join/probe() below,
+                // so nothing can flip phase from Done back into "busy" out
+                // from under us; (2) every SDK-callback-thread path in
+                // engine-talkback.cpp only ever advances phase TOWARD Done
+                // (AwaitingChannel/Invite/Sending/Destroying -> Done), never
+                // away from it, so once Idle/Done is observed here it stays
+                // that way until THIS thread calls probe() again. That also
+                // means the driving thread from a PRIOR probe, if still
+                // joinable, has already tripped its own is_idle() exit (or
+                // will within one 10ms tick if a callback thread set Done
+                // directly, e.g. onCreateChannelResponse's early-failure
+                // path) -- so this join costs at most one tick interval, not
+                // the ~30s bound.
+                if (talkback_thread.joinable()) talkback_thread.join();
+                talkback_stop.store(false, std::memory_order_release);
+
+                // probe() returns true if and only if it issued a
+                // CreateChannel -- every refusal, not just the re-entrancy
+                // guard, returns false. Spawning the driving thread only on
+                // true is what keeps "a ladder started" and "a driver is
+                // running" the same fact. That matters beyond thread count:
+                // the driving thread is the only thread besides this one
+                // that drives the batch-destroy API, and a thread spawned
+                // for a probe that created nothing can be draining strays
+                // while an onCreateChannelResponse branch destroys on this
+                // thread. Do not "helpfully" spawn it on a refusal to get
+                // strays drained -- probe() drains them itself on those
+                // paths. See probe()'s return-value contract in
+                // engine-talkback.h.
+                if (talkback.probe(meeting_svc, who)) {
+                    // Drive tick() off a dedicated thread: ipc_read_line_with_
+                    // message_pump() blocks, so tick() cannot live on the read
+                    // loop's thread. Bounded at 3000 x 10ms (~30s), not the
+                    // ~12s a naive read of the probe's own "~3s of tone"
+                    // comment suggests -- AwaitingChannel and AwaitingInvite
+                    // each carry their own 10s timeout (kAwaitTimeout in
+                    // engine-talkback.cpp) before falling through to
+                    // Destroying, which itself retries up to
+                    // kMaxDestroyAttempts times. Worst case is 10s timeout
+                    // plus several destroy retries; 12s could expire the
+                    // thread mid-destroy and strand a channel -- exactly what
+                    // the destroy-retry machinery exists to prevent (Ruling A,
+                    // task-5-brief). is_idle() breaks the loop as soon as the
+                    // ladder settles so the happy path does not spin the full
+                    // bound; talkback_stop lets Quit break it early too.
+                    talkback_thread = std::thread([]() {
+                        for (int i = 0; i < 3000; ++i) {
+                            if (talkback_stop.load(std::memory_order_acquire)) break;
+                            talkback.tick();
+                            // has_pending_work(), not is_idle(): a stray
+                            // channel queued by a late/duplicate
+                            // onCreateChannelResponse can leave the ladder
+                            // itself Idle/Done while drain_stray_channels()
+                            // (reached from tick(), which only this thread
+                            // drives, and from probe()'s own refusal paths,
+                            // which run only when this thread does not
+                            // exist) still has not run for it. If
+                            // this loop exited on is_idle() alone it could
+                            // stop right after AwaitingChannel's 10s timeout
+                            // -> Destroying -> Done settles, and then a
+                            // genuinely late create_channel_response arrives
+                            // at t+11s, queues a real Zoom channel, and
+                            // nothing ever destroys it (F3 review-round
+                            // finding). is_idle() is still exactly right for
+                            // the refusal gate above -- see the comment on
+                            // has_pending_work() in engine-talkback.h for why
+                            // the two must not be conflated.
+                            if (!talkback.has_pending_work()) break;
+                            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                        }
+                    });
+                }
+            }
+
+        } else if (command == IpcCommand::TalkbackOpen) {
+            talkback.open_audio(json_str(line, "region"),
+                                static_cast<uint32_t>(json_uint(line, "rate")),
+                                static_cast<uint16_t>(json_uint(line, "channels")));
+
+        } else if (command == IpcCommand::TalkbackAudio) {
+            // Drained on THIS thread deliberately: on Windows this loop is
+            // also the SDK's message-pump thread (see
+            // ipc_read_line_with_message_pump above), so every SDK call stays
+            // on the thread the SDK already uses. The Milestone 1 probe's
+            // separate driving thread was the first in this engine to call SDK
+            // APIs off the pump; this path does not repeat that.
+            talkback.drain_audio();
+
+        } else if (command == IpcCommand::TalkbackClose) {
+            talkback.close_audio();
+
+        } else if (command == IpcCommand::TalkbackStart) {
+            // F3 review-round fix: session_stop()'s own comment used to
+            // claim R1's mutual exclusion (probe() refuses while
+            // m_session_live, session_start() refuses while
+            // has_pending_work()) alone guarantees the probe's driving
+            // thread can never be mid-tick() while the session runs -- but
+            // that gate is a single-instant check made when a probe or a
+            // session STARTS. It says nothing about a driving thread that
+            // already passed has_pending_work(), went to sleep_for(10ms),
+            // and wakes again after this branch has since started a
+            // session. Mirror the TalkbackProbe branch above: join the
+            // driving thread here too, BEFORE ever calling session_start(),
+            // so no probe ladder can still be ticking when a session starts.
+            if (talkback_thread.joinable()) talkback_thread.join();
+            // Task 3: a key press names a TARGET (kTalkbackAllTalentTarget or
+            // a nominee's name), not a participant to open a channel for --
+            // session_start() now selects an already-provisioned channel.
+            // Task 5 fix round 1 (F7): the "participant" fallback that used
+            // to live here was a compatibility shim for the plugin's
+            // pre-Task-5 wire shape, with an explicit "delete once Task 5
+            // ships" note. Task 5 shipped and the review confirmed the new
+            // shape end-to-end (src/zoom-engine-client.cpp sends "target"
+            // unconditionally) -- deleted.
+            const std::string target = json_str(line, "target");
+            talkback.session_start(meeting_svc, target);
+
+        } else if (command == IpcCommand::TalkbackStop) {
+            talkback.session_stop();
+
+        } else if (command == IpcCommand::TalkbackNominate) {
+            // Mirror the TalkbackStart branch above: join the probe's
+            // driving thread first so nominate() (which reassigns
+            // m_svc/m_ctrl, same as session_start()) can never race it --
+            // see the comment there.
+            if (talkback_thread.joinable()) talkback_thread.join();
+            // Task 3 fix round 1 (Minor 1): an empty nominee list is a
+            // DELIBERATE denominate -- it destroys the standing set -- so a
+            // request whose list could not be parsed must never reach
+            // nominate(). Refuse loudly instead; the operator retries, and the
+            // talent channels are still standing when they do.
+            bool nominees_ok = false;
+            const std::vector<std::string> nominees =
+                json_str_array(line, "nominees", &nominees_ok);
+            // Final-review C1 (CRITICAL): the plugin's identity for THIS
+            // request, echoed back in every terminal report so a report can
+            // be matched to the staging slot it belongs to (see
+            // EngineTalkback::nominate()'s `attempt` parameter and
+            // src/talkback-nomination.h). Absent (0) for a raw-pipe caller or
+            // a plugin older than this fix, which suppresses the field
+            // entirely -- those reports then look exactly like a pre-C1
+            // engine's, which the plugin tolerates by design.
+            const uint32_t attempt = json_uint(line, "attempt");
+            if (!nominees_ok) {
+                // Terminal for this attempt, so it carries the id too: the
+                // plugin staged the send, and a refusal it cannot match is a
+                // refusal it cannot clear.
+                EngineIpc::write(
+                    R"({"cmd":"talkback_nominate","stage":"nominate","ok":false,)"
+                    R"("reason":"malformed_nominees")" +
+                    (attempt ? R"(,"attempt":)" + std::to_string(attempt)
+                             : std::string()) + "}");
+            } else {
+                // Fix round 2 (N1): this bool used to be discarded outright.
+                // nominate() reports its own terminal outcome on every
+                // return-false path today (that discipline is the actual
+                // fix for N1 -- see nomination_create_next()'s two abort
+                // branches), so this is a backstop, not the primary signal:
+                // if a FUTURE path inside nominate() ever returns false
+                // without having reported anything, a silently discarded
+                // bool is exactly how that would go unnoticed again. This
+                // "debug" line is diagnostic-only -- handle_event()'s
+                // generic "debug" branch just logs it, it does not
+                // participate in the plugin's nomination state machine, so
+                // it can never double up with report_nomination()'s own
+                // terminal line.
+                if (!talkback.nominate(meeting_svc, nominees, attempt)) {
+                    EngineIpc::write(
+                        R"({"cmd":"debug","stage":"nominate_returned_false"})");
+                }
+            }
+
         } else if (command == IpcCommand::Leave) {
+            // F4 review-round fix: mirror the quit path below (see the
+            // "Join the talkback driving thread BEFORE any SDK teardown
+            // call" comment near the bottom of main()) -- the same
+            // constraint applies here. tick() may be mid SDK-call on the
+            // driving thread via m_ctrl/m_svc (raw ZOOMSDK pointers
+            // captured at probe() time) at the moment this command-thread
+            // branch calls Leave() through meeting_svc; that is the same
+            // "SDK callbacks racing teardown" class the quit path already
+            // guards against. Signal stop first so this does not wait out
+            // the full ~30s bound -- in the common case is_idle() has
+            // already stopped the loop well before that, so the join costs
+            // at most one ~10ms tick.
+            talkback_stop.store(true, std::memory_order_release);
+            if (talkback_thread.joinable()) talkback_thread.join();
+            // F4 review-round fix: only the explicit talkback_close branch
+            // used to call this. Leave() destroys the talkback channel
+            // meeting-side, but m_audio_open stayed true and the ring
+            // region stayed mapped -- a director who never sent
+            // talkback_close before leaving left the engine holding a
+            // mapping (and, once the destroy-path fix elsewhere in this
+            // round clears m_channel_id_z, a channel id that no longer
+            // exists) for as long as the process lives. close_audio() is
+            // idempotent (bails immediately if !m_audio_open), so calling
+            // it here is safe even when talkback was never opened.
+            talkback.close_audio();
+            // The persistent session is a separate channel from the probe's
+            // (see engine-talkback.h) and needs its own explicit teardown
+            // here for the same reason close_audio() does: Leave() destroys
+            // meeting-side state out from under it otherwise. session_stop()
+            // is idempotent (bails immediately if nothing is live), so this
+            // is safe even when no session was ever started.
+            talkback.session_stop();
+            // Provisioned channels and their membership are meeting-scoped
+            // (design doc's "Meeting rejoin" row) -- once Leave() below
+            // runs there is nothing left on Zoom's side for the nomination
+            // table to reference. Bookkeeping only, no SDK call; see
+            // nomination_reset()'s own comment.
+            talkback.nomination_reset();
             if (meeting_svc)
                 meeting_svc->Leave(ZOOMSDK::LEAVE_MEETING);
 
@@ -1455,6 +2046,30 @@ int main()
     // Stop the heartbeat before tearing down the SDK / IPC.
     running.store(false, std::memory_order_release);
     if (heartbeat.joinable()) heartbeat.join();
+
+    // Join the talkback driving thread BEFORE any SDK teardown call, not
+    // just before CleanUPSDK() -- Leave() below also runs through
+    // meeting_svc, and tick() calls through m_ctrl/m_svc (raw ZOOMSDK
+    // pointers captured at probe() time) on every iteration. A tick() still
+    // in flight when either of those tears down is a callback racing
+    // teardown on invalidated SDK pointers -- the defect class this project
+    // documents in CLAUDE.md's "Engine teardown" invariant. Signal stop
+    // first so this does not wait out the full ~30s bound.
+    talkback_stop.store(true, std::memory_order_release);
+    if (talkback_thread.joinable()) talkback_thread.join();
+    // F4 review-round fix: same reasoning as the Leave branch above -- quit
+    // is another path that used to leave m_audio_open true and the ring
+    // region mapped. Close it before the SDK teardown calls below run, same
+    // ordering discipline as the driving-thread join right above (SDK
+    // callbacks must never race teardown).
+    talkback.close_audio();
+    // Same reasoning as the Leave branch above: tear down the session's own
+    // channel before the SDK teardown calls below run.
+    talkback.session_stop();
+    // Same reasoning as the Leave branch above: the nomination table only
+    // holds bookkeeping for meeting-scoped state, so clear it before the SDK
+    // teardown calls below run. No SDK call in nomination_reset() itself.
+    talkback.nomination_reset();
 
     if (meeting_svc) meeting_svc->Leave(ZOOMSDK::LEAVE_MEETING);
     share_engine.detach();

@@ -158,12 +158,14 @@ static std::string zoom_error_message(const QJsonObject &obj)
 #if defined(WIN32)
 #include <windows.h>
 #else
+#include <dlfcn.h>
 #include <signal.h>
 #include <spawn.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <cstring>
 extern char **environ;
 #endif
 
@@ -198,6 +200,54 @@ static std::string engine_executable_path()
         return candidate;
     return "ZoomObsEngine.exe";
 #else
+    // Resolve the engine next to the loaded plugin binary, mirroring the Windows
+    // branch above. Returning a bare "ZoomObsEngine" is not sufficient: the
+    // launcher uses posix_spawnp, which for a name containing no slash performs
+    // a PATH search, and the engine ships inside the plugin bundle
+    // (Contents/MacOS on macOS) which is never on PATH -- so the spawn failed
+    // with ENOENT and the plugin could never start a meeting.
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<const void *>(&engine_executable_path), &info) &&
+        info.dli_fname) {
+        const std::string module_path(info.dli_fname);
+        const size_t slash = module_path.find_last_of('/');
+        if (slash != std::string::npos) {
+            const std::string module_dir = module_path.substr(0, slash + 1);
+#if defined(__APPLE__)
+            // Preferred macOS layout, and the only one where authentication can
+            // work: the engine ships as an .app whose Contents/Frameworks holds
+            // the Zoom SDK runtime, because the SDK loads its runtime bundles
+            // through the main bundle rather than through rpath. A bare
+            // executable beside the module still launches and still authenticates
+            // *nothing* -- see engine/src/main-macos.mm. Checked first so a stale
+            // loose binary from an older install cannot win.
+            std::string candidate =
+                module_dir + "ZoomObsEngine.app/Contents/MacOS/ZoomObsEngine";
+            if (access(candidate.c_str(), X_OK) == 0) // flawfinder: ignore (own install paths, not a trust boundary)
+                return candidate;
+
+            candidate = module_dir + "zoom-runtime/ZoomObsEngine";
+#else
+            std::string candidate = module_dir + "zoom-runtime/ZoomObsEngine";
+#endif
+            if (access(candidate.c_str(), X_OK) == 0) // flawfinder: ignore (own install paths, not a trust boundary)
+                return candidate;
+
+            candidate = module_dir + "ZoomObsEngine";
+            if (access(candidate.c_str(), X_OK) == 0) // flawfinder: ignore (own install paths, not a trust boundary)
+                return candidate;
+        }
+    }
+
+    char *obs_path = obs_module_file("ZoomObsEngine");
+    if (obs_path) {
+        const std::string candidate(obs_path);
+        bfree(obs_path);
+        if (access(candidate.c_str(), X_OK) == 0) // flawfinder: ignore (own install paths, not a trust boundary)
+            return candidate;
+    }
+    // Last resort: let posix_spawnp search PATH, so a developer build with the
+    // engine on PATH still works rather than failing outright.
     return "ZoomObsEngine";
 #endif
 }
@@ -1124,11 +1174,18 @@ bool ZoomEngineClient::launch_engine()
     return true;
 #else
     const std::string path = engine_executable_path();
+    blog(LOG_INFO, "[obs-zoom-plugin] Launching ZoomObsEngine: %s", path.c_str());
     char *const argv[] = {const_cast<char *>(path.c_str()), nullptr};
     pid_t pid = -1;
+    // posix_spawnp returns the error number directly; it does not set errno.
     const int rc = posix_spawnp(&pid, path.c_str(), nullptr, nullptr, argv, environ);
     if (rc != 0) {
-        set_last_error("Failed to launch ZoomObsEngine process.");
+        // Name the path and the reason: "failed to launch" alone gives no way to
+        // tell a missing engine from a non-executable one.
+        const std::string message = "Failed to launch ZoomObsEngine at '" + path +
+                                    "': " + strerror(rc);
+        set_last_error(message);
+        blog(LOG_ERROR, "[obs-zoom-plugin] %s", message.c_str());
         return false;
     }
     m_pid = pid;
@@ -1497,6 +1554,10 @@ void ZoomEngineClient::handle_event(const std::string &line)
     if (cmd == "joined") {
         m_awaiting_admission.store(false, std::memory_order_release);
         m_state.store(MeetingState::InMeeting, std::memory_order_release);
+        // A successful join supersedes whatever failed before it; without
+        // this the dock keeps showing "Connection failed" from a previous
+        // attempt over a perfectly healthy meeting.
+        clear_last_error();
         ZoomReconnectManager::instance().on_join_success();
         return;
     }
@@ -1612,6 +1673,72 @@ void ZoomEngineClient::handle_event(const std::string &line)
                                : std::string());
             }
             set_error_and_notify(error_message);
+            return;
+        }
+        // Another media-path error: sources keep their participant binding
+        // across meetings, but Zoom mints user ids per join, so after a
+        // rejoin a saved id often refers to nobody until the operator
+        // reassigns the source or that participant comes back. Subscribing
+        // to an absent participant is therefore a waiting state, not an
+        // error — stay quiet and let the recovery loop keep retrying. If the
+        // participant IS in the roster the failure is real and stays loud,
+        // but either way the meeting itself is healthy: never route this
+        // into the join-failure / reconnect machinery below (doing so
+        // flipped the session to "Connection failed" mid-meeting).
+        // raw_media_start_failed with privilege_requested is the NORMAL first
+        // half of the record-privilege handshake: canStartRawRecording returns
+        // NoPermission(6), the engine requests the privilege, and the grant
+        // lands moments later (121ms observed live 2026-08-20) followed by
+        // raw_media_ready. Routing it into the join-failure tail flipped a
+        // healthy joined session to Failed, which then gated start_engine,
+        // resubscription and recovery for the rest of the session. Surface
+        // the message; never vote against the meeting.
+        if (emsg == "raw_media_start_failed" &&
+            obj.value("privilege_requested").toBool()) {
+            std::vector<ErrorCallback> error_callbacks;
+            const std::string error_message = zoom_error_message(obj);
+            {
+                std::lock_guard<std::mutex> lk(m_mtx);
+                m_last_error = error_message;
+                for (const auto &entry : m_error_callbacks)
+                    if (entry.second) error_callbacks.push_back(entry.second);
+            }
+            for (const auto &cb : error_callbacks) cb(error_message);
+            return;
+        }
+        if (emsg == "video_subscribe_failed") {
+            const uint32_t participant_id =
+                static_cast<uint32_t>(obj.value("participant_id").toInt());
+            const std::string uuid =
+                obj.value("source_uuid").toString().toStdString();
+            bool known = false;
+            std::string error_message;
+            std::vector<ErrorCallback> error_callbacks;
+            {
+                std::lock_guard<std::mutex> lk(m_mtx);
+                for (const auto &p : m_roster) {
+                    if (p.user_id == participant_id) {
+                        known = true;
+                        break;
+                    }
+                }
+                if (known) {
+                    error_message =
+                        "Zoom engine could not subscribe to video for source " +
+                        (uuid.empty() ? std::string("(unknown)") : uuid);
+                    m_last_error = error_message;
+                    for (const auto &entry : m_error_callbacks)
+                        if (entry.second)
+                            error_callbacks.push_back(entry.second);
+                }
+            }
+            if (!known) {
+                blog(LOG_INFO,
+                     "[obs-zoom-plugin] Video subscribe for absent participant %u (source %s) - waiting for them to join",
+                     participant_id, uuid.c_str());
+                return;
+            }
+            for (const auto &cb : error_callbacks) cb(error_message);
             return;
         }
         const QString reason = obj.value("reason").toString();

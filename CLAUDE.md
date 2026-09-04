@@ -19,6 +19,27 @@ video event means "read the newest frame in the region", an audio event means
 "drain everything pending in the ring" — this property is load-bearing for the
 dispatch design and must survive refactors.
 
+## macOS (Apple Silicon)
+
+Reunified 2026-08-20 (merge of the `mac-port` line). Same two-process design;
+the differences that matter: IPC rides Unix sockets (`/tmp/ZoomObsPlugin_*.sock`)
+instead of named pipes; the engine is `ZoomObsEngine.app` inside the plugin
+bundle with the Zoom SDK copied into its `Contents/Frameworks` (the SDK loads
+sibling bundles from there — rpath does not work); install with
+`scripts/make-macos-bundle.sh --build-dir <dir> --link-sdk --install`, never by
+hand. POSIX shm names are collapsed to 20 chars on Apple (`shm_platform_name`,
+PSHMNAMLEN=31) and a shm object is **sized exactly once** (ftruncate on an
+existing object is EINVAL — create-over-held fstats and recreates instead).
+The engine's SDK-facing rules are documented in `engine/src/main-macos.mm`:
+never subscribe to the local user's own share, detach `renderer.delegate`
+before `destroyRender:` (synchronous callback re-entry deadlocked the main
+thread for hours), frame callbacks `try_lock` and drop rather than block SDK
+threads, heartbeat pings route through the main queue only after
+`initSDKWithParams` returns. `ShmAudioSlot::capture_ns` crosses processes on
+DIFFERENT clocks on macOS (see the struct comment) — `audio_latency_us` is
+untrustworthy there until that is reconciled. Kill a mid-meeting engine only
+after checking `{"cmd":"status"}` — it IS the meeting session.
+
 ## Build, test, install
 
 Full toolchain setup is in `README.md` (§Building). Day-to-day, an existing

@@ -174,11 +174,32 @@ void ZoomControlServer::on_new_connection()
         return;
     while (m_server->hasPendingConnections()) {
         auto *socket = m_server->nextPendingConnection();
-        connect(socket, &QTcpSocket::readyRead, this, [this, socket]() {
+        // The guard, not the raw pointer, drives the read loop: handle_line
+        // can block (nested event loop in the join path), and a client that
+        // disconnects meanwhile has this socket deleteLater'd inside that
+        // nested loop. The raw pointer then dangles and the loop's next
+        // canReadLine() is a use-after-free (second live SIGSEGV of
+        // 2026-08-20, after the write_response one was already guarded).
+        QPointer<QTcpSocket> guard(socket);
+        connect(socket, &QTcpSocket::readyRead, this, [this, guard]() {
             if (!m_running)
                 return;
-            while (socket->canReadLine())
-                handle_line(socket, socket->readLine(4096).trimmed());
+            // handle_line must NOT run inside this signal-emission frame:
+            // several commands block in a nested event loop (join's ZAK
+            // fetch, engine start), and a deleteLater issued at nested depth
+            // executes INSIDE that nested loop -- deleting the socket while
+            // Qt's own canReadNotification() emission frame underneath us is
+            // still live. The QPointer guards protected plugin code but not
+            // Qt's unwinding frame (third SIGSEGV of 2026-08-20, no plugin
+            // frames on the stack). Queue each line instead: the handler
+            // then runs from the event loop proper, where a mid-handler
+            // socket deletion is safe and the guards make writes no-ops.
+            while (guard && guard->canReadLine()) {
+                const QByteArray line = guard->readLine(4096).trimmed();
+                QTimer::singleShot(0, this, [this, guard, line]() {
+                    handle_line(guard, line);
+                });
+            }
         });
         connect(socket, &QTcpSocket::disconnected, socket, &QTcpSocket::deleteLater);
     }
@@ -450,7 +471,14 @@ static QJsonObject talkback_nomination_to_json(
     return obj;
 }
 
-void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
+// NOTE (macOS reunification): the socket is held as a QPointer, not a raw
+// pointer. handle_line() is delivered via QTimer::singleShot(0) rather than
+// inline from readyRead -- three control-server crashes were one flaw, where a
+// handler blocking in a nested event loop let deleteLater fire inside that
+// loop and unwound the socket underneath the frame. The queued delivery is
+// what fixes it; the QPointer is what makes the queued call safe when the
+// socket died before it ran.
+void ZoomControlServer::handle_line(QPointer<QTcpSocket> socket, const QByteArray &line)
 {
     const ParsedControlRequest parsed = parse_control_request(line, m_token);
     if (parsed.error == ControlRequestError::InvalidJson) {
@@ -1086,10 +1114,10 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
 
     // Keep the socket open and stream JSON events until it disconnects.
     if (cmd == "subscribe_events") {
-        m_event_subs.insert(socket);
+        m_event_subs.insert(socket.data());
         // Remove from the set if the client disconnects.
-        connect(socket, &QTcpSocket::disconnected, this,
-                [this, socket]() { remove_subscriber(socket); },
+        connect(socket.data(), &QTcpSocket::disconnected, this,
+                [this, socket]() { remove_subscriber(socket.data()); },
                 Qt::UniqueConnection);
         write_response(socket, {{"ok", true}, {"subscribed", true}});
         // Send current state immediately so the subscriber starts with fresh data.
@@ -1115,9 +1143,14 @@ void ZoomControlServer::handle_line(QTcpSocket *socket, const QByteArray &line)
     });
 }
 
-void ZoomControlServer::write_response(QTcpSocket *socket,
+void ZoomControlServer::write_response(const QPointer<QTcpSocket> &socket,
                                        const QJsonObject &response)
 {
+    // The client may have disconnected (and its socket been deleted) while
+    // the handler was blocked; a dead QPointer makes that a dropped response
+    // instead of a use-after-free.
+    if (!socket || socket->state() != QAbstractSocket::ConnectedState)
+        return;
     QJsonDocument doc(response);
     socket->write(doc.toJson(QJsonDocument::Compact));
     socket->write("\n");

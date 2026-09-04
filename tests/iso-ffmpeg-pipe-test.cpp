@@ -122,7 +122,7 @@ int main(int argc, char **argv)
         // "permanently broken" -- exactly the mismatch that turned one
         // resolution failure into a full CTest timeout (2026-08-19 macOS
         // CI). Fail fast and loud instead of cascading.
-        std::fprintf(stderr, "FAIL: cannot resolve this test binary's own "
+        std::fprintf(stderr, "FAIL: cannot resolve this test binary's own " // flawfinder: ignore
                              "path; skipping the rest (see self_path())\n");
         return 1;
     }
@@ -148,7 +148,7 @@ int main(int argc, char **argv)
                     break;
                 }
                 if (!pipe.running()) {
-                    std::fprintf(stderr,
+                    std::fprintf(stderr, // flawfinder: ignore
                                  "FAIL: child exited mid-transfer after "
                                  "queuing %zu/%zu buffers\n", queued, kCount);
                     break;

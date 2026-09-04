@@ -746,6 +746,22 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
                 audio.frames = mono_frames;
                 audio.format = AUDIO_FORMAT_16BIT;
                 audio.speakers = SPEAKERS_STEREO;
+            } else if (ctx->audio_mode.load(std::memory_order_acquire) ==
+                           AudioChannelMode::Mono &&
+                       channels == 2) {
+                // True-stereo wire but the operator wants mono: average the
+                // pair rather than dropping a side.
+                const uint32_t frames = byte_len / (kZoomBytesPerSample * 2);
+                if (ctx->stereo_buf.size() < frames)
+                    ctx->stereo_buf.resize(frames);
+                for (uint32_t i = 0; i < frames; ++i) {
+                    ctx->stereo_buf[i] = static_cast<int16_t>(
+                        (static_cast<int32_t>(pcm[i * 2]) + pcm[i * 2 + 1]) / 2);
+                }
+                audio.data[0] = reinterpret_cast<const uint8_t *>(ctx->stereo_buf.data());
+                audio.frames = frames;
+                audio.format = AUDIO_FORMAT_16BIT;
+                audio.speakers = SPEAKERS_MONO;
             } else {
                 audio.data[0] = reinterpret_cast<const uint8_t *>(pcm);
                 audio.frames = byte_len /

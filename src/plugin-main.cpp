@@ -4,6 +4,7 @@
 #include "zoom-source.h"
 #include "zoom-participant-audio-source.h"
 #include "zoom-supersource.h"
+#include "zoom-loudness-meter-source.h"
 #include "zoom-engine-client.h"
 #include "zoom-reconnect.h"
 #include "zoom-settings.h"
@@ -489,6 +490,8 @@ bool obs_module_load(void)
     zoom_participant_audio_source_register();
     zoom_supersource_register();
     zoom_supersource_load_gfx();
+    corevideo_loudness_meter_source_register();
+    corevideo_loudness_meter_load_gfx();
     blog(LOG_INFO, "[obs-zoom-plugin] Registered CoreVideo source kinds");
 
     ZoomPluginSettings s = ZoomPluginSettings::load();
@@ -545,6 +548,7 @@ void obs_module_unload(void)
     }
     shutdown_corevideo();
     zoom_supersource_unload_gfx();
+    corevideo_loudness_meter_unload_gfx();
     g_dock.clear();
     g_iso_panel.clear();
     g_output_panel.clear();

@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include "loudness-board.h"
+
 void zoom_participant_audio_source_register();
 
 // One live CoreVideoAudioSource, flattened for the control API and any other
@@ -41,3 +43,19 @@ std::vector<CoreVideoAudioSourceInfo> corevideo_audio_source_infos();
 // CoreVideoAudioSource, including ones already created. Returns the value
 // actually applied after clamping.
 uint32_t corevideo_set_global_audio_delay_ms(uint32_t delay_ms);
+
+// One BS.1770-4 reading per live CoreVideoAudioSource, for the readiness
+// board. Safe to call from any thread; takes g_sources_mtx and then each
+// source's own mutex, in that order and never the reverse.
+//
+// The display name here is a CACHED copy, refreshed on the engine's roster
+// callback. ZoomEngineClient::roster() deep-copies every ParticipantInfo --
+// strings included -- under the client's hot mutex, so resolving a name on
+// the audio path (about a hundred buffers a second, per source) would put a
+// full roster copy on the media path.
+std::vector<LoudnessReading> corevideo_loudness_readings();
+
+// Starts every live source's mic-check window over. Integrated loudness is
+// scoped to ONE panelist's check, not the session: without this the number
+// is polluted by whoever spoke before them on the same source.
+void corevideo_reset_loudness_windows();

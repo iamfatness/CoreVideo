@@ -269,6 +269,7 @@ if(COREVIDEO_BUILD_PLUGIN)
         src/talkback-cue.cpp
         src/zoom-participant-audio-source.cpp
         src/zoom-supersource.cpp
+        src/zoom-loudness-meter-source.cpp
         src/zoom-tiles-background.cpp
         src/zoom-tiles-audio.cpp
         src/zoom-tiles-effect.cpp
@@ -989,6 +990,35 @@ if(BUILD_TESTING)
     )
     add_test(NAME CoreVideoAudioSilenceFade
              COMMAND CoreVideoAudioSilenceFadeTest)
+
+    # ITU-R BS.1770-4 loudness. The coefficients are DERIVED from the runtime
+    # sample rate rather than taken from the standard's 48 kHz table, because
+    # the engine stamps whatever rate Zoom gave it into ShmAudioHeader and
+    # Zoom commonly sends 32 kHz -- measured 1.3 LU of error on a 1 kHz tone
+    # if the 48 kHz constants are used at 32 kHz, with nothing in the reading
+    # to say it is wrong. See src/audio-loudness.h.
+    add_executable(CoreVideoAudioLoudnessTest
+        tests/audio-loudness-test.cpp
+    )
+    target_include_directories(CoreVideoAudioLoudnessTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoAudioLoudness
+             COMMAND CoreVideoAudioLoudnessTest)
+
+    # The readiness board's model: panel MEDIAN (not mean, so one laptop mic
+    # cannot drag the reference), deviation in LU, pass/fail, deterministic
+    # row order, and the row/bar rectangle arithmetic. The layout is pinned
+    # here rather than looked at on screen because this repo has no headless
+    # GPU harness and has ruled against building one. See src/loudness-board.h.
+    add_executable(CoreVideoLoudnessBoardTest
+        tests/loudness-board-test.cpp
+    )
+    target_include_directories(CoreVideoLoudnessBoardTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoLoudnessBoard
+             COMMAND CoreVideoLoudnessBoardTest)
 
     # Backfills silence into an ISO WAV across gaps so its own timeline
     # tracks real elapsed time instead of shrinking by every silent

@@ -154,6 +154,60 @@ Every one of these is documented at length where it lives; the list is the map.
   directly (2026-08-18/19). Applied in both `zoom-source.cpp`
   (`output_audio_from_shared_memory`, shared by the main and director-preview
   slots) and `zoom-participant-audio-source.cpp`.
+- **Loudness coefficients follow the RUNTIME sample rate, never 48 kHz**
+  (`src/audio-loudness.h`, feat/panelist-feedback): BS.1770-4 publishes its
+  two K-weighting biquads' coefficients for 48 kHz and no other rate, and
+  this plugin has no guaranteed rate -- Zoom commonly delivers 32 kHz. The
+  coefficients are DERIVED from the analog prototype at whatever
+  `loudness_meter_configure()` is called with; at 48 kHz that derivation
+  reproduces the published table to fourteen digits, which is what the
+  engine's tests assert. Pinned at 48 kHz and fed 32 kHz, a 1 kHz tone
+  whose true value is -19.98 LUFS reads -18.66: 1.3 LU wrong, on a meter
+  whose whole product claim is that a 6 LU spread between panelists is
+  visible, and with nothing in the number to say it is wrong. The
+  gated-integration window carries the same fragility one level up:
+  `loudness_meter_clear_window()` is shared, on purpose, by
+  `loudness_meter_configure()` and `loudness_meter_reset_window()` so a
+  mid-stream format renegotiation (Zoom renegotiating, or a Mix/Isolated
+  role flip changing channel count on the same subscription) cannot leave
+  blocks measured under the OLD coefficients sitting in the same check
+  window as blocks measured under the new ones -- do not let those two
+  call sites diverge.
+- **Integrated loudness is gated, and the gate is load-bearing, not an
+  optimisation** (`audio-loudness.h`'s two-pass integration: an absolute
+  gate at -70 LUFS, then a relative gate at -10 LU below the
+  absolute-gated mean, over 400 ms blocks at a 100 ms hop): a panelist is
+  silent roughly 80% of a preshow, and ungated silence pulls the mean down
+  hard -- 4 s of -20 LUFS speech inside a 20 s window reads -27.08 LUFS
+  ungated and -20.16 gated, and -27.08 is not a usably-wrong number, it is
+  a differently-shaped one that would fail every panelist on every panel.
+  The board's reference is the panel **MEDIAN** of gated integrated
+  loudness, never the mean, and only panelists who have cleared the
+  minimum gated block count vote on it -- one laptop mic sitting at -35
+  LUFS should not get to drag the reference far enough to fail everyone
+  else, and a panelist who hasn't spoken yet should not vote at all.
+- **The readiness board's `kLoudnessBoardMinRowPx` is a SLOT PITCH, not a
+  drawn row height** (`src/loudness-board.h`): `loudness_board_visible_rows()`
+  divides available body height by it to decide how many rows fit; the row
+  actually drawn is that slot minus `kLoudnessBoardRowGapPx`. The test
+  asserts `last.h + kLoudnessBoardRowGapPx >= kLoudnessBoardMinRowPx`
+  specifically because `last.h >= kLoudnessBoardMinRowPx` is unsatisfiable
+  for any positive gap -- a future "simplification" to the un-added form
+  is a regression, not a cleanup. Label refresh on the same board is gated
+  on BOTH `model.signature` changing AND `shown` (the visible row count)
+  changing, because the signature encodes reference/names/statuses/
+  deviations but not how many rows the current canvas height reveals: a
+  signature-only gate leaves rows newly exposed by a resize blank
+  indefinitely whenever the panel's content hasn't otherwise moved --
+  worst during a silent preshow, which is the normal state, since every
+  parked row reads identically. The board's own 10 Hz rebuild
+  (`meter_video_tick`) is gated on `obs_source_showing()` for the same
+  reason as the Talkback dock's roster poll: a meter parked on an unused
+  scene should not pay for `g_sources_mtx` plus every live source's mutex
+  ten times a second forever. The accumulator SUBTRACTS the 100 ms
+  interval rather than zeroing on fire -- zeroing discards the remainder
+  that pushed a tick over threshold, which at 60 fps lands every 7 frames
+  (~117 ms, ~8.6 Hz) instead of the documented 10 Hz.
 - **ISO recording timing** (`src/iso-video-pacer.h`, `src/iso-audio-gap-fill.h`):
   raw video has no per-frame timestamps and ffmpeg cannot be trusted to
   invent correct ones from a byte stream — `-use_wallclock_as_timestamps`
@@ -1204,6 +1258,138 @@ Every one of these is documented at length where it lives; the list is the map.
   the `"left"` handler clears the field without a separate notify call, same
   as it has never notified roster callbacks either. Rendered as a
   `CvBanner(Warning)` under the engine controls, not the modal it replaces.
+
+- **Panelist loudness meter is fed on the audio lane, per source, from the
+  WIRE format** (`src/zoom-participant-audio-source.cpp`, feat/panelist-feedback
+  Task 5): each `CoreVideoAudioSource` now owns a `LoudnessMeter`
+  (`src/audio-loudness.h`, a pure BS.1770-4 header from earlier tasks in this
+  feature). `output_audio_frame()` feeds it inside the per-slot drain loop --
+  same rule as everywhere else in this file: a media event is a coalescing
+  PROMPT, feeding "the buffer that woke us" instead of every drained slot
+  reads low by a load-dependent amount. It is fed the pre-publish WIRE PCM
+  (post resume-fade, pre Mono/Stereo assembly) because the operator's
+  Mono/Stereo routing choice for OBS is not what the panelist actually sent,
+  and mono-summing a stereo feed reads ~3 LU different from the same person
+  carried as stereo. A reset request is an atomic flag consumed on the audio
+  lane's own next slot, never called directly from another thread, because a
+  reset has to land on a hop boundary the meter itself controls. Display name
+  is cached (`ctx->display_name`, guarded by `ctx->mtx`) from the roster
+  callback's already-fetched roster copy in `maybe_resubscribe_for_roster()`
+  -- never re-resolved per buffer, since `ZoomEngineClient::roster()`
+  deep-copies every `ParticipantInfo` under a hot mutex and the readiness
+  board this feeds polls at ~10 Hz. `corevideo_loudness_readings()` /
+  `corevideo_reset_loudness_windows()` mirror `corevideo_audio_source_infos()`'s
+  registry pattern exactly, including its `g_sources_mtx`-then-`ctx->mtx` lock
+  order; the audio lane never touches `g_sources_mtx`, so the order cannot
+  invert. The window resets on every (un)subscribe transition
+  (`unsubscribe_audio()`, `forget_subscription_for_new_engine()`), because
+  integrated loudness is scoped to one panelist's mic check, not the source's
+  whole lifetime -- without it a re-subscribed source's number is polluted by
+  whoever spoke before on the same source.
+- **Only Participant-kind sources vote on the panel median, or appear on the
+  board at all** (final whole-branch review, 2026-09-05, Critical). Three
+  kinds of CoreVideo audio source exist (`CoreVideoAudioKind`,
+  `src/audio-subscription-state.h`): Participant, ActiveSpeaker (a resolved
+  duplicate of whoever is currently talking) and Audience (the whole-meeting
+  mix, no participant id). `corevideo_loudness_readings()` used to hand ALL
+  three to the board with no distinction: an ActiveSpeaker source in a scene
+  with 4 Participant sources put a duplicate of whoever was talking into a
+  5-value median, shifting the reference by up to a full LU on an even/odd
+  flip and moving every panelist's pass/fail with it; an Audience source put
+  the whole-room mix into a reference meant to describe individual
+  microphones; both rendered as phantom `"- unassigned -"` rows since neither
+  carries a participant id or (for Audience) ever gets a cached display name.
+  `LoudnessReading` now carries `kind`, and the filtering lives in the PURE
+  header (`src/loudness-board.h`'s `loudness_panel_median()` and
+  `loudness_board_build()`), not in the OBS glue that calls it -- both are
+  pinned by a test that a median over a mixed vector equals the median of the
+  Participants alone, and the board excludes non-Participant readings from
+  rows entirely rather than showing them as read-only entries: the board's
+  whole model is "one row per panelist's mic", and a row for a duplicate
+  speaker or the room mix is the same mystery-row defect wearing a label,
+  not a fix for it. **The board shows SOURCES, not the roster** -- see the
+  header comment on `src/zoom-loudness-meter-source.h`: a row exists because
+  an operator created a Participant-kind source and pointed it at somebody,
+  so a panelist with no source never appears, and a rejoin (participant ids
+  are meeting-scoped and do not survive one) drops a row to
+  "- unassigned -"/"no audio" until the operator re-points it. Correct
+  behaviour, documented because it is the most likely way an operator
+  concludes the board itself is broken.
+- **The deviation bar is driven by short-term deviation, the row TEXT stays on
+  the integrated verdict** (`loudness_board_bar_input()`,
+  `src/loudness-board.h`). `LoudnessBoardRow::has_short_term`/`short_term_lufs`
+  were measured and carried all the way to the board and read by nothing --
+  `row_value_text()` only ever printed the integrated number. Ruling: bars
+  are geometry the renderer fills every frame regardless of the label-refresh
+  gate, so driving the bar's position from the fast (short-term) measure costs
+  no extra text-child churn, while folding short-term into
+  `LoudnessBoardModel::signature` would rebuild every row's text children
+  ~10x/sec for a value the text never shows -- exactly what
+  `loudness_board_needs_label_refresh()` exists to prevent. Where a short-term
+  reading or a reference is unavailable, `loudness_board_bar_input()` falls
+  back to the integrated deviation the bar always used, rather than showing no
+  bar at all. **Regression B, same-day re-review**: the first cut populated
+  `has_short_term_deviation` whenever a short-term reading and a reference
+  existed, with no gate on whether the row had a real verdict yet.
+  `loudness_meter_short_term()` is UNGATED, so a subscribed-but-silent source
+  reads its own noise floor (e.g. -90 LUFS) -- against a ~-22 LUFS reference
+  that is a ~-68 LU deviation, clamped to a full-length bar pegged hard left,
+  in idle grey, right next to the text "no audio"/"measuring". A silent
+  preshow is this board's NORMAL state, so this was the common case, not an
+  edge one. `has_short_term_deviation` is now gated on `has_deviation`
+  itself (the same Pass/Loud/Quiet verdict condition) rather than restated
+  independently -- which also guarantees the integrated fallback is always
+  available whenever the short-term value is. NoAudio and Measuring rows now
+  draw no bar at all, pinned in `tests/loudness-board-test.cpp` by a case
+  with a stray -90 LUFS short-term reading on an otherwise-silent row.
+- **No `log10` in the relative gate's hot loop**
+  (`loudness_meter_integrated()`, `src/audio-loudness.h`). Pass 2 used to
+  convert every gated block (up to `kLoudnessMaxGatedBlocks` = 6000) to LUFS
+  with `loudness_lufs_from_mean_square()` (a `log10()`) just to compare it
+  against a LUFS threshold, once per source per 100 ms poll, on the graphics
+  thread inside `corevideo_loudness_readings()`, under the same mutex the
+  audio drain holds for its whole drain. The relative gate
+  (`kLoudnessRelativeGateLu` = -10 LU below the absolute-gated mean) is
+  exactly a factor of ten in LINEAR mean square -- `L(z) > L(mean) - 10 <=>
+  z > mean/10` -- so the comparison is now `z > 0.1 * abs_mean_z` with no
+  log10 anywhere in the loop, which also removes a float round-trip that
+  could flip a block sitting exactly on the threshold. The pinned -27.08/
+  -20.16 and -22.96/-20.06 figures in `tests/audio-loudness-test.cpp` are
+  unchanged. `loudness_meter_configure()` also now `reserve()`s `gated` to
+  `kLoudnessMaxGatedBlocks` up front, so the audio lane is provably
+  allocation-free after configure.
+- **`corevideo_loudness_readings()` uses `try_lock` on each source's mutex,
+  never a blocking `lock()`, and a failed try_lock skips the MEASUREMENT,
+  never the ROW** (final whole-branch review, 2026-09-05, Important, plus a
+  same-day re-review regression). It runs on the OBS graphics thread via
+  `meter_video_tick()` and takes the exact `ctx->mtx` that
+  `output_audio_frame()` holds across an entire drain -- including
+  `shm_region_open_readwrite()`, `obs_source_output_audio()`, and
+  rate-limited `blog()` calls that write to disk -- so a blocking lock here
+  could stall the graphics thread for the length of one source's drain.
+  `corevideo_audio_source_infos()` (the sibling registry walk) is unchanged
+  and still blocks -- it is called far less often and from a different
+  context. **Regression A, same day**: the first cut `continue`d past
+  `out.push_back(r)` on a failed try_lock, which drops the whole reading, not
+  just its numbers -- one fewer row for `loudness_board_row_rect()` to divide
+  the canvas by (every OTHER row visibly resizes for one poll), one fewer
+  vote for that poll's panel median (every OTHER panelist's pass/fail can
+  move for 100 ms), and a changed `model.signature` that forces exactly the
+  full child-text rebuild `loudness_board_needs_label_refresh()` exists to
+  prevent -- on a mutex that is busy often, not rarely, since
+  `output_audio_frame()` holds it across a real drain. The reading is now
+  ALWAYS pushed; only the measurement fields (`has_short_term`/
+  `has_integrated`/`gated_blocks`) are left at their unavailable defaults
+  when the try_lock fails, which `loudness_board_build()` already renders
+  correctly as NoAudio -- the same state a source that has simply never
+  spoken gets. The row's identity (`source_uuid`, `kind`, `participant_id`)
+  was always readable without `ctx->mtx`, but `display_name` was not: it is
+  now guarded by its own dedicated `name_mtx` (`CoreVideoAudioSource`, next
+  to the field) instead of `ctx->mtx`, specifically so a busy audio drain
+  cannot make a row's NAME flicker to "- unassigned -" on the exact polls
+  where its numbers go missing. All three `display_name` writers
+  (`unsubscribe_audio()`, `forget_subscription_for_new_engine()`, the roster
+  callback) moved to `name_mtx` alongside the reader.
 
 ## Live testing against a real meeting
 

@@ -1,0 +1,466 @@
+// tests/audio-loudness-test.cpp
+// ITU-R BS.1770-4 loudness, measured at whatever rate Zoom actually sends.
+//
+// WHY THIS TEST IS THE WHOLE FEATURE. BS.1770-4 publishes its K-weighting
+// biquad coefficients for 48 kHz and for no other rate. This plugin does not
+// receive a guaranteed rate: the engine reads GetSampleRate() per buffer and
+// stamps it into ShmAudioHeader::sample_rate (engine/src/engine-audio.cpp),
+// and Zoom commonly delivers 32 kHz. Coefficients pinned at 48 kHz and fed
+// 32 kHz audio still produce a plausible-looking number -- measured below at
+// 1.3 LU wrong on a 1 kHz tone -- which is precisely the failure a meter
+// cannot survive, because nothing about the reading says it is wrong.
+#include "audio-loudness.h"
+
+#include <cmath>
+#include <cstdint>
+#include <iostream>
+#include <vector>
+
+static int failures = 0;
+
+static void check(bool ok, const char *message)
+{
+    if (!ok) {
+        std::cerr << "FAIL: " << message << "\n";
+        ++failures;
+    }
+}
+
+static bool near(double a, double b, double tol)
+{
+    return std::fabs(a - b) <= tol;
+}
+
+int main()
+{
+    // ── The published BS.1770-4 table, at 48 kHz, to the digit ─────────────
+    // Table 1 (stage 1, the "head"/high-shelf pre-filter) and Table 2 (stage
+    // 2, the RLB high-pass) of BS.1770-4. If the derivation is right, it
+    // reproduces these exactly at 48 kHz -- that is the only rate at which
+    // there is anything published to check against, which is why it is
+    // checked to 1e-11 and not to a comfortable tolerance.
+    {
+        const LoudnessBiquadCoeffs s1 = bs1770_stage1_coeffs(48000);
+        check(near(s1.b0,  1.53512485958697, 1e-11), "48k stage-1 b0 does not match the published BS.1770-4 table");
+        check(near(s1.b1, -2.69169618940638, 1e-11), "48k stage-1 b1 does not match the published BS.1770-4 table");
+        check(near(s1.b2,  1.19839281085285, 1e-11), "48k stage-1 b2 does not match the published BS.1770-4 table");
+        check(near(s1.a1, -1.69065929318241, 1e-11), "48k stage-1 a1 does not match the published BS.1770-4 table");
+        check(near(s1.a2,  0.73248077421585, 1e-11), "48k stage-1 a2 does not match the published BS.1770-4 table");
+
+        const LoudnessBiquadCoeffs s2 = bs1770_stage2_coeffs(48000);
+        check(near(s2.b0,  1.0, 1e-12), "48k stage-2 b0 must be exactly 1");
+        check(near(s2.b1, -2.0, 1e-12), "48k stage-2 b1 must be exactly -2");
+        check(near(s2.b2,  1.0, 1e-12), "48k stage-2 b2 must be exactly 1");
+        check(near(s2.a1, -1.99004745483398, 1e-11), "48k stage-2 a1 does not match the published BS.1770-4 table");
+        check(near(s2.a2,  0.99007225036621, 1e-11), "48k stage-2 a2 does not match the published BS.1770-4 table");
+    }
+
+    // ── 32 kHz must produce DIFFERENT, correctly derived coefficients ──────
+    // These are the bilinear transform of the same analog prototype at
+    // 32 kHz. A "derivation" that quietly returned the 48 kHz numbers for
+    // every rate would pass every check above and fail every one here.
+    {
+        const LoudnessBiquadCoeffs s1 = bs1770_stage1_coeffs(32000);
+        check(near(s1.b0,  1.51117789957, 1e-9), "32k stage-1 b0 is wrong");
+        check(near(s1.b1, -2.46488941336, 1e-9), "32k stage-1 b1 is wrong");
+        check(near(s1.b2,  1.04163327352, 1e-9), "32k stage-1 b2 is wrong");
+        check(near(s1.a1, -1.53904509625, 1e-9), "32k stage-1 a1 is wrong");
+        check(near(s1.a2,  0.62696685598, 1e-9), "32k stage-1 a2 is wrong");
+
+        const LoudnessBiquadCoeffs s2 = bs1770_stage2_coeffs(32000);
+        check(near(s2.a1, -1.98508966899, 1e-9), "32k stage-2 a1 is wrong");
+        check(near(s2.a2,  0.98514532067, 1e-9), "32k stage-2 a2 is wrong");
+    }
+
+    // ── The two rates must not be the same numbers ─────────────────────────
+    // Stated as its own assertion rather than left implicit in the two blocks
+    // above, because "the coefficients are rate-dependent" is the invariant,
+    // and an implementer reading only this file should see it said out loud.
+    {
+        const LoudnessBiquadCoeffs a = bs1770_stage1_coeffs(48000);
+        const LoudnessBiquadCoeffs b = bs1770_stage1_coeffs(32000);
+        check(std::fabs(a.a1 - b.a1) > 0.10,
+              "stage-1 a1 barely moved between 48 kHz and 32 kHz -- the "
+              "coefficients are not being derived from the rate at all");
+        const LoudnessBiquadCoeffs c = bs1770_stage2_coeffs(48000);
+        const LoudnessBiquadCoeffs d = bs1770_stage2_coeffs(32000);
+        check(std::fabs(c.a1 - d.a1) > 0.004,
+              "stage-2 a1 barely moved between 48 kHz and 32 kHz -- the "
+              "high-pass corner is being placed at a fixed digital frequency "
+              "rather than a fixed 38 Hz");
+    }
+
+    // ── A degenerate rate must not produce NaN or a divide by zero ─────────
+    {
+        const LoudnessBiquadCoeffs s1 = bs1770_stage1_coeffs(0);
+        check(std::isfinite(s1.b0) && std::isfinite(s1.a1),
+              "a zero sample rate produced non-finite coefficients -- the "
+              "ring header can be read before the writer has initialised it");
+    }
+
+    // ── The biquad itself: a direct-form-II-transposed step ────────────────
+    // Pinned against hand-computed values so a sign slip on the feedback
+    // terms cannot hide inside a filter response test.
+    {
+        const LoudnessBiquadCoeffs c{0.5, 0.25, 0.125, -0.5, 0.25};
+        LoudnessBiquadState st{};
+        // y[0] = 0.5*1 = 0.5
+        const double y0 = loudness_biquad_step(c, st, 1.0);
+        check(near(y0, 0.5, 1e-12), "biquad sample 0 was not b0*x0");
+        // y[1] = 0.5*0 + 0.25*1 + 0.125*0 - (-0.5)*0.5 - 0.25*0 = 0.5
+        const double y1 = loudness_biquad_step(c, st, 0.0);
+        check(near(y1, 0.5, 1e-12), "biquad sample 1 is wrong -- check the "
+              "sign convention on a1 (y = b.x - a.y)");
+        // y[2] = 0.125*1 - (-0.5)*0.5 - 0.25*0.5 = 0.125 + 0.25 - 0.125 = 0.25
+        const double y2 = loudness_biquad_step(c, st, 0.0);
+        check(near(y2, 0.25, 1e-12), "biquad sample 2 is wrong -- the second "
+              "feedback tap (a2) is not being applied");
+    }
+
+    // ── Reference tones: the numbers an implementer can check by hand ──────
+    //
+    // The K-weighting curve has a gain of exactly +0.691 dB at 997 Hz, and
+    // BS.1770's -0.691 dB offset is there to cancel it. So for a ~1 kHz sine
+    // the whole measurement collapses to L = 10*log10(mean square of the
+    // un-weighted signal), which is a number that can be worked out on paper:
+    //
+    //   peak 1.0        -> mean square 0.5    -> -3.01 LUFS
+    //   peak 0.1        -> mean square 0.005  -> -23.01 LUFS
+    //   RMS  0.1        -> mean square 0.01   -> -20.00 LUFS
+    //
+    // The third is the one to remember: a 1 kHz tone at -20 dBFS RMS reads
+    // -20.0 LUFS. If that does not hold, the offset, the channel weight, the
+    // int16 scaling or the K-weighting is wrong, and no amount of relative
+    // comparison downstream will save the reading.
+    auto feed_sine = [](LoudnessMeter &m, uint32_t rate, double peak,
+                        double freq, double seconds) {
+        const size_t n = static_cast<size_t>(rate * seconds);
+        std::vector<int16_t> pcm(n);
+        for (size_t i = 0; i < n; ++i) {
+            const double v = peak * std::sin(2.0 * 3.14159265358979323846 *
+                                             freq * static_cast<double>(i) /
+                                             static_cast<double>(rate));
+            double s = v * 32767.0;
+            if (s > 32767.0)  s =  32767.0;
+            if (s < -32767.0) s = -32767.0;
+            pcm[i] = static_cast<int16_t>(std::lround(s));
+        }
+        loudness_meter_feed_int16(m, pcm.data(), n, 1, rate);
+    };
+
+    {
+        LoudnessMeter m;
+        feed_sine(m, 48000, 1.0, 1000.0, 5.0);
+        double lufs = 0.0;
+        check(loudness_meter_momentary(m, &lufs),
+              "momentary loudness was unavailable after 5 s of tone");
+        check(near(lufs, -3.01, 0.10),
+              "a full-scale 1 kHz sine at 48 kHz did not read -3.01 LUFS");
+    }
+    {
+        LoudnessMeter m;
+        feed_sine(m, 48000, 0.1, 1000.0, 5.0);
+        double lufs = 0.0;
+        check(loudness_meter_momentary(m, &lufs), "momentary unavailable");
+        check(near(lufs, -23.01, 0.10),
+              "a 1 kHz sine of peak amplitude 0.1 at 48 kHz did not read "
+              "-23.01 LUFS");
+    }
+    {
+        // -20 dBFS RMS: peak = sqrt(2) * 0.1.
+        LoudnessMeter m;
+        feed_sine(m, 48000, std::sqrt(2.0) * 0.1, 1000.0, 5.0);
+        double lufs = 0.0;
+        check(loudness_meter_momentary(m, &lufs), "momentary unavailable");
+        check(near(lufs, -20.00, 0.10),
+              "a -20 dBFS RMS 1 kHz sine at 48 kHz did not read -20.0 LUFS -- "
+              "K-weighting is ~0 dB at 1 kHz once the -0.691 offset is "
+              "applied, so this is an equality, not an approximation");
+    }
+
+    // ── The same tone at 32 kHz must read the same, not 1.3 LU high ────────
+    // This is the assertion the whole runtime-rate design exists for. With
+    // the 48 kHz coefficients applied to 32 kHz audio this tone reads
+    // -18.66 LUFS instead of -19.98: it passes a "looks like a plausible
+    // loudness" eyeball test and fails here.
+    {
+        LoudnessMeter m;
+        feed_sine(m, 32000, std::sqrt(2.0) * 0.1, 1000.0, 5.0);
+        double lufs = 0.0;
+        check(loudness_meter_momentary(m, &lufs), "momentary unavailable at 32 kHz");
+        check(near(lufs, -19.98, 0.12),
+              "a -20 dBFS RMS 1 kHz sine at 32 kHz did not read -20 LUFS -- "
+              "the coefficients are not following the runtime rate");
+        check(lufs < -19.5,
+              "the 32 kHz reading is more than 0.5 LU hot, which is the "
+              "signature of 48 kHz coefficients being used at 32 kHz");
+    }
+
+    // ── Short-term needs 3 s; momentary needs 400 ms ───────────────────────
+    {
+        LoudnessMeter m;
+        feed_sine(m, 48000, std::sqrt(2.0) * 0.1, 1000.0, 0.35);
+        double lufs = 0.0;
+        check(!loudness_meter_momentary(m, &lufs),
+              "momentary reported a value before a full 400 ms block existed");
+        feed_sine(m, 48000, std::sqrt(2.0) * 0.1, 1000.0, 0.20);
+        check(loudness_meter_momentary(m, &lufs),
+              "momentary was still unavailable after 550 ms");
+        check(!loudness_meter_short_term(m, &lufs),
+              "short-term reported a value before 3 s of audio existed");
+        feed_sine(m, 48000, std::sqrt(2.0) * 0.1, 1000.0, 3.0);
+        check(loudness_meter_short_term(m, &lufs),
+              "short-term was still unavailable after 3.5 s");
+        check(near(lufs, -20.00, 0.15), "short-term did not read -20 LUFS");
+    }
+
+    // ── Stereo: two identical channels are +3 dB, not the same as mono ─────
+    // BS.1770 sums the weighted per-channel mean squares (G = 1.0 for L and
+    // R), it does not average them. Averaging is the mistake that makes a
+    // stereo panelist read 3 LU quieter than the identical mono one beside
+    // them, which is exactly the comparison this feature exists to make.
+    {
+        LoudnessMeter mono;
+        feed_sine(mono, 48000, std::sqrt(2.0) * 0.1, 1000.0, 2.0);
+        double mono_lufs = 0.0;
+        check(loudness_meter_momentary(mono, &mono_lufs), "mono unavailable");
+
+        LoudnessMeter st;
+        const size_t n = 48000 * 2;
+        std::vector<int16_t> pcm(n * 2);
+        for (size_t i = 0; i < n; ++i) {
+            const double v = std::sqrt(2.0) * 0.1 *
+                std::sin(2.0 * 3.14159265358979323846 * 1000.0 *
+                         static_cast<double>(i) / 48000.0);
+            const int16_t s = static_cast<int16_t>(std::lround(v * 32767.0));
+            pcm[i * 2]     = s;
+            pcm[i * 2 + 1] = s;
+        }
+        loudness_meter_feed_int16(st, pcm.data(), n, 2, 48000);
+        double st_lufs = 0.0;
+        check(loudness_meter_momentary(st, &st_lufs), "stereo unavailable");
+        check(near(st_lufs - mono_lufs, 3.01, 0.05),
+              "dual-mono stereo was not +3.01 LU relative to mono -- the "
+              "channels are being averaged instead of summed");
+    }
+
+    // ── Digital silence never produces NaN or -inf leaking to a caller ─────
+    {
+        LoudnessMeter m;
+        std::vector<int16_t> zeros(48000, 0);
+        loudness_meter_feed_int16(m, zeros.data(), zeros.size(), 1, 48000);
+        double lufs = 0.0;
+        const bool have = loudness_meter_momentary(m, &lufs);
+        check(!have || std::isfinite(lufs),
+              "true digital silence produced a non-finite momentary reading -- "
+              "a panelist who has not spoken yet is the normal case here, not "
+              "an edge case");
+    }
+
+    // ── The gate is the reason this measure is usable at all ───────────────
+    // A panelist is silent roughly 80% of a preshow. 4 s of speech at
+    // -20 LUFS followed by 16 s of silence averages to -27.08 LUFS if
+    // ungated -- an answer that describes the meeting, not the microphone.
+    // The BS.1770 absolute gate at -70 LUFS discards the silent blocks and
+    // the answer comes back to -20.
+    {
+        LoudnessMeter m;
+        feed_sine(m, 48000, std::sqrt(2.0) * 0.1, 1000.0, 4.0);
+        std::vector<int16_t> zeros(48000 * 16, 0);
+        loudness_meter_feed_int16(m, zeros.data(), zeros.size(), 1, 48000);
+
+        double lufs = 0.0;
+        check(loudness_meter_integrated(m, &lufs),
+              "integrated loudness was unavailable after 4 s of speech");
+        check(near(lufs, -20.16, 0.35),
+              "4 s of -20 LUFS speech in 20 s of silence did not integrate to "
+              "about -20 LUFS -- an ungated running average reads -27.08 here");
+        check(lufs > -22.0,
+              "the integrated reading is dragged down by silence: the "
+              "absolute -70 LUFS gate is not being applied");
+        check(loudness_meter_gated_blocks(m) > 30 &&
+              loudness_meter_gated_blocks(m) < 60,
+              "the gated block count is not ~40 -- 4 s of speech at a 100 ms "
+              "hop is about 40 blocks that clear the absolute gate");
+    }
+
+    // ── The RELATIVE gate, which the absolute gate cannot stand in for ─────
+    // 10 s at -20 LUFS then 10 s at -40 LUFS: every block clears -70, so the
+    // absolute gate alone leaves -22.96. The relative gate (-10 LU below the
+    // absolute-gated mean) drops the quiet half and the answer is -20.06 --
+    // the loudness of the speech, which is what a mic check is asking about.
+    {
+        LoudnessMeter m;
+        feed_sine(m, 48000, std::sqrt(2.0) * 0.1,  1000.0, 10.0);
+        feed_sine(m, 48000, std::sqrt(2.0) * 0.01, 1000.0, 10.0);
+        double lufs = 0.0;
+        check(loudness_meter_integrated(m, &lufs), "integrated unavailable");
+        check(near(lufs, -20.06, 0.30),
+              "loud-then-quiet did not integrate to about -20 LUFS -- with "
+              "only the absolute gate this reads -22.96");
+    }
+
+    // ── The check window is resettable, and a reset is a clean slate ───────
+    // A mic check is per panelist. Without this the number is polluted by
+    // whoever spoke before them on the same source.
+    {
+        LoudnessMeter m;
+        feed_sine(m, 48000, 1.0, 1000.0, 3.0);            // very loud, -3 LUFS
+        double before = 0.0;
+        check(loudness_meter_integrated(m, &before), "integrated unavailable");
+        check(near(before, -3.01, 0.30), "the loud pass did not read -3 LUFS");
+
+        loudness_meter_reset_window(m);
+        double after = 0.0;
+        check(!loudness_meter_integrated(m, &after),
+              "integrated loudness survived a window reset -- the previous "
+              "panelist's check is still in the number");
+        check(loudness_meter_gated_blocks(m) == 0,
+              "the gated block count survived a window reset");
+
+        feed_sine(m, 48000, std::sqrt(2.0) * 0.1, 1000.0, 3.0);
+        check(loudness_meter_integrated(m, &after), "integrated unavailable "
+              "after refilling the window");
+        check(near(after, -20.00, 0.30),
+              "the post-reset reading is contaminated by the pre-reset audio");
+    }
+
+    // ── A mid-window format change is ALSO a clean slate ────────────────────
+    // loudness_meter_configure()'s own header comment documents that it fires
+    // automatically mid-source: Zoom renegotiates, and a Mix/Isolated role
+    // flip changes the channel count on the same subscription. If that lands
+    // inside a panelist's 20-60 s check window, the gated blocks computed
+    // under the OLD coefficients/channel weighting must not survive to be
+    // averaged with blocks computed under the NEW ones.
+    {
+        LoudnessMeter m;
+        feed_sine(m, 48000, std::sqrt(2.0) * 0.1, 1000.0, 3.0);
+        double before = 0.0;
+        check(loudness_meter_integrated(m, &before),
+              "integrated loudness was unavailable before the format change");
+        check(loudness_meter_gated_blocks(m) > 0,
+              "no gated blocks accumulated before the format change -- the "
+              "test setup is not exercising the window it means to clear");
+
+        loudness_meter_configure(m, 32000, 2);   // different rate AND channels
+
+        check(loudness_meter_gated_blocks(m) == 0,
+              "the gated block count survived a mid-window format change -- "
+              "loudness_meter_configure() must clear the gated window, not "
+              "just the filters");
+        double after = 0.0;
+        check(!loudness_meter_integrated(m, &after),
+              "integrated loudness survived a mid-window format change -- "
+              "blocks measured under the old sample rate/channel count are "
+              "still being averaged with whatever comes next");
+    }
+
+    // ── A panelist who has never spoken has NO integrated reading ──────────
+    // Not -70, not 0. The board must be able to say "no audio" rather than
+    // print a number that looks like a measurement.
+    {
+        LoudnessMeter m;
+        std::vector<int16_t> zeros(48000 * 5, 0);
+        loudness_meter_feed_int16(m, zeros.data(), zeros.size(), 1, 48000);
+        double lufs = 0.0;
+        check(!loudness_meter_integrated(m, &lufs),
+              "five seconds of pure silence produced an integrated loudness");
+        check(loudness_meter_gated_blocks(m) == 0,
+              "silent blocks were counted as gated blocks");
+    }
+
+    // ── Chunk invariance: the drain-loop law, stated as arithmetic ─────────
+    // A media event is a coalescing prompt, not a payload: one wakeup can
+    // carry eight ring slots. Measuring "the buffer that woke us" would throw
+    // away up to seven eighths of the audio. This asserts that feeding the
+    // same samples in 10 ms pieces and in one 2 s piece are the same
+    // measurement, which is what makes feeding from inside the drain loop
+    // correct.
+    {
+        const uint32_t rate = 32000;
+        const size_t n = rate * 2;
+        std::vector<int16_t> pcm(n);
+        for (size_t i = 0; i < n; ++i) {
+            const double v = 0.2 * std::sin(2.0 * 3.14159265358979323846 *
+                                            440.0 * static_cast<double>(i) /
+                                            static_cast<double>(rate));
+            pcm[i] = static_cast<int16_t>(std::lround(v * 32767.0));
+        }
+        LoudnessMeter whole;
+        loudness_meter_feed_int16(whole, pcm.data(), n, 1, rate);
+
+        LoudnessMeter pieces;
+        const size_t chunk = rate / 100;   // 10 ms, Zoom's buffer size
+        for (size_t off = 0; off < n; off += chunk) {
+            const size_t take = (off + chunk <= n) ? chunk : (n - off);
+            loudness_meter_feed_int16(pieces, pcm.data() + off, take, 1, rate);
+        }
+
+        double a = 0.0, b = 0.0;
+        check(loudness_meter_integrated(whole, &a) &&
+              loudness_meter_integrated(pieces, &b),
+              "one of the two feeding patterns produced no integrated value");
+        check(near(a, b, 1e-9),
+              "feeding in 10 ms chunks did not match feeding in one buffer -- "
+              "the hop boundary is following call boundaries instead of frame "
+              "counts, so the measurement depends on IPC batching");
+        double ma = 0.0, mb = 0.0;
+        check(loudness_meter_momentary(whole, &ma) &&
+              loudness_meter_momentary(pieces, &mb) && near(ma, mb, 1e-9),
+              "momentary differed between chunked and whole feeding");
+    }
+
+    // ── The wire format the tap actually hands over ────────────────────────
+    // output_audio_frame() reads ShmAudioHeader::sample_rate and ::channels
+    // per slot and can see them CHANGE mid-source: the engine restamps
+    // whatever GetSampleRate() returned, and an operator flipping a target
+    // between Mix (stereo) and Isolated (mono) changes the channel count on
+    // the same live subscription. The meter must follow that without
+    // carrying one format's filter history into the other's measurement.
+    {
+        LoudnessMeter m;
+        feed_sine(m, 48000, std::sqrt(2.0) * 0.1, 1000.0, 2.0);
+        check(m.sample_rate == 48000 && m.channels == 1,
+              "the meter did not adopt the first buffer's wire format");
+
+        // Same tone, now arriving at 32 kHz: the meter must re-derive rather
+        // than keep filtering with 48 kHz coefficients.
+        feed_sine(m, 32000, std::sqrt(2.0) * 0.1, 1000.0, 4.0);
+        check(m.sample_rate == 32000,
+              "a mid-stream rate change did not reconfigure the meter");
+        double lufs = 0.0;
+        check(loudness_meter_momentary(m, &lufs) && near(lufs, -19.98, 0.15),
+              "after a mid-stream rate change the reading is wrong -- the "
+              "coefficients did not follow");
+        check(m.hop_frames == 3200,
+              "the 100 ms hop is not 3200 frames at 32 kHz -- the hop length "
+              "is fixed in samples instead of in time");
+    }
+
+    // ── A null or empty buffer is a no-op, not a crash ────────────────────
+    // The drain loop can hand over a slot it failed to copy.
+    {
+        LoudnessMeter m;
+        loudness_meter_feed_int16(m, nullptr, 480, 1, 48000);
+        std::vector<int16_t> one(1, 0);
+        loudness_meter_feed_int16(m, one.data(), 0, 1, 48000);
+        loudness_meter_feed_int16(m, one.data(), 1, 0, 48000);
+        check(m.hop_total == 0,
+              "a degenerate feed advanced the measurement");
+    }
+
+    // ── loudness_meter_configure() reserves the gated vector up front ──────
+    // so the audio lane is provably allocation-free after configure -- no
+    // realloc can land on the media path once a source is subscribed.
+    {
+        LoudnessMeter m;
+        loudness_meter_configure(m, 48000, 1);
+        check(m.gated.capacity() >= kLoudnessMaxGatedBlocks,
+              "loudness_meter_configure() did not reserve the gated vector "
+              "to kLoudnessMaxGatedBlocks");
+    }
+
+    if (failures == 0)
+        std::cout << "audio-loudness: all tests passed\n";
+    return failures == 0 ? 0 : 1;
+}

@@ -1,5 +1,6 @@
 #include "zoom-participant-audio-source.h"
 
+#include "audio-loudness.h"
 #include "audio-silence-fade.h"
 #include "audio-subscription-state.h"
 #include "audio-timeline.h"
@@ -97,6 +98,18 @@ struct CoreVideoAudioSource {
     // Was the last published buffer true digital silence? See
     // src/audio-silence-fade.h. Same ownership as `timeline`.
     bool prev_was_silent = false;
+    // BS.1770-4 loudness for this participant. Same ownership as `timeline`
+    // and `prev_was_silent`: advanced by the audio lane thread inside
+    // output_audio_frame(), which holds ctx->mtx for the whole drain, and
+    // read under that same mutex by corevideo_loudness_readings().
+    LoudnessMeter loudness;
+    // Set by any thread, consumed by the audio lane at the next slot. A reset
+    // has to land on a hop boundary the meter itself controls, so it is a
+    // request rather than a direct call: touching the meter from the caller's
+    // thread would race the drain that is filling it.
+    std::atomic<bool> loudness_reset_requested{false};
+    // Display name, cached on the roster callback. Guarded by ctx->mtx.
+    std::string display_name;
     // Next ring slot this source will drain. Only the engine reader thread
     // touches it, the same thread that owns `timeline`.
     uint32_t read_index    = 0;
@@ -187,6 +200,49 @@ std::vector<CoreVideoAudioSourceInfo> corevideo_audio_source_infos()
     return out;
 }
 
+std::vector<LoudnessReading> corevideo_loudness_readings()
+{
+    std::vector<LoudnessReading> out;
+    // Same lock order as corevideo_audio_source_infos(): g_sources_mtx first,
+    // then each source's own mutex. The audio lane takes only ctx->mtx and
+    // never touches g_sources_mtx, so this can never invert.
+    std::lock_guard<std::mutex> lk(g_sources_mtx);
+    out.reserve(g_sources.size());
+    for (CoreVideoAudioSource *ctx : g_sources) {
+        if (!ctx) continue;
+        LoudnessReading r;
+        r.source_uuid = ctx->source_uuid;
+        r.participant_id =
+            ctx->current_participant_id.load(std::memory_order_acquire);
+        r.subscribed = ctx->subscribed.load(std::memory_order_acquire);
+        {
+            std::lock_guard<std::mutex> ctx_lk(ctx->mtx);
+            r.display_name   = ctx->display_name;
+            r.has_short_term = loudness_meter_short_term(ctx->loudness,
+                                                         &r.short_term_lufs);
+            r.has_integrated = loudness_meter_integrated(ctx->loudness,
+                                                         &r.integrated_lufs);
+            r.gated_blocks   = loudness_meter_gated_blocks(ctx->loudness);
+        }
+        out.push_back(std::move(r));
+    }
+    return out;
+}
+
+void corevideo_reset_loudness_windows()
+{
+    std::lock_guard<std::mutex> lk(g_sources_mtx);
+    for (CoreVideoAudioSource *ctx : g_sources) {
+        if (ctx)
+            ctx->loudness_reset_requested.store(true,
+                                                std::memory_order_release);
+    }
+    blog(LOG_INFO,
+         "[obs-zoom-plugin] CoreVideo loudness: mic-check windows reset on %d "
+         "source(s)",
+         static_cast<int>(g_sources.size()));
+}
+
 static uint32_t target_participant_id(const CoreVideoAudioSource *ctx)
 {
     if (!ctx) return 0;
@@ -264,6 +320,11 @@ static void unsubscribe_audio(CoreVideoAudioSource *ctx)
         std::lock_guard<std::mutex> lk(ctx->mtx);
         audio_timeline_reset(ctx->timeline);
         ctx->read_started = false;
+        // A new subscription is a new panelist's mic check -- or the same
+        // one after a gap of unknown length. Either way the previous
+        // window's gated blocks describe audio that is not this check.
+        loudness_meter_reset_window(ctx->loudness);
+        ctx->display_name.clear();
     }
 }
 
@@ -344,6 +405,8 @@ static void forget_subscription_for_new_engine(CoreVideoAudioSource *ctx)
         std::lock_guard<std::mutex> lk(ctx->mtx);
         audio_timeline_reset(ctx->timeline);
         ctx->read_started = false;
+        loudness_meter_reset_window(ctx->loudness);
+        ctx->display_name.clear();
     }
     if (!was_subscribed) return;
     blog(LOG_INFO,
@@ -381,6 +444,7 @@ static void maybe_resubscribe_for_roster(CoreVideoAudioSource *ctx)
     // live on 2026-08-16. An absent target resolves to 0, which is the
     // already-documented "nobody resolved yet, ask again next tick" case.
     bool held_participant_present = true;
+    std::string cached_name;
     const bool needs_roster =
         (state.subscribed && state.participant_id != 0) || target != 0;
     if (needs_roster) {
@@ -395,6 +459,27 @@ static void maybe_resubscribe_for_roster(CoreVideoAudioSource *ctx)
             held_participant_present = present(state.participant_id);
         if (target != 0 && !present(target))
             target = 0;
+
+        // The ONE place a display name is resolved for this source. This
+        // function runs on the engine's roster callback, which is exactly as
+        // often as a name can change, and it has already paid for the roster
+        // copy above. The readiness board reads the cached string instead of
+        // calling roster() itself, because roster() deep-copies every
+        // ParticipantInfo under the engine client's hot mutex and the board
+        // asks ten times a second.
+        const uint32_t name_for = target != 0 ? target : state.participant_id;
+        if (name_for != 0) {
+            for (const ParticipantInfo &p : roster) {
+                if (p.user_id == name_for) {
+                    cached_name = p.display_name;
+                    break;
+                }
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lk(ctx->mtx);
+        ctx->display_name = cached_name;
     }
 
     switch (audio_resubscribe_action(ctx->kind, active, state, target,
@@ -711,6 +796,33 @@ static void output_audio_frame(CoreVideoAudioSource *ctx,
                                         sample_rate / 1000 * kAudioResumeFadeMs);
             }
             ctx->prev_was_silent = cur_silent;
+
+            // ── BS.1770-4 metering ────────────────────────────────────────
+            // HERE, inside the per-slot loop, and nowhere else. A media event
+            // is a coalescing PROMPT, not a payload: one wakeup routinely
+            // carries several ring slots and this loop drains until the ring
+            // is seen empty. Measuring "the buffer that woke us" would
+            // silently discard most of the audio and read low by a
+            // load-dependent amount -- the worst shape of wrong, because it
+            // looks fine on an idle box.
+            //
+            // Fed with the WIRE format (`pcm`, `channels`, `sample_rate`)
+            // rather than the publish format assembled below: the operator's
+            // Mono/Stereo choice is a routing decision for OBS, and a
+            // mono-summed copy of a stereo panelist would read 3 LU different
+            // from the same person carried as stereo. The measurement has to
+            // describe what the panelist SENT.
+            //
+            // The resume fade above has already been applied to these
+            // samples, which is correct: it is part of what we publish, it is
+            // 3 ms long, and excluding it would mean measuring audio that
+            // nobody hears.
+            if (ctx->loudness_reset_requested.exchange(
+                    false, std::memory_order_acq_rel)) {
+                loudness_meter_reset_window(ctx->loudness);
+            }
+            loudness_meter_feed_int16(ctx->loudness, pcm_mut, pcm_frames,
+                                      channels, sample_rate);
             const auto *pcm = pcm_mut;
             obs_source_audio audio = {};
             audio.samples_per_sec = sample_rate;

@@ -410,6 +410,45 @@ int main()
               "momentary differed between chunked and whole feeding");
     }
 
+    // ── The wire format the tap actually hands over ────────────────────────
+    // output_audio_frame() reads ShmAudioHeader::sample_rate and ::channels
+    // per slot and can see them CHANGE mid-source: the engine restamps
+    // whatever GetSampleRate() returned, and an operator flipping a target
+    // between Mix (stereo) and Isolated (mono) changes the channel count on
+    // the same live subscription. The meter must follow that without
+    // carrying one format's filter history into the other's measurement.
+    {
+        LoudnessMeter m;
+        feed_sine(m, 48000, std::sqrt(2.0) * 0.1, 1000.0, 2.0);
+        check(m.sample_rate == 48000 && m.channels == 1,
+              "the meter did not adopt the first buffer's wire format");
+
+        // Same tone, now arriving at 32 kHz: the meter must re-derive rather
+        // than keep filtering with 48 kHz coefficients.
+        feed_sine(m, 32000, std::sqrt(2.0) * 0.1, 1000.0, 4.0);
+        check(m.sample_rate == 32000,
+              "a mid-stream rate change did not reconfigure the meter");
+        double lufs = 0.0;
+        check(loudness_meter_momentary(m, &lufs) && near(lufs, -19.98, 0.15),
+              "after a mid-stream rate change the reading is wrong -- the "
+              "coefficients did not follow");
+        check(m.hop_frames == 3200,
+              "the 100 ms hop is not 3200 frames at 32 kHz -- the hop length "
+              "is fixed in samples instead of in time");
+    }
+
+    // ── A null or empty buffer is a no-op, not a crash ────────────────────
+    // The drain loop can hand over a slot it failed to copy.
+    {
+        LoudnessMeter m;
+        loudness_meter_feed_int16(m, nullptr, 480, 1, 48000);
+        std::vector<int16_t> one(1, 0);
+        loudness_meter_feed_int16(m, one.data(), 0, 1, 48000);
+        loudness_meter_feed_int16(m, one.data(), 1, 0, 48000);
+        check(m.hop_total == 0,
+              "a degenerate feed advanced the measurement");
+    }
+
     if (failures == 0)
         std::cout << "audio-loudness: all tests passed\n";
     return failures == 0 ? 0 : 1;

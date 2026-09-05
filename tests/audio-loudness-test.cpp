@@ -257,6 +257,129 @@ int main()
               "an edge case");
     }
 
+    // ── The gate is the reason this measure is usable at all ───────────────
+    // A panelist is silent roughly 80% of a preshow. 4 s of speech at
+    // -20 LUFS followed by 16 s of silence averages to -27.08 LUFS if
+    // ungated -- an answer that describes the meeting, not the microphone.
+    // The BS.1770 absolute gate at -70 LUFS discards the silent blocks and
+    // the answer comes back to -20.
+    {
+        LoudnessMeter m;
+        feed_sine(m, 48000, std::sqrt(2.0) * 0.1, 1000.0, 4.0);
+        std::vector<int16_t> zeros(48000 * 16, 0);
+        loudness_meter_feed_int16(m, zeros.data(), zeros.size(), 1, 48000);
+
+        double lufs = 0.0;
+        check(loudness_meter_integrated(m, &lufs),
+              "integrated loudness was unavailable after 4 s of speech");
+        check(near(lufs, -20.16, 0.35),
+              "4 s of -20 LUFS speech in 20 s of silence did not integrate to "
+              "about -20 LUFS -- an ungated running average reads -27.08 here");
+        check(lufs > -22.0,
+              "the integrated reading is dragged down by silence: the "
+              "absolute -70 LUFS gate is not being applied");
+        check(loudness_meter_gated_blocks(m) > 30 &&
+              loudness_meter_gated_blocks(m) < 60,
+              "the gated block count is not ~40 -- 4 s of speech at a 100 ms "
+              "hop is about 40 blocks that clear the absolute gate");
+    }
+
+    // ── The RELATIVE gate, which the absolute gate cannot stand in for ─────
+    // 10 s at -20 LUFS then 10 s at -40 LUFS: every block clears -70, so the
+    // absolute gate alone leaves -22.96. The relative gate (-10 LU below the
+    // absolute-gated mean) drops the quiet half and the answer is -20.06 --
+    // the loudness of the speech, which is what a mic check is asking about.
+    {
+        LoudnessMeter m;
+        feed_sine(m, 48000, std::sqrt(2.0) * 0.1,  1000.0, 10.0);
+        feed_sine(m, 48000, std::sqrt(2.0) * 0.01, 1000.0, 10.0);
+        double lufs = 0.0;
+        check(loudness_meter_integrated(m, &lufs), "integrated unavailable");
+        check(near(lufs, -20.06, 0.30),
+              "loud-then-quiet did not integrate to about -20 LUFS -- with "
+              "only the absolute gate this reads -22.96");
+    }
+
+    // ── The check window is resettable, and a reset is a clean slate ───────
+    // A mic check is per panelist. Without this the number is polluted by
+    // whoever spoke before them on the same source.
+    {
+        LoudnessMeter m;
+        feed_sine(m, 48000, 1.0, 1000.0, 3.0);            // very loud, -3 LUFS
+        double before = 0.0;
+        check(loudness_meter_integrated(m, &before), "integrated unavailable");
+        check(near(before, -3.01, 0.30), "the loud pass did not read -3 LUFS");
+
+        loudness_meter_reset_window(m);
+        double after = 0.0;
+        check(!loudness_meter_integrated(m, &after),
+              "integrated loudness survived a window reset -- the previous "
+              "panelist's check is still in the number");
+        check(loudness_meter_gated_blocks(m) == 0,
+              "the gated block count survived a window reset");
+
+        feed_sine(m, 48000, std::sqrt(2.0) * 0.1, 1000.0, 3.0);
+        check(loudness_meter_integrated(m, &after), "integrated unavailable "
+              "after refilling the window");
+        check(near(after, -20.00, 0.30),
+              "the post-reset reading is contaminated by the pre-reset audio");
+    }
+
+    // ── A panelist who has never spoken has NO integrated reading ──────────
+    // Not -70, not 0. The board must be able to say "no audio" rather than
+    // print a number that looks like a measurement.
+    {
+        LoudnessMeter m;
+        std::vector<int16_t> zeros(48000 * 5, 0);
+        loudness_meter_feed_int16(m, zeros.data(), zeros.size(), 1, 48000);
+        double lufs = 0.0;
+        check(!loudness_meter_integrated(m, &lufs),
+              "five seconds of pure silence produced an integrated loudness");
+        check(loudness_meter_gated_blocks(m) == 0,
+              "silent blocks were counted as gated blocks");
+    }
+
+    // ── Chunk invariance: the drain-loop law, stated as arithmetic ─────────
+    // A media event is a coalescing prompt, not a payload: one wakeup can
+    // carry eight ring slots. Measuring "the buffer that woke us" would throw
+    // away up to seven eighths of the audio. This asserts that feeding the
+    // same samples in 10 ms pieces and in one 2 s piece are the same
+    // measurement, which is what makes feeding from inside the drain loop
+    // correct.
+    {
+        const uint32_t rate = 32000;
+        const size_t n = rate * 2;
+        std::vector<int16_t> pcm(n);
+        for (size_t i = 0; i < n; ++i) {
+            const double v = 0.2 * std::sin(2.0 * 3.14159265358979323846 *
+                                            440.0 * static_cast<double>(i) /
+                                            static_cast<double>(rate));
+            pcm[i] = static_cast<int16_t>(std::lround(v * 32767.0));
+        }
+        LoudnessMeter whole;
+        loudness_meter_feed_int16(whole, pcm.data(), n, 1, rate);
+
+        LoudnessMeter pieces;
+        const size_t chunk = rate / 100;   // 10 ms, Zoom's buffer size
+        for (size_t off = 0; off < n; off += chunk) {
+            const size_t take = (off + chunk <= n) ? chunk : (n - off);
+            loudness_meter_feed_int16(pieces, pcm.data() + off, take, 1, rate);
+        }
+
+        double a = 0.0, b = 0.0;
+        check(loudness_meter_integrated(whole, &a) &&
+              loudness_meter_integrated(pieces, &b),
+              "one of the two feeding patterns produced no integrated value");
+        check(near(a, b, 1e-9),
+              "feeding in 10 ms chunks did not match feeding in one buffer -- "
+              "the hop boundary is following call boundaries instead of frame "
+              "counts, so the measurement depends on IPC batching");
+        double ma = 0.0, mb = 0.0;
+        check(loudness_meter_momentary(whole, &ma) &&
+              loudness_meter_momentary(pieces, &mb) && near(ma, mb, 1e-9),
+              "momentary differed between chunked and whole feeding");
+    }
+
     if (failures == 0)
         std::cout << "audio-loudness: all tests passed\n";
     return failures == 0 ? 0 : 1;

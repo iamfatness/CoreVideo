@@ -183,6 +183,15 @@ struct LoudnessMeter {
     // (hop_total - 1) % kLoudnessShortTermHops.
     double   hop_ring[kLoudnessShortTermHops] = {};
     uint64_t hop_total = 0;
+
+    // The gated integration window -- ONE PANELIST'S MIC CHECK, not the
+    // session. Each entry is the mean square of a 400 ms block that cleared
+    // the absolute gate. Held as values rather than a running sum because the
+    // relative gate has to re-examine every block once the absolute-gated
+    // mean is known.
+    std::vector<double> gated;
+    size_t   gated_head  = 0;   // ring write position once `gated` is full
+    uint64_t gated_total = 0;   // blocks ever admitted, never wrapped
 };
 
 // (Re)configures for a rate/channel count and clears all filter state. Called
@@ -299,6 +308,94 @@ inline bool loudness_meter_short_term(const LoudnessMeter &m, double *out_lufs)
     return true;
 }
 
-// Placeholder until Task 3 lands the gated integrator. Declared above so
-// feed_int16 already calls it; defined empty here so this task builds alone.
-inline void loudness_meter_on_hop_complete(LoudnessMeter &) {}
+// BS.1770-4's two gates. The absolute one discards silence for free, which is
+// exactly the mechanism a panel needs: a panelist is silent roughly 80% of a
+// panel, and an ungated integrated reading over that measures the meeting
+// rather than the microphone (measured: 4 s of -20 LUFS speech inside 20 s
+// reads -27.08 ungated). The relative one then discards the quiet tail so the
+// answer describes the speech.
+constexpr double kLoudnessAbsoluteGateLufs = -70.0;
+constexpr double kLoudnessRelativeGateLu   = -10.0;
+
+// 6000 blocks is 10 minutes of continuously-gated audio at a 100 ms hop. A
+// mic check is 20-60 s (~200-600 blocks), so this is never reached in the
+// use this was built for; past it the window keeps the most RECENT 10 minutes
+// rather than growing without bound. Documented rather than silent, because
+// "the oldest audio quietly leaves the window" is a real semantic and an
+// operator who leaves a board running all show is entitled to know it.
+constexpr size_t kLoudnessMaxGatedBlocks = 6000;
+
+// Called at every completed 100 ms hop. A 400 ms block is the newest four
+// hops, so admitting one block per hop is the standard's 75% overlap.
+inline void loudness_meter_on_hop_complete(LoudnessMeter &m)
+{
+    double z = 0.0;
+    if (!loudness_hop_mean(m, kLoudnessMomentaryHops, &z)) return;
+    const double l = loudness_lufs_from_mean_square(z);
+    if (!std::isfinite(l) || l <= kLoudnessAbsoluteGateLufs) return;
+
+    if (m.gated.size() < kLoudnessMaxGatedBlocks) {
+        m.gated.push_back(z);
+    } else {
+        m.gated[m.gated_head] = z;
+        m.gated_head = (m.gated_head + 1) % kLoudnessMaxGatedBlocks;
+    }
+    ++m.gated_total;
+}
+
+// Starts this source's check window over. Clears the gated blocks and the hop
+// history, but NOT the biquad state: the filters describe the signal that is
+// still arriving, and zeroing them mid-stream would inject a transient into
+// the first block of the new window.
+inline void loudness_meter_reset_window(LoudnessMeter &m)
+{
+    m.gated.clear();
+    m.gated_head  = 0;
+    m.gated_total = 0;
+    m.hop_acc     = 0.0;
+    m.hop_filled  = 0;
+    for (uint32_t i = 0; i < kLoudnessShortTermHops; ++i) m.hop_ring[i] = 0.0;
+    m.hop_total   = 0;
+}
+
+// Blocks admitted to the current window. A board uses this to decide whether
+// an integrated reading is worth showing: the spec's 20 s mic check yields
+// ~200 blocks, so a handful of blocks is a cough, not a check.
+inline uint64_t loudness_meter_gated_blocks(const LoudnessMeter &m)
+{
+    return m.gated_total;
+}
+
+// Integrated (I): the two-pass gate, over the current check window.
+// False means "this panelist has not produced a measurable check yet", which
+// is a different statement from any loudness value and must stay
+// distinguishable all the way to the board.
+inline bool loudness_meter_integrated(const LoudnessMeter &m, double *out_lufs)
+{
+    if (m.gated.empty()) return false;
+
+    double sum = 0.0;
+    for (double z : m.gated) sum += z;
+    const double abs_mean_lufs =
+        loudness_lufs_from_mean_square(sum / static_cast<double>(m.gated.size()));
+    if (!std::isfinite(abs_mean_lufs)) return false;
+
+    const double relative_threshold = abs_mean_lufs + kLoudnessRelativeGateLu;
+    double sum2 = 0.0;
+    size_t n2 = 0;
+    for (double z : m.gated) {
+        // Strictly greater, per BS.1770-4: a block exactly on the threshold
+        // is excluded.
+        if (loudness_lufs_from_mean_square(z) > relative_threshold) {
+            sum2 += z;
+            ++n2;
+        }
+    }
+    if (n2 == 0) return false;
+
+    const double l = loudness_lufs_from_mean_square(sum2 /
+                                                    static_cast<double>(n2));
+    if (!std::isfinite(l)) return false;
+    *out_lufs = l;
+    return true;
+}

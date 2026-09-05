@@ -4,7 +4,7 @@
 
 **Goal:** Give the macOS engine the talkback feature that today exists only in the Windows engine, without forking the ladder logic into a second implementation.
 
-**Architecture:** Introduce one CoreVideo-owned abstract seam, `TalkbackSdk`, at the boundary where `engine-talkback.cpp` calls Zoom. The ladder, pacing, nomination state machine and abort paths stay as the single implementation they are today; only the type they call changes. Two backends implement the seam: a Windows adapter wrapping `ZOOMSDK::IMeetingTalkbackController` (which hides the Begin/Add/Execute batch sequences entirely), and a macOS Objective-C++ adapter wrapping `ZoomSDKTalkbackController` (whose equivalents are single atomic calls). The existing fakes move from subclassing Zoom's Windows interfaces to implementing `TalkbackSdk`, which is what makes the test suite build and run on macOS.
+**Architecture:** Introduce one CoreVideo-owned abstract seam, `TalkbackSdk`, at the boundary where `engine-talkback.cpp` calls Zoom. The ladder, pacing, nomination state machine and abort paths stay as the single implementation they are today; only the type they call changes. Two backends implement the seam: a Windows adapter wrapping `ZOOMSDK::IMeetingTalkbackController` (which hides the Begin/Add/Execute batch sequences entirely), and a macOS Objective-C++ adapter wrapping `ZoomSDKTalkbackController` (whose equivalents are single atomic calls). The existing fakes move from subclassing Zoom's Windows talkback interface to implementing `TalkbackSdk`. Note the ladder suite still does NOT run on macOS — see the Global Constraint on the macOS offline proof; compilation is the offline check.
 
 **Tech Stack:** C++17, Objective-C++ (`.mm`) for the macOS adapter, Zoom Meeting SDK (Windows `IMeetingTalkbackController` / macOS `ZoomSDKTalkbackController`), CMake, the project's plain-executable test convention (no framework).
 
@@ -13,7 +13,8 @@
 - **Zero behaviour change on Windows.** Windows talkback works and has passed its live gate. A task that changes Windows *behaviour* rather than the type it calls is a defect, not progress. **This is verified by CI, not locally** — the development machine is an Apple Silicon Mac with no Windows toolchain, so "Windows still green" means the branch's Windows x64 PR check, the same gate that verified the #229 merge. Do not ask an implementer to run a Windows suite; ask it to keep the change mechanical and let CI answer.
 - **`CreateChannel` and every membership call are SDK-thread-only.** On Windows that thread is the command loop. **On macOS it is the main queue** — the IPC reader is a separate thread that `dispatch_async`es to the main queue (`engine/src/main-macos.mm:2243`). This is the single most important difference in the port and the most likely source of a defect.
 - **Law 2 pacing is server behaviour, not API shape.** One membership call per ~600 ms, round-robin, with backoff on a too-frequent refusal. It ports unchanged. Only the *error code* differs: Windows `SDKERR_TOO_FREQUENT_CALL` (enum position 18) vs macOS `ZoomSDKError_TooFrequentCall` (`ZoomSDKErrors.h:241`). The adapter normalises; the ladder must never see a raw SDK code.
-- **No live-meeting dependency before Task 5.** Tasks 1-4 must be completable and verifiable with no network and no Zoom meeting. This is a hard sequencing requirement, not a preference — see Task 5's note on the `initSDKWithParams` wedge.
+- **No live-meeting dependency before Task 5.** Tasks 1-4 must be completable with no network and no Zoom meeting. This is a hard sequencing requirement, not a preference — see Task 5's note on the `initSDKWithParams` wedge.
+- **The macOS offline proof is COMPILATION, not the ladder suite.** This was the plan's original premise and it was wrong, discovered during Task 1: the seam removes the ladder's dependency on `IMeetingTalkbackController`, but `engine-talkback.h/.cpp` remains coupled to `IMeetingService`, `IUserInfo`, `IMeetingParticipantsController` and `IMeetingTalkbackCtrlEvent` for roster, participant and mute logic. `CoreVideoEngineTalkbackSelectTest` therefore stays Windows-only. Ruling (human, 2026-09-04): do NOT widen the seam to cover the host interfaces — that is a large refactor of working, show-critical Windows code to gain test coverage of logic that is not changing. Instead: Task 2's compile-against-the-real-framework step is the macOS offline proof (it still catches every signature, selector, delegate and enum mismatch), the ladder's behaviour stays pinned by the Windows suite where it actually runs, and correctness on macOS is settled by CI plus Task 5's live gate.
 - **Never assert a branch unreachable.** Standing policy in `CLAUDE.md`; two Majors in this feature have lived behind exactly that claim.
 - **Tests pin invariants, not implementations.** Every new pin must be mutation-proved: break the thing, watch the test fail, revert.
 
@@ -22,7 +23,7 @@
 ## File Structure
 
 **Create:**
-- `src/talkback-sdk.h` — the abstract seam plus the normalised result type. Pure, no Zoom headers, no Qt, no OBS. This is what makes the ladder and its tests portable.
+- `src/talkback-sdk.h` — the abstract seam plus the normalised result type. Pure, no Zoom headers, no Qt, no OBS. This is what lets one ladder serve two platforms.
 - `engine/src/engine-talkback-sdk-win.h` — Windows adapter. Owns the Begin/Add/Execute batch sequences so nothing above it knows they exist.
 - `engine/src/engine-talkback-sdk-macos.h` / `.mm` — macOS adapter over `ZoomSDKTalkbackController`, plus the delegate object that forwards callbacks into `TalkbackSdkEvents`.
 - `engine/src/engine-talkback-pump-macos.h` / `.mm` — the main-queue timer that drives `nomination_tick()`, replacing Windows' command-loop idle turn.
@@ -31,20 +32,24 @@
 - `engine/src/engine-talkback.h` / `.cpp` — hold a `TalkbackSdk*` instead of a `ZOOMSDK::IMeetingTalkbackController*`; call normalised methods. Delete the batch bookkeeping that moves into the Windows adapter.
 - `engine/src/main.cpp` — construct the Windows adapter, pass it in. No logic change.
 - `engine/src/main-macos.mm` — construct the macOS adapter, wire the seven talkback IPC commands, start the pump.
-- `CMakeLists.txt` — add the macOS talkback sources to the macOS engine target; make `CoreVideoEngineTalkbackSelectTest` build on all platforms.
+- `CMakeLists.txt` — add the macOS talkback sources to the macOS engine target. `CoreVideoEngineTalkbackSelectTest` STAYS Windows-gated (see Global Constraints).
 - `tests/engine-talkback-select-test.cpp` — fakes implement `TalkbackSdk` rather than Zoom's Windows interfaces.
-- `src/zoom-talkback-panel.cpp` — flip `kTalkbackPlatformSupported` (Task 5).
+- `src/zoom-talkback-panel.cpp` — flip `kTalkbackPlatformSupported` (Task 4).
 - `CLAUDE.md` — the macOS talkback section, replacing the "does not exist on macOS" entry.
 
 **Deliberately not touched:** `src/talkback-plan.h`, `src/talkback-nomination.h`, `src/talkback-nomination-dispatch.h`, `src/talkback-key.h`, `src/talkback-ring.h`, `src/talkback-dock-state.h`, `src/zoom-talkback-panel.cpp` (beyond the flag). These are already cross-platform and already compile on macOS. **The port is the engine, not the feature.**
 
 ---
 
-### Task 1: The `TalkbackSdk` seam, and the suite running on macOS
+### Task 1: The `TalkbackSdk` seam
 
-Introduces the abstraction, retargets the ladder and the fakes onto it, and un-gates the test target so it builds everywhere. Windows behaviour is unchanged throughout; the existing mutation-proved suite is the safety net.
+Introduces the abstraction, retargets the ladder and the fakes onto it, and moves the Windows SDK calls behind an adapter. Windows behaviour is unchanged throughout; the existing mutation-proved suite is the safety net.
 
-**These were drafted as two tasks and merged, because neither is testable alone.** `engine-talkback.cpp` compiles nowhere on macOS today — it is Windows-gated in `ENGINE_SOURCES` (`CMakeLists.txt:398`, which the macOS engine target does not use) and at `CMakeLists.txt:1236`. So the refactor cannot be compiled or run locally until the CMake gate moves; and the gate cannot move until the refactor frees the fakes from Zoom's Windows headers. One deliverable: **the ladder and its suite build and pass on macOS.**
+**Amended during execution (2026-09-04).** This task originally also un-gated `CoreVideoEngineTalkbackSelectTest` so the ladder suite would run on macOS, and its deliverable was stated as "the ladder and its suite build and pass on macOS." That deliverable was **not achievable and has been withdrawn** — see the Global Constraint on the macOS offline proof. The seam removes the ladder's dependency on `IMeetingTalkbackController`, but not on `IMeetingService`, `IUserInfo`, `IMeetingParticipantsController` or `IMeetingTalkbackCtrlEvent`, so the target stays Windows-gated and the un-gate step was reverted in fix round 1.
+
+The seam itself is still required and still correct: it is what lets Task 2 put a macOS adapter under the same ladder. Only the testing claim was wrong.
+
+**Deliverable:** the ladder calls a normalised, CoreVideo-owned seam; the Windows adapter owns the Begin/Add/Execute batch sequences; Windows behaviour and the emitted diagnostic codes are unchanged.
 
 **Files:**
 - Create: `src/talkback-sdk.h`
@@ -254,14 +259,14 @@ This is mechanical. Do not take the opportunity to restructure the ladder — th
 
 In `tests/engine-talkback-select-test.cpp`, replace `class FakeTalkbackController : public ZOOMSDK::IMeetingTalkbackController` with a `FakeTalkbackSdk : public TalkbackSdk`, carrying the same scripted behaviour plus a `next_create_result` field for Step 2's test. Keep every existing assertion.
 
-- [ ] **Step 7: Un-gate the test target so this is verifiable at all**
+- [ ] **Step 7: WITHDRAWN — do not un-gate the test target**
 
-In `CMakeLists.txt`, `CoreVideoEngineTalkbackSelectTest` is gated inside an `if(WIN32)` block (around `:1228`) under a comment stating the engine is Windows-only. That is now false for this target: it needs `engine-talkback.cpp` plus `TalkbackSdk`, and no Zoom headers. Move its `add_executable` and `add_test` out of the Windows block, and update the stale comment to say why it is portable now.
+This step originally moved `CoreVideoEngineTalkbackSelectTest` out of the `if(WIN32)` block. It was attempted, achieved nothing (the target still did not register on macOS), and was reverted in fix round 1. Leave the Windows gate in place and make sure its comment names the four types that actually keep it there: `IMeetingService`, `IUserInfo`, `IMeetingParticipantsController`, `IMeetingTalkbackCtrlEvent`.
 
-- [ ] **Step 8: Build and run the suite on macOS**
+- [ ] **Step 8: Confirm the macOS build is unbroken**
 
-Run: `cmake --build build --config Release --parallel 8 --target CoreVideoEngineTalkbackSelectTest && ./build/CoreVideoEngineTalkbackSelectTest`
-Expected: compiles and PASSES, on a machine with no Zoom SDK and no meeting. A Zoom-header include error means a Step 5 call site was missed — fix it there, never with a macOS `#ifdef`.
+Run: `cmake --build build --config Release --parallel 8`
+Expected: builds clean. This proves the seam did not break the plugin-side build; it does NOT exercise the ladder, which has no macOS test path.
 
 - [ ] **Step 9: Run the full suite on macOS**
 

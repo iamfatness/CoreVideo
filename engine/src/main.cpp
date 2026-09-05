@@ -12,6 +12,10 @@
 // comment in engine-talkback.h for why engine-talkback.cpp no longer derives
 // this internally.
 #include "engine-talkback-sdk-win.h"
+// TalkbackWinHost (macOS-port Task 2b, 2026-09-05): the seam's second half --
+// see inject_talkback_host() below and set_host()'s comment in
+// engine-talkback.h.
+#include "engine-talkback-host-win.h"
 #include <zoom_sdk.h>
 #include <auth_service_interface.h>
 #include <setting_service_interface.h>
@@ -462,11 +466,21 @@ public:
     // (main()'s local is reassigned across Join calls; storing the address
     // rather than a snapshot keeps this reading whatever is current). Called
     // once from main() right after both `talkback` and `meeting_svc` exist.
+    //
+    // `host` (Task 2b, 2026-09-05): the address of main()'s static
+    // TalkbackWinHost -- stable for the life of the process, unlike
+    // `meeting_svc_ptr`'s pointee, which main.cpp reassigns across Join
+    // calls. resolve_roster_change() takes TalkbackHost* now instead of
+    // ZOOMSDK::IMeetingService*, so roster_changed() below needs both: the
+    // pointer VALUE from *meeting_svc_ptr to null-check exactly as it always
+    // did, and this fixed address to pass through when that check passes.
     void attach_talkback(EngineTalkback *talkback,
-                         ZOOMSDK::IMeetingService * const *meeting_svc_ptr)
+                         ZOOMSDK::IMeetingService * const *meeting_svc_ptr,
+                         TalkbackHost *host)
     {
         m_talkback = talkback;
         m_meeting_svc_ptr = meeting_svc_ptr;
+        m_talkback_host = host;
     }
 
     void attach(ZOOMSDK::IMeetingParticipantsController *part_ctrl,
@@ -628,8 +642,17 @@ private:
     {
         rebuild_roster();
         send_roster();
+        // Task 2b: pass m_talkback_host only when there genuinely is a
+        // meeting service -- *m_meeting_svc_ptr is the null-check that used
+        // to gate m_svc inside resolve_roster_change() itself; now that the
+        // parameter is TalkbackHost*, the null has to travel in from here,
+        // or a non-null TalkbackWinHost wrapping a stale/null controller
+        // would make resolve_roster_change()'s own "if (!host) return;"
+        // unreachable -- the exact fail-open shape this port's brief warns
+        // against for every host injection site.
         if (m_talkback && m_meeting_svc_ptr)
-            m_talkback->resolve_roster_change(*m_meeting_svc_ptr);
+            m_talkback->resolve_roster_change(*m_meeting_svc_ptr ? m_talkback_host
+                                                                 : nullptr);
     }
 
     void rebuild_roster()
@@ -697,6 +720,9 @@ private:
     // of a snapshot.
     EngineTalkback *m_talkback = nullptr;
     ZOOMSDK::IMeetingService * const *m_meeting_svc_ptr = nullptr;
+    // Task 2b: the fixed address of main()'s static TalkbackWinHost -- see
+    // attach_talkback()'s own comment.
+    TalkbackHost *m_talkback_host = nullptr;
 };
 
 // ── Auth event handler ────────────────────────────────────────────────────────
@@ -1506,10 +1532,13 @@ int main()
     // events_registered() reflects it and probe() can refuse on a failed
     // registration exactly as it did before this seam existed) -- probe()
     // and nominate() used to call SetEvent() themselves; it is still not one
-    // of TalkbackSdk's own OPERATIONS (the seam's normalised
-    // TalkbackSdkEvents shape does not match the real
-    // ZOOMSDK::IMeetingTalkbackCtrlEvent, which `talkback` still implements
-    // directly to receive Windows callbacks natively), so it is a method on
+    // of TalkbackSdk's own OPERATIONS -- registration itself is platform-
+    // specific in a way none of the operations are (see
+    // engine-talkback-sdk-win.h's own comment: TalkbackWinSdk implements
+    // ZOOMSDK::IMeetingTalkbackCtrlEvent directly as of Task 2b and forwards
+    // into whatever set_events() points at, which is `talkback` below, via
+    // the portable TalkbackSdkEvents shape -- `talkback` itself no longer
+    // implements the real SDK interface at all) -- so it is a method on
     // the CONCRETE TalkbackWinSdk, callable only from code that already
     // holds one -- main.cpp, here, at the same point it constructs the
     // adapter. Deliberately NOT called before resolve_roster_change(): that
@@ -1559,8 +1588,38 @@ int main()
         ZOOMSDK::IMeetingTalkbackController *ctrl =
             svc ? svc->GetMeetingTalkbackController() : nullptr;
         talkback_sdk = TalkbackWinSdk(ctrl);
-        if (register_event) talkback_sdk.register_event(&talkback);
+        // Task 2b: set_events() wires the forwarding target (talkback_sdk's
+        // own onCreateChannelResponse/etc, now the concrete
+        // ZOOMSDK::IMeetingTalkbackCtrlEvent implementation, translate and
+        // call into this) every time the adapter is rebuilt, since the
+        // reassignment above (`talkback_sdk = TalkbackWinSdk(ctrl)`) is a
+        // fresh object with no events target of its own yet. register_event()
+        // no longer takes `&talkback` -- it registers itself with the SDK;
+        // see that method's own comment.
+        talkback_sdk.set_events(&talkback);
+        if (register_event) talkback_sdk.register_event();
         talkback.set_sdk(ctrl ? &talkback_sdk : nullptr);
+    };
+    // Task 2b (2026-09-05): the seam's second adapter, over
+    // ZOOMSDK::IMeetingService* itself rather than the talkback controller --
+    // see engine-talkback-host-win.h's own comment for why it needs the
+    // meeting service directly (it fetches two different controllers off it:
+    // participants for the roster, audio for the mute calls). Static storage
+    // duration for the identical reason `talkback_sdk` above has it: m_host is
+    // a raw pointer into this object, read for as long as a probe's driving
+    // thread or a live key press lives.
+    static TalkbackWinHost talkback_host(nullptr);
+    // Mirrors inject_talkback_sdk() exactly -- same null-check (inject
+    // nullptr when svc is genuinely null, so probe()/nominate()/
+    // session_start()'s own `if (!m_host) ... "no_meeting_service"`/
+    // `"not_in_meeting"` refusals stay reachable) and the same
+    // safe_to_inject gating, for the same reason: a call site about to be
+    // refused for session_live/probe_busy/create_busy must not re-derive the
+    // host out from under whichever subsystem is using it. No `register_event`
+    // parameter -- TalkbackHost has no event registration of its own to make.
+    auto inject_talkback_host = [](ZOOMSDK::IMeetingService *svc, bool safe_to_inject) {
+        if (!safe_to_inject) return;
+        talkback_host = TalkbackWinHost(svc);
     };
     // Task 4: wire the roster-change path (EngineParticipants' five SDK
     // callbacks) to EngineTalkback's re-resolution. Deferred until here
@@ -1568,7 +1627,7 @@ int main()
     // `&meeting_svc` rather than its current value, since Join reassigns it
     // and this must always see the meeting the roster events belong to (same
     // pattern as EngineMeetingEvent's own `&meeting_svc` above).
-    participants.attach_talkback(&talkback, &meeting_svc);
+    participants.attach_talkback(&talkback, &meeting_svc, &talkback_host);
     // The thread is kept joinable (never detached) and joined explicitly --
     // both before starting a fresh one and, critically, before any SDK
     // teardown call at process exit (see the Quit path below). talkback.tick()
@@ -1877,8 +1936,15 @@ int main()
                 // pressed -- the trigger this fix round found. When false,
                 // this call touches nothing, exactly as probe()'s own
                 // refusal would have left m_ctrl alone before Task 1.
-                inject_talkback_sdk(meeting_svc, /*register_event=*/true,
-                                    talkback.is_idle() && !talkback.session_live());
+                {
+                    const bool safe_to_inject =
+                        talkback.is_idle() && !talkback.session_live();
+                    inject_talkback_sdk(meeting_svc, /*register_event=*/true,
+                                       safe_to_inject);
+                    // Task 2b: same gating as inject_talkback_sdk() immediately
+                    // above -- see inject_talkback_host()'s own comment.
+                    inject_talkback_host(meeting_svc, safe_to_inject);
+                }
 
                 // probe() returns true if and only if it issued a
                 // CreateChannel -- every refusal, not just the re-entrancy
@@ -1893,7 +1959,14 @@ int main()
                 // strays drained -- probe() drains them itself on those
                 // paths. See probe()'s return-value contract in
                 // engine-talkback.h.
-                if (talkback.probe(meeting_svc, who)) {
+                //
+                // Task 2b: `meeting_svc ? &talkback_host : nullptr` -- probe()
+                // now takes TalkbackHost*, and the ternary is what keeps a
+                // genuinely absent meeting service arriving as a real nullptr
+                // (probe()'s own `if (!m_host) ... "no_meeting_service"` must
+                // stay reachable) rather than a non-null TalkbackWinHost
+                // wrapping a null controller underneath.
+                if (talkback.probe(meeting_svc ? &talkback_host : nullptr, who)) {
                     // Drive tick() off a dedicated thread: ipc_read_line_with_
                     // message_pump() blocks, so tick() cannot live on the read
                     // loop's thread. Bounded at 3000 x 10ms (~30s), not the
@@ -1992,9 +2065,17 @@ int main()
             // now leaves m_sdk exactly as the last successful injection left
             // it, instead of re-deriving it out from under whichever
             // subsystem is using it.
-            inject_talkback_sdk(meeting_svc, /*register_event=*/false,
-                                !talkback.session_live() && !talkback.has_pending_work());
-            talkback.session_start(meeting_svc, target);
+            {
+                const bool safe_to_inject =
+                    !talkback.session_live() && !talkback.has_pending_work();
+                inject_talkback_sdk(meeting_svc, /*register_event=*/false, safe_to_inject);
+                // Task 2b: same gating, same reason -- see
+                // inject_talkback_host()'s own comment.
+                inject_talkback_host(meeting_svc, safe_to_inject);
+            }
+            // Task 2b: see the TalkbackProbe branch's matching comment on the
+            // ternary -- session_start() now takes TalkbackHost*.
+            talkback.session_start(meeting_svc ? &talkback_host : nullptr, target);
 
         } else if (command == IpcCommand::TalkbackStop) {
             talkback.session_stop();
@@ -2058,9 +2139,18 @@ int main()
                 // the event sink out from under the ladder that is still
                 // using them, before nominate() ever reaches its own
                 // (unchanged) refusal.
-                inject_talkback_sdk(meeting_svc, /*register_event=*/true,
-                                    !talkback.session_live() && !talkback.has_pending_work());
-                if (!talkback.nominate(meeting_svc, nominees, attempt)) {
+                {
+                    const bool safe_to_inject =
+                        !talkback.session_live() && !talkback.has_pending_work();
+                    inject_talkback_sdk(meeting_svc, /*register_event=*/true, safe_to_inject);
+                    // Task 2b: same gating, same reason -- see
+                    // inject_talkback_host()'s own comment.
+                    inject_talkback_host(meeting_svc, safe_to_inject);
+                }
+                // Task 2b: see the TalkbackProbe branch's matching comment on
+                // the ternary -- nominate() now takes TalkbackHost*.
+                if (!talkback.nominate(meeting_svc ? &talkback_host : nullptr,
+                                      nominees, attempt)) {
                     EngineIpc::write(
                         R"({"cmd":"debug","stage":"nominate_returned_false"})");
                 }

@@ -54,6 +54,36 @@
 #include "engine-writer.h"   // EngineIpc::test_sink() -- Task 5 fix round 3 (N6)
 #include "talkback-ring.h"   // the tap side of the ring, so drain_audio() has real audio
 
+// Fix round 1 (Windows CI, 2026-09-05): these five used to arrive
+// TRANSITIVELY through engine-talkback.h, which included them unconditionally
+// because EngineTalkback itself needed them (it implemented
+// ZOOMSDK::IMeetingTalkbackCtrlEvent directly and took
+// ZOOMSDK::IMeetingService* throughout). This task's own retarget onto
+// TalkbackSdkEvents/TalkbackHost is what removed them from engine-talkback.h
+// -- exactly so the macOS engine target, which has no Zoom C++ SDK at all,
+// could compile engine-talkback.cpp -- and this file's own fakes were never
+// updated to include what they still genuinely need directly. They DO still
+// need it: FakeMeetingService/FakeParticipantsController/FakeAudioController/
+// FakeUserInfo/FakeUIntList below are ordinary subclasses of the REAL
+// ZOOMSDK::IMeetingService/IMeetingParticipantsController/
+// IMeetingAudioController/IUserInfo/IList<unsigned int> -- unrelated to the
+// TalkbackHost/TalkbackSdk seam, which is what main.cpp's production adapters
+// (TalkbackWinSdk/TalkbackWinHost) wrap those same real interfaces INTO. A
+// test double for the seam's OWN interfaces doesn't need any Zoom type at all
+// (see FakeTalkbackHost/FakeTalkbackSdk, both plain TalkbackHost/TalkbackSdk
+// subclasses); a test double for the SDK objects the production adapters wrap
+// still needs the real SDK headers to derive from, same as it always did.
+// Same order and same reasoning engine-talkback.h used to state: windows.h
+// before zoom_sdk.h (zoom_sdk_def.h uses HWND without including it itself) is
+// already satisfied by engine-talkback.h's own engine-ipc.h include above;
+// meeting_participants_ctrl_interface.h uses AudioType without including its
+// own home header, so meeting_audio_interface.h must come first.
+#include "zoom_sdk.h"
+#include "meeting_service_interface.h"
+#include "meeting_service_components/meeting_talkback_ctrl_interface.h"
+#include "meeting_service_components/meeting_audio_interface.h"
+#include "meeting_service_components/meeting_participants_ctrl_interface.h"
+
 #include <iostream>
 #include <string>
 #include <utility>
@@ -63,15 +93,21 @@
 // the generated override block below is copied verbatim from the header, where
 // every type is written unqualified. Rather than rewrite 57 signatures (and
 // have to redo it on every SDK bump), pull the namespace in here. Safe in a
-// test TU with no other consumers; engine-talkback.cpp itself still qualifies
-// everything as ZOOMSDK:: exactly as before.
+// test TU with no other consumers; engine-talkback.cpp itself no longer
+// references ZOOMSDK:: at all (Task 2b) -- the only production file left that
+// does is engine-talkback-sdk-win.h/engine-talkback-host-win.h, neither of
+// which this TU includes.
 using namespace ZOOMSDK;
 
-// TalkbackError is nested INSIDE IMeetingTalkbackCtrlEvent, which is why
-// engine-talkback.h's overrides take it unqualified -- they are members of a
-// subclass. Out here it needs the enclosing class named.
-static const IMeetingTalkbackCtrlEvent::TalkbackError kOk =
-    IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_OK;
+// Fix round 1: kOk/kAlreadyExist/kNoPermission below are TalkbackResult now,
+// not ZOOMSDK::IMeetingTalkbackCtrlEvent::TalkbackError -- this file drives
+// EngineTalkback's on_*_response() methods (TalkbackSdkEvents' shape)
+// directly, and has no remaining reason to name that SDK interface or its
+// nested TalkbackError type at all. meeting_talkback_ctrl_interface.h is
+// still included above, but only for ZOOMSDK::IMeetingTalkbackController --
+// FakeMeetingService::GetMeetingTalkbackController()'s declared return type,
+// inherited from ZOOMSDK::IMeetingService's own pure virtual.
+static const TalkbackResult kOk = TalkbackResult::Ok;
 
 static int failures = 0;
 
@@ -808,61 +844,53 @@ static void drain_membership(EngineTalkback &tb)
     }
 }
 
-// Task 2b: the test-side mirror of engine-talkback-sdk-win.h's
-// talkback_win_tb_result() -- this file drives EngineTalkback's own
-// on_*_response() methods directly now (it implements TalkbackSdkEvents, not
-// ZOOMSDK::IMeetingTalkbackCtrlEvent, any more), so something here has to do
-// the same TalkbackError->TalkbackResult translation the real adapter does in
-// production. Deliberately not #including engine-talkback-sdk-win.h to reuse
-// its version: that header also declares TalkbackWinSdk's full
-// ZOOMSDK::IMeetingTalkbackCtrlEvent override set, which would make this TU
-// implicitly depend on the real controller's SetEvent() shape matching too --
-// a coupling this file's own fakes exist to avoid. Only Ok/AlreadyExist are
-// ever compared against by the ladder (see that function's own comment for
-// why every other value maps to Unknown); the raw `err` is threaded through
-// separately as `raw_code` regardless, so no test assertion depends on this
-// mapping being any richer.
-static TalkbackResult test_tb_result(IMeetingTalkbackCtrlEvent::TalkbackError err)
-{
-    switch (err) {
-    case IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_OK: return TalkbackResult::Ok;
-    case IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_ALREADY_EXIST:
-        return TalkbackResult::AlreadyExists;
-    default: return TalkbackResult::Unknown;
-    }
-}
-
-// Task 2b: thin shims preserving every existing call site's argument shape
-// (a zchar_t* channel id, a bare TalkbackError) while calling EngineTalkback's
-// renamed, portable methods -- on_create_channel_response()/
-// on_channel_user_join_response()/on_channel_user_leave_response(), which take
-// (UTF-8 string, TalkbackResult, raw_code) instead of
-// (const zchar_t*, TalkbackError). Mechanical translation only: every value
-// a test already passes (chan_id(N).c_str(), a user id, kOk/kAlreadyExist/
-// kNoPermission/...) is unchanged.
+// Fix round 1 (Windows CI, 2026-09-05): this file used to keep driving
+// EngineTalkback's event methods through IMeetingTalkbackCtrlEvent::
+// TalkbackError, translated to TalkbackResult by a test-side mirror of
+// engine-talkback-sdk-win.h's talkback_win_tb_result(). That was LEFTOVER,
+// not genuine: EngineTalkback implements TalkbackSdkEvents now, not
+// ZOOMSDK::IMeetingTalkbackCtrlEvent, so nothing in this file's own code
+// needs that interface or its nested TalkbackError type any more -- the
+// translation belongs entirely to the production adapter
+// (TalkbackWinSdk::onCreateChannelResponse()/etc, engine-talkback-sdk-win.h),
+// which this test drives around, not through. Windows CI caught this: the
+// prior round quietly kept the include of ZOOMSDK/zchar_t/
+// IMeetingTalkbackCtrlEvent working by relying on engine-talkback.h to have
+// pulled the Zoom headers in transitively, which this same task's own retarget
+// removed -- see the new #include block below this file's `using namespace
+// ZOOMSDK;` line for the genuinely-still-needed half of that (FakeMeetingService
+// and friends really do derive from real ZOOMSDK interfaces, unrelated to the
+// TalkbackSdkEvents seam, and need their own explicit includes now).
+//
+// These shims now take TalkbackResult directly -- the ladder's own currency,
+// and this seam's fakes' too (FakeTalkbackSdk already speaks TalkbackResult
+// exclusively) -- preserving every other part of each existing call site's
+// argument shape (a zchar_t* channel id, a user id where applicable)
+// unchanged. `raw_code` mirrors the TalkbackResult's own numbering, the same
+// honest-about-what-it-is convention FakeTalkbackSdk::last_raw_code() already
+// documents: nothing in this file asserts a specific raw_code value from
+// these three, only from FakeTalkbackSdk's own operations.
 static void tb_create_response(EngineTalkback &tb, const zchar_t *id,
-                               IMeetingTalkbackCtrlEvent::TalkbackError err)
+                               TalkbackResult result)
 {
-    tb.on_create_channel_response(utf8_of(id), test_tb_result(err),
-                                  static_cast<int>(err));
+    tb.on_create_channel_response(utf8_of(id), result, static_cast<int>(result));
 }
 static void tb_join_response(EngineTalkback &tb, const zchar_t *id, unsigned int user_id,
-                            IMeetingTalkbackCtrlEvent::TalkbackError err)
+                            TalkbackResult result)
 {
-    tb.on_channel_user_join_response(utf8_of(id), user_id, test_tb_result(err),
-                                     static_cast<int>(err));
+    tb.on_channel_user_join_response(utf8_of(id), user_id, result,
+                                     static_cast<int>(result));
 }
 static void tb_leave_response(EngineTalkback &tb, const zchar_t *id, unsigned int user_id,
-                             IMeetingTalkbackCtrlEvent::TalkbackError err)
+                             TalkbackResult result)
 {
-    tb.on_channel_user_leave_response(utf8_of(id), user_id, test_tb_result(err),
-                                      static_cast<int>(err));
+    tb.on_channel_user_leave_response(utf8_of(id), user_id, result,
+                                      static_cast<int>(result));
 }
 
-static void respond(EngineTalkback &tb, const zchar_t *id,
-                    IMeetingTalkbackCtrlEvent::TalkbackError err)
+static void respond(EngineTalkback &tb, const zchar_t *id, TalkbackResult result)
 {
-    tb_create_response(tb, id, err);
+    tb_create_response(tb, id, result);
     drain_membership(tb);
 }
 
@@ -1373,8 +1401,7 @@ int main()
         // channel, OK for the other. TALKBACK_ERROR_ALREADY_EXIST literally
         // means "the invited user is already in the channel" -- both must be
         // treated as confirmed presence, never as a failure to retry.
-        static const IMeetingTalkbackCtrlEvent::TalkbackError kAlreadyExist =
-            IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_ALREADY_EXIST;
+        static const TalkbackResult kAlreadyExist = TalkbackResult::AlreadyExists;
         tb_join_response(tb, chan_id(1).c_str(), 1001, kAlreadyExist);
         tb_join_response(tb, chan_id(2).c_str(), 1001, kOk);
         resolve(tb, host);
@@ -1634,8 +1661,7 @@ int main()
         check(svc.ctrl.invited.size() == 2, "Ivan's join did not invite him");
 
         // Both invites come back permanently rejected.
-        static const IMeetingTalkbackCtrlEvent::TalkbackError kNoPermission =
-            IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_NOPERMISSION;
+        static const TalkbackResult kNoPermission = TalkbackResult::NoPermission;
         tb_join_response(tb, chan_id(1).c_str(), 5001, kNoPermission);
         tb_join_response(tb, chan_id(2).c_str(), 5001, kNoPermission);
 
@@ -2033,7 +2059,7 @@ int main()
         check(svc.ctrl.destroyed.empty(),
               "setup: channel 1 was destroyed before the failure even arrived");
         respond(tb, chan_id(2).c_str(),
-            IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_NOPERMISSION);
+            TalkbackResult::NoPermission);
 
         check(count_abort_reports(lines) == 1,
               "an async channel_failed response did not emit exactly one "
@@ -2163,7 +2189,7 @@ int main()
         check(tb.nominate(&host, {"Sarah"}, 43), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(),
-            IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_NOPERMISSION);
+            TalkbackResult::NoPermission);
 
         check(count_abort_reports(lines) == 1,
               "setup: the failing ladder did not emit its terminal abort report");
@@ -2233,7 +2259,7 @@ int main()
 
         // Create #3 (the first private) is rejected by Zoom.
         respond(tb, chan_id(3).c_str(),
-            IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_NOPERMISSION);
+            TalkbackResult::NoPermission);
 
         check(count_abort_reports(lines) == 1,
               "the ladder abort did not emit exactly one terminal abort report");
@@ -3089,7 +3115,7 @@ int main()
         // silently unconfirmed talent, which is the worse of the two.
         tb_create_response(tb, 
             chan_id(9).c_str(),
-            IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_NOPERMISSION);
+            TalkbackResult::NoPermission);
         check(!tb.has_pending_work(),
               "setup: the probe did not settle, so the deferral half below "
               "would pass for the wrong reason");
@@ -3144,7 +3170,7 @@ int main()
         // The ladder dies and takes its channels with it.
         const std::size_t destroyed_before = svc.ctrl.destroyed.size();
         tb_create_response(tb, chan_id(2).c_str(),
-                                   IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_NOPERMISSION);
+                                   TalkbackResult::NoPermission);
         check(svc.ctrl.destroyed.size() > destroyed_before,
               "setup: the failing ladder did not tear its channels down");
 

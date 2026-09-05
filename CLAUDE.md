@@ -40,18 +40,26 @@ DIFFERENT clocks on macOS (see the struct comment) — `audio_latency_us` is
 untrustworthy there until that is reconciled. Kill a mid-meeting engine only
 after checking `{"cmd":"status"}` — it IS the meeting session.
 
-**Talkback does not exist on macOS**, and the dock says so rather than failing
-quietly. `engine-talkback.cpp` is in `ENGINE_SOURCES`, which only the Windows
-and Linux engine targets use; the macOS engine target is `main-macos.mm` plus
-(2026-09-05, macOS talkback port Task 2) `engine-talkback-sdk-macos.{h,mm}` —
-`TalkbackMacSdk`, the seam's macOS adapter over `ZoomSDKTalkbackController` —
-and it still never compiles `engine-talkback.cpp` itself: `EngineTalkback`
-directly implements `ZOOMSDK::IMeetingTalkbackCtrlEvent` and takes
-`ZOOMSDK::IMeetingService*` throughout, the Windows/Linux C++ SDK's own
-namespace, which the macOS Zoom SDK (pure Objective-C, no `zoom_sdk.h`) has no
-counterpart for at all — confirmed by trying: adding it to the macOS target
-fails immediately with `'zoom_sdk.h' file not found`, independent of anything
-the adapter does. The dock is cross-platform and builds either way, so without a gate it is a
+**Talkback does not exist on macOS** from the operator's side, and the dock
+says so rather than failing quietly — that has not changed, but what blocks it
+has. `engine-talkback.cpp` is in `ENGINE_SOURCES`, which the Windows and Linux
+engine targets use directly; the macOS engine target is `main-macos.mm` plus,
+as of 2026-09-05 (macOS talkback port), `engine-talkback.cpp` ITSELF,
+`engine-talkback-sdk-macos.{h,mm}` (`TalkbackMacSdk`, Task 2's adapter over
+`ZoomSDKTalkbackController`) and `engine-talkback-host-macos.{h,mm}`
+(`TalkbackMacHost`, Task 2b's adapter over `ZoomSDKMeetingActionController`).
+Task 2b removed `EngineTalkback`'s last coupling to the Windows/Linux C++
+SDK's own namespace — it implements the portable `TalkbackSdkEvents`
+(`src/talkback-sdk.h`) instead of `ZOOMSDK::IMeetingTalkbackCtrlEvent`
+directly, and takes `TalkbackHost*` (`src/talkback-host.h`) instead of
+`ZOOMSDK::IMeetingService*` throughout — so `engine-talkback.cpp` compiles
+into the macOS `ZoomObsEngine` target clean, zero warnings, for the first time
+ever. **Talkback still does not run on macOS**: neither `TalkbackMacSdk` nor
+`TalkbackMacHost` is wired into `main-macos.mm`'s command loop (nothing there
+constructs `EngineTalkback` at all yet) — a later task's job. The dock's
+`kTalkbackPlatformSupported` gate below is therefore still correct and still
+load-bearing, for the same reason it always was: the dock is cross-platform
+and builds either way, so without a gate it is a
 panel whose every control sends a command nothing answers. One constant,
 `kTalkbackPlatformSupported` (`src/zoom-talkback-panel.cpp`), feeds
 `TalkbackDockSessionView::platform_supported`,

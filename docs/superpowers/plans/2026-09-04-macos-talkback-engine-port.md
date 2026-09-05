@@ -10,10 +10,10 @@
 
 ## Global Constraints
 
-- **Zero behaviour change on Windows.** Windows talkback works and has passed its live gate. Every task below must leave `ctest` fully green on Windows; a task that changes Windows *behaviour* rather than the type it calls is a defect, not progress.
+- **Zero behaviour change on Windows.** Windows talkback works and has passed its live gate. A task that changes Windows *behaviour* rather than the type it calls is a defect, not progress. **This is verified by CI, not locally** — the development machine is an Apple Silicon Mac with no Windows toolchain, so "Windows still green" means the branch's Windows x64 PR check, the same gate that verified the #229 merge. Do not ask an implementer to run a Windows suite; ask it to keep the change mechanical and let CI answer.
 - **`CreateChannel` and every membership call are SDK-thread-only.** On Windows that thread is the command loop. **On macOS it is the main queue** — the IPC reader is a separate thread that `dispatch_async`es to the main queue (`engine/src/main-macos.mm:2243`). This is the single most important difference in the port and the most likely source of a defect.
 - **Law 2 pacing is server behaviour, not API shape.** One membership call per ~600 ms, round-robin, with backoff on a too-frequent refusal. It ports unchanged. Only the *error code* differs: Windows `SDKERR_TOO_FREQUENT_CALL` (enum position 18) vs macOS `ZoomSDKError_TooFrequentCall` (`ZoomSDKErrors.h:241`). The adapter normalises; the ladder must never see a raw SDK code.
-- **No live-meeting dependency before Task 6.** Tasks 1–5 must be completable and verifiable with no network and no Zoom meeting. This is a hard sequencing requirement, not a preference — see Task 6's note on the `initSDKWithParams` wedge.
+- **No live-meeting dependency before Task 5.** Tasks 1-4 must be completable and verifiable with no network and no Zoom meeting. This is a hard sequencing requirement, not a preference — see Task 5's note on the `initSDKWithParams` wedge.
 - **Never assert a branch unreachable.** Standing policy in `CLAUDE.md`; two Majors in this feature have lived behind exactly that claim.
 - **Tests pin invariants, not implementations.** Every new pin must be mutation-proved: break the thing, watch the test fail, revert.
 
@@ -40,14 +40,16 @@
 
 ---
 
-### Task 1: The `TalkbackSdk` seam, with Windows behind it
+### Task 1: The `TalkbackSdk` seam, and the suite running on macOS
 
-Introduces the abstraction and retargets the ladder and the fakes onto it. Windows behaviour is unchanged throughout; the existing mutation-proved suite is the safety net.
+Introduces the abstraction, retargets the ladder and the fakes onto it, and un-gates the test target so it builds everywhere. Windows behaviour is unchanged throughout; the existing mutation-proved suite is the safety net.
+
+**These were drafted as two tasks and merged, because neither is testable alone.** `engine-talkback.cpp` compiles nowhere on macOS today — it is Windows-gated in `ENGINE_SOURCES` (`CMakeLists.txt:398`, which the macOS engine target does not use) and at `CMakeLists.txt:1236`. So the refactor cannot be compiled or run locally until the CMake gate moves; and the gate cannot move until the refactor frees the fakes from Zoom's Windows headers. One deliverable: **the ladder and its suite build and pass on macOS.**
 
 **Files:**
 - Create: `src/talkback-sdk.h`
 - Create: `engine/src/engine-talkback-sdk-win.h`
-- Modify: `engine/src/engine-talkback.h`, `engine/src/engine-talkback.cpp`, `engine/src/main.cpp`
+- Modify: `engine/src/engine-talkback.h`, `engine/src/engine-talkback.cpp`, `engine/src/main.cpp`, `CMakeLists.txt`
 - Test: `tests/engine-talkback-select-test.cpp`
 
 **Interfaces:**
@@ -252,62 +254,40 @@ This is mechanical. Do not take the opportunity to restructure the ladder — th
 
 In `tests/engine-talkback-select-test.cpp`, replace `class FakeTalkbackController : public ZOOMSDK::IMeetingTalkbackController` with a `FakeTalkbackSdk : public TalkbackSdk`, carrying the same scripted behaviour plus a `next_create_result` field for Step 2's test. Keep every existing assertion.
 
-- [ ] **Step 7: Run the whole suite on Windows**
+- [ ] **Step 7: Un-gate the test target so this is verifiable at all**
 
-Run: `cmake --build build --config Release --parallel 8 && cd build && ctest -C Release --output-on-failure`
-Expected: PASS, with the same test count as before plus the new normalisation pin. Any *behavioural* difference here is a defect in the retarget, not an improvement.
+In `CMakeLists.txt`, `CoreVideoEngineTalkbackSelectTest` is gated inside an `if(WIN32)` block (around `:1228`) under a comment stating the engine is Windows-only. That is now false for this target: it needs `engine-talkback.cpp` plus `TalkbackSdk`, and no Zoom headers. Move its `add_executable` and `add_test` out of the Windows block, and update the stale comment to say why it is portable now.
 
-- [ ] **Step 8: Mutation-prove the new pin**
+- [ ] **Step 8: Build and run the suite on macOS**
 
-Change `talkback_win_result`'s `SDKERR_TOO_FREQUENT_CALL` case to return `TalkbackResult::Unknown`. Run the suite. Expected: FAIL. Revert and confirm green.
+Run: `cmake --build build --config Release --parallel 8 --target CoreVideoEngineTalkbackSelectTest && ./build/CoreVideoEngineTalkbackSelectTest`
+Expected: compiles and PASSES, on a machine with no Zoom SDK and no meeting. A Zoom-header include error means a Step 5 call site was missed — fix it there, never with a macOS `#ifdef`.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 9: Run the full suite on macOS**
+
+Run: `cd build && ctest -C Release --output-on-failure`
+Expected: PASS, with the previous count plus the new normalisation pin and the newly-portable talkback target.
+
+- [ ] **Step 10: Mutation-prove the new pin**
+
+Change `talkback_win_result`'s `SDKERR_TOO_FREQUENT_CALL` case to return `TalkbackResult::Unknown`. Rebuild and run. Expected: FAIL. Revert and confirm green.
+
+Note this mutation is on Windows-only code, so it is proved by inspection of the mapping plus the macOS-side fake test; the fake's `script_create_results` path is what actually exercises the ladder's retry here.
+
+- [ ] **Step 11: Commit**
 
 ```bash
 git add src/talkback-sdk.h engine/src/engine-talkback-sdk-win.h \
         engine/src/engine-talkback.h engine/src/engine-talkback.cpp \
-        engine/src/main.cpp tests/engine-talkback-select-test.cpp
-git commit -m "refactor(talkback): put a normalised SDK seam under the ladder"
+        engine/src/main.cpp tests/engine-talkback-select-test.cpp CMakeLists.txt
+git commit -m "refactor(talkback): normalised SDK seam, suite portable to macOS"
 ```
+
+**Windows verification:** none of the above runs a Windows suite — this machine has no Windows toolchain. Push the branch and let the PR's Windows x64 check confirm no behavioural change, per Global Constraints.
 
 ---
 
-### Task 2: Build the ladder and its tests on macOS
-
-With the fakes no longer touching Zoom's Windows headers, the ladder and its suite become portable. This is the task that makes every later one verifiable offline.
-
-**Files:**
-- Modify: `CMakeLists.txt`
-- Test: `tests/engine-talkback-select-test.cpp` (no content change; it just has to compile here)
-
-**Interfaces:**
-- Consumes: `TalkbackSdk` (Task 1).
-- Produces: `CoreVideoEngineTalkbackSelectTest` as an all-platform target.
-
-- [ ] **Step 1: Move the test target out of the Windows-only block**
-
-In `CMakeLists.txt`, `CoreVideoEngineTalkbackSelectTest` is currently gated with a comment stating the engine is Windows-only. It now depends on `engine-talkback.cpp` plus `TalkbackSdk` — no Zoom headers. Move the `add_executable` and its `add_test` out of the `if(WIN32)` block.
-
-- [ ] **Step 2: Build it on macOS**
-
-Run: `cmake --build build --config Release --target CoreVideoEngineTalkbackSelectTest`
-Expected: compiles. Any Zoom-header include error means a Task 1 call site was missed — fix it there, not with a macOS `#ifdef`.
-
-- [ ] **Step 3: Run the suite on macOS**
-
-Run: `cd build && ctest -C Release --output-on-failure`
-Expected: PASS, including every talkback ladder assertion, on a machine with no Zoom SDK and no meeting.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add CMakeLists.txt
-git commit -m "test(talkback): build the ladder suite on every platform"
-```
-
----
-
-### Task 3: The macOS adapter
+### Task 2: The macOS adapter
 
 **Files:**
 - Create: `engine/src/engine-talkback-sdk-macos.h`, `engine/src/engine-talkback-sdk-macos.mm`
@@ -508,14 +488,29 @@ void TalkbackMacSdk::set_events(TalkbackSdkEvents *events)
 
 - [ ] **Step 3: Add to the macOS engine target**
 
-In `CMakeLists.txt`, add `engine/src/engine-talkback-sdk-macos.mm` and `engine/src/engine-talkback.cpp` to the macOS `ZoomObsEngine` target (currently `main-macos.mm` alone).
+In `CMakeLists.txt`, add `engine/src/engine-talkback-sdk-macos.mm` and `engine/src/engine-talkback.cpp` to the macOS `ZoomObsEngine` target (currently `main-macos.mm` alone, `:459`).
 
-- [ ] **Step 4: Compile**
+- [ ] **Step 4: Configure a build that actually has the engine target**
 
-Run: `cmake --build build --config Release --target ZoomObsEngine`
+The default `build/` directory on this machine has **no `BUILD_ZOOM_ENGINE`** in its cache, so `ZoomObsEngine` does not exist as a target and Step 5 would fail with "no rule to make target" rather than a real compile error.
+
+```bash
+cmake -S . -B build-engine -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_ZOOM_ENGINE=ON \
+  -DZOOM_SDK_DIR="$HOME/Developer/zoom-sdk-macos" \
+  -DCMAKE_PREFIX_PATH="/tmp/obs-sdk;$HOME/Qt/6.8.3/macos" \
+  -DLibObs_DIR=/tmp/obs-sdk/cmake/LibObs \
+  -Dobs-frontend-api_DIR=/tmp/obs-sdk/cmake/obs-frontend-api
+```
+
+If `/tmp/obs-sdk` is missing (it is cleared on reboot), recreate it from the "Get OBS headers" step in `.github/workflows/build.yml` first.
+
+- [ ] **Step 5: Compile**
+
+Run: `cmake --build build-engine --config Release --target ZoomObsEngine`
 Expected: compiles and links against the real framework. **This step is the offline substitute for a spike** — it proves every signature, delegate protocol and enum value exists as used. A typo in a selector is an error here, not a runtime surprise in a meeting.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add engine/src/engine-talkback-sdk-macos.h \
@@ -525,7 +520,7 @@ git commit -m "feat(talkback): macOS adapter over ZoomSDKTalkbackController"
 
 ---
 
-### Task 4: The main-queue pacing pump and command wiring
+### Task 3: The main-queue pacing pump and command wiring
 
 The most defect-prone task, because the threading model differs from Windows and the difference is invisible until something races.
 
@@ -534,7 +529,7 @@ The most defect-prone task, because the threading model differs from Windows and
 - Modify: `engine/src/main-macos.mm`, `CMakeLists.txt`
 
 **Interfaces:**
-- Consumes: `TalkbackMacSdk` (Task 3), `EngineTalkback::nomination_tick()` / `mic_tick()` / `drain_audio()`.
+- Consumes: `TalkbackMacSdk` (Task 2), `EngineTalkback::nomination_tick()` / `mic_tick()` / `drain_audio()`.
 - Produces: `talkback_pump_start(EngineTalkback *)`, `talkback_pump_stop()`.
 
 - [ ] **Step 1: Write the pump**
@@ -639,7 +634,7 @@ git commit -m "feat(talkback): main-queue pump and command wiring for macOS"
 
 ---
 
-### Task 5: Turn the dock on, and correct the docs
+### Task 4: Turn the dock on, and correct the docs
 
 **Files:**
 - Modify: `src/zoom-talkback-panel.cpp`, `tests/talkback-dock-state-test.cpp`, `CLAUDE.md`
@@ -673,7 +668,7 @@ git commit -m "feat(talkback): enable the dock on macOS"
 
 ---
 
-### Task 6: Live verification — one session, batched
+### Task 5: Live verification — one session, batched
 
 **Everything above is offline. This task is the only one that needs a meeting, and it is deliberately last.**
 
@@ -697,7 +692,7 @@ Batch it with the two standing macOS unknowns. All three want the same scarce th
 
 ## Open Questions
 
-These do not block Tasks 1–5 and should be answered in Task 6 rather than guessed at now:
+These do not block Tasks 1–5 and should be answered in Task 5 rather than guessed at now:
 
 1. **Does macOS rate-limit membership calls identically?** Law 2 was measured on Windows and on ZComms. The pacing is implemented regardless — it is harmless if unnecessary and essential if not — but the ~600 ms floor may want re-measuring.
 2. **Does the macOS SDK duck channel members at creation**, as Zoom does on Windows? The provision-time `setChannelBackgroundVolume:` neutral write is ported unconditionally for the same reason.

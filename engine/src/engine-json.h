@@ -10,7 +10,20 @@
 #if defined(WIN32)
 #include <windows.h>
 #endif
+// macOS talkback port, Task 2b (2026-09-05): zoom_sdk.h is the Windows/Linux
+// C++ SDK header and does not exist on macOS (pure Objective-C SDK, no
+// zoom_sdk.h at all) -- gated here, the ONE place this file needs it, rather
+// than only at zchar_to_utf8()'s own declaration below, because the
+// #include itself is what fails first ("'zoom_sdk.h' file not found"),
+// before the compiler ever reaches a type it defines. This was previously
+// unconditional because every past includer of this header (main.cpp,
+// engine-talkback.cpp, engine-talkback-sdk-win.h) was Windows/Linux-only;
+// engine-talkback.cpp joining the macOS ZoomObsEngine target this task is
+// the first thing that includes this header on Apple at all. json_str()/
+// json_escape() below have no Zoom dependency and are unaffected either way.
+#if !defined(__APPLE__)
 #include <zoom_sdk.h>
+#endif
 
 #include <string>
 
@@ -50,6 +63,13 @@ inline std::string json_escape(const std::string &in)
     return out;
 }
 
+// macOS talkback port, Task 2b: not declared at all on Apple -- zchar_t (the
+// type this function's own signature needs) comes from the same zoom_sdk.h
+// gated out above, and nothing on macOS calls this function anyway
+// (main-macos.mm has its own to_utf8(NSString*); the seam's macOS adapters --
+// TalkbackMacSdk, TalkbackMacHost -- convert NSString straight to std::string
+// with no zchar_t in sight, by design).
+#if !defined(__APPLE__)
 inline std::string zchar_to_utf8(const zchar_t *name)
 {
     if (!name) return {};
@@ -67,3 +87,4 @@ inline std::string zchar_to_utf8(const zchar_t *name)
     return name;
 #endif
 }
+#endif

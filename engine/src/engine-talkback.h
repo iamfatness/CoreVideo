@@ -21,21 +21,12 @@
 // over E2P, so a failure names the exact rung it fell off instead of
 // surfacing as silence.
 //
-// engine-ipc.h must come before any Zoom SDK header: it pulls in <windows.h>
-// (under WIN32), and zoom_sdk_def.h uses HWND without including it itself.
-// Every other engine-*.h in this codebase follows the same order.
+// engine-ipc.h must come before any Zoom SDK header on platforms that still
+// have one: it pulls in <windows.h> (under WIN32), and zoom_sdk_def.h uses
+// HWND without including it itself. Every other engine-*.h in this codebase
+// follows the same order. This file itself no longer includes any Zoom SDK
+// header at all (macOS talkback port, Task 2b, 2026-09-04) -- see below.
 #include "../../src/engine-ipc.h"
-
-#include "zoom_sdk.h"
-#include "meeting_service_interface.h"
-#include "meeting_service_components/meeting_talkback_ctrl_interface.h"
-// meeting_service_interface.h only forward-declares IMeetingParticipantsController;
-// resolve_participant() needs the full definition (GetParticipantsList,
-// GetUserByUserID) and IUserInfo (GetUserName). meeting_participants_ctrl_interface.h
-// uses AudioType without including its home header, so meeting_audio_interface.h
-// must come first -- same order main.cpp already uses for this same pair.
-#include "meeting_service_components/meeting_audio_interface.h"
-#include "meeting_service_components/meeting_participants_ctrl_interface.h"
 
 // talkback_pcm_rate_supported() -- F7 review-round fix uses this to validate
 // the ring header's sample_rate engine-side, the same gate the plugin
@@ -52,6 +43,15 @@
 // one normalised value, TalkbackResult::TooFrequent). No SDK dependency
 // itself -- same reason talkback-plan.h has none.
 #include "../../src/talkback-sdk.h"
+// TalkbackHost -- Task 2b (2026-09-05): the SECOND seam this file crosses.
+// TalkbackSdk (above) normalised the channel-management OPERATIONS
+// (create/invite/destroy/send/volume); this one normalises the remaining
+// coupling the macOS port brief measured as four concerns -- the
+// ZOOMSDK::IMeetingService* parameter/member, the roster walk
+// (resolve_participant()/current_roster()), and the mic control
+// (ensure_mic_open()/restore_mic_state()). No SDK dependency itself, same
+// reason talkback-sdk.h has none.
+#include "../../src/talkback-host.h"
 
 #include <atomic>
 #include <chrono>
@@ -60,35 +60,50 @@
 #include <string>
 #include <vector>
 
-class EngineTalkback : public ZOOMSDK::IMeetingTalkbackCtrlEvent {
+class EngineTalkback : public TalkbackSdkEvents {
 public:
     // TalkbackSdk seam (Task 1, 2026-09-04): injects the adapter every
     // controller OPERATION below (create/invite/destroy/send/volume/
     // is_supported) is issued through. Callers own the adapter's lifetime and
-    // decide WHEN to (re)inject -- this class deliberately never calls
-    // m_svc->GetMeetingTalkbackController() to refresh it internally any
-    // more (Steps 1-6 of this task's brief). Two reasons, not one:
+    // decide WHEN to (re)inject -- this class deliberately never derives the
+    // Zoom talkback controller and rewraps it internally any more (Steps 1-6
+    // of Task 1's brief). Two reasons, not one:
     //   (1) a test must be able to inject a FakeTalkbackSdk and have it
-    //       actually reached; an internal re-derivation from m_svc would
-    //       silently overwrite it with whatever the test's fake meeting
-    //       service's own GetMeetingTalkbackController() returns (nothing, in
-    //       every existing fake), making the seam untestable.
+    //       actually reached; an internal re-derivation from the underlying
+    //       meeting service would silently overwrite it with whatever the
+    //       test's fake meeting service's own controller getter returns
+    //       (nothing, in every existing fake), making the seam untestable.
     //   (2) resolve_roster_change()'s fix-round-1 (M3) guard specifically
-    //       AVOIDS refreshing m_svc/the controller while a live key press or a
-    //       busy nomination holds them, because a transient null picked up
-    //       there used to persist for the rest of a live press. Removing the
+    //       AVOIDS refreshing the adapter while a live key press or a busy
+    //       nomination holds them, because a transient null picked up there
+    //       used to persist for the rest of a live press. Removing the
     //       internal refresh everywhere is a strictly SAFER generalisation of
     //       that fix, not a narrower one: resolve_roster_change() now simply
     //       never re-derives the adapter, in EITHER of its branches, so the
     //       failure mode M3 closed cannot exist here at all. See
     //       tasks-1-report.md for the full reasoning.
     // On Windows, engine/src/main.cpp constructs a TalkbackWinSdk wrapping
-    // svc->GetMeetingTalkbackController() and calls this before probe(),
-    // nominate() and session_start() -- mirroring exactly where this class
-    // used to refresh m_svc/the controller itself. It deliberately does NOT
+    // the current meeting's talkback controller and calls this before
+    // probe(), nominate() and session_start() -- mirroring exactly where this
+    // class used to refresh the controller itself. It deliberately does NOT
     // call this before resolve_roster_change(): that function reuses whatever
     // was last injected, which is what makes point (2) above true.
     void set_sdk(TalkbackSdk *sdk) { m_sdk = sdk; }
+
+    // Task 2b (2026-09-05): the TalkbackHost seam's counterpart to set_sdk()
+    // above, same discipline. Callers own the adapter's lifetime and decide
+    // WHEN to (re)inject; this class never re-derives it internally. On
+    // Windows, main.cpp constructs a TalkbackWinHost wrapping the current
+    // ZOOMSDK::IMeetingService* and calls this immediately before
+    // probe()/nominate()/session_start(), mirroring inject_talkback_sdk()'s
+    // own null-check and safe_to_inject gating exactly -- see that lambda's
+    // comment. Injecting nullptr when there is genuinely no meeting service
+    // is load-bearing, not incidental: probe()/nominate()/session_start()'s
+    // own `if (!m_host) ... "no_meeting_service"`/`"not_in_meeting"` refusals
+    // must stay reachable, which they would not if a wrapper object were
+    // always handed in even while wrapping a null controller underneath (the
+    // exact fail-open shape Task 1's review caught for m_sdk).
+    void set_host(TalkbackHost *host) { m_host = host; }
 
     // Starts the probe ladder. Reports and returns without blocking; the
     // asynchronous rungs continue through the callbacks below and tick().
@@ -121,7 +136,7 @@ public:
     // lives. Refusals that create nothing therefore drain any queued stray
     // synchronously before returning false, so "no thread" never means
     // "nobody drains" -- see probe_refused_without_ladder().
-    bool probe(ZOOMSDK::IMeetingService *svc, const std::string &participant_name);
+    bool probe(TalkbackHost *host, const std::string &participant_name);
 
     // Called from the engine's main loop. Sends tone buffers while a send is
     // in progress, then destroys the channel.
@@ -171,7 +186,7 @@ public:
     // not a state that stays true; it has to be re-asserted.
     //
     // Rides main.cpp's command-loop idle pump beside nomination_tick(), NOT a
-    // thread of its own: everything this touches (m_svc, the participants and
+    // thread of its own: everything this touches (m_host, the participants and
     // audio controllers, m_session_live) is command-loop state, and this file
     // already has one hard-won exception to that rule (the probe's tick()
     // thread) which is not worth a second. Cheap on every turn: with no live
@@ -189,7 +204,7 @@ public:
     // Deliberately NOT part of the probe's Phase machine: that machine exists
     // to tear itself down after one tone, which is the opposite of what a key
     // held down needs. The session never touches the PROBE's channel
-    // (m_channel_id_z), which tick() destroys from a separate thread, so that
+    // (m_channel_id), which tick() destroys from a separate thread, so that
     // race stays structurally impossible rather than lock-avoided.
     //
     // TASK 3 (2026-08-25) IS THE POINT OF THIS MILESTONE: session_start()
@@ -214,7 +229,7 @@ public:
     // too. Destruction belongs to nominate()'s replace path, nomination_reset()
     // (Leave/quit) and the failure paths in the create ladder -- never to a key
     // release. Idempotent: Leave and quit both call it unconditionally.
-    bool session_start(ZOOMSDK::IMeetingService *svc, const std::string &target);
+    bool session_start(TalkbackHost *host, const std::string &target);
     void session_stop();
     bool session_live() const;
 
@@ -359,7 +374,7 @@ public:
     // not identify this attempt" (a raw-pipe caller, or an older plugin) and
     // suppresses the field entirely, so those reports look exactly like a
     // pre-C1 engine's and the plugin's tolerant path handles them.
-    bool nominate(ZOOMSDK::IMeetingService *svc,
+    bool nominate(TalkbackHost *host,
                   const std::vector<std::string> &nominees,
                   uint32_t attempt = 0);
 
@@ -452,7 +467,7 @@ public:
     // see that member's header comment for the two triggering sequences this
     // closes and why one alone is not enough.
     //
-    // FIX ROUND 1, M3 (Major): m_svc used to be reassigned ONLY when no
+    // FIX ROUND 1, M3 (Major): m_host used to be reassigned ONLY when no
     // session is live -- probe() and nominate() both refuse outright while
     // m_session_live specifically because they touch it; this function
     // cannot refuse outright (a rejoin mid-press must still be invited), so
@@ -462,14 +477,14 @@ public:
     // window) and that null then persisted for the rest of a live press.
     //
     // TASK 1 (2026-09-04) GENERALISED THIS rather than narrowly porting it:
-    // this function no longer re-derives the SDK adapter (m_sdk) from m_svc
+    // this function no longer re-derives the SDK adapter (m_sdk) from m_host
     // AT ALL, in either branch -- see set_sdk()'s own comment for why. That
     // makes the M3 failure mode structurally impossible here instead of
     // conditionally avoided, at the cost of never picking up a legitimately
     // fresher adapter via a roster event either; membership_pump_invite()
     // (the only later reader of m_sdk this function's work feeds) simply
     // keeps using whatever probe()/nominate()/session_start() last injected,
-    // which main.cpp keeps alive for the life of the meeting. m_svc itself
+    // which main.cpp keeps alive for the life of the meeting. m_host itself
     // keeps the ORIGINAL M3 conditional (reassigned only when no session is
     // live and invites are allowed): current_roster()/resolve_participant()
     // still read it, and that half of M3 is unrelated to the adapter.
@@ -486,7 +501,7 @@ public:
     // delay, because nothing is marked resolved when it refuses: the next
     // roster event (there is always another one eventually) gets another
     // chance.
-    void resolve_roster_change(ZOOMSDK::IMeetingService *svc);
+    void resolve_roster_change(TalkbackHost *host);
 
     // True once the ladder is quiescent: Idle before the first probe() ever
     // runs, Done after one finishes (success, failure, or abandoned
@@ -547,16 +562,30 @@ public:
         return !m_stray_channels.empty();
     }
 
-    // IMeetingTalkbackCtrlEvent
-    void onCreateChannelResponse(const zchar_t *channelID, TalkbackError error) override;
-    void onDestroyChannelResponse(const zchar_t *channelID, TalkbackError error) override;
-    void onChannelUserJoinResponse(const zchar_t *channelID, unsigned int userID,
-                                   TalkbackError error) override;
-    void onChannelUserLeaveResponse(const zchar_t *channelID, unsigned int userID,
-                                    TalkbackError error) override;
-    void onJoinTalkbackChannel(unsigned int inviterID) override;
-    void onLeaveTalkbackChannel(unsigned int inviterID) override;
-    void onInviterAudioLevel(unsigned int inviterID, unsigned int audioLevel) override;
+    // TalkbackSdkEvents (Task 2b, 2026-09-05): this class used to implement
+    // ZOOMSDK::IMeetingTalkbackCtrlEvent directly (7 methods, including three
+    // receive-side stubs -- onJoinTalkbackChannel/onLeaveTalkbackChannel/
+    // onInviterAudioLevel -- that were always empty bodies, since this engine
+    // is the DIRECTOR, never talent; deleted along with the base class, not
+    // carried forward as dead overrides). The four that matter are now
+    // TalkbackSdkEvents' own shape: a UTF-8 channel id (never a raw SDK
+    // wchar_t/char id) and a TalkbackResult (never a raw TalkbackError) cross
+    // this boundary, same as every operation already crossing TalkbackSdk.
+    // The platform adapter (TalkbackWinSdk::register_event() on Windows) owns
+    // translating the real SDK callback into this shape and is where the raw
+    // TalkbackError value is preserved as `raw_code`, for the report lines
+    // that must keep carrying it verbatim (src/talkback-sdk.h's last_raw_code()
+    // convention; CLAUDE.md documents operators reading these exact numbers).
+    void on_create_channel_response(const std::string &channel_id,
+                                    TalkbackResult result, int raw_code) override;
+    void on_destroy_channel_response(const std::string &channel_id,
+                                     TalkbackResult result, int raw_code) override;
+    void on_channel_user_join_response(const std::string &channel_id,
+                                       uint32_t user_id,
+                                       TalkbackResult result, int raw_code) override;
+    void on_channel_user_leave_response(const std::string &channel_id,
+                                        uint32_t user_id,
+                                        TalkbackResult result, int raw_code) override;
 
 private:
     enum class Phase { Idle, AwaitingChannel, AwaitingInvite, Sending, Destroying, Done };
@@ -654,7 +683,7 @@ private:
     // no participants list -- callers treat that the same as "nobody is
     // present" rather than an error, same null-safety resolve_participant()
     // already has. const for the same reason resolve_participant() is: both
-    // only read m_svc, and command-loop-thread-only convention (not a lock)
+    // only read m_host, and command-loop-thread-only convention (not a lock)
     // is what makes that safe -- see m_pending_create's header comment for
     // why that convention is stated once there rather than re-argued here.
     //
@@ -701,12 +730,13 @@ private:
     // every later key press for that target selecting fewer channels and
     // nothing left to re-provision them.
     //
-    // Null-safe: a null id matches nothing (basic_string comparison against a
-    // null zchar_t* is char_traits::length(nullptr), an access violation, so
-    // the guard is here rather than at each caller).
-    bool channel_is_provisioned_locked(const zchar_t *channelID) const;
+    // Empty-safe: an empty id matches nothing (Task 2b -- was "null-safe"
+    // against a raw zchar_t*, char_traits::length(nullptr) being an access
+    // violation; the callback now delivers a std::string, whose empty state
+    // is the direct analogue of that old null and is guarded the same way).
+    bool channel_is_provisioned_locked(const std::string &channel_id) const;
 
-    // Adopt `channelID` as the PROBE's channel, unless it is already
+    // Adopt `channel_id` as the PROBE's channel, unless it is already
     // provisioned. Returns false when it is, meaning this response belongs to
     // somebody else's create and the ladder must keep waiting for its own.
     //
@@ -714,8 +744,8 @@ private:
     // scope, so a future adoption path cannot be added that skips the check --
     // the same reasoning that moved the arbiter's claim-and-stamp into a
     // single transition last task. If you add another adopter, call this;
-    // never assign m_channel_id_z directly.
-    bool adopt_probe_channel(const zchar_t *channelID, const std::string &id_utf8);
+    // never assign m_channel_id directly.
+    bool adopt_probe_channel(const std::string &channel_id);
 
     // The single exit every probe() refusal that created nothing routes
     // through: settles the phase, drains any queued stray on this thread
@@ -881,8 +911,7 @@ private:
     // before this change an invite became "pending" the instant it was issued,
     // and now there is a window where it is queued but not yet issued, which
     // that check alone cannot see.
-    void enqueue_invite(const std::basic_string<zchar_t> &channel_id_z,
-                        const std::string &channel_id_utf8,
+    void enqueue_invite(const std::string &channel_id,
                         const std::string &name);
 
     // ── LAW 1: this client's own meeting audio (2026-08-29) ─────────────────
@@ -1034,7 +1063,7 @@ private:
                                             uint32_t *attempts);
 
     // Resolves `name` to a live user id and, if found, invites it into the
-    // already-created channel `channel_id_z`. Deliberately independent of
+    // already-created channel `channel_id`. Deliberately independent of
     // the create-queue machinery above -- it takes a channel id and a name,
     // nothing about m_nomination_pending or the arbiter -- so a future
     // roster-driven re-invite (Task 4, ruled to run on the SDK callback
@@ -1059,24 +1088,29 @@ private:
     // yet" -- and the pre-Law-2 code reported it as a plain `"stage":"invite"`
     // failure and then relied on some later roster event to try again, which
     // for a name already marked present or failed would never come.
-    bool invite_nominee(const std::basic_string<zchar_t> &channel_id_z,
-                        const std::string &channel_id_utf8,
+    bool invite_nominee(const std::string &channel_id,
                         const std::string &name, uint32_t retries);
 
-    ZOOMSDK::IMeetingService          *m_svc  = nullptr;
+    // Task 2b (2026-09-05): TalkbackHost seam -- see set_host()'s own comment
+    // and src/talkback-host.h. Replaces what was ZOOMSDK::IMeetingService*
+    // (m_svc) throughout this file: the roster walk
+    // (resolve_participant()/current_roster()) and the mic control
+    // (ensure_mic_open()/restore_mic_state()) now read this instead of
+    // calling GetMeetingParticipantsController()/GetMeetingAudioController()
+    // on a raw Zoom type directly.
+    TalkbackHost *m_host = nullptr;
     // TalkbackSdk seam (Task 1, 2026-09-04): every SDK OPERATION this file
     // needs (create/invite/destroy/send/volume/is_supported) now crosses
     // through this normalised interface (src/talkback-sdk.h) instead of a raw
     // ZOOMSDK::IMeetingTalkbackController*, so the ladder's own logic never
     // sees a Zoom type or a raw SDKError. Set via set_sdk(), which this file
     // itself never calls: production (engine/src/main.cpp) constructs a
-    // TalkbackWinSdk wrapping whatever m_svc->GetMeetingTalkbackController()
-    // returns and injects it before probe()/nominate()/session_start(); a
-    // test injects a FakeTalkbackSdk the same way. This deliberately REMOVES
-    // the internal `m_sdk = m_svc->GetMeetingTalkbackController()` refresh
-    // every entry point used to do for itself -- see set_sdk()'s own comment
-    // for why re-deriving it here would silently discard whatever a caller
-    // (test or production) just injected.
+    // TalkbackWinSdk wrapping the current meeting's talkback controller and
+    // injects it before probe()/nominate()/session_start(); a test injects a
+    // FakeTalkbackSdk the same way. This deliberately REMOVES the internal
+    // re-derivation every entry point used to do for itself -- see
+    // set_sdk()'s own comment for why re-deriving it here would silently
+    // discard whatever a caller (test or production) just injected.
     TalkbackSdk *m_sdk = nullptr;
 
     // m_phase is written from SDK callback threads (onCreateChannelResponse,
@@ -1090,12 +1124,12 @@ private:
     // fields it is unsafe to reason about from phase ordering alone.
     std::atomic<Phase> m_phase{Phase::Idle};
 
-    // m_channel_id / m_channel_id_z / m_stray_channels are NOT safe under
+    // m_channel_id / m_channel_id / m_stray_channels are NOT safe under
     // acquire/release on m_phase alone and must go through m_chan_mtx for
     // EVERY access from here down, cross-thread or not -- no exceptions, so
     // nobody has to re-derive which phases are "safe".
     //
-    // The tempting argument -- "m_channel_id_z is fully written in
+    // The tempting argument -- "m_channel_id is fully written in
     // onCreateChannelResponse before m_phase is released to AwaitingInvite,
     // so an acquire-load of m_phase >= AwaitingInvite is a synchronizes-with
     // edge" -- is real but incomplete: it only covers phases AT OR ABOVE
@@ -1110,7 +1144,7 @@ private:
     // not merely a stale value. This is on the expected path (it is exactly
     // the late-callback scenario the timeout machinery exists to handle),
     // found live in review round 3 after round 2's stray-channel fix added
-    // the first cross-thread read of m_channel_id_z that could land in the
+    // the first cross-thread read of m_channel_id that could land in the
     // Idle/Done window.
     //
     // Discipline: copy the needed value out under the lock, release, THEN
@@ -1122,14 +1156,17 @@ private:
     // outside, so it is declared const like is_idle(), which requires the
     // mutex itself be lockable from a const method.
     mutable std::mutex m_chan_mtx;
-    std::string  m_channel_id;      // UTF-8, REPORTING ONLY -- never pass to
-                                     // the SDK, see m_channel_id_z below.
-    // zchar_t is wchar_t on Windows (zoom_sdk_def.h) but char elsewhere, so
-    // basic_string<zchar_t> is the only type that is simultaneously correct
-    // on both platforms and round-trip-safe for an opaque SDK identifier
-    // (no UTF-8 re-encoding). Every SDK call that takes a channel ID copies
-    // this out under m_chan_mtx first; never call .c_str() on it directly.
-    std::basic_string<zchar_t> m_channel_id_z;
+    // Task 2b (2026-09-05): ONE representation, not two. Before this task the
+    // SDK-facing id lived in a SEPARATE sibling field, typed zchar_t (wchar_t
+    // on Windows, char elsewhere) to round-trip an opaque SDK identifier with
+    // no UTF-8 re-encoding, back when this file received raw
+    // ZOOMSDK::IMeetingTalkbackCtrlEvent callbacks natively, while this field
+    // carried the same value in UTF-8 for reporting only. TalkbackSdk's
+    // operations (Task 1) and TalkbackSdkEvents' callbacks (this task) both
+    // already take/deliver UTF-8 exclusively, so the two representations held
+    // identical bytes from the moment this task landed -- keeping both was
+    // duplication with no round-trip left to justify it.
+    std::string  m_channel_id;
 
     // BeginBatchDestroyChannels/AddChannelToDestroy/ExecuteBatchDestroyChannels
     // has exactly one caller: tick(), on whichever thread owns the engine
@@ -1137,7 +1174,7 @@ private:
     // that discover a channel needing cleanup push its id here (under
     // m_chan_mtx) instead of calling the SDK; drain_stray_channels(), called
     // only from tick(), is the sole drainer.
-    std::vector<std::basic_string<zchar_t>> m_stray_channels;
+    std::vector<std::string> m_stray_channels;
 
     // R1-round-3 review fix: true for exactly the window in which
     // drain_stray_channels() (driving thread) is between its m_chan_mtx-
@@ -1211,7 +1248,7 @@ private:
     // F8 review-round fix: counts audio_send report emissions in
     // drain_audio() so it can report the first occurrence and then only
     // periodically, never once per drain. Without this, a stale
-    // m_channel_id_z (fixed elsewhere in this round -- see the destroy
+    // m_channel_id (fixed elsewhere in this round -- see the destroy
     // paths in tick()) made every buffer fail and every drain_audio() call
     // report it: ~50-100 pipe lines/sec, the message-storm shape this
     // codebase already has a live incident about. Reset whenever a fresh
@@ -1341,7 +1378,7 @@ private:
     // so a destroyed channel can never still be selected -- drain_audio()
     // then counts no_channel_drops loudly instead of sending into a channel
     // Zoom no longer has.
-    std::vector<std::basic_string<zchar_t>> m_session_channels;
+    std::vector<std::string> m_session_channels;
     std::string                m_session_target;  // UTF-8, reporting only
     bool                       m_session_live = false;
 
@@ -1493,7 +1530,7 @@ private:
     // the whole table before destroying each channel), and nomination_reset()
     // (clears on Leave/quit, bookkeeping only). Nomination never spawns a
     // driving thread the way the probe does, so nothing here has
-    // m_channel_id_z's cross-thread Idle/Done hazard. It is guarded anyway
+    // m_channel_id's cross-thread Idle/Done hazard. It is guarded anyway
     // per this task's own instruction ("guard it with m_chan_mtx like every
     // other channel-id state") so a future reader that is NOT the command
     // loop -- a talkback_status query, say -- does not have to re-derive
@@ -1523,8 +1560,7 @@ private:
     };
 
     struct TalkbackProvisionedChannel {
-        std::basic_string<zchar_t> channel_id_z;
-        std::string channel_id;              // UTF-8, reporting only
+        std::string channel_id;
         std::vector<std::string> members;    // by NAME, see above
         bool is_all_talent = false;
         // Task 4: the subset of `members` this file currently believes are
@@ -1616,7 +1652,7 @@ private:
     // ever tells us the id left" (e.g. the meeting itself is winding down),
     // the roster check is the fast path for the common case.
     struct TalkbackPendingInvite {
-        std::basic_string<zchar_t> channel_id_z;
+        std::string channel_id;
         unsigned int user_id = 0;
         std::string name;   // for reporting only -- never compared against
                              // the SDK, same rule as every name in this file
@@ -1690,8 +1726,7 @@ private:
     // Zoom no longer has" is not a state that exists rather than one argued to
     // be unreachable.
     struct TalkbackQueuedInvite {
-        std::basic_string<zchar_t> channel_id_z;
-        std::string channel_id;   // UTF-8, reporting only
+        std::string channel_id;
         std::string name;         // resolved to a live id at ISSUE time, never here
         // Not-before for THIS entry, distinct from the pacer's own floor: it
         // is how a code-18 refusal backs itself off (kInviteRateLimitBackoff
@@ -1707,7 +1742,7 @@ private:
     // membership call per 600ms, a 13-channel plan's FIFO order decides
     // whether the last talent's own private channel is confirmed at second 2
     // or at second 20 -- and it is the private channels the director keys.
-    std::basic_string<zchar_t> m_last_invite_channel;
+    std::string m_last_invite_channel;
 
     // ── LAW 1 (2026-08-29): this client's own meeting audio ─────────────────
     // Command-loop thread only, like the audio path itself -- session_start(),

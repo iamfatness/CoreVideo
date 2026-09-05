@@ -2,7 +2,13 @@
 #include "engine-writer.h"   // EngineIpc::write -- an inline fn in a namespace,
                              // so it must be INCLUDED, never forward-declared
 #include "talkback-tone.h"
-#include "engine-json.h"     // zchar_to_utf8 / json_escape / json_str (Step 3a)
+#include "engine-json.h"     // json_escape / json_str (Step 3a). zchar_to_utf8()
+                             // is no longer called from this file (Task 2b,
+                             // 2026-09-05): the channel ids and the events this
+                             // file consumes are UTF-8 std::string end to end
+                             // now (TalkbackSdk's operations, TalkbackSdkEvents'
+                             // callbacks), so there is nothing left to
+                             // re-encode. Left included for json_escape/json_str.
 #include "talkback-ring.h"   // talkback_ring_drain / TalkbackRingSlotFn (Milestone 2)
 
 #include <algorithm>          // std::find / std::remove (Task 4 roster diffing)
@@ -271,12 +277,12 @@ bool EngineTalkback::probe_refused_without_ladder()
     return false;
 }
 
-bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
+bool EngineTalkback::probe(TalkbackHost *host,
                            const std::string &participant_name)
 {
     // Re-entrancy guard: Task 5 wires this to a control-API command a human
     // can send twice. A second call while a channel is live would otherwise
-    // unconditionally reset m_channel_id_z out from under the live ladder,
+    // unconditionally reset m_channel_id out from under the live ladder,
     // discarding the only handle we have to destroy it -- refusing is
     // correct for a probe; there is nothing sensible to queue or cancel.
     // Returning false here (rather than starting a ladder) is also the
@@ -297,7 +303,7 @@ bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
 
     // R1 review-round fix (mutual exclusion): the probe and the persistent
     // session must never run concurrently. Before this, session_start()
-    // reassigned m_svc/m_sdk -- the exact same fields tick() dereferences on
+    // reassigned m_host/m_sdk -- the exact same fields tick() dereferences on
     // its OWN driving thread while a probe is in flight -- with no gate at
     // all: a genuine cross-thread pointer race (Critical 2). The
     // batch-destroy half of the original reasoning (tick()'s destroy for the
@@ -322,7 +328,7 @@ bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
         return false;
     }
 
-    m_svc = svc;
+    m_host = host;
     m_participant_name = participant_name;
     m_phase.store(Phase::Idle, std::memory_order_release);
     {
@@ -331,14 +337,13 @@ bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
         // comment in the header.
         std::lock_guard<std::mutex> lock(m_chan_mtx);
         m_channel_id.clear();
-        m_channel_id_z.clear();
     }
     m_participant_id = 0;
     m_tone_index = 0;
     m_buffers_sent = 0;
     m_destroy_attempts = 0;
 
-    if (!m_svc) {
+    if (!m_host) {
         report("controller", R"("ok":false,"reason":"no_meeting_service")");
         // The one created-nothing exit that deliberately does NOT drain:
         // m_sdk is only checked at RUNG 1 below, which this exit precedes,
@@ -501,15 +506,14 @@ void EngineTalkback::drain_stray_channels()
         ~ClearOnExit() { flag.store(false, std::memory_order_release); }
     } clear_on_exit{m_driving_thread_in_sdk_call};
 
-    std::vector<std::basic_string<zchar_t>> strays;
+    std::vector<std::string> strays;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
         if (m_stray_channels.empty()) return;
         strays.swap(m_stray_channels);
     }
 
-    for (const auto &id : strays) {
-        const std::string id_utf8 = zchar_to_utf8(id.c_str());
+    for (const auto &id_utf8 : strays) {
         // Bounded, local retry -- deliberately not tied to m_destroy_attempts
         // (that counter is reserved for the main channel) and deliberately
         // not spread across future tick() calls, so one stray can never
@@ -537,20 +541,19 @@ void EngineTalkback::drain_stray_channels()
     }
 }
 
-bool EngineTalkback::channel_is_provisioned_locked(const zchar_t *channelID) const
+bool EngineTalkback::channel_is_provisioned_locked(const std::string &channel_id) const
 {
-    // Caller holds m_chan_mtx -- see the header. Null-safe by construction:
-    // comparing a basic_string against a null zchar_t* would be
-    // char_traits::length(nullptr), and a null id is reachable here on any
-    // error code (the callback's own null guard says so).
-    if (!channelID) return false;
+    // Caller holds m_chan_mtx -- see the header. Empty-safe by construction
+    // (Task 2b: was null-safe against a raw zchar_t*; the callback now
+    // delivers a std::string, and an empty one is reachable here on any
+    // error result exactly as a null id used to be).
+    if (channel_id.empty()) return false;
     for (const auto &pc : m_provisioned_channels)
-        if (pc.channel_id_z == channelID) return true;
+        if (pc.channel_id == channel_id) return true;
     return false;
 }
 
-bool EngineTalkback::adopt_probe_channel(const zchar_t *channelID,
-                                         const std::string &id_utf8)
+bool EngineTalkback::adopt_probe_channel(const std::string &channel_id)
 {
     // Fix round 1, M1. ONE lock scope containing both the check and the
     // assignment, so "is this already somebody's live channel" cannot be
@@ -558,9 +561,8 @@ bool EngineTalkback::adopt_probe_channel(const zchar_t *channelID,
     // what Task 3 shipped: the provisioned-table check guarded the stray
     // queue and not the probe's adoption.
     std::lock_guard<std::mutex> lock(m_chan_mtx);
-    if (channel_is_provisioned_locked(channelID)) return false;
-    m_channel_id = id_utf8;             // UTF-8, reporting only
-    m_channel_id_z.assign(channelID);   // SDK identifier, verbatim -- see header
+    if (channel_is_provisioned_locked(channel_id)) return false;
+    m_channel_id = channel_id;
     return true;
 }
 
@@ -893,7 +895,7 @@ void EngineTalkback::tick()
                R"(,"attempt":)" + std::to_string(m_destroy_attempts + 1));
 
         if (e == TalkbackResult::Ok) {
-            // F8 review-round fix: m_channel_id_z used to be cleared only at
+            // F8 review-round fix: m_channel_id used to be cleared only at
             // the start of the NEXT probe(), never here -- so the probe's
             // throwaway channel id outlived the channel itself. If the audio
             // path (open_audio/drain_audio) is live at the same time, every
@@ -901,12 +903,10 @@ void EngineTalkback::tick()
             // fails every buffer, and (before the drain_audio rate-limit
             // fixed elsewhere in this round) reported it on every drain --
             // the same message-storm shape this codebase already has a live
-            // incident about. Clear both representations together, under the
-            // same lock discipline as every other m_channel_id_z access.
+            // incident about.
             {
                 std::lock_guard<std::mutex> lock(m_chan_mtx);
                 m_channel_id.clear();
-                m_channel_id_z.clear();
             }
             m_phase.store(Phase::Done, std::memory_order_release);
             return;
@@ -927,7 +927,6 @@ void EngineTalkback::tick()
             {
                 std::lock_guard<std::mutex> lock(m_chan_mtx);
                 m_channel_id.clear();
-                m_channel_id_z.clear();
             }
             m_phase.store(Phase::Done, std::memory_order_release);
         }
@@ -937,16 +936,14 @@ void EngineTalkback::tick()
 unsigned int EngineTalkback::resolve_participant(const std::string &name,
                                                  ReportSink sink) const
 {
-    if (!m_svc) return 0;
-    auto *part = m_svc->GetMeetingParticipantsController();
-    if (!part) return 0;
-    ZOOMSDK::IList<unsigned int> *ids = part->GetParticipantsList();
-    if (!ids) return 0;
-    for (int i = 0; i < ids->GetCount(); ++i) {
-        const unsigned int uid = ids->GetItem(i);
-        ZOOMSDK::IUserInfo *u = part->GetUserByUserID(uid);
-        if (!u) continue;
-        if (zchar_to_utf8(u->GetUserName()) == name) {
+    // Task 2b: the roster walk (GetMeetingParticipantsController() ->
+    // GetParticipantsList() -> GetUserByUserID()) moved into TalkbackWinHost;
+    // this now just asks the host for the roster it already resolved. Empty
+    // is a legitimate answer (m_host null, or a host with nothing to report),
+    // same null-safety this function always had.
+    if (!m_host) return 0;
+    for (const auto &p : m_host->roster()) {
+        if (p.display_name == name) {
             // F2 review-round fix: IsSupportTalkback() is a PER-USER gate,
             // distinct from IsMeetingSupportTalkBack() (the meeting-level
             // gate reported at RUNG 2 in probe()) -- a meeting can support
@@ -959,11 +956,10 @@ unsigned int EngineTalkback::resolve_participant(const std::string &name,
             // the log -- reporting supported=false and still attempting
             // the send is what makes the contrast between this value and
             // what the human actually hears into data.
-            const bool supported = u->IsSupportTalkback();
             const std::string fields =
                 R"("name":")" + json_escape(name) + R"(","user_id":)" +
-                std::to_string(uid) + R"(,"supported":)" +
-                (supported ? "true" : "false");
+                std::to_string(p.user_id) + R"(,"supported":)" +
+                (p.supports_talkback ? "true" : "false");
             // Fix round 1, M3: this line used to always go through report()
             // ("cmd":"talkback_probe"), which meant a nomination's per-user
             // gate -- the exact one Step 3 of the brief and invariant 5
@@ -977,15 +973,25 @@ unsigned int EngineTalkback::resolve_participant(const std::string &name,
                 report_nomination("participant_talkback_support", fields);
             else
                 report("participant_talkback_support", fields);
-            return uid;
+            return p.user_id;
         }
     }
     return 0;
 }
 
-void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackError error)
+void EngineTalkback::on_create_channel_response(const std::string &channel_id,
+                                                TalkbackResult result, int raw_code)
 {
-    const std::string id = zchar_to_utf8(channelID);
+    // Task 2b: `id` kept as an alias so the body below -- unchanged in logic
+    // from before this task -- reads the same way it always did. The
+    // adapter (TalkbackWinSdk::register_event() on Windows) has already
+    // converted the real SDK callback's wchar_t*/char* channel id and its
+    // native TalkbackError into this seam's UTF-8 string and TalkbackResult;
+    // `raw_code` is the one thing that conversion cannot recover once lost,
+    // so it is threaded through separately for the report lines that must
+    // keep carrying a raw SDK number (src/talkback-sdk.h's last_raw_code()
+    // convention).
+    const std::string &id = channel_id;
 
     // Route by who asked. See src/talkback-channel-owner.h: the response
     // carries no indication of its requester, so the arbiter is the only
@@ -1036,7 +1042,7 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
     // (it is a log-only trace line; see attempt_field()'s inventory).
     const std::string response_fields =
         R"("channel":")" + json_escape(id) + R"(","error":)" +
-        std::to_string(static_cast<int>(error));
+        std::to_string(raw_code);
     if (owner == TalkbackChannelOwner::Nomination)
         report_nomination("create_channel_response", response_fields);
     else
@@ -1156,7 +1162,7 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
             // response fall out down channel_untracked. Only a positively
             // superseded generation lands here: destroy exactly what the
             // response names, advance nothing.
-            if (error == TALKBACK_ERROR_OK && channelID != nullptr) {
+            if (result == TalkbackResult::Ok && !channel_id.empty()) {
                 uint32_t attempts = 0;
                 const TalkbackResult e = destroy_channel_retrying(id, &attempts);
                 // Fix round 1 (Finding 3): raw platform code, not
@@ -1173,7 +1179,7 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
             } else {
                 report_nomination("channel_stale",
                                   R"("ok":true,"reason":"no_channel_to_destroy","error":)" +
-                                  std::to_string(static_cast<int>(error)));
+                                  std::to_string(raw_code));
             }
             // Fix round 3 (N6, Major): nomination_abort_ladder() replaces the
             // bare queue-clear this branch used to do on its own -- the
@@ -1228,10 +1234,10 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
                 std::lock_guard<std::mutex> lock(m_chan_mtx);
                 m_nomination_pending.clear();
             }
-            if (error != TALKBACK_ERROR_OK || channelID == nullptr) {
+            if (result != TalkbackResult::Ok || channel_id.empty()) {
                 report_nomination("channel_cancelled",
                                   R"("ok":true,"reason":"no_channel_to_destroy","error":)" +
-                                  std::to_string(static_cast<int>(error)));
+                                  std::to_string(raw_code));
                 return;
             }
             uint32_t attempts = 0;
@@ -1248,7 +1254,7 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
             return;
         }
 
-        if (error != TALKBACK_ERROR_OK || channelID == nullptr) {
+        if (result != TalkbackResult::Ok || channel_id.empty()) {
             // Fix round 3 (N6, Major): this is the LIKELIER real-world abort
             // of the two N1 originally fixed -- CreateChannel()'s synchronous
             // return mostly validates arguments; a genuine Zoom-side failure
@@ -1260,8 +1266,7 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
             // k failing must not strand 1..k-1 forever" destroy (fix round 1,
             // M2) that used to be hand-written here, AND tells the plugin the
             // attempt is over -- which the hand-written version never did.
-            report_nomination("channel_failed",
-                              R"("error":)" + std::to_string(static_cast<int>(error)));
+            report_nomination("channel_failed", R"("error":)" + std::to_string(raw_code));
             nomination_abort_ladder("channel_failed");
             return;
         }
@@ -1281,8 +1286,7 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
                 // the front", and this is the only place the front advances.
                 m_nomination_create_retries = 0;
                 TalkbackProvisionedChannel pc;
-                pc.channel_id_z.assign(channelID);
-                pc.channel_id = id;
+                pc.channel_id = channel_id;
                 pc.members = planned.members;
                 pc.is_all_talent = planned.is_all_talent;
                 m_provisioned_channels.push_back(std::move(pc));
@@ -1328,8 +1332,6 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
                           R"("channel":")" + json_escape(id) + R"(","is_all_talent":)" +
                           (planned.is_all_talent ? "true" : "false") + R"(,"members":)" +
                           std::to_string(planned.members.size()));
-
-        const std::basic_string<zchar_t> channel_copy(channelID);
 
         // LIVE PRODUCTION, 2026-08-29: TALENT WERE DUCKED BY BEING ASSIGNED.
         // Make this channel's background volume explicit before anybody is
@@ -1380,7 +1382,7 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         // and shares that budget with the ladder's own creates, because Zoom's
         // limit does not distinguish the two.
         for (const auto &name : planned.members)
-            enqueue_invite(channel_copy, id, name);
+            enqueue_invite(channel_id, name);
 
         bool more;
         std::size_t provisioned_count = 0;
@@ -1417,19 +1419,17 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
     // was outstanding (a stray/duplicate, handled by id-comparison below --
     // never by m_pending_create, which by definition has no opinion here).
 
-    if (!channelID) {
+    if (channel_id.empty()) {
         // F1 review-round fix: guard before ANY comparison or assignment
-        // touches channelID as a raw pointer -- std::basic_string's
-        // operator== / assign() against a null zchar_t* is
-        // char_traits::length(nullptr), an access violation. zchar_to_utf8
-        // above already null-guards internally (that's the precedent this
-        // follows), but the `m_channel_id_z == channelID` comparison and
-        // the `m_stray_channels.emplace_back(channelID)` construction a few
-        // lines down do not, and a null id is reachable here on any error
-        // code, not only TALKBACK_ERROR_OK. Report it distinctly -- we want
-        // to KNOW the SDK did this -- rather than crash or silently no-op.
+        // touches the channel id -- Task 2b: was a raw zchar_t* comparison/
+        // assign() against a null pointer (char_traits::length(nullptr), an
+        // access violation); the id is now a std::string and an empty one is
+        // reachable here on any error result, not only TalkbackResult::Ok,
+        // for the identical reason a null pointer used to be. Report it
+        // distinctly -- we want to KNOW the SDK did this -- rather than
+        // crash or silently no-op.
         report("create_channel_response_null_channel",
-               R"("error":)" + std::to_string(static_cast<int>(error)));
+               R"("error":)" + std::to_string(raw_code));
         if (m_phase.load(std::memory_order_acquire) == Phase::AwaitingChannel) {
             // This was the rung we were waiting on and it came back with
             // nothing usable -- same disposition as any other
@@ -1462,7 +1462,7 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         // batches. The Nomination branch above is the path where no probe
         // ladder is running -- see the inventory and the recorded residual
         // gap at the top of tick(). So: here, queue and never call.
-        // The comparison against m_channel_id_z below is exactly
+        // The comparison against m_channel_id below is exactly
         // the access that must go through m_chan_mtx -- reachable while
         // phase is Idle/Done, i.e. while a fresh probe() is allowed to be
         // clearing/reassigning that member on another thread right now; see
@@ -1476,7 +1476,7 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         // long after the request that caused it was already resolved -- at
         // which point m_pending_create has moved on to None or to the OTHER
         // subsystem, so the arbiter above no longer has an opinion about it.
-        // Comparing ONLY against m_channel_id_z (as this branch used to)
+        // Comparing ONLY against m_channel_id (as this branch used to)
         // meant a redelivered response for a channel we were talking on
         // landed here, failed that comparison, and got queued as a stray --
         // so tick() destroyed a LIVE channel out from under drain_audio() on
@@ -1491,22 +1491,22 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         // taking out a provisioned channel mid-show, which is strictly worse
         // than the session-channel case R2 was written for, because that
         // channel is meant to survive every key press until the meeting ends.
-        if (error == TALKBACK_ERROR_OK) {
+        if (result == TalkbackResult::Ok) {
             bool is_probe_channel;
             bool is_provisioned_channel;
             {
                 std::lock_guard<std::mutex> lock(m_chan_mtx);
-                is_probe_channel = (m_channel_id_z == channelID);
+                is_probe_channel = (m_channel_id == channel_id);
                 // Fix round 1, M1: the same question the adoption path asks,
                 // through the same helper, so the two answers cannot drift.
                 is_provisioned_channel =
-                    !is_probe_channel && channel_is_provisioned_locked(channelID);
+                    !is_probe_channel && channel_is_provisioned_locked(channel_id);
                 if (!is_probe_channel && !is_provisioned_channel) {
                     // A genuinely different, untracked channel now exists.
                     // Queue it (still under the lock, so the check and the
                     // push are one atomic decision); drain_stray_channels()
                     // (called from tick()) owns actually destroying it.
-                    m_stray_channels.emplace_back(channelID);
+                    m_stray_channels.emplace_back(channel_id);
                 }
             }
             if (is_provisioned_channel) {
@@ -1532,12 +1532,12 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         }
         return;
     }
-    if (error != TALKBACK_ERROR_OK) {
+    if (result != TalkbackResult::Ok) {
         m_phase.store(Phase::Done, std::memory_order_release);
         return;
     }
     // Fix round 1, M1 (Major): ADOPT ONLY WHAT IS NOT ALREADY OURS. This
-    // used to be a bare assignment of m_channel_id/m_channel_id_z, and it is
+    // used to be a bare assignment of m_channel_id, and it is
     // the path a redelivered NOMINATION response takes when a probe holds the
     // arbiter: the response is attributed to Probe, so the Nomination branch
     // above is skipped, and phase IS AwaitingChannel, so the stray path's own
@@ -1554,7 +1554,7 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
     // probe with no channel id to destroy. Fail open, exactly as the arbiter
     // does elsewhere -- a probe that reports nothing costs a diagnostic, a
     // destroyed provisioned channel costs the show.
-    if (!adopt_probe_channel(channelID, id)) {
+    if (!adopt_probe_channel(channel_id)) {
         report("create_channel_response_provisioned_duplicate",
                R"("channel":")" + json_escape(id) + R"(","adopted":false)");
         return;
@@ -1593,20 +1593,26 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
     m_phase.store(Phase::AwaitingInvite, std::memory_order_release);
 }
 
-void EngineTalkback::onDestroyChannelResponse(const zchar_t *channelID, TalkbackError error)
+void EngineTalkback::on_destroy_channel_response(const std::string &channel_id,
+                                                 TalkbackResult /*result*/, int raw_code)
 {
     report("destroyed",
-           R"("channel":")" + json_escape(zchar_to_utf8(channelID)) +
-           R"(","error":)" + std::to_string(static_cast<int>(error)));
+           R"("channel":")" + json_escape(channel_id) +
+           R"(","error":)" + std::to_string(raw_code));
 }
 
-void EngineTalkback::onChannelUserJoinResponse(const zchar_t *channelID,
-                                               unsigned int userID, TalkbackError error)
+void EngineTalkback::on_channel_user_join_response(const std::string &channel_id,
+                                                   uint32_t user_id,
+                                                   TalkbackResult result, int raw_code)
 {
+    // Task 2b: `channelID`/`userID`/`error` kept as local aliases so the body
+    // below -- unchanged in logic -- reads the same way it always did.
+    const std::string &channelID = channel_id;
+    const unsigned int userID = user_id;
     report("invite_response",
-           R"("channel":")" + json_escape(zchar_to_utf8(channelID)) +
+           R"("channel":")" + json_escape(channelID) +
            R"(","user_id":)" + std::to_string(userID) +
-           R"(,"error":)" + std::to_string(static_cast<int>(error)));
+           R"(,"error":)" + std::to_string(raw_code));
 
     // Task 4: nomination-issued invites -- both the initial provisioning
     // loop's (onCreateChannelResponse's Nomination branch, above) and
@@ -1621,16 +1627,16 @@ void EngineTalkback::onChannelUserJoinResponse(const zchar_t *channelID,
     // probe's own AwaitingInvite wait: a probe and a nomination never share
     // a channel id.
     bool nomination_handled = false;
-    if (channelID) {
+    if (!channelID.empty()) {
         std::string resolved_name;
-        std::string channel_id_utf8;
+        std::string matched_channel_id;
         bool matched = false;
         bool confirmed = false;
         {
             std::lock_guard<std::mutex> lock(m_chan_mtx);
             for (auto it = m_nomination_pending_invites.begin();
                  it != m_nomination_pending_invites.end(); ++it) {
-                if (it->channel_id_z != channelID || it->user_id != userID) continue;
+                if (it->channel_id != channelID || it->user_id != userID) continue;
                 resolved_name = it->name;
                 matched = true;
                 m_nomination_pending_invites.erase(it);
@@ -1648,15 +1654,15 @@ void EngineTalkback::onChannelUserJoinResponse(const zchar_t *channelID,
                 // already succeeded. Any OTHER non-OK error is a real gate
                 // (e.g. IsSupportTalkback() == false surfacing as a rejected
                 // invite) and must be reported as a failure, never swallowed.
-                if (error == TALKBACK_ERROR_OK || error == TALKBACK_ERROR_ALREADY_EXIST) {
+                if (result == TalkbackResult::Ok || result == TalkbackResult::AlreadyExists) {
                     confirmed = true;
                     for (auto &pc : m_provisioned_channels) {
-                        if (pc.channel_id_z != channelID) continue;
+                        if (pc.channel_id != channelID) continue;
                         bool already = false;
                         for (const auto &m : pc.present)
                             if (m.name == resolved_name) { already = true; break; }
                         if (!already) pc.present.push_back({resolved_name, userID});
-                        channel_id_utf8 = pc.channel_id;
+                        matched_channel_id = pc.channel_id;
                         break;
                     }
                 } else {
@@ -1673,12 +1679,12 @@ void EngineTalkback::onChannelUserJoinResponse(const zchar_t *channelID,
                     // roster and comes back, the one signal that plausibly
                     // changes the outcome.
                     for (auto &pc : m_provisioned_channels) {
-                        if (pc.channel_id_z != channelID) continue;
+                        if (pc.channel_id != channelID) continue;
                         bool already = false;
                         for (const auto &n : pc.failed)
                             if (n == resolved_name) { already = true; break; }
                         if (!already) pc.failed.push_back(resolved_name);
-                        channel_id_utf8 = pc.channel_id;
+                        matched_channel_id = pc.channel_id;
                         break;
                     }
                 }
@@ -1689,10 +1695,10 @@ void EngineTalkback::onChannelUserJoinResponse(const zchar_t *channelID,
             if (confirmed) {
                 report_nomination("member_invited",
                                   R"("name":")" + json_escape(resolved_name) +
-                                  R"(","channel":")" + json_escape(channel_id_utf8) +
+                                  R"(","channel":")" + json_escape(matched_channel_id) +
                                   R"(","user_id":)" + std::to_string(userID) +
                                   R"(,"already_member":)" +
-                                  (error == TALKBACK_ERROR_ALREADY_EXIST ? "true" : "false"));
+                                  (result == TalkbackResult::AlreadyExists ? "true" : "false"));
             } else {
                 // Gates are surfaced, never swallowed: a rejected nomination
                 // invite (e.g. IsSupportTalkback() == false rendered as
@@ -1702,7 +1708,7 @@ void EngineTalkback::onChannelUserJoinResponse(const zchar_t *channelID,
                 report_nomination("member_invite_failed",
                                   R"("name":")" + json_escape(resolved_name) +
                                   R"(","user_id":)" + std::to_string(userID) +
-                                  R"(,"error":)" + std::to_string(static_cast<int>(error)));
+                                  R"(,"error":)" + std::to_string(raw_code));
             }
         }
     }
@@ -1710,46 +1716,42 @@ void EngineTalkback::onChannelUserJoinResponse(const zchar_t *channelID,
 
     if (m_phase.load(std::memory_order_acquire) != Phase::AwaitingInvite) return;
 
-    if (!channelID) {
+    if (channelID.empty()) {
         // F1 review-round fix: this line is reached for EVERY error code,
         // including TALKBACK_ERROR_NOPERMISSION -- exactly the error this
-        // probe exists to exercise -- and the SDK can hand back a null
-        // channelID on that path. Without this guard, `channel_copy !=
-        // channelID` below is std::basic_string comparing against a null
-        // zchar_t*, i.e. char_traits::length(nullptr): an access violation
-        // that replaces our diagnostic with a crash-recovery event at
-        // exactly the moment we're trying to learn something. Report it
-        // distinctly (we want to KNOW the SDK did that) and destroy the
-        // channel we know we created -- m_channel_id_z is still valid; only
-        // this callback's echo of it is null.
+        // probe exists to exercise -- and the SDK can hand back an empty
+        // channel id on that path (Task 2b: was a null zchar_t*; the empty
+        // string is the direct analogue). Without this guard the comparison
+        // below would compare against a channel id that never arrived.
+        // Report it distinctly (we want to KNOW the SDK did that) and
+        // destroy the channel we know we created -- m_channel_id is still
+        // valid; only this callback's echo of it is empty.
         report("invite_response_null_channel",
                R"("user_id":)" + std::to_string(userID) +
-               R"(,"error":)" + std::to_string(static_cast<int>(error)));
+               R"(,"error":)" + std::to_string(raw_code));
         m_phase.store(Phase::Destroying, std::memory_order_release);
         return;
     }
 
-    // Copy both channel-id representations out under the lock before using
-    // either -- same discipline as everywhere else m_channel_id_z is
-    // touched, see the m_chan_mtx comment in the header.
-    std::basic_string<zchar_t> channel_copy;
+    // Copy the channel id out under the lock before using it -- same
+    // discipline as everywhere else m_channel_id is touched, see the
+    // m_chan_mtx comment in the header.
     std::string channel_copy_utf8;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
-        channel_copy = m_channel_id_z;
         channel_copy_utf8 = m_channel_id;
     }
 
     // Phase alone can't tell "our invite landed" from "some other invite
     // response landed while we happened to be in this phase" -- correlate
     // the callback to the exact channel and user we are waiting on.
-    if (channel_copy != channelID || userID != m_participant_id) {
+    if (channel_copy_utf8 != channelID || userID != m_participant_id) {
         report("invite_response_mismatch",
                R"("expected_channel":")" + json_escape(channel_copy_utf8) +
                R"(","expected_user":)" + std::to_string(m_participant_id));
         return;
     }
-    if (error != TALKBACK_ERROR_OK) {
+    if (result != TalkbackResult::Ok) {
         m_phase.store(Phase::Destroying, std::memory_order_release);
         return;
     }
@@ -1764,20 +1766,24 @@ void EngineTalkback::onChannelUserJoinResponse(const zchar_t *channelID,
 
     m_tone_index = 0;
     m_buffers_sent = 0;
-    // Unlike m_phase, m_channel_id_z needs no ordering argument here: tick()
+    // Unlike m_phase, m_channel_id needs no ordering argument here: tick()
     // will re-read it through m_chan_mtx itself once it observes Sending
     // (see the m_chan_mtx comment in the header), so this store only needs
     // to publish the phase transition, not the string.
     m_phase.store(Phase::Sending, std::memory_order_release);   // tick() takes it from here
 }
 
-void EngineTalkback::onChannelUserLeaveResponse(const zchar_t *channelID, unsigned int userID,
-                                                TalkbackError error)
+void EngineTalkback::on_channel_user_leave_response(const std::string &channel_id,
+                                                    uint32_t user_id,
+                                                    TalkbackResult result, int raw_code)
 {
+    // Task 2b: local aliases, same reason as on_channel_user_join_response().
+    const std::string &channelID = channel_id;
+    const unsigned int userID = user_id;
     report("leave_response",
-           R"("channel":")" + json_escape(zchar_to_utf8(channelID)) +
+           R"("channel":")" + json_escape(channelID) +
            R"(","user_id":)" + std::to_string(userID) +
-           R"(,"error":)" + std::to_string(static_cast<int>(error)));
+           R"(,"error":)" + std::to_string(raw_code));
 
     // Fix round 1, M4 (Major): the mirror image of the correlation
     // onChannelUserJoinResponse now does. Before this fix, `present` only
@@ -1799,22 +1805,22 @@ void EngineTalkback::onChannelUserLeaveResponse(const zchar_t *channelID, unsign
     // what is actually in it, so there is no counter to underflow and no
     // separate guard needed to make "not present" and "leave it alone" the
     // same code path.
-    if (!channelID || error != TALKBACK_ERROR_OK) return;
+    if (channelID.empty() || result != TalkbackResult::Ok) return;
 
     std::string resolved_name;
-    std::string channel_id_utf8;
+    std::string matched_channel_id;
     bool found = false;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
         for (auto &pc : m_provisioned_channels) {
-            if (pc.channel_id_z != channelID) continue;
+            if (pc.channel_id != channelID) continue;
             auto it = std::find_if(pc.present.begin(), pc.present.end(),
                                    [userID](const TalkbackPresentMember &m) {
                                        return m.user_id == userID;
                                    });
             if (it != pc.present.end()) {
                 resolved_name = it->name;
-                channel_id_utf8 = pc.channel_id;
+                matched_channel_id = pc.channel_id;
                 pc.present.erase(it);
                 found = true;
             }
@@ -1824,19 +1830,16 @@ void EngineTalkback::onChannelUserLeaveResponse(const zchar_t *channelID, unsign
     if (found) {
         report_nomination("member_left",
                           R"("name":")" + json_escape(resolved_name) + R"(","channel":")" +
-                          json_escape(channel_id_utf8) + "\"");
+                          json_escape(matched_channel_id) + "\"");
     }
 }
-void EngineTalkback::onJoinTalkbackChannel(unsigned int) {}
-void EngineTalkback::onLeaveTalkbackChannel(unsigned int) {}
-void EngineTalkback::onInviterAudioLevel(unsigned int, unsigned int) {}
 
 // ── Pre-provisioned channels (Task 2, 2026-08-25) ───────────────────────────
 //
 // Moves channel creation from key time to nomination time -- see nominate()'s
 // header declaration comment for the live-measured reason (buffers discarded
 // on every key press while the create+invite round trip was in flight).
-bool EngineTalkback::nominate(ZOOMSDK::IMeetingService *svc,
+bool EngineTalkback::nominate(TalkbackHost *host,
                               const std::vector<std::string> &nominees,
                               uint32_t attempt)
 {
@@ -1848,7 +1851,7 @@ bool EngineTalkback::nominate(ZOOMSDK::IMeetingService *svc,
     const std::string att = attempt_field(attempt);
     // R1-style mutual exclusion, same reasoning as probe()'s and
     // session_start()'s matching guards: nominate() is about to reassign
-    // m_svc/m_sdk, the exact fields the probe's driving thread dereferences
+    // m_host/m_sdk, the exact fields the probe's driving thread dereferences
     // for as long as has_pending_work() is true, and a live session already
     // holds its own channel through those same fields. This is the
     // plan-level ruling that "nomination must not break [probe/session
@@ -1865,11 +1868,11 @@ bool EngineTalkback::nominate(ZOOMSDK::IMeetingService *svc,
         report_nomination("nominate", R"("ok":false,"reason":"probe_busy")" + att);
         return false;
     }
-    if (!svc) {
+    if (!host) {
         report_nomination("nominate", R"("ok":false,"reason":"not_in_meeting")" + att);
         return false;
     }
-    m_svc  = svc;
+    m_host = host;
     // Task 1 (2026-09-04): no internal GetMeetingTalkbackController() refresh
     // any more -- see set_sdk()'s comment in the header. main.cpp injects the
     // adapter (and registers SetEvent on the real controller, outside the
@@ -2357,7 +2360,7 @@ bool EngineTalkback::membership_pump_invite()
             for (std::size_t i = 0; i < m_invite_queue.size(); ++i) {
                 if (now < m_invite_queue[i].not_before) continue;
                 if (first_eligible == none) first_eligible = i;
-                if (m_invite_queue[i].channel_id_z != m_last_invite_channel) {
+                if (m_invite_queue[i].channel_id != m_last_invite_channel) {
                     pick = i;
                     break;
                 }
@@ -2370,9 +2373,9 @@ bool EngineTalkback::membership_pump_invite()
             // Stamped from the DEQUEUE, not from a successful issue: a name
             // that resolves to nobody still tells us which channel this pass
             // was working on, and rotating away from it is right either way.
-            m_last_invite_channel = job.channel_id_z;
+            m_last_invite_channel = job.channel_id;
         }
-        if (invite_nominee(job.channel_id_z, job.channel_id, job.name, job.retries))
+        if (invite_nominee(job.channel_id, job.name, job.retries))
             return true;    // a real membership call went out; the turn is spent
         // uid 0 -- nobody by that name is in the meeting right now. Reported
         // inside invite_nominee(), no SDK call made, so the pacer's budget is
@@ -2467,7 +2470,7 @@ void EngineTalkback::assert_command_loop_thread(const char *where) const
     }
 }
 
-TalkbackResult EngineTalkback::destroy_channel_retrying(const std::string &channel_id_utf8,
+TalkbackResult EngineTalkback::destroy_channel_retrying(const std::string &channel_id,
                                                          uint32_t *attempts)
 {
     // Fix round 3: the bounded Begin/Add/Execute retry, extracted from four
@@ -2482,7 +2485,7 @@ TalkbackResult EngineTalkback::destroy_channel_retrying(const std::string &chann
     TalkbackResult e = TalkbackResult::Unknown;
     uint32_t attempt = 0;
     for (; attempt < kMaxDestroyAttempts; ++attempt) {
-        e = m_sdk->destroy_channels({channel_id_utf8});
+        e = m_sdk->destroy_channels({channel_id});
         if (e == TalkbackResult::Ok) break;
     }
     if (attempts) *attempts = attempt + 1;
@@ -2504,11 +2507,11 @@ void EngineTalkback::nomination_destroy_provisioned()
         report_nomination("channels_destroy_skipped", R"("reason":"no_controller")");
         return;
     }
-    std::vector<std::basic_string<zchar_t>> ids;
+    std::vector<std::string> ids;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
         ids.reserve(m_provisioned_channels.size());
-        for (auto &pc : m_provisioned_channels) ids.push_back(std::move(pc.channel_id_z));
+        for (auto &pc : m_provisioned_channels) ids.push_back(std::move(pc.channel_id));
         m_provisioned_channels.clear();
         // Task 4: any invite this ladder is still waiting to hear back about
         // belongs to a channel that no longer exists in a moment -- forget
@@ -2543,19 +2546,18 @@ void EngineTalkback::nomination_destroy_provisioned()
         // structural guarantee, not a claim about who calls it.
         m_session_channels.clear();
     }
-    for (const auto &channel_id_z : ids) {
-        const std::string channel_id_utf8 = zchar_to_utf8(channel_id_z.c_str());
+    for (const auto &channel_id : ids) {
         uint32_t attempts = 0;
-        const TalkbackResult e = destroy_channel_retrying(channel_id_utf8, &attempts);
+        const TalkbackResult e = destroy_channel_retrying(channel_id, &attempts);
         // Fix round 1 (Finding 3): raw platform code, not TalkbackResult --
         // reflects the retry loop's LAST attempt, same as `e` does.
         report_nomination("channel_destroyed",
-                          R"("channel":")" + json_escape(channel_id_utf8) + R"(","code":)" +
+                          R"("channel":")" + json_escape(channel_id) + R"(","code":)" +
                           std::to_string(m_sdk->last_raw_code()) + R"(,"attempts":)" +
                           std::to_string(attempts));
         if (e != TalkbackResult::Ok) {
             report_nomination("channel_destroy_abandoned",
-                              R"("channel":")" + json_escape(channel_id_utf8) + "\"");
+                              R"("channel":")" + json_escape(channel_id) + "\"");
         }
     }
 }
@@ -2603,7 +2605,7 @@ void EngineTalkback::nomination_abort_ladder(const std::string &reason)
         if (m_session_live) {
             for (const auto &sel : m_session_channels) {
                 for (const auto &pc : m_provisioned_channels) {
-                    if (pc.channel_id_z == sel) { orphans_live_session = true; break; }
+                    if (pc.channel_id == sel) { orphans_live_session = true; break; }
                 }
                 if (orphans_live_session) break;
             }
@@ -2645,8 +2647,7 @@ void EngineTalkback::nomination_abort_ladder(const std::string &reason)
                       attempt_field(m_nomination_attempt));
 }
 
-void EngineTalkback::enqueue_invite(const std::basic_string<zchar_t> &channel_id_z,
-                                    const std::string &channel_id_utf8,
+void EngineTalkback::enqueue_invite(const std::string &channel_id,
                                     const std::string &name)
 {
     // LAW 2: the two callers of this (onCreateChannelResponse's per-channel
@@ -2663,13 +2664,12 @@ void EngineTalkback::enqueue_invite(const std::basic_string<zchar_t> &channel_id
     // one join queues the same invite five times and spends five turns of the
     // pacer on it.
     for (const auto &q : m_invite_queue)
-        if (q.channel_id_z == channel_id_z && q.name == name) return;
-    m_invite_queue.push_back({channel_id_z, channel_id_utf8, name,
+        if (q.channel_id == channel_id && q.name == name) return;
+    m_invite_queue.push_back({channel_id, name,
                               std::chrono::steady_clock::now(), 0});
 }
 
-bool EngineTalkback::invite_nominee(const std::basic_string<zchar_t> &channel_id_z,
-                                    const std::string &channel_id_utf8,
+bool EngineTalkback::invite_nominee(const std::string &channel_id,
                                     const std::string &name, uint32_t retries)
 {
     // resolve_participant() reports IsSupportTalkback() itself (the
@@ -2681,12 +2681,12 @@ bool EngineTalkback::invite_nominee(const std::basic_string<zchar_t> &channel_id
     if (uid == 0) {
         report_nomination("member_not_in_meeting",
                           R"("name":")" + json_escape(name) + R"(","channel":")" +
-                          json_escape(channel_id_utf8) + "\"");
+                          json_escape(channel_id) + "\"");
         return false;   // NO SDK call was made -- see membership_pump_invite()
     }
     // Task 1: invite_users() with a single-element id list is the exact
     // Begin/Add/ExecuteBatchInviteUsers sequence this used to spell out.
-    const TalkbackResult e = m_sdk->invite_users(channel_id_utf8, {uid});
+    const TalkbackResult e = m_sdk->invite_users(channel_id, {uid});
     // LAW 2: a membership call reached Zoom, whatever it answered. Stamped
     // BEFORE the disposition below, because it is precisely the refused calls
     // that must not be followed instantly by another.
@@ -2697,7 +2697,7 @@ bool EngineTalkback::invite_nominee(const std::basic_string<zchar_t> &channel_id
     report_nomination("invite",
                       R"("name":")" + json_escape(name) + R"(","user_id":)" +
                       std::to_string(uid) + R"(,"channel":")" +
-                      json_escape(channel_id_utf8) + R"(","code":)" +
+                      json_escape(channel_id) + R"(","code":)" +
                       std::to_string(m_sdk->last_raw_code()));
 
     // LAW 2's other half: 18 IS A WAIT, NOT A FAILURE -- the same ruling the
@@ -2722,7 +2722,7 @@ bool EngineTalkback::invite_nominee(const std::basic_string<zchar_t> &channel_id
         if (next > kMaxInviteRetries) {
             report_nomination("invite_rate_limited",
                               R"("name":")" + json_escape(name) + R"(","channel":")" +
-                              json_escape(channel_id_utf8) + R"(","retries":)" +
+                              json_escape(channel_id) + R"(","retries":)" +
                               std::to_string(retries));
             return true;
         }
@@ -2730,12 +2730,12 @@ bool EngineTalkback::invite_nominee(const std::basic_string<zchar_t> &channel_id
             kInviteRateLimitBackoff * (1u << retries);
         report_nomination("invite_rate_limited_retry",
                           R"("name":")" + json_escape(name) + R"(","channel":")" +
-                          json_escape(channel_id_utf8) + R"(","retry":)" +
+                          json_escape(channel_id) + R"(","retry":)" +
                           std::to_string(next) + R"(,"max_retries":)" +
                           std::to_string(kMaxInviteRetries) + R"(,"backoff_ms":)" +
                           std::to_string(delay.count()));
         std::lock_guard<std::mutex> lock(m_chan_mtx);
-        m_invite_queue.push_back({channel_id_z, channel_id_utf8, name,
+        m_invite_queue.push_back({channel_id, name,
                                   std::chrono::steady_clock::now() + delay, next});
         return true;
     }
@@ -2759,7 +2759,7 @@ bool EngineTalkback::invite_nominee(const std::basic_string<zchar_t> &channel_id
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
         m_nomination_pending_invites.push_back(
-            {channel_id_z, uid, name, std::chrono::steady_clock::now() + kAwaitTimeout});
+            {channel_id, uid, name, std::chrono::steady_clock::now() + kAwaitTimeout});
     }
     return true;
 }
@@ -2842,25 +2842,21 @@ void EngineTalkback::nomination_reset()
 // ── Roster re-resolution (Task 4, 2026-08-25) ───────────────────────────────
 std::vector<EngineTalkback::TalkbackRosterEntry> EngineTalkback::current_roster() const
 {
+    // Task 2b: the roster walk moved into TalkbackWinHost -- see
+    // resolve_participant()'s matching comment. Empty if there is no host
+    // injected or the host's own roster() answers empty, same null-safety
+    // this function always had (no meeting service, no controller, no
+    // participants list all folded into the same "nobody present" answer).
     std::vector<TalkbackRosterEntry> roster;
-    if (!m_svc) return roster;
-    auto *part = m_svc->GetMeetingParticipantsController();
-    if (!part) return roster;
-    ZOOMSDK::IList<unsigned int> *ids = part->GetParticipantsList();
-    if (!ids) return roster;
-    roster.reserve(static_cast<std::size_t>(ids->GetCount()));
-    for (int i = 0; i < ids->GetCount(); ++i) {
-        const unsigned int uid = ids->GetItem(i);
-        ZOOMSDK::IUserInfo *u = part->GetUserByUserID(uid);
-        if (!u) continue;
-        roster.push_back({uid, zchar_to_utf8(u->GetUserName())});
-    }
+    if (!m_host) return roster;
+    for (const auto &p : m_host->roster())
+        roster.push_back({p.user_id, p.display_name});
     return roster;
 }
 
-void EngineTalkback::resolve_roster_change(ZOOMSDK::IMeetingService *svc)
+void EngineTalkback::resolve_roster_change(TalkbackHost *host)
 {
-    if (!svc) return;
+    if (!host) return;
 
     // THE RULING THIS FUNCTION EXISTS UNDER (see the header comment): invite
     // only, NEVER create. Every provisioned channel already exists from
@@ -2911,7 +2907,7 @@ void EngineTalkback::resolve_roster_change(ZOOMSDK::IMeetingService *svc)
     if (!invites_allowed)
         report_nomination("roster_resolve", R"("ok":false,"reason":"probe_busy","pruned":true)");
 
-    // Fix round 1, M3 (Major): m_svc used to be reassigned ONLY when no
+    // Fix round 1, M3 (Major): m_host used to be reassigned ONLY when no
     // session is live -- probe() and nominate() both refuse OUTRIGHT while
     // m_session_live because they touch it; this function cannot refuse
     // outright (a rejoin mid-press must still be invited), so it left the
@@ -2922,28 +2918,28 @@ void EngineTalkback::resolve_roster_change(ZOOMSDK::IMeetingService *svc)
     // REST of the press.
     //
     // TASK 1 (2026-09-04): this function no longer re-derives m_sdk from
-    // m_svc AT ALL, in EITHER branch -- see set_sdk()'s comment in the
-    // header. That is a strictly SAFER generalisation of M3, not a narrower
-    // one: the transient-null failure mode M3 closed cannot exist here any
-    // more, because there is no internal derivation left to race. This
-    // function simply reuses whatever probe()/nominate()/session_start() (or
-    // a test) last injected; membership_pump_invite() is the only later
-    // reader of it, and main.cpp keeps that adapter valid for the life of
-    // the meeting. m_svc keeps its ORIGINAL M3 conditional below --
-    // current_roster()/resolve_participant() still read it, which is
-    // unrelated to the adapter.
+    // the underlying meeting service AT ALL, in EITHER branch -- see
+    // set_sdk()'s comment in the header. That is a strictly SAFER
+    // generalisation of M3, not a narrower one: the transient-null failure
+    // mode M3 closed cannot exist here any more, because there is no internal
+    // derivation left to race. This function simply reuses whatever
+    // probe()/nominate()/session_start() (or a test) last injected;
+    // membership_pump_invite() is the only later reader of it, and main.cpp
+    // keeps that adapter valid for the life of the meeting. m_host keeps its
+    // ORIGINAL M3 conditional below -- current_roster()/resolve_participant()
+    // still read it, which is unrelated to the m_sdk adapter.
     //
-    // M1: and ONLY when invites are allowed. m_svc belongs to whatever
+    // M1: and ONLY when invites are allowed. m_host belongs to whatever
     // subsystem has_pending_work() is reporting; the pruning half below needs
-    // it for nothing (current_roster() reads the PARTICIPANTS controller,
-    // and every table it touches is ours), so a probe-busy pass must leave it
-    // exactly as it found it.
+    // it for nothing (current_roster() reads m_host's own roster(), and every
+    // table it touches is ours), so a probe-busy pass must leave it exactly
+    // as it found it.
     if (m_session_live || !invites_allowed) {
         if (!m_sdk && invites_allowed)
             return;            // paranoia only -- session_start() would not
                                // have gone live without a valid m_sdk
     } else {
-        m_svc = svc;
+        m_host = host;
         if (!m_sdk) return;    // no adapter has ever been injected for this
                                // meeting yet -- same bail the old internal
                                // GetMeetingTalkbackController() refresh gave
@@ -2967,7 +2963,6 @@ void EngineTalkback::resolve_roster_change(ZOOMSDK::IMeetingService *svc)
     // never sees a half-updated table); invites happen AFTER the lock is
     // released, below.
     struct ChannelInvites {
-        std::basic_string<zchar_t> channel_id_z;
         std::string channel_id;
         std::vector<std::string> names;
     };
@@ -3104,14 +3099,14 @@ void EngineTalkback::resolve_roster_change(ZOOMSDK::IMeetingService *svc)
                     // walk of a list bounded by the plan.
                     bool already_pending = false;
                     for (const auto &pi : m_nomination_pending_invites) {
-                        if (pi.channel_id_z == pc.channel_id_z && pi.name == name) {
+                        if (pi.channel_id == pc.channel_id && pi.name == name) {
                             already_pending = true;
                             break;
                         }
                     }
                     if (!already_pending) {
                         for (const auto &q : m_invite_queue) {
-                            if (q.channel_id_z == pc.channel_id_z && q.name == name) {
+                            if (q.channel_id == pc.channel_id && q.name == name) {
                                 already_pending = true;
                                 break;
                             }
@@ -3141,7 +3136,6 @@ void EngineTalkback::resolve_roster_change(ZOOMSDK::IMeetingService *svc)
                 }
             }
             if (!work.names.empty()) {
-                work.channel_id_z = pc.channel_id_z;
                 work.channel_id = pc.channel_id;
                 to_invite.push_back(std::move(work));
             }
@@ -3174,7 +3168,7 @@ void EngineTalkback::resolve_roster_change(ZOOMSDK::IMeetingService *svc)
     if (invites_allowed)
         for (const auto &work : to_invite)
             for (const auto &name : work.names)
-                enqueue_invite(work.channel_id_z, work.channel_id, name);
+                enqueue_invite(work.channel_id, name);
 }
 
 // ── Talkback audio path (Milestone 2) ───────────────────────────────────────
@@ -3520,27 +3514,26 @@ void EngineTalkback::drain_audio()
 
     // The channels to talk on are the SESSION's SELECTION (Task 3) -- the
     // provisioned channels session_start() matched to the keyed target --
-    // never the probe's m_channel_id_z, which tick() destroys from a separate
+    // never the probe's m_channel_id, which tick() destroys from a separate
     // thread three seconds after it opens; sending on that would race the
     // destroy mid-SendAudioDataToChannel. Nothing tick() touches is reachable
     // from here, so that race stays structurally impossible rather than
     // merely unlikely.
     //
     // Copy the ids out under m_chan_mtx, release, THEN call the SDK -- the
-    // one rule this file never bends. `channels` owns the strings for the
-    // whole drain and `channel_ids_utf8` borrows from it, so both must (and
-    // do) outlive the talkback_ring_drain() calls below. No channel id
-    // crosses the IPC boundary; Task 1's seam takes UTF-8 rather than the raw
-    // zchar_t, so this now builds that once per drain rather than once per
-    // buffer/channel (see SendCtx's comment).
-    std::vector<std::basic_string<zchar_t>> channels;
+    // one rule this file never bends. `channels` and `channel_ids_utf8` are
+    // the same UTF-8 strings under two names (Task 2b: m_session_channels
+    // used to store the raw zchar_t identifier and this file re-encoded it
+    // per drain via zchar_to_utf8(); TalkbackSdkEvents/TalkbackSdk both
+    // already deliver/take UTF-8 exclusively, so there is nothing left to
+    // convert) -- kept as a plain copy rather than collapsing the two names,
+    // since both are read independently below.
+    std::vector<std::string> channels;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
         channels = m_session_channels;
     }
-    std::vector<std::string> channel_ids_utf8;
-    channel_ids_utf8.reserve(channels.size());
-    for (const auto &c : channels) channel_ids_utf8.push_back(zchar_to_utf8(c.c_str()));
+    std::vector<std::string> channel_ids_utf8 = channels;
 
     auto *hdr = static_cast<ShmAudioHeader *>(m_audio_region.ptr);
 
@@ -3616,7 +3609,7 @@ void EngineTalkback::drain_audio()
 // Deliberately NOT part of the probe's Phase machine above: that machine
 // exists to tear itself down after one tone, which is the opposite of what a
 // key held down needs. The session never sends on the probe's channel
-// (m_channel_id_z), which tick() destroys from a separate thread, so that
+// (m_channel_id), which tick() destroys from a separate thread, so that
 // SendAudioDataToChannel/destroy race stays structurally impossible rather
 // than merely unlikely.
 //
@@ -3707,8 +3700,10 @@ void EngineTalkback::debug_expire_pending_create_for_test()
 // reason as well as a tidy one -- CreateSettingService() is an SDK EXPORT, and
 // engine-talkback.cpp is compiled into a test target that links no SDK library
 // at all (tests/engine-talkback-select-test.cpp fakes pure-virtual interfaces
-// only). Everything in THIS function goes through IMeetingService's virtual
-// interfaces, which is exactly why the ordering below can be pinned.
+// only). Everything in THIS function goes through TalkbackHost's pure-virtual
+// interface (Task 2b, 2026-09-05 -- was IMeetingService's own virtual
+// interfaces directly, before this file crossed that seam too), which is
+// exactly why the ordering below can be pinned with a FakeTalkbackHost.
 // WEAKER THAN ZCOMMS'S, and stated rather than glossed: a never-fed virtual
 // mic is silent by construction, while a dead device selection is silent
 // because Zoom honours it. If a live gate ever hears the room, the escalation
@@ -3719,30 +3714,34 @@ void EngineTalkback::debug_expire_pending_create_for_test()
 bool EngineTalkback::ensure_mic_open(const char *when)
 {
     const std::string when_field = R"(,"when":")" + std::string(when) + "\"";
-    if (!m_svc) {
+    if (!m_host) {
         m_mic_open = false;
         report_session("mic_open", R"("ok":false,"reason":"no_meeting_service")" + when_field);
         return false;
     }
-    auto *parts = m_svc->GetMeetingParticipantsController();
-    if (!parts) {
+    // Task 2b: the roster/self lookup moved into TalkbackHost (myself()) and
+    // the mute READ moved into is_self_muted() -- both still ultimately go
+    // through GetMeetingParticipantsController()/GetMySelfUser() on Windows
+    // (TalkbackWinHost), but this file no longer knows that. `myself()`
+    // failing collapses what used to be two distinct reasons here
+    // ("no_participants_controller" and "no_self_user") into one: the host
+    // abstraction has no way to tell them apart from the outside, and
+    // resolve_participant()/current_roster() already made the identical
+    // trade for the roster walk.
+    TalkbackParticipant self;
+    if (!m_host->myself(self)) {
         m_mic_open = false;
-        report_session("mic_open", R"("ok":false,"reason":"no_participants_controller")" +
-                       when_field);
+        report_session("mic_open", R"("ok":false,"reason":"no_self_user")" + when_field);
         return false;
     }
     // THE AUTHORITATIVE READ. IMeetingAudioController has no "am I muted"
     // anywhere in meeting_audio_interface.h -- it has MuteAudio/UnMuteAudio and
     // CanUnMuteBySelf and nothing that reports state. The state lives on
     // IUserInfo::IsAudioMuted() for GetMySelfUser(), which is the participants
-    // controller's answer and the same one ZComms settled on.
-    ZOOMSDK::IUserInfo *self = parts->GetMySelfUser();
-    if (!self) {
-        m_mic_open = false;
-        report_session("mic_open", R"("ok":false,"reason":"no_self_user")" + when_field);
-        return false;
-    }
-    if (!self->IsAudioMuted()) {
+    // controller's answer and the same one ZComms settled on -- now read via
+    // TalkbackHost::is_self_muted(), which fails CLOSED (reports muted) when
+    // the SDK cannot answer, so an unknown state is never mistaken for "open".
+    if (!m_host->is_self_muted()) {
         m_mic_open = true;
         // Reported on the KEY EDGE only. A latched key re-asserts every 2s for
         // as long as it is held, and a line per assertion is 30 lines a minute
@@ -3754,20 +3753,25 @@ bool EngineTalkback::ensure_mic_open(const char *when)
         return true;
     }
 
-    auto *audio = m_svc->GetMeetingAudioController();
-    if (!audio) {
+    // TalkbackHost::set_self_muted() returns TalkbackResult::NotExist as the
+    // "there is nothing here to call" sentinel -- the same convention
+    // TalkbackSdk's own no_controller() uses -- when the audio controller (or
+    // self, re-resolved) is unavailable, distinct from a genuine SDK failure
+    // to unmute. That is what keeps this branch's report shape identical to
+    // the pre-Task-2b "no_audio_controller" rejection.
+    const TalkbackResult r = m_host->set_self_muted(false);
+    if (r == TalkbackResult::NotExist) {
         m_mic_open = false;
         report_session("mic_open", R"("ok":false,"was_muted":true,)"
                        R"("reason":"no_audio_controller")" + when_field);
         return false;
     }
-    const ZOOMSDK::SDKError e = audio->UnMuteAudio(self->GetUserID());
-    m_mic_open = (e == ZOOMSDK::SDKERR_SUCCESS);
+    m_mic_open = (r == TalkbackResult::Ok);
     // ALWAYS reported, tick or key: finding the bot muted is the event Law 1
     // exists for, and a host re-muting it mid-key is precisely what the
     // operator needs in the log afterwards.
     report_session("mic_open", std::string(R"("ok":)") + (m_mic_open ? "true" : "false") +
-                   R"(,"was_muted":true,"code":)" + std::to_string(static_cast<int>(e)) +
+                   R"(,"was_muted":true,"code":)" + std::to_string(m_host->last_raw_code()) +
                    when_field);
     // Remember to put it back, but only for a key that actually opened it.
     // A failed unmute changed nothing, so there is nothing to restore -- and
@@ -3785,21 +3789,20 @@ void EngineTalkback::restore_mic_state()
     if (!m_mic_restore_pending) return;
     m_mic_restore_pending = false;
     m_mic_open = false;
-    if (!m_svc) return;
-    auto *parts = m_svc->GetMeetingParticipantsController();
-    ZOOMSDK::IUserInfo *self = parts ? parts->GetMySelfUser() : nullptr;
-    auto *audio = m_svc->GetMeetingAudioController();
-    if (!self || !audio) {
+    if (!m_host) return;
+    // Same TalkbackResult::NotExist sentinel as ensure_mic_open() above --
+    // see that function's comment.
+    const TalkbackResult r = m_host->set_self_muted(true);
+    if (r == TalkbackResult::NotExist) {
         report_session("mic_restore", R"("ok":false,"reason":"no_controller")");
         return;
     }
     // allowUnmuteBySelf stays at the SDK default (true): this is us putting
     // ourselves back the way the host left us, not us imposing a meeting
     // policy we have no business setting.
-    const ZOOMSDK::SDKError e = audio->MuteAudio(self->GetUserID(), true);
     report_session("mic_restore", std::string(R"("ok":)") +
-                   (e == ZOOMSDK::SDKERR_SUCCESS ? "true" : "false") +
-                   R"(,"code":)" + std::to_string(static_cast<int>(e)));
+                   (r == TalkbackResult::Ok ? "true" : "false") +
+                   R"(,"code":)" + std::to_string(m_host->last_raw_code()));
 }
 
 void EngineTalkback::mic_tick()
@@ -3848,7 +3851,7 @@ void EngineTalkback::mic_tick()
     report_session_state(true, "live", now_open ? "open" : "blocked");
 }
 
-bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
+bool EngineTalkback::session_start(TalkbackHost *host,
                                    const std::string &target)
 {
     if (m_session_live) {
@@ -3894,7 +3897,7 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
     // R1 review-round fix (mutual exclusion): refuse while the probe's
     // driving thread might still be running -- see the matching guard at the
     // top of probe(), which explains why. This check MUST come before
-    // m_svc/m_sdk are touched below: those are the exact fields tick()
+    // m_host/m_sdk are touched below: those are the exact fields tick()
     // dereferences on its own thread for as long as has_pending_work() is
     // true, and reassigning them here while that thread is mid-call was
     // Critical 2 -- a genuine cross-thread pointer race, not merely a
@@ -3907,12 +3910,12 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
         return false;
     }
 
-    if (!svc) {
+    if (!host) {
         report_session("session_start", R"("ok":false,"reason":"not_in_meeting")");
         report_session_state(false, "not_in_meeting");
         return false;
     }
-    m_svc  = svc;
+    m_host = host;
     // Task 1 (2026-09-04): no internal GetMeetingTalkbackController() refresh
     // any more -- see set_sdk()'s comment in the header. main.cpp injects the
     // adapter immediately before calling session_start().
@@ -3948,7 +3951,7 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
     // the selection in the SAME lock scope (so a concurrent reader can never
     // see a half-built selection), release, and only then touch the SDK --
     // the discipline every other m_chan_mtx access in this file follows.
-    std::vector<std::basic_string<zchar_t>> selected;
+    std::vector<std::string> selected;
     std::string selected_ids;   // UTF-8, reporting only
     std::size_t provisioned_total = 0;
     std::size_t still_coming = 0;   // channels for THIS target not created yet
@@ -3971,7 +3974,7 @@ bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
         for (const auto &pc : m_provisioned_channels) {
             if (!talkback_channel_serves_target(pc.is_all_talent, pc.members, target))
                 continue;
-            selected.push_back(pc.channel_id_z);
+            selected.push_back(pc.channel_id);
             if (!selected_ids.empty()) selected_ids += ",";
             selected_ids += pc.channel_id;
         }
@@ -4160,7 +4163,7 @@ void EngineTalkback::session_stop()
     //
     // Idempotent: Leave and quit both call it unconditionally, and a key that
     // was never granted a channel must not be an error on the way out.
-    std::vector<std::basic_string<zchar_t>> channels;
+    std::vector<std::string> channels;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
         channels.swap(m_session_channels);
@@ -4213,7 +4216,7 @@ void EngineTalkback::session_stop()
     // the feature.
     if (was_ducked) {
         for (const auto &id : channels)
-            m_sdk->set_background_volume(zchar_to_utf8(id.c_str()), kBackgroundNeutral);
+            m_sdk->set_background_volume(id, kBackgroundNeutral);
     }
 
     report_session("session_stop", R"("ok":true,"channels":)" +

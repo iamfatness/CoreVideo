@@ -325,6 +325,36 @@ int main()
               "the post-reset reading is contaminated by the pre-reset audio");
     }
 
+    // ── A mid-window format change is ALSO a clean slate ────────────────────
+    // loudness_meter_configure()'s own header comment documents that it fires
+    // automatically mid-source: Zoom renegotiates, and a Mix/Isolated role
+    // flip changes the channel count on the same subscription. If that lands
+    // inside a panelist's 20-60 s check window, the gated blocks computed
+    // under the OLD coefficients/channel weighting must not survive to be
+    // averaged with blocks computed under the NEW ones.
+    {
+        LoudnessMeter m;
+        feed_sine(m, 48000, std::sqrt(2.0) * 0.1, 1000.0, 3.0);
+        double before = 0.0;
+        check(loudness_meter_integrated(m, &before),
+              "integrated loudness was unavailable before the format change");
+        check(loudness_meter_gated_blocks(m) > 0,
+              "no gated blocks accumulated before the format change -- the "
+              "test setup is not exercising the window it means to clear");
+
+        loudness_meter_configure(m, 32000, 2);   // different rate AND channels
+
+        check(loudness_meter_gated_blocks(m) == 0,
+              "the gated block count survived a mid-window format change -- "
+              "loudness_meter_configure() must clear the gated window, not "
+              "just the filters");
+        double after = 0.0;
+        check(!loudness_meter_integrated(m, &after),
+              "integrated loudness survived a mid-window format change -- "
+              "blocks measured under the old sample rate/channel count are "
+              "still being averaged with whatever comes next");
+    }
+
     // ── A panelist who has never spoken has NO integrated reading ──────────
     // Not -70, not 0. The board must be able to say "no audio" rather than
     // print a number that looks like a measurement.

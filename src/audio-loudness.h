@@ -194,12 +194,38 @@ struct LoudnessMeter {
     uint64_t gated_total = 0;   // blocks ever admitted, never wrapped
 };
 
+// Clears the hop-tracking and gated-integration state shared by
+// loudness_meter_configure() and loudness_meter_reset_window(). Factored out
+// so the two paths cannot drift apart: a mid-stream format change (Zoom
+// renegotiating, or a Mix/Isolated role flip changing the channel count on
+// the same subscription -- see loudness_meter_configure() below) is just as
+// much a "this check window's numbers are no longer comparable" event as an
+// explicit reset, because the gated blocks it would otherwise carry forward
+// were computed under the OLD biquad coefficients and channel weighting.
+// Mixing those with post-change blocks silently averages two different
+// measurements into one check-window result. Does NOT touch filter state
+// (c1/c2/s1/s2) -- callers that need that cleared too (configure) do it
+// themselves, immediately adjacent to this call.
+inline void loudness_meter_clear_window(LoudnessMeter &m)
+{
+    m.gated.clear();
+    m.gated_head  = 0;
+    m.gated_total = 0;
+    m.hop_filled  = 0;
+    m.hop_acc     = 0.0;
+    for (uint32_t i = 0; i < kLoudnessShortTermHops; ++i) m.hop_ring[i] = 0.0;
+    m.hop_total   = 0;
+}
+
 // (Re)configures for a rate/channel count and clears all filter state. Called
 // automatically by loudness_meter_feed_int16() whenever the wire format
 // changes -- which it can, mid-source: Zoom renegotiates, and the operator's
 // Mix/Isolated role flip changes the channel count on the same subscription.
 // Carrying filter history across that would smear one format's transient into
-// the other's measurement.
+// the other's measurement -- and the same is true of the gated integration
+// window, cleared here via loudness_meter_clear_window() so a format change
+// mid-check-window cannot silently average blocks measured under two
+// different coefficient sets into one panelist's reading.
 inline void loudness_meter_configure(LoudnessMeter &m, uint32_t sample_rate,
                                      uint16_t channels)
 {
@@ -212,10 +238,7 @@ inline void loudness_meter_configure(LoudnessMeter &m, uint32_t sample_rate,
     m.s2.assign(m.channels, LoudnessBiquadState{});
     m.hop_frames = (rate * kLoudnessHopMs) / 1000;
     if (m.hop_frames == 0) m.hop_frames = 1;
-    m.hop_filled = 0;
-    m.hop_acc    = 0.0;
-    for (uint32_t i = 0; i < kLoudnessShortTermHops; ++i) m.hop_ring[i] = 0.0;
-    m.hop_total = 0;
+    loudness_meter_clear_window(m);
 }
 
 // Hook the gated integrator into the hop boundary. Defined in Task 3; the
@@ -346,16 +369,13 @@ inline void loudness_meter_on_hop_complete(LoudnessMeter &m)
 // Starts this source's check window over. Clears the gated blocks and the hop
 // history, but NOT the biquad state: the filters describe the signal that is
 // still arriving, and zeroing them mid-stream would inject a transient into
-// the first block of the new window.
+// the first block of the new window. Shares loudness_meter_clear_window()
+// with loudness_meter_configure() precisely so this deliberate asymmetry
+// (filter state preserved here, cleared there) cannot accidentally regress
+// into the two functions clearing different things.
 inline void loudness_meter_reset_window(LoudnessMeter &m)
 {
-    m.gated.clear();
-    m.gated_head  = 0;
-    m.gated_total = 0;
-    m.hop_acc     = 0.0;
-    m.hop_filled  = 0;
-    for (uint32_t i = 0; i < kLoudnessShortTermHops; ++i) m.hop_ring[i] = 0.0;
-    m.hop_total   = 0;
+    loudness_meter_clear_window(m);
 }
 
 // Blocks admitted to the current window. A board uses this to decide whether

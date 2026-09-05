@@ -263,16 +263,39 @@ Conditions detectable from a box plus landmarks, and the advice each maps to:
 
 - **Self-tile exclusion is mandatory, and is real work — no such code exists.** Confirmed by exhaustive search: `ParticipantInfo` has no self/me field, the engine builds the roster from `GetParticipantsList()` with zero filtering, and the bot therefore appears in every roster, picker, tile candidate set, and speaker candidate set. The only existing defence is a handful of operator-chosen exclude combo boxes keyed by a **meeting-scoped `user_id` that does not survive a rejoin**. Worse: **talkback deliberately unmutes the bot**, so during a talkback key the bot is a fully eligible active-speaker candidate. Adding a vcam return feed on top of this makes a real feedback loop likely, not hypothetical. This needs a durable self/return identity flag, not another combo box.
 
-### OPEN QUESTION — tile source resolution vs. auto-framing quality
+### Tile source resolution — resolved: auto-framing never requests resolution
 
-Tiles subscribes at **P360 by default** (`tile_feed_subscribe`, `zoom-supersource.cpp:475-480`), not 1080p. The rationale is recorded in place: on 2026-08-17 a 720p wall oversubscribed Zoom's raw-data envelope and throttled the entire meeting to 0.3–0.45× real time. The engine's policy is upgrade-only, so a participant already carried at 720p/1080p for a program output is shared at that higher resolution — but the default wall is 360p.
+Tiles subscribes at **P360 by default** (`tile_feed_subscribe`,
+`zoom-supersource.cpp:475-480`), and that default exists for a live reason:
+on 2026-08-17 a 720p wall oversubscribed Zoom's raw-data envelope and
+throttled the entire meeting to 0.3–0.45× real time.
 
-Consequences, which differ per subsystem:
+**This does not constrain auto-framing, because subscriptions are shared and
+upgrade-only.** From the rationale comment at `zoom-supersource.cpp:459`:
 
-- **Detection is unaffected.** We downscale to ~320 px long edge anyway; a 640×360 source is ample.
-- **Auto-framed tile *quality* is affected.** Cropping into a 360p source and magnifying the result will look soft. Getting crisp auto-framed tiles means raising the subscription resolution — which walks straight back into the envelope that caused the 2026-08-17 throttle.
+> *"Shared feeds are NOT degraded by this. The engine holds one subscription
+> per participant with an upgrade-only resolution policy... So a participant
+> already on a 720p/1080p program output keeps that quality, and the tile
+> simply reuses the high-quality feed. 360p is paid only for participants
+> the wall alone is showing."*
 
-This gates Subsystem 3a only, and 3a is last in the build order, so it does not block anything before it. Options: accept softness at 360p; raise resolution only for the small number of tiles actually being auto-framed; or restrict auto-framing to preshow, where a throttled meeting is survivable.
+In the real production configuration the panelists that matter are already
+carried at high resolution — the **active speaker feed pulls 1080p**, and any
+**ISO'd participant has a constant high-res feed**. Tiles reuses those feeds
+for free, so the crop math has real pixels for exactly the people being
+checked.
+
+**Design rule: auto-framing consumes whatever the shared feed already is and
+must never request a resolution upgrade.** Consequences:
+
+- No new subscription pressure, so the 2026-08-17 throttle cannot be
+  reintroduced by this feature.
+- No new operator control is needed. The existing ISO / program-output
+  controls *are* the resolution lever, and they already encode operator
+  intent about who matters.
+- A tile that looks soft under auto-framing is a participant who is neither
+  ISO'd nor active speaker. The fix is to ISO them — an action the operator
+  already has, for reasons they already understand.
 - **The vcam needs its own seat.** Some Zoom client must select OBS Virtual Camera as its webcam; that is a normal client, not our SDK identity. Prior findings warn that same-account joins collide, so this should be a separate account.
 - Broadcast sample rate is 48 kHz. Resample, or recompute filter coefficients, if participant audio arrives at another rate.
 

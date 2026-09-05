@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install scanners
         run: |
@@ -125,7 +125,7 @@ jobs:
 
       - name: Upload Flawfinder SARIF
         if: hashFiles('security-reports/flawfinder.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@v4.37.4
         with:
           sarif_file: security-reports/flawfinder.sarif
           category: flawfinder

@@ -84,6 +84,11 @@ struct TalkbackDockOpenKey {
 
 // The state the dock has about keying at the moment it rebuilds its buttons.
 struct TalkbackDockKeyContext {
+    // See TalkbackDockSessionView::platform_supported. Refused AHEAD of
+    // engine/meeting/source, all three of which are also false on a macOS box
+    // -- each would be a true statement that sends the operator to debug
+    // something that is not the problem.
+    bool platform_supported = true;
     bool engine_running = false;
     bool in_meeting     = false;
     // An OBS audio source is selected. Without one key_on() cannot open a tap
@@ -122,6 +127,14 @@ inline std::vector<TalkbackDockKeyButton> talkback_dock_key_buttons(
                                ctx.open.target == target;
         if (held_here) {
             b.enabled = true;
+        } else if (!ctx.platform_supported) {
+            // Below held_here and nowhere else. Never disabling a button the
+            // operator is holding is the stronger law (a disabled QPushButton
+            // drops `down` without emitting released(), which strands the key)
+            // and it costs nothing to honour here: with no talkback engine
+            // there is no key to hold, so this ordering is unreachable rather
+            // than a trade.
+            b.reason = "talkback is not available on macOS yet";
         } else if (ctx.open.open && !ctx.open.dock_owned) {
             // m3: not "another talkback key is open" -- naming the surface is
             // what tells the operator that pressing here cannot help and that
@@ -851,6 +864,16 @@ enum class TalkbackDockBannerState {
     LiveMicBlocked,
     // A key was refused, or the last one that closed had failed.
     Refused,
+    // This build's engine has no talkback at all (macOS: engine-talkback.cpp
+    // is only in ENGINE_SOURCES, which the main-macos.mm target does not use).
+    // The dock is cross-platform and compiles anyway, so without this it is a
+    // panel of controls that send commands nothing on the other end answers.
+    //
+    // It is checked FIRST and returns, which is what keeps the roadmap wording
+    // out of the ON AIR strip STRUCTURALLY rather than by promise: on a build
+    // with no talkback engine nothing can key, so nothing can be live, and
+    // Unavailable and Live are unreachable together by construction.
+    Unavailable,
 };
 
 struct TalkbackDockBanner {
@@ -862,6 +885,12 @@ struct TalkbackDockBanner {
 };
 
 struct TalkbackDockSessionView {
+    // False on a build whose engine has no talkback (macOS). A FIELD, not an
+    // #ifdef in this header: this file is Qt/OBS-free and compiles on every
+    // platform, so the macOS rendering is pinned by a Windows or Linux CI run
+    // -- otherwise a macOS-only branch is tested by nothing this project runs.
+    // The caller sets it (see zoom-talkback-panel.cpp).
+    bool        platform_supported = true;
     bool        key_open = false;
     std::string target;
     bool        engine_live = false;
@@ -920,6 +949,16 @@ inline std::string talkback_dock_recovery_label(const std::string &recover)
 inline TalkbackDockBanner talkback_dock_banner(const TalkbackDockSessionView &s)
 {
     TalkbackDockBanner b;
+    // FIRST, and it returns. Everything below describes a key on an engine
+    // that can carry one; this build's cannot. See TalkbackDockBannerState::
+    // Unavailable for why the precedence is the safety property and not a
+    // style choice.
+    if (!s.platform_supported) {
+        b.state = TalkbackDockBannerState::Unavailable;
+        b.headline = "Talkback is coming to macOS";
+        b.detail = "Talkback is Windows-only in this release.";
+        return b;
+    }
     if (!s.key_open) {
         b.headline = "Off air";
         if (!s.engine_reason.empty() && !s.engine_live) {

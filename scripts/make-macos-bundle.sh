@@ -21,9 +21,22 @@
 #                     Fast for local iteration; NOT distributable.
 #   --install         Also copy into ~/Library/Application Support/obs-studio/plugins
 #   --sign IDENTITY   codesign identity (default: "-", ad-hoc)
+#   --entitlements F  Engine entitlements plist
+#                     (default: scripts/macos-engine.entitlements)
+#   --notarize PROF   After signing, submit to Apple with notarytool using this
+#                     stored credential profile, then staple the ticket.
+#                     Requires a real --sign identity; refuses on ad-hoc.
 #
-# Ad-hoc signing is fine for local runs. A distributable build needs a Developer
-# ID identity plus notarization, which this script does not do.
+# Ad-hoc signing is fine for local runs. A DISTRIBUTABLE build needs
+# --sign "Developer ID Application: ..." and --notarize.
+#
+# Signing a real identity turns on the hardened runtime, which notarization
+# requires -- and which is also what makes the Zoom SDK's nested code need
+# signing individually. Sealing it inside the engine app is NOT enough: Apple
+# requires every executable item to carry its own Developer ID signature, and
+# the SDK ships ~98 frameworks/bundles/dylibs. They are signed deepest-first,
+# because signing a container seals its contents and any signature applied
+# inside afterwards invalidates that seal.
 
 set -euo pipefail
 
@@ -36,6 +49,8 @@ ZOOM_SDK="${ZOOM_SDK_DIR:-$HOME/Developer/zoom-sdk-macos}"
 LINK_SDK=0
 DO_INSTALL=0
 SIGN_ID="-"
+ENTITLEMENTS=""
+NOTARIZE_PROFILE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -45,12 +60,26 @@ while [ $# -gt 0 ]; do
         --obs-app)   OBS_APP="$2";   shift 2 ;;
         --zoom-sdk)  ZOOM_SDK="$2";  shift 2 ;;
         --sign)      SIGN_ID="$2";   shift 2 ;;
+        --entitlements) ENTITLEMENTS="$2"; shift 2 ;;
+        --notarize)  NOTARIZE_PROFILE="$2"; shift 2 ;;
         --link-sdk)  LINK_SDK=1;     shift ;;
         --install)   DO_INSTALL=1;   shift ;;
         -h|--help)   sed -n '2,31p' "$0"; exit 0 ;;
         *) echo "error: unknown argument '$1'" >&2; exit 2 ;;
     esac
 done
+
+# Validated HERE, before anything is built: these combinations can only fail,
+# and finding that out after a full bundle assembly (and, with --notarize, a
+# 612 MB upload) wastes minutes to say something knowable at argument time.
+if [ -n "$NOTARIZE_PROFILE" ]; then
+    [ "$SIGN_ID" != "-" ] || {
+        echo "error: --notarize needs a real --sign identity; Apple rejects" >&2
+        echo "       ad-hoc signatures." >&2; exit 2; }
+    [ "$LINK_SDK" -eq 0 ] || {
+        echo "error: --notarize cannot be combined with --link-sdk (a symlinked" >&2
+        echo "       SDK is not sealable and not distributable)." >&2; exit 2; }
+fi
 
 [ -n "$BUILD_DIR" ] || { echo "error: --build-dir is required" >&2; exit 2; }
 [ -d "$BUILD_DIR" ] || { echo "error: build dir '$BUILD_DIR' does not exist" >&2; exit 2; }
@@ -210,16 +239,63 @@ for f in "$BUNDLE/Contents/MacOS/plugins/tls/"*.dylib; do
     [ -f "$f" ] && repoint_rpaths "$f"
 done
 
+ENTITLEMENTS="${ENTITLEMENTS:-$SRC_DIR/scripts/macos-engine.entitlements}"
+
+# The hardened runtime is what notarization requires and what ad-hoc signing
+# cannot carry (--timestamp needs a real identity and would fail offline), so
+# these are added only for a genuine Developer ID run. That keeps the local
+# ad-hoc path exactly as fast as it was.
+CS_HARDENED=()
+if [ "$SIGN_ID" != "-" ]; then
+    CS_HARDENED=(--options runtime --timestamp)
+fi
+
+sign_one() {  # sign_one <path> [extra codesign args…]
+    local path="$1"; shift
+    # ${arr[@]+"${arr[@]}"}, not a bare "${arr[@]}": macOS ships bash 3.2, where
+    # expanding an EMPTY array under `set -u` is an unbound-variable error. The
+    # ad-hoc path is exactly the empty case, so the plain form breaks every
+    # local build while working fine on any newer bash you might test with.
+    codesign --force --sign "$SIGN_ID" \
+        ${CS_HARDENED[@]+"${CS_HARDENED[@]}"} "$@" "$path"
+}
+
 # Sign nested code BEFORE the enclosing bundle: signing the outer bundle seals
 # its contents, so signing anything inside afterwards invalidates that seal.
+#
+# The SDK first, and this is the part that ad-hoc signing let us skip. Sealing
+# ZoomSDK.framework inside the engine app is NOT a signature on the ~98
+# frameworks/bundles/dylibs it ships; notarization rejects any executable item
+# that does not carry one of its own. `find -depth` yields contents before
+# their containers, which is exactly the inside-out order codesign needs -- do
+# not "simplify" it to a plain find.
+#
+# Skipped for --link-sdk: that tree is a symlink to a shared 612 MB SDK that is
+# not ours to re-sign, and those builds are dev-only and unsealable anyway.
+if [ "$SIGN_ID" != "-" ] && [ "$LINK_SDK" -eq 0 ] && \
+   [ -d "$ENGINE_APP/Contents/Frameworks" ]; then
+    echo "signing nested SDK code (this takes a minute)…"
+    sdk_signed=0
+    while IFS= read -r item; do
+        sign_one "$item"
+        sdk_signed=$((sdk_signed + 1))
+    done < <(find "$ENGINE_APP/Contents/Frameworks" -depth \
+                  \( -name "*.framework" -o -name "*.bundle" \
+                     -o -name "*.dylib" -o -name "*.app" \))
+    echo "signed $sdk_signed nested SDK items"
+fi
+
 for f in "$BUNDLE/Contents/MacOS/plugins/tls/"*.dylib; do
-    [ -f "$f" ] && codesign --force --sign "$SIGN_ID" "$f"
+    [ -f "$f" ] && sign_one "$f"
 done
+# The engine is the only binary that links the Zoom SDK, so it is the only one
+# that needs disable-library-validation -- see the entitlements file. Giving the
+# whole bundle that entitlement would be handing it to OBS's process for free.
 [ -d "$ENGINE_APP" ] && \
-    codesign --force --sign "$SIGN_ID" "$ENGINE_APP"
+    sign_one "$ENGINE_APP" --entitlements "$ENTITLEMENTS"
 [ -d "$BUNDLE/Contents/MacOS/CoreVideoOAuthCallback.app" ] && \
-    codesign --force --sign "$SIGN_ID" "$BUNDLE/Contents/MacOS/CoreVideoOAuthCallback.app"
-codesign --force --sign "$SIGN_ID" "$BUNDLE"
+    sign_one "$BUNDLE/Contents/MacOS/CoreVideoOAuthCallback.app"
+sign_one "$BUNDLE"
 # A symlinked SDK is deliberately unsealable, so --strict would fail on exactly
 # the builds we know are dev-only. Verify the real thing; say so for the other.
 if [ "$LINK_SDK" -eq 1 ]; then
@@ -229,6 +305,36 @@ else
 fi
 
 echo "built: $BUNDLE (version $VERSION)"
+
+# ── Notarization ──────────────────────────────────────────────────────────
+#
+# notarytool takes an archive, never a bare bundle, but the TICKET is stapled
+# to the BUNDLE. So: zip a copy for submission, staple the real bundle, and
+# leave re-zipping for distribution to the caller -- the submitted zip does not
+# contain the ticket and must not be the artifact anyone ships.
+#
+# Stapling matters offline: without the ticket, first launch does a network
+# round-trip to Gatekeeper, and a tester with no connection is refused.
+if [ -n "$NOTARIZE_PROFILE" ]; then
+    # The --sign / --link-sdk preconditions were checked at argument time.
+    SUBMIT_ZIP="$(mktemp -d)/$(basename "$BUNDLE").zip"
+    # ditto --keepParent, not `zip`: it preserves symlinks and resource forks,
+    # and a bundle flattened by plain zip fails notarization for structure.
+    ditto -c -k --keepParent "$BUNDLE" "$SUBMIT_ZIP"
+
+    echo "submitting to Apple (612 MB of SDK — expect several minutes)…"
+    xcrun notarytool submit "$SUBMIT_ZIP" \
+        --keychain-profile "$NOTARIZE_PROFILE" --wait
+
+    xcrun stapler staple "$BUNDLE"
+    xcrun stapler validate "$BUNDLE"
+    # The question a tester's Mac actually asks. `-t install` is the right
+    # assessment type for a bundle that is installed rather than launched.
+    spctl --assess -vvv -t install "$BUNDLE" || \
+        echo "note: spctl assessment above is advisory for a plugin bundle"
+    rm -rf "$(dirname "$SUBMIT_ZIP")"
+    echo "notarized and stapled: $BUNDLE"
+fi
 
 if [ "$DO_INSTALL" -eq 1 ]; then
     DEST="$HOME/Library/Application Support/obs-studio/plugins"

@@ -241,11 +241,13 @@ Every one of these is documented at length where it lives; the list is the map.
   half-honoured — briefing ten of eleven while the log says "live" is the
   failure mode this whole feature is written against. A target is not a channel — all-talent
   past 10 people owns `ceil(n/10)` of them and one drain pass fans the same
-  PCM out to all (`talkback_channel_serves_target`). Milestone incomplete
-  until the live gate passes: the first-syllable claim is measured on the old
-  path, not yet re-measured on the new one. **Gate run 1 (2026-08-26) failed
-  before it could measure anything** — see the create-pacing entry below and
-  `docs/superpowers/notes/2026-08-26-talkback-preprovisioned-live-gate.md`.
+  PCM out to all (`talkback_channel_serves_target`). **THE LIVE GATE PASSED
+  (owner's own testing, 2026-09-04)**: the first-syllable claim is now measured
+  on the PRE-PROVISIONED path, not inherited from the old one. Gate run 1
+  (2026-08-26) had failed before it could measure anything — that failure is
+  what produced the create-pacing entry below, and
+  `docs/superpowers/notes/2026-08-26-talkback-preprovisioned-live-gate.md`
+  remains the record of it. The milestone is complete on Windows.
 - **Channel membership must be acoustically NEUTRAL until keyed** (live
   production, 2026-08-29: talent reported their meeting audio ducking the
   moment they were **assigned** to a talkback channel, before any key was
@@ -286,10 +288,14 @@ Every one of these is documented at length where it lives; the list is the map.
   Mutation-proved in `tests/engine-talkback-select-test.cpp` (deleting the
   provision-time set fails six assertions; restoring to a non-neutral value
   fails two) and reverted clean. The probe is unchanged — it ducks for its
-  three-second tone and destroys its channel, self-contained. **Not yet
-  confirmed live**: this is written from the operator's report plus the
-  absence of any duck-at-provision in our own code; it needs the next
-  production to confirm talent are no longer ducked on assign.
+  three-second tone and destroys its channel, self-contained. **CONFIRMED LIVE
+  (owner's own testing, 2026-09-04): talent are no longer ducked on assign.**
+  Worth keeping in mind how this one was reached, because the reasoning was
+  weaker than the result: it was written from the operator's report plus the
+  ABSENCE of any duck-at-provision in our own code, i.e. by elimination about a
+  third party's undocumented behaviour. That also retires the argued-not-measured
+  reading of `kBackgroundNeutral` = 1.0 (deduced from the setter being keyed by
+  channelID alone, with no per-member variant anywhere in the API).
 - **THE THREE TALKBACK DELIVERY LAWS** (ported 2026-08-29 from the sibling
   ZComms project, which spent that day live-hunting talkback delivery failures
   against the same Meeting SDK 7.1.5; its writeup is in
@@ -390,7 +396,11 @@ Every one of these is documented at length where it lives; the list is the map.
   `onCreateChannelResponse`, and every re-resolved name at once from
   `resolve_roster_change()`. Two channels passed the 2026-08-26 gate because
   two channels is two creates and two invites; a 24-talent plan is 13 creates
-  and 24+ invites and would have tripped exactly what ZComms measured. So
+  and 24+ invites and would have tripped exactly what ZComms measured.
+  **CONFIRMED LIVE at real scale (owner's own testing, 2026-09-04): a
+  multi-channel plan provisions with no terminal `create_rate_limited`** — so
+  the shared 600 ms floor holds beyond the two-channel case that passed in
+  August, and Law 2 is no longer inferred from ZComms' measurements alone. So
   `kNominationCreateSpacing` (300 ms, creates only) became
   **`kMembershipCallSpacing` (600 ms, shared)**: both call kinds queue,
   `nomination_tick()` spends **at most one call per turn** against one floor

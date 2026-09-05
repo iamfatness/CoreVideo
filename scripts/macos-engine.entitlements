@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for ZoomObsEngine.app, the process that links the Zoom Meeting
+  SDK. NOT for the plugin bundle: only the engine links the ZoomSDK framework
+  (see CMakeLists.txt), the plugin reaches it over a socket, and an entitlement
+  a binary does not need is attack surface it should not carry.
+
+  NOTE ON STYLE: no double hyphens anywhere in this comment. XML forbids them
+  inside comments and Apple's AMFIUnserializeXML enforces that strictly, so a
+  double hyphen here fails every codesign call with a bare "syntax error near
+  line N" that names the entitlements file and nothing else. This file is
+  parsed by a stricter reader than most XML you will write.
+
+  disable-library-validation is LOAD BEARING. It is finding #1 of the whole
+  macOS port restated as a signing requirement: ZoomSDK.framework is not self
+  contained, and at auth it loads sibling BUNDLES (ssb_sdk, zNet, zPTUIEx and
+  others) through the MAIN BUNDLE's Contents/Frameworks directory, not via
+  rpath and not relative to the framework. Library validation is precisely the
+  mechanism that refuses that load, and the hardened runtime (mandatory for
+  notarization) turns it on.
+
+  Without this entitlement the failure is the one that already cost days once:
+  initSDK returns Success, getAuthService returns a live object, and sdkAuth
+  returns Failed(1) SYNCHRONOUSLY with no delegate callback ever firing. It is
+  also invisible until the build is DISTRIBUTED, because a locally signed dev
+  build of the same code runs fine, so nothing short of signing and launching
+  the real artifact can catch it.
+
+  The two device entitlements are for the SDK's own UI, which is shown on
+  purpose so the operator can pick a camera and admit waiting room
+  participants. TCC still needs the matching NSCameraUsageDescription and
+  NSMicrophoneUsageDescription strings in the engine app's Info.plist: these
+  entitlements permit the access, the strings are what the prompt says.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <key>com.apple.security.device.camera</key>
+    <true/>
+</dict>
+</plist>

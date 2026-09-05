@@ -979,6 +979,21 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoAudioSilenceFade
              COMMAND CoreVideoAudioSilenceFadeTest)
 
+    # ITU-R BS.1770-4 loudness. The coefficients are DERIVED from the runtime
+    # sample rate rather than taken from the standard's 48 kHz table, because
+    # the engine stamps whatever rate Zoom gave it into ShmAudioHeader and
+    # Zoom commonly sends 32 kHz -- measured 1.3 LU of error on a 1 kHz tone
+    # if the 48 kHz constants are used at 32 kHz, with nothing in the reading
+    # to say it is wrong. See src/audio-loudness.h.
+    add_executable(CoreVideoAudioLoudnessTest
+        tests/audio-loudness-test.cpp
+    )
+    target_include_directories(CoreVideoAudioLoudnessTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoAudioLoudness
+             COMMAND CoreVideoAudioLoudnessTest)
+
     # Backfills silence into an ISO WAV across gaps so its own timeline
     # tracks real elapsed time instead of shrinking by every silent
     # stretch — 2026-08-21 design review ("does ZoomISO handle variable

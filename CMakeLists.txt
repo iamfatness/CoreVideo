@@ -456,7 +456,24 @@ if(BUILD_ZOOM_ENGINE)
         #
         # -F<dir> adds the framework search path for both `#import <ZoomSDK/...>`
         # header resolution and `-framework ZoomSDK` linking.
-        add_executable(ZoomObsEngine engine/src/main-macos.mm)
+        # engine-talkback.cpp is deliberately NOT added here, despite this
+        # task's own brief listing it: EngineTalkback (engine-talkback.h)
+        # still directly implements ZOOMSDK::IMeetingTalkbackCtrlEvent and
+        # takes ZOOMSDK::IMeetingService* in probe()/nominate()/
+        # session_start()/resolve_roster_change() -- the Windows/Linux C++
+        # SDK's own namespace, which has no macOS counterpart at all (the
+        # macOS Zoom SDK is pure Objective-C; there is no zoom_sdk.h, no
+        # IMeetingService, nothing under ZOOMSDK::). Task 1's own report
+        # found this exact coupling (its "Finding 1") and the resulting
+        # decision was to leave engine-talkback.cpp Windows/Linux-only rather
+        # than widen TalkbackSdk into a second seam over IMeetingService --
+        # this compile attempt reconfirms it: adding engine-talkback.cpp here
+        # fails immediately with "'zoom_sdk.h' file not found", independent
+        # of anything in this file. Only the new adapter is added -- compiling
+        # IT clean against the real ZoomSDKTalkbackController is this task's
+        # actual offline proof.
+        add_executable(ZoomObsEngine engine/src/main-macos.mm
+            engine/src/engine-talkback-sdk-macos.mm)
         target_include_directories(ZoomObsEngine PRIVATE src engine/src)
         # -F must be on BOTH the compile line (so `#import <ZoomSDK/ZoomSDK.h>`
         # resolves via the framework's Headers dir) and the link line (so

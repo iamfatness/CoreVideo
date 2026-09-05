@@ -42,8 +42,16 @@ after checking `{"cmd":"status"}` — it IS the meeting session.
 
 **Talkback does not exist on macOS**, and the dock says so rather than failing
 quietly. `engine-talkback.cpp` is in `ENGINE_SOURCES`, which only the Windows
-engine target uses; the macOS engine is `main-macos.mm` and never compiles it.
-The dock is cross-platform and builds either way, so without a gate it is a
+and Linux engine targets use; the macOS engine target is `main-macos.mm` plus
+(2026-09-05, macOS talkback port Task 2) `engine-talkback-sdk-macos.{h,mm}` —
+`TalkbackMacSdk`, the seam's macOS adapter over `ZoomSDKTalkbackController` —
+and it still never compiles `engine-talkback.cpp` itself: `EngineTalkback`
+directly implements `ZOOMSDK::IMeetingTalkbackCtrlEvent` and takes
+`ZOOMSDK::IMeetingService*` throughout, the Windows/Linux C++ SDK's own
+namespace, which the macOS Zoom SDK (pure Objective-C, no `zoom_sdk.h`) has no
+counterpart for at all — confirmed by trying: adding it to the macOS target
+fails immediately with `'zoom_sdk.h' file not found`, independent of anything
+the adapter does. The dock is cross-platform and builds either way, so without a gate it is a
 panel whose every control sends a command nothing answers. One constant,
 `kTalkbackPlatformSupported` (`src/zoom-talkback-panel.cpp`), feeds
 `TalkbackDockSessionView::platform_supported`,

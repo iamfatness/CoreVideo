@@ -94,12 +94,21 @@ struct TilesEffect {
 bool tiles_effect_load(TilesEffect &out);
 
 // Drops our reference to the effect and resets the struct. Safe to call on
-// an unloaded/failed TilesEffect. Note: gs_effect_create_from_file() allocates
-// a fresh gs_effect_t on every call -- libobs does NOT cache or dedupe
-// effects compiled from the same file (an earlier version of this comment
-// claimed otherwise). gs_effect_destroy() here is a real, immediate release
-// of THIS handle. Every caller that loads its own TilesEffect from this file
-// (the Tiles wall and the Loudness Meter each compile an independent copy)
-// owns exactly one handle and must destroy it exactly once; two owners must
-// never share one gs_effect_t*, or the second destroy is a double-free.
+// an unloaded/failed TilesEffect.
+//
+// libobs CACHES effects created from a file, and both halves of that matter
+// here -- verified in libobs source, because this comment has been wrong in
+// both directions before:
+//
+//   graphics.c, gs_effect_create_from_file(): find_cached_effect(file) is
+//   consulted first, so loading the same path twice returns the SAME
+//   gs_effect_t*. gs_effect_create() marks any file-created effect cached.
+//   effect.c, gs_effect_destroy(): `if (!effect->cached)` guards the real
+//   free, so destroying a cached effect is a no-op; obs_free_graphics()
+//   reclaims it at shutdown.
+//
+// Consequence for callers: several owners may each hold a TilesEffect loaded
+// from this same file (the Tiles wall and the Loudness Meter both do). They
+// share one underlying pointer, each destroy is a no-op, and that is safe --
+// there is no double-free to avoid and no leak to chase.
 void tiles_effect_destroy(TilesEffect &fx);

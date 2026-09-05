@@ -300,3 +300,21 @@ inline LoudnessBoardRect loudness_board_bar_rect(const LoudnessBoardRect &row,
     r.x = (d >= 0.0) ? centre : centre - len;
     return r;
 }
+
+// The shortest row that is still a readiness board rather than a texture: a
+// name and a number at a size an operator reads across a control room, plus
+// the gap. A 25-person Zoom Events room would otherwise produce 13 px rows.
+constexpr int kLoudnessBoardMinRowPx = 24;
+
+// How many rows this canvas can actually show. Beyond it the renderer draws
+// the first N (which, because rows are name-ordered, is stable frame to frame
+// rather than shuffling) and says so in the header band.
+inline size_t loudness_board_visible_rows(int canvas_h, size_t row_count)
+{
+    if (canvas_h <= kLoudnessBoardHeaderPx || row_count == 0) return 0;
+    const int body_h = canvas_h - kLoudnessBoardHeaderPx;
+    const size_t capacity =
+        static_cast<size_t>(body_h / kLoudnessBoardMinRowPx);
+    if (capacity == 0) return 0;
+    return row_count < capacity ? row_count : capacity;
+}

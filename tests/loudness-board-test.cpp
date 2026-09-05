@@ -297,6 +297,42 @@ int main()
               "the bar's vertical extent does not match its row");
     }
 
+    // ── The board is bounded, and it says so ───────────────────────────────
+    // A 25-person Zoom Events room would give rows a few pixels tall, which
+    // is not a readiness board, it is a texture. The renderer caps the rows
+    // it draws; the cap has to be a decision that can be reasoned about here
+    // rather than a magic number buried in a draw loop.
+    {
+        check(loudness_board_visible_rows(360, 3) == 3,
+              "three panelists on a 360 px canvas did not all fit");
+        check(loudness_board_visible_rows(360, 40) ==
+              (360 - kLoudnessBoardHeaderPx) / kLoudnessBoardMinRowPx,
+              "forty panelists were not capped to what the canvas can show "
+              "at the minimum readable row height");
+        check(loudness_board_visible_rows(360, 0) == 0,
+              "an empty panel produced rows to draw");
+        check(loudness_board_visible_rows(0, 10) == 0,
+              "a zero-height canvas produced rows to draw");
+        const size_t capped = loudness_board_visible_rows(360, 40);
+        const LoudnessBoardRect last =
+            loudness_board_row_rect(640, 360, capped, capped - 1);
+        // Compared against the SLOT (drawn height + the inter-row gap), not
+        // the drawn height alone: kLoudnessBoardMinRowPx is the minimum
+        // whole-row allotment ("a name and a number... plus the gap", per
+        // its own comment), and loudness_board_row_rect always carves the
+        // gap back out of whatever slot it is given. Comparing the cap's
+        // capacity formula (floor(body_h / kLoudnessBoardMinRowPx), pinned
+        // by the equality check above) against the post-gap .h directly is
+        // unsatisfiable by construction whenever kLoudnessBoardRowGapPx > 0:
+        // capacity = floor(body_h/M) only guarantees body_h/capacity >= M,
+        // i.e. the SLOT is at least M, not the slot minus the gap. For this
+        // canvas that is 25 px of slot for a 24 px minimum, and row_rect's
+        // own -4 px gap then drops the drawn height to 21.
+        check(last.h + kLoudnessBoardRowGapPx >= kLoudnessBoardMinRowPx,
+              "the capped row count still produced rows below the minimum "
+              "readable slot height");
+    }
+
     if (failures == 0)
         std::cout << "loudness-board: all tests passed\n";
     return failures == 0 ? 0 : 1;

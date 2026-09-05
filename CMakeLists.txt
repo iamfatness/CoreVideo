@@ -269,6 +269,7 @@ if(COREVIDEO_BUILD_PLUGIN)
         src/talkback-cue.cpp
         src/zoom-participant-audio-source.cpp
         src/zoom-supersource.cpp
+        src/zoom-loudness-meter-source.cpp
         src/zoom-tiles-background.cpp
         src/zoom-tiles-audio.cpp
         src/zoom-tiles-effect.cpp

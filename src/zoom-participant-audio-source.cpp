@@ -108,8 +108,16 @@ struct CoreVideoAudioSource {
     // request rather than a direct call: touching the meter from the caller's
     // thread would race the drain that is filling it.
     std::atomic<bool> loudness_reset_requested{false};
-    // Display name, cached on the roster callback. Guarded by ctx->mtx.
+    // Display name, cached on the roster callback. Guarded by its OWN mutex,
+    // name_mtx, deliberately NOT ctx->mtx: corevideo_loudness_readings() has
+    // to be able to read a row's identity even on a poll where ctx->mtx's
+    // try_lock fails because output_audio_frame() is mid-drain (SHM open,
+    // obs_source_output_audio(), disk-writing blog() calls) -- see that
+    // function. A name that only updates on a roster callback is cheap
+    // enough to give its own uncontended mutex rather than fight the audio
+    // lane for the busy one.
     std::string display_name;
+    std::mutex  name_mtx;
     // Next ring slot this source will drain. Only the engine reader thread
     // touches it, the same thread that owns `timeline`.
     uint32_t read_index    = 0;
@@ -220,24 +228,44 @@ std::vector<LoudnessReading> corevideo_loudness_readings()
         r.participant_id =
             ctx->current_participant_id.load(std::memory_order_acquire);
         r.subscribed = ctx->subscribed.load(std::memory_order_acquire);
+        // The name comes from its OWN mutex (name_mtx), never from ctx->mtx,
+        // and is read unconditionally -- this row's identity must survive a
+        // poll where the measurement below is skipped.
         {
-            // try_lock, not lock: output_audio_frame() holds this exact mutex
-            // across a whole drain -- shm_region_open_readwrite(),
-            // obs_source_output_audio(), rate-limited blog() calls that write
-            // to disk -- and this runs on the OBS graphics thread via
-            // meter_video_tick(). A blocking lock() here would let one busy
-            // audio source stall the graphics thread for the length of its
-            // drain. Skipping a busy source for this poll costs nothing an
-            // operator can see: its numbers reappear on the next 100 ms tick,
-            // invisible on a board that redraws at 10 Hz anyway.
+            std::lock_guard<std::mutex> name_lk(ctx->name_mtx);
+            r.display_name = ctx->display_name;
+        }
+        // try_lock, not lock: output_audio_frame() holds ctx->mtx across a
+        // whole drain -- shm_region_open_readwrite(), obs_source_output_audio(),
+        // rate-limited blog() calls that write to disk -- and this runs on
+        // the OBS graphics thread via meter_video_tick(). A blocking lock()
+        // here would let one busy audio source stall the graphics thread for
+        // the length of its drain.
+        //
+        // On a failed try_lock the READING IS STILL PUSHED, just with its
+        // measurement fields left at their unavailable defaults
+        // (has_short_term/has_integrated false, gated_blocks 0) -- this used
+        // to `continue` here, which dropped the row entirely: one fewer row
+        // for loudness_board_row_rect() to divide the canvas by (every OTHER
+        // row visibly resizes), one fewer vote for that poll's panel median
+        // (every OTHER panelist's pass/fail can move for 100 ms), and a
+        // changed `model.signature` that forces the very child-text rebuild
+        // the signature gate exists to prevent. A reading with no
+        // measurement is the same "not measured yet" state
+        // loudness_board_build() already renders as NoAudio/Measuring for a
+        // source that has simply never spoken -- the honest fix is a
+        // temporarily-empty reading, not a temporarily-missing row. Its real
+        // numbers reappear on the very next 100 ms poll once the drain
+        // releases the mutex.
+        {
             std::unique_lock<std::mutex> ctx_lk(ctx->mtx, std::try_to_lock);
-            if (!ctx_lk.owns_lock()) continue;
-            r.display_name   = ctx->display_name;
-            r.has_short_term = loudness_meter_short_term(ctx->loudness,
-                                                         &r.short_term_lufs);
-            r.has_integrated = loudness_meter_integrated(ctx->loudness,
-                                                         &r.integrated_lufs);
-            r.gated_blocks   = loudness_meter_gated_blocks(ctx->loudness);
+            if (ctx_lk.owns_lock()) {
+                r.has_short_term = loudness_meter_short_term(ctx->loudness,
+                                                             &r.short_term_lufs);
+                r.has_integrated = loudness_meter_integrated(ctx->loudness,
+                                                             &r.integrated_lufs);
+                r.gated_blocks   = loudness_meter_gated_blocks(ctx->loudness);
+            }
         }
         out.push_back(std::move(r));
     }
@@ -339,6 +367,9 @@ static void unsubscribe_audio(CoreVideoAudioSource *ctx)
         // one after a gap of unknown length. Either way the previous
         // window's gated blocks describe audio that is not this check.
         loudness_meter_reset_window(ctx->loudness);
+    }
+    {
+        std::lock_guard<std::mutex> name_lk(ctx->name_mtx);
         ctx->display_name.clear();
     }
 }
@@ -421,6 +452,9 @@ static void forget_subscription_for_new_engine(CoreVideoAudioSource *ctx)
         audio_timeline_reset(ctx->timeline);
         ctx->read_started = false;
         loudness_meter_reset_window(ctx->loudness);
+    }
+    {
+        std::lock_guard<std::mutex> name_lk(ctx->name_mtx);
         ctx->display_name.clear();
     }
     if (!was_subscribed) return;
@@ -493,7 +527,7 @@ static void maybe_resubscribe_for_roster(CoreVideoAudioSource *ctx)
         }
     }
     {
-        std::lock_guard<std::mutex> lk(ctx->mtx);
+        std::lock_guard<std::mutex> name_lk(ctx->name_mtx);
         ctx->display_name = cached_name;
     }
 

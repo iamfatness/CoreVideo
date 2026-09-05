@@ -1288,7 +1288,20 @@ Every one of these is documented at length where it lives; the list is the map.
   `loudness_board_needs_label_refresh()` exists to prevent. Where a short-term
   reading or a reference is unavailable, `loudness_board_bar_input()` falls
   back to the integrated deviation the bar always used, rather than showing no
-  bar at all.
+  bar at all. **Regression B, same-day re-review**: the first cut populated
+  `has_short_term_deviation` whenever a short-term reading and a reference
+  existed, with no gate on whether the row had a real verdict yet.
+  `loudness_meter_short_term()` is UNGATED, so a subscribed-but-silent source
+  reads its own noise floor (e.g. -90 LUFS) -- against a ~-22 LUFS reference
+  that is a ~-68 LU deviation, clamped to a full-length bar pegged hard left,
+  in idle grey, right next to the text "no audio"/"measuring". A silent
+  preshow is this board's NORMAL state, so this was the common case, not an
+  edge one. `has_short_term_deviation` is now gated on `has_deviation`
+  itself (the same Pass/Loud/Quiet verdict condition) rather than restated
+  independently -- which also guarantees the integrated fallback is always
+  available whenever the short-term value is. NoAudio and Measuring rows now
+  draw no bar at all, pinned in `tests/loudness-board-test.cpp` by a case
+  with a stray -90 LUFS short-term reading on an otherwise-silent row.
 - **No `log10` in the relative gate's hot loop**
   (`loudness_meter_integrated()`, `src/audio-loudness.h`). Pass 2 used to
   convert every gated block (up to `kLoudnessMaxGatedBlocks` = 6000) to LUFS
@@ -1306,17 +1319,37 @@ Every one of these is documented at length where it lives; the list is the map.
   `kLoudnessMaxGatedBlocks` up front, so the audio lane is provably
   allocation-free after configure.
 - **`corevideo_loudness_readings()` uses `try_lock` on each source's mutex,
-  never a blocking `lock()`** (final whole-branch review, 2026-09-05,
-  Important). It runs on the OBS graphics thread via `meter_video_tick()` and
-  takes the exact `ctx->mtx` that `output_audio_frame()` holds across an
-  entire drain -- including `shm_region_open_readwrite()`,
-  `obs_source_output_audio()`, and rate-limited `blog()` calls that write to
-  disk. A blocking lock here could stall the graphics thread for the length
-  of one source's drain. A source that is busy is simply skipped for that
-  poll; its numbers reappear on the next 100 ms tick, invisible on a board
-  that redraws at 10 Hz. `corevideo_audio_source_infos()` (the sibling
-  registry walk) is unchanged and still blocks -- it is called far less often
-  and from a different context.
+  never a blocking `lock()`, and a failed try_lock skips the MEASUREMENT,
+  never the ROW** (final whole-branch review, 2026-09-05, Important, plus a
+  same-day re-review regression). It runs on the OBS graphics thread via
+  `meter_video_tick()` and takes the exact `ctx->mtx` that
+  `output_audio_frame()` holds across an entire drain -- including
+  `shm_region_open_readwrite()`, `obs_source_output_audio()`, and
+  rate-limited `blog()` calls that write to disk -- so a blocking lock here
+  could stall the graphics thread for the length of one source's drain.
+  `corevideo_audio_source_infos()` (the sibling registry walk) is unchanged
+  and still blocks -- it is called far less often and from a different
+  context. **Regression A, same day**: the first cut `continue`d past
+  `out.push_back(r)` on a failed try_lock, which drops the whole reading, not
+  just its numbers -- one fewer row for `loudness_board_row_rect()` to divide
+  the canvas by (every OTHER row visibly resizes for one poll), one fewer
+  vote for that poll's panel median (every OTHER panelist's pass/fail can
+  move for 100 ms), and a changed `model.signature` that forces exactly the
+  full child-text rebuild `loudness_board_needs_label_refresh()` exists to
+  prevent -- on a mutex that is busy often, not rarely, since
+  `output_audio_frame()` holds it across a real drain. The reading is now
+  ALWAYS pushed; only the measurement fields (`has_short_term`/
+  `has_integrated`/`gated_blocks`) are left at their unavailable defaults
+  when the try_lock fails, which `loudness_board_build()` already renders
+  correctly as NoAudio -- the same state a source that has simply never
+  spoken gets. The row's identity (`source_uuid`, `kind`, `participant_id`)
+  was always readable without `ctx->mtx`, but `display_name` was not: it is
+  now guarded by its own dedicated `name_mtx` (`CoreVideoAudioSource`, next
+  to the field) instead of `ctx->mtx`, specifically so a busy audio drain
+  cannot make a row's NAME flicker to "- unassigned -" on the exact polls
+  where its numbers go missing. All three `display_name` writers
+  (`unsubscribe_audio()`, `forget_subscription_for_new_engine()`, the roster
+  callback) moved to `name_mtx` alongside the reader.
 
 ## Live testing against a real meeting
 

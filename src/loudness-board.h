@@ -104,13 +104,15 @@ struct LoudnessBoardRow {
     bool              has_short_term = false;
     double            short_term_lufs = 0.0;
     // Short-term deviation from the panel reference, i.e. short_term_lufs -
-    // reference. Populated whenever both a short-term reading and a
-    // reference exist, independent of `has_deviation` (which gates on
-    // gated_blocks meeting kLoudnessBoardMinBlocks -- a verdict requirement
-    // that a live, ungated number should not inherit). This is what
-    // loudness_board_bar_input() prefers: the bar is meant to move live while
-    // the panelist talks, and short-term is the fast measure that does that;
-    // the row TEXT stays on the integrated verdict.
+    // reference. Populated only when the row ALSO has a real integrated
+    // verdict (`has_deviation`, i.e. cleared min_blocks against an
+    // established reference) -- loudness_meter_short_term() is UNGATED, so a
+    // silent or barely-started source reads its own noise floor as a huge,
+    // meaningless deviation, and this field must not carry that onto the
+    // board. This is what loudness_board_bar_input() prefers when it exists:
+    // the bar is meant to move live while the panelist talks, and short-term
+    // is the fast measure that does that; the row TEXT stays on the
+    // integrated verdict.
     bool              has_short_term_deviation = false;
     double            short_term_deviation_lu  = 0.0;
     bool              has_integrated = false;
@@ -273,13 +275,6 @@ inline LoudnessBoardModel loudness_board_build(
         row.has_integrated  = r->has_integrated;
         row.integrated_lufs = r->integrated_lufs;
 
-        if (row.has_short_term && model.has_reference &&
-            std::isfinite(row.short_term_lufs)) {
-            row.has_short_term_deviation = true;
-            row.short_term_deviation_lu =
-                row.short_term_lufs - model.reference_lufs;
-        }
-
         if (!r->has_integrated || r->gated_blocks == 0) {
             row.status = LoudnessRowStatus::NoAudio;
         } else if (r->gated_blocks < min_blocks) {
@@ -297,6 +292,29 @@ inline LoudnessBoardModel loudness_board_build(
             row.status = LoudnessRowStatus::Measuring;
         }
         row.detail = loudness_row_status_text(row.status);
+
+        // Short-term deviation is gated on the row already having a REAL
+        // VERDICT -- the same condition that sets `has_deviation` above
+        // (Pass/Loud/Quiet, i.e. cleared min_blocks against an established
+        // reference) -- NOT merely on a short-term reading existing.
+        // loudness_meter_short_term() is UNGATED -- a subscribed-but-silent
+        // source reads its own noise floor (e.g. -90 LUFS), which against a
+        // ~-22 LUFS panel reference is a ~-68 LU deviation, clamped to full
+        // scale. Without this gate a silent preshow -- this board's NORMAL
+        // state, and a panelist who has merely started talking but not yet
+        // cleared min_blocks (Measuring) -- would paint a full-length bar
+        // pegged hard left, in idle grey, right next to text reading "no
+        // audio" or "measuring": it reads as "far too quiet" when the truth
+        // is "not measured at all". Piggybacking on `has_deviation` rather
+        // than restating its condition also means loudness_board_bar_input()'s
+        // integrated fallback is always available whenever the short-term
+        // one is populated -- the bar can still fall back, never vanish.
+        if (row.has_deviation && row.has_short_term &&
+            std::isfinite(row.short_term_lufs)) {
+            row.has_short_term_deviation = true;
+            row.short_term_deviation_lu =
+                row.short_term_lufs - model.reference_lufs;
+        }
         model.rows.push_back(std::move(row));
     }
 

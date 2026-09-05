@@ -353,6 +353,70 @@ int main()
               "moved -- short-term must not force a text-child rebuild");
     }
 
+    // ── REGRESSION B: an unmeasured row must draw NO bar, even with a
+    // short-term reading ────────────────────────────────────────────────────
+    // loudness_meter_short_term() is ungated: a subscribed-but-silent source
+    // still reads its own noise floor (e.g. -90 LUFS), which against a real
+    // panel reference is a huge, meaningless deviation. NoAudio (never
+    // spoken / zero gated blocks) and Measuring (some gated blocks, not yet
+    // enough for a verdict) must both refuse to populate
+    // has_short_term_deviation, and loudness_board_bar_input() must refuse
+    // to produce ANY bar for them -- a silent preshow is this board's normal
+    // state, and it must not paint a full-length bar pegged hard left on
+    // every row in it.
+    {
+        std::vector<LoudnessReading> panel = {
+            measured("Ana", -20.0, -20.0, 200),   // establishes a reference
+            measured("Ben", -20.0, -20.0, 200),
+        };
+        // NoAudio: subscribed, never spoken, but with a stray short-term
+        // reading (the shape a noise-floor read would actually take).
+        LoudnessReading silent_with_noise_floor;
+        silent_with_noise_floor.source_uuid     = "uuid_Cara";
+        silent_with_noise_floor.display_name    = "Cara";
+        silent_with_noise_floor.subscribed      = true;
+        silent_with_noise_floor.has_short_term  = true;
+        silent_with_noise_floor.short_term_lufs = -90.0;
+        silent_with_noise_floor.has_integrated  = false;
+        silent_with_noise_floor.gated_blocks    = 0;
+        panel.push_back(silent_with_noise_floor);
+
+        // Measuring: a handful of gated blocks (well under
+        // kLoudnessBoardMinBlocks) with a short-term reading that has not
+        // yet converged on real speech either.
+        panel.push_back(measured("Dev", -20.0, -80.0, 5));
+
+        const LoudnessBoardModel m = loudness_board_build(
+            panel, LoudnessReference::PanelMedian, 2.0, kLoudnessBoardMinBlocks);
+        check(m.has_reference, "no reference produced");
+
+        const LoudnessBoardRow *cara = nullptr;
+        const LoudnessBoardRow *dev  = nullptr;
+        for (const LoudnessBoardRow &row : m.rows) {
+            if (row.name == "Cara") cara = &row;
+            if (row.name == "Dev")  dev  = &row;
+        }
+        check(cara != nullptr && dev != nullptr, "expected rows missing");
+
+        check(cara->status == LoudnessRowStatus::NoAudio,
+              "Cara was not reported as NoAudio");
+        check(!cara->has_short_term_deviation,
+              "a NoAudio row with a stray short-term reading populated a "
+              "short-term deviation");
+        double bar_lu = 0.0;
+        check(!loudness_board_bar_input(*cara, &bar_lu),
+              "a NoAudio row produced a bar input -- a silent preshow must "
+              "draw no bar, not a full-length one from the noise floor");
+
+        check(dev->status == LoudnessRowStatus::Measuring,
+              "Dev was not reported as Measuring");
+        check(!dev->has_short_term_deviation,
+              "a still-Measuring row populated a short-term deviation");
+        bar_lu = 0.0;
+        check(!loudness_board_bar_input(*dev, &bar_lu),
+              "a still-Measuring row produced a bar input");
+    }
+
     // ── The signature changes on content and NOT on input order ────────────
     // The Talkback dock shipped a live defect (2026-08-29) where a merely
     // REORDERED roster rebuilt the whole widget list several times a second

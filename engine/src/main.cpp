@@ -1501,22 +1501,27 @@ int main()
     // used to do for itself at the top of probe()/nominate()/session_start()
     // before Task 1 (see set_sdk()'s comment in engine-talkback.h for why
     // that internal derivation was removed). `register_event` additionally
-    // calls SetEvent() on the REAL controller -- probe() and nominate() used
-    // to do this themselves; it is not one of TalkbackSdk's operations (the
-    // seam's own TalkbackSdkEvents shape does not match
+    // calls register_event() (fix round 1, Finding 2: routes through the
+    // adapter now, not a bare SetEvent() on the raw pointer, so
+    // events_registered() reflects it and probe() can refuse on a failed
+    // registration exactly as it did before this seam existed) -- probe()
+    // and nominate() used to call SetEvent() themselves; it is still not one
+    // of TalkbackSdk's own OPERATIONS (the seam's normalised
+    // TalkbackSdkEvents shape does not match the real
     // ZOOMSDK::IMeetingTalkbackCtrlEvent, which `talkback` still implements
-    // directly to receive Windows callbacks natively), so it happens here,
-    // on the raw pointer, exactly where the old internal code did it.
-    // Deliberately NOT called before resolve_roster_change(): that function's
-    // fix-round-1 (M3) guard depends on nothing re-deriving the adapter while
-    // a live session or a busy nomination holds it -- see
+    // directly to receive Windows callbacks natively), so it is a method on
+    // the CONCRETE TalkbackWinSdk, callable only from code that already
+    // holds one -- main.cpp, here, at the same point it constructs the
+    // adapter. Deliberately NOT called before resolve_roster_change(): that
+    // function's fix-round-1 (M3) guard depends on nothing re-deriving the
+    // adapter while a live session or a busy nomination holds it -- see
     // EngineTalkback::resolve_roster_change()'s own comment.
     auto inject_talkback_sdk = [](ZOOMSDK::IMeetingService *svc, bool register_event) {
         ZOOMSDK::IMeetingTalkbackController *ctrl =
             svc ? svc->GetMeetingTalkbackController() : nullptr;
         talkback_sdk = TalkbackWinSdk(ctrl);
+        if (register_event) talkback_sdk.register_event(&talkback);
         talkback.set_sdk(&talkback_sdk);
-        if (register_event && ctrl) ctrl->SetEvent(&talkback);
     };
     // Task 4: wire the roster-change path (EngineParticipants' five SDK
     // callbacks) to EngineTalkback's re-resolution. Deferred until here

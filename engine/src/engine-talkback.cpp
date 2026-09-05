@@ -374,10 +374,22 @@ bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
            std::string(R"("supported":)") + (supported ? "true" : "false"));
     if (!supported) return probe_refused_without_ladder();
 
-    // SetEvent() registers this object as the SDK's callback sink. It is not
-    // one of TalkbackSdk's operations (macOS's equivalent registration would
-    // not look like this call at all) -- main.cpp makes it directly on the
-    // real controller, at the same point it injects the adapter above.
+    // Fix round 1 (Finding 2): SetEvent() registers this object as the SDK's
+    // callback sink, and a failed registration means no callback will ever
+    // reach this object, so the create below must not be issued -- this
+    // check existed before Task 1 and was dropped by mistake when SetEvent()
+    // moved out of the seam; restored here. Registering itself is NOT one of
+    // TalkbackSdk's operations (macOS's equivalent registration would not
+    // look like this call at all) -- main.cpp makes it directly on the real
+    // controller, via TalkbackWinSdk::register_event(), at the same point it
+    // injects the adapter above (inject_talkback_sdk(), called immediately
+    // before every probe()). What belongs here, unchanged from before Task
+    // 1, is reading the OUTCOME and refusing on it -- same stage name, same
+    // "code" field (the raw platform code, via last_raw_code(), never
+    // TalkbackResult's own numbering -- see Finding 3 / src/talkback-sdk.h's
+    // doc comment), same refusal path.
+    report("set_event", R"("code":)" + std::to_string(m_sdk->last_raw_code()));
+    if (!m_sdk->events_registered()) return probe_refused_without_ladder();
 
     // RUNG 3: create exactly one channel. Max 16 exist; we make one and
     // destroy it, so a failed probe cannot leak channel budget into the
@@ -414,8 +426,12 @@ bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
         return probe_refused_without_ladder();
     }
     const TalkbackResult create_result = m_sdk->create_channel(1);
+    // Fix round 1 (Finding 3): the raw platform code, not TalkbackResult's
+    // own numbering -- see src/talkback-sdk.h's doc comment on
+    // last_raw_code(). The ladder's own decision (the line below) still
+    // reads create_result, never the raw code.
     report("create_channel", R"("code":)" +
-           std::to_string(static_cast<int>(create_result)));
+           std::to_string(m_sdk->last_raw_code()));
     if (create_result != TalkbackResult::Ok) return probe_refused_without_ladder();
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
@@ -504,7 +520,10 @@ void EngineTalkback::drain_stray_channels()
         }
         report("stray_destroy",
                R"("channel":")" + json_escape(id_utf8) +
-               R"(","code":)" + std::to_string(static_cast<int>(e)) +
+               // Fix round 1 (Finding 3): raw platform code, not
+               // TalkbackResult -- see last_raw_code()'s doc comment. The
+               // retry loop above still keys on `e` (TalkbackResult).
+               R"(","code":)" + std::to_string(m_sdk->last_raw_code()) +
                R"(,"attempts":)" + std::to_string(attempt + 1));
         if (e != TalkbackResult::Ok) {
             report("stray_destroy_abandoned",
@@ -810,8 +829,9 @@ void EngineTalkback::tick()
         // lines is the message-storm shape this codebase already has a live
         // incident about.
         if (m_buffers_sent == 0 || e != TalkbackResult::Ok) {
+            // Fix round 1 (Finding 3): raw platform code, not TalkbackResult.
             report("send", R"("buffer":)" + std::to_string(m_buffers_sent) +
-                   R"(,"code":)" + std::to_string(static_cast<int>(e)));
+                   R"(,"code":)" + std::to_string(m_sdk->last_raw_code()));
         }
         if (e != TalkbackResult::Ok) {
             m_phase.store(Phase::Destroying, std::memory_order_release);
@@ -863,7 +883,8 @@ void EngineTalkback::tick()
         std::vector<std::string> ids;
         if (!channel_copy_utf8.empty()) ids.push_back(channel_copy_utf8);
         const TalkbackResult e = m_sdk->destroy_channels(ids);
-        report("destroy", R"("code":)" + std::to_string(static_cast<int>(e)) +
+        // Fix round 1 (Finding 3): raw platform code, not TalkbackResult.
+        report("destroy", R"("code":)" + std::to_string(m_sdk->last_raw_code()) +
                R"(,"attempt":)" + std::to_string(m_destroy_attempts + 1));
 
         if (e == TalkbackResult::Ok) {
@@ -1133,9 +1154,12 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
             if (error == TALKBACK_ERROR_OK && channelID != nullptr) {
                 uint32_t attempts = 0;
                 const TalkbackResult e = destroy_channel_retrying(id, &attempts);
+                // Fix round 1 (Finding 3): raw platform code, not
+                // TalkbackResult -- reflects the retry loop's LAST attempt,
+                // same as `e` does.
                 report_nomination("channel_stale",
                                   R"("channel":")" + json_escape(id) + R"(","code":)" +
-                                  std::to_string(static_cast<int>(e)) + R"(,"attempts":)" +
+                                  std::to_string(m_sdk->last_raw_code()) + R"(,"attempts":)" +
                                   std::to_string(attempts));
                 if (e != TalkbackResult::Ok) {
                     report_nomination("channel_stale_destroy_abandoned",
@@ -1207,9 +1231,10 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
             }
             uint32_t attempts = 0;
             const TalkbackResult e = destroy_channel_retrying(id, &attempts);
+            // Fix round 1 (Finding 3): raw platform code, not TalkbackResult.
             report_nomination("channel_cancelled",
                               R"("channel":")" + json_escape(id) + R"(","code":)" +
-                              std::to_string(static_cast<int>(e)) + R"(,"attempts":)" +
+                              std::to_string(m_sdk->last_raw_code()) + R"(,"attempts":)" +
                               std::to_string(attempts));
             if (e != TalkbackResult::Ok) {
                 report_nomination("channel_cancelled_abandoned",
@@ -1282,9 +1307,10 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
             report_nomination("channel_untracked", R"("channel":")" + json_escape(id) + "\"");
             uint32_t attempts = 0;
             const TalkbackResult e = destroy_channel_retrying(id, &attempts);
+            // Fix round 1 (Finding 3): raw platform code, not TalkbackResult.
             report_nomination("channel_untracked_destroy",
                               R"("channel":")" + json_escape(id) + R"(","code":)" +
-                              std::to_string(static_cast<int>(e)) + R"(,"attempts":)" +
+                              std::to_string(m_sdk->last_raw_code()) + R"(,"attempts":)" +
                               std::to_string(attempts));
             if (e != TalkbackResult::Ok) {
                 report_nomination("channel_untracked_destroy_abandoned",
@@ -1328,10 +1354,13 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
         // One report line per CHANNEL, not per member: a 13-channel plan is 13
         // lines, where per-member would be up to 130 -- the message-storm shape
         // this codebase already has a live incident about.
-        const TalkbackResult bgv = m_sdk->set_background_volume(id, kBackgroundNeutral);
+        // The ladder takes no decision on this result, only reports it (same
+        // as before Task 1 -- nothing here ever gated on the duck).
+        m_sdk->set_background_volume(id, kBackgroundNeutral);
+        // Fix round 1 (Finding 3): raw platform code, not TalkbackResult.
         report_nomination("background_volume_neutral",
                           R"("channel":")" + json_escape(id) + R"(","volume":1.0,"code":)" +
-                          std::to_string(static_cast<int>(bgv)));
+                          std::to_string(m_sdk->last_raw_code()));
 
         // Invite by NAME, resolved at ISSUE time: Zoom user ids are
         // meeting-scoped, so a stored id would point at nobody after a rejoin
@@ -1546,8 +1575,9 @@ void EngineTalkback::onCreateChannelResponse(const zchar_t *channelID, TalkbackE
     // Begin/Add/ExecuteBatchInviteUsers sequence this used to spell out by
     // hand for one participant.
     const TalkbackResult e = m_sdk->invite_users(channel_copy_utf8, {m_participant_id});
+    // Fix round 1 (Finding 3): raw platform code, not TalkbackResult.
     report("invite", R"("user_id":)" + std::to_string(m_participant_id) +
-           R"(,"code":)" + std::to_string(static_cast<int>(e)));
+           R"(,"code":)" + std::to_string(m_sdk->last_raw_code()));
     if (e != TalkbackResult::Ok) {
         m_phase.store(Phase::Destroying, std::memory_order_release);
         return;
@@ -1721,10 +1751,11 @@ void EngineTalkback::onChannelUserJoinResponse(const zchar_t *channelID,
 
     // Duck the main meeting for the person being spoken to, so the tone is
     // unambiguous rather than competing with meeting audio.
-    const TalkbackResult vol =
-        m_sdk->set_background_volume(channel_copy_utf8, kBackgroundDucked);
+    m_sdk->set_background_volume(channel_copy_utf8, kBackgroundDucked);
+    // Fix round 1 (Finding 3): raw platform code, not TalkbackResult. The
+    // ladder took no decision on this result before Task 1 either.
     report("background_volume", R"("code":)" +
-           std::to_string(static_cast<int>(vol)));
+           std::to_string(m_sdk->last_raw_code()));
 
     m_tone_index = 0;
     m_buffers_sent = 0;
@@ -2090,7 +2121,9 @@ bool EngineTalkback::nomination_create_next()
     // channel, which is not paced (it is the first) but must still push the
     // next membership call of ANY kind out by the spacing.
     stamp_membership_call();
-    report_nomination("create_channel", R"("code":)" + std::to_string(static_cast<int>(e)));
+    // Fix round 1 (Finding 3): raw platform code, not TalkbackResult -- the
+    // retry decision right below still keys on `e`.
+    report_nomination("create_channel", R"("code":)" + std::to_string(m_sdk->last_raw_code()));
 
     // LIVE GATE RUN 1 (2026-08-26): TalkbackResult::TooFrequent (Task 1;
     // formerly the raw SDKERR_TOO_FREQUENT_CALL) is the ONE synchronous
@@ -2509,9 +2542,11 @@ void EngineTalkback::nomination_destroy_provisioned()
         const std::string channel_id_utf8 = zchar_to_utf8(channel_id_z.c_str());
         uint32_t attempts = 0;
         const TalkbackResult e = destroy_channel_retrying(channel_id_utf8, &attempts);
+        // Fix round 1 (Finding 3): raw platform code, not TalkbackResult --
+        // reflects the retry loop's LAST attempt, same as `e` does.
         report_nomination("channel_destroyed",
                           R"("channel":")" + json_escape(channel_id_utf8) + R"(","code":)" +
-                          std::to_string(static_cast<int>(e)) + R"(,"attempts":)" +
+                          std::to_string(m_sdk->last_raw_code()) + R"(,"attempts":)" +
                           std::to_string(attempts));
         if (e != TalkbackResult::Ok) {
             report_nomination("channel_destroy_abandoned",
@@ -2651,11 +2686,14 @@ bool EngineTalkback::invite_nominee(const std::basic_string<zchar_t> &channel_id
     // BEFORE the disposition below, because it is precisely the refused calls
     // that must not be followed instantly by another.
     stamp_membership_call();
+    // Fix round 1 (Finding 3): raw platform code, not TalkbackResult --
+    // CLAUDE.md documents this exact line's `code` field read verbatim off
+    // real Windows SDKError values (2, 3, 18) in post-mortems.
     report_nomination("invite",
                       R"("name":")" + json_escape(name) + R"(","user_id":)" +
                       std::to_string(uid) + R"(,"channel":")" +
                       json_escape(channel_id_utf8) + R"(","code":)" +
-                      std::to_string(static_cast<int>(e)));
+                      std::to_string(m_sdk->last_raw_code()));
 
     // LAW 2's other half: 18 IS A WAIT, NOT A FAILURE -- the same ruling the
     // create ladder already lives under, applied to the call kind ZComms
@@ -3423,7 +3461,10 @@ void send_one(const void *pcm, uint32_t byte_len, uint64_t, void *ctx)
         const TalkbackResult e = c->sdk->send_audio(
             channel, send_ptr, send_len, c->rate, send_stereo);
         if (e != TalkbackResult::Ok) {
-            c->last_err = static_cast<int>(e);
+            // Fix round 1 (Finding 3): raw platform code, not TalkbackResult
+            // -- read immediately after this channel's own send_audio() call,
+            // before any other seam call can overwrite it.
+            c->last_err = c->sdk->last_raw_code();
             ++c->failed;
         } else {
             ++c->sent;

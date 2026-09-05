@@ -55,4 +55,29 @@ public:
     virtual TalkbackResult set_background_volume(const std::string &channel_id,
                                                  float volume) = 0;
     virtual void set_events(TalkbackSdkEvents *events) = 0;
+
+    // Fix round 1 (Findings 2 & 3). Neither of these is a ladder DECISION --
+    // TalkbackResult is still the only thing the ladder's own logic compares
+    // against, everywhere -- they are what the ladder's REPORT lines need.
+    //
+    // last_raw_code(): the platform's own error code from whichever seam
+    // call (an operation above, or event registration below) most recently
+    // returned. CLAUDE.md documents operators and post-mortems reading these
+    // specific Windows SDKError numbers verbatim out of the E2P log (e.g.
+    // "stage":"invite",...,"code":2 -- SDKERR_WRONG_USAGE, a talent in a
+    // different breakout room -- and code 3, and code 18 for the rate
+    // limit); reporting TalkbackResult's own numbering there instead would
+    // make every one of those diagnostics silently wrong, even though the
+    // ladder's retry/abort decisions (which DO use TalkbackResult) would
+    // still be correct. So the two never collapse into one value: the
+    // adapter maps its raw code to a TalkbackResult for the ladder AND keeps
+    // the raw code available, separately, for the report line that follows.
+    virtual int last_raw_code() const = 0;
+    // Whether the most recent attempt to register this object's event sink
+    // succeeded (SetEvent, on Windows). Registration itself is NOT one of
+    // this seam's operations -- it is platform-specific in a way none of the
+    // operations above are (see engine-talkback-sdk-win.h's own comment) --
+    // but probe() must still be able to refuse when it fails, exactly as it
+    // always could, so that one bit crosses here.
+    virtual bool events_registered() const = 0;
 };

@@ -259,15 +259,15 @@ public:
         if (!scripted_create_results.empty()) {
             const TalkbackResult r = scripted_create_results.front();
             scripted_create_results.erase(scripted_create_results.begin());
-            return r;
+            return record(r);
         }
-        if (creates == fail_create_call) return TalkbackResult::Unknown;
+        if (creates == fail_create_call) return record(TalkbackResult::Unknown);
         if (rate_limit_next > 0) {
             --rate_limit_next;
             ++rate_limited;
-            return TalkbackResult::TooFrequent;
+            return record(TalkbackResult::TooFrequent);
         }
-        return TalkbackResult::Ok;
+        return record(TalkbackResult::Ok);
     }
     TalkbackResult destroy_channels(const std::vector<std::string> &channel_ids) override
     {
@@ -278,7 +278,7 @@ public:
         // lives there and nowhere above it. Recorded exactly like the old
         // fake's AddChannelToDestroy(), one push per id.
         for (const auto &id : channel_ids) destroyed.push_back(id);
-        return TalkbackResult::Ok;
+        return record(TalkbackResult::Ok);
     }
     // Task 4: BEGIN/ADD/EXECUTE recorded as committed (channel, user_id)
     // pairs in `invited` -- the same shape `destroyed` above records for the
@@ -303,11 +303,11 @@ public:
         if (invite_rate_limit_next > 0) {
             --invite_rate_limit_next;
             ++invite_rate_limited;
-            return TalkbackResult::TooFrequent;
+            return record(TalkbackResult::TooFrequent);
         }
         for (uint32_t uid : user_ids)
             invited.push_back(std::make_pair(channel_id, uid));
-        return TalkbackResult::Ok;
+        return record(TalkbackResult::Ok);
     }
     TalkbackResult send_audio(const std::string &channel_id, const char *,
                               uint32_t len, uint32_t, bool) override
@@ -315,16 +315,33 @@ public:
         if (first_send_call < 0) first_send_call = calls;
         ++calls;
         sends.push_back(std::make_pair(channel_id, len));
-        return TalkbackResult::Ok;
+        return record(TalkbackResult::Ok);
     }
     TalkbackResult set_background_volume(const std::string &channel_id, float v) override
     {
         if (first_volume_call < 0) first_volume_call = calls;
         ++calls;
         volumes.push_back(std::make_pair(channel_id, v));
-        return TalkbackResult::Ok;
+        return record(TalkbackResult::Ok);
     }
     bool is_meeting_support_talkback() override { return supported; }
+
+    // Fix round 1 (Findings 2 & 3). This fake has no real platform
+    // underneath it, so there is no genuine raw SDK code to surface --
+    // last_raw_code() mirrors the most recent TalkbackResult numerically
+    // (via record(), called by every operation above), which is honest
+    // about what it is (nothing asserts a specific value against it; the
+    // real diagnostics CLAUDE.md documents are about TalkbackWinSdk's
+    // mapping, verified there by inspection, not about this fake). Defaults
+    // to true so every pre-existing probe()-driving test, none of which
+    // simulates a failed event registration, is unaffected.
+    int last_raw_code() const override { return m_last_code; }
+    bool events_registered_value = true;
+    bool events_registered() const override { return events_registered_value; }
+
+private:
+    TalkbackResult record(TalkbackResult r) { m_last_code = static_cast<int>(r); return r; }
+    int m_last_code = 0;
 };
 
 // -- The fake participants list/user info (Task 4) -------------------------

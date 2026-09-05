@@ -2978,6 +2978,27 @@ int main()
               "a create that eventually succeeded was reported as rate-limited");
     }
 
+    // -- Fix round 2 (Important 6): pin the SetEvent-failure refusal fix
+    // round 1 restored -- probe()'s
+    // `if (!m_sdk->events_registered()) return probe_refused_without_ladder();`.
+    // Deleting that check left the whole suite green in fix round 1's own
+    // verification, because nothing anywhere set events_registered_value
+    // false; this is the honest fake-side hook that makes it pinnable. A
+    // failed event registration means no callback will ever reach this
+    // object, so the create must never be issued -- exactly the
+    // pre-Task-1 behaviour (`if (set_err != SDKERR_SUCCESS) return
+    // probe_refused_without_ladder();`) this restored. -----------------------
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
+        svc.ctrl.events_registered_value = false;
+        check(!tb.probe(&svc, "Someone"),
+              "probe() proceeded after a failed event registration");
+        check(svc.ctrl.creates == 0,
+              "a probe with no callback sink still issued CreateChannel");
+    }
+
     if (failures == 0)
         std::cout << "engine-talkback-select: all tests passed\n";
     return failures == 0 ? 0 : 1;

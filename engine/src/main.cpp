@@ -1516,12 +1516,51 @@ int main()
     // function's fix-round-1 (M3) guard depends on nothing re-deriving the
     // adapter while a live session or a busy nomination holds it -- see
     // EngineTalkback::resolve_roster_change()'s own comment.
-    auto inject_talkback_sdk = [](ZOOMSDK::IMeetingService *svc, bool register_event) {
+    //
+    // Fix round 2, Critical 1: `set_sdk(&talkback_sdk)` used to run
+    // UNCONDITIONALLY, even when `ctrl` came back null. That made m_sdk
+    // non-null in every case reachable from here, so
+    // engine-talkback.cpp's `if (!m_sdk) ... "no_controller"` -- the ONE
+    // check session_start() has against a dead controller -- could never
+    // fire on Windows: fail-closed had silently become fail-open, and a key
+    // pressed on a null controller would have gone "live" with every send
+    // accepted-but-silent and the duck never restored (send_audio()'s
+    // NotExist and session_stop()'s `!m_sdk` bail both pass when m_sdk is a
+    // non-null adapter wrapping a null ZOOMSDK controller). Injecting
+    // nullptr when there is genuinely no controller is what makes that
+    // check reachable again -- the pre-Task-1 code's own
+    // `if (!m_ctrl) refuse` depended on exactly this null, and the M3 fix
+    // this file already cites is what proves the null is a real,
+    // documented transient, not a theoretical one.
+    //
+    // Fix round 2, Critical 2: this used to run BEFORE the engine function
+    // it precedes at every one of its three call sites, unconditionally --
+    // re-deriving the controller and re-registering the event sink even on
+    // a call about to be refused for session_live/probe_busy/create_busy.
+    // The pre-Task-1 code ordered this the other way on purpose (three
+    // comments say so: probe()'s R1 mutual-exclusion guard, nominate()'s
+    // matching one, session_start()'s at :3889-3897) -- a probe pressed
+    // during a live key, a nomination attempted while one is already
+    // provisioning, or a second talkback_start would all re-derive the
+    // adapter mid-press otherwise, and a transient null observed at that
+    // instant would leave the LIVE press's adapter wrapping null for the
+    // rest of it: the same M3 clobber class fix round 1 closed for
+    // resolve_roster_change() alone, reopened here by injection running
+    // ahead of the very gates that used to keep it from firing at all.
+    // `safe_to_inject` is each call site's OWN pre-check, computed from the
+    // same public accessors (session_live()/is_idle()/has_pending_work())
+    // the engine function itself gates on first -- when false, this call
+    // touches NOTHING, leaving m_sdk exactly as a previous successful
+    // injection left it, precisely as the pre-Task-1 code left m_ctrl alone
+    // on every one of these same early-refusal paths.
+    auto inject_talkback_sdk = [](ZOOMSDK::IMeetingService *svc, bool register_event,
+                                  bool safe_to_inject) {
+        if (!safe_to_inject) return;
         ZOOMSDK::IMeetingTalkbackController *ctrl =
             svc ? svc->GetMeetingTalkbackController() : nullptr;
         talkback_sdk = TalkbackWinSdk(ctrl);
         if (register_event) talkback_sdk.register_event(&talkback);
-        talkback.set_sdk(&talkback_sdk);
+        talkback.set_sdk(ctrl ? &talkback_sdk : nullptr);
     };
     // Task 4: wire the roster-change path (EngineParticipants' five SDK
     // callbacks) to EngineTalkback's re-resolution. Deferred until here
@@ -1828,8 +1867,18 @@ int main()
                 // Task 1: inject the seam's adapter (and register the event
                 // sink on the real controller) right before the call that
                 // used to do both internally -- see inject_talkback_sdk()'s
-                // own comment above.
-                inject_talkback_sdk(meeting_svc, /*register_event=*/true);
+                // own comment above. Fix round 2, Critical 2: safe_to_inject
+                // mirrors probe()'s OWN pre-m_svc/m_sdk guards exactly
+                // (is_idle()'s underlying phase check, then m_session_live) --
+                // both are already guaranteed true here by the surrounding
+                // is_idle() branch and this thread being the only caller of
+                // probe(), EXCEPT session_live(), which a live key press from
+                // an EARLIER session_start() can leave true while a probe is
+                // pressed -- the trigger this fix round found. When false,
+                // this call touches nothing, exactly as probe()'s own
+                // refusal would have left m_ctrl alone before Task 1.
+                inject_talkback_sdk(meeting_svc, /*register_event=*/true,
+                                    talkback.is_idle() && !talkback.session_live());
 
                 // probe() returns true if and only if it issued a
                 // CreateChannel -- every refusal, not just the re-entrancy
@@ -1932,8 +1981,19 @@ int main()
             const std::string target = json_str(line, "target");
             // Task 1: inject the adapter (no event registration -- session_
             // start() never called SetEvent() either, before or after this
-            // task; see its own M4 comment on why).
-            inject_talkback_sdk(meeting_svc, /*register_event=*/false);
+            // task; see its own M4 comment on why). Fix round 2, Critical 2:
+            // safe_to_inject mirrors session_start()'s own pre-m_svc/m_sdk
+            // guards (m_session_live, has_pending_work()) -- its
+            // m_audio_fail_reason check is not one of them (it never gates
+            // whether m_svc/m_sdk get touched, only an earlier refusal that
+            // happens not to reach them either way), so it is not
+            // replicated here. A redundant second key press or one that
+            // arrives while the probe's driving thread has not yet settled
+            // now leaves m_sdk exactly as the last successful injection left
+            // it, instead of re-deriving it out from under whichever
+            // subsystem is using it.
+            inject_talkback_sdk(meeting_svc, /*register_event=*/false,
+                                !talkback.session_live() && !talkback.has_pending_work());
             talkback.session_start(meeting_svc, target);
 
         } else if (command == IpcCommand::TalkbackStop) {
@@ -1987,8 +2047,19 @@ int main()
                 // terminal line.
                 // Task 1: inject the adapter and register the event sink
                 // right before the call that used to do both internally --
-                // see inject_talkback_sdk()'s own comment above.
-                inject_talkback_sdk(meeting_svc, /*register_event=*/true);
+                // see inject_talkback_sdk()'s own comment above. Fix round 2,
+                // Critical 2: safe_to_inject mirrors nominate()'s own
+                // pre-m_svc/m_sdk guards exactly (m_session_live,
+                // has_pending_work()) -- the trigger this fix round found
+                // for THIS call site is a re-nomination sent while an
+                // earlier ladder is still provisioning (create_busy) or
+                // while a probe/session holds the arbiter: without this,
+                // main.cpp would re-derive the controller and re-register
+                // the event sink out from under the ladder that is still
+                // using them, before nominate() ever reaches its own
+                // (unchanged) refusal.
+                inject_talkback_sdk(meeting_svc, /*register_event=*/true,
+                                    !talkback.session_live() && !talkback.has_pending_work());
                 if (!talkback.nominate(meeting_svc, nominees, attempt)) {
                     EngineIpc::write(
                         R"({"cmd":"debug","stage":"nominate_returned_false"})");

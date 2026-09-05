@@ -363,12 +363,17 @@ bool EngineTalkback::probe(ZOOMSDK::IMeetingService *svc,
 
     // RUNG 2: the meeting-level gate. This is the one we expect Enhanced Media
     // to satisfy, and the one that decides whether the feature is viable.
-    // TalkbackWinSdk::is_meeting_support_talkback() also folds in "does the
-    // real controller exist" (it returns m_ctrl && m_ctrl->IsMeetingSupport
-    // TalkBack()) -- the seam has no way to tell that apart from "exists but
-    // unsupported", so on Windows a null real controller now reports here as
-    // "supported":false rather than at RUNG 1 above. Nothing downstream acts
-    // differently either way; both were always refusals.
+    // Fix round 2 (Important 4): a null real controller is caught at RUNG 1
+    // above, not here -- main.cpp's inject_talkback_sdk() only calls
+    // set_sdk() with a non-null adapter when GetMeetingTalkbackController()
+    // itself returned non-null (Critical 1), so by the time m_sdk is
+    // non-null, TalkbackWinSdk::is_meeting_support_talkback()'s own
+    // `m_ctrl &&` is a defensive check on a condition that cannot actually
+    // occur through this call path, not a second route to this rung's
+    // "supported":false. (An earlier version of this comment argued the
+    // opposite -- that a null controller folded into "supported":false here
+    // -- which was true only while Critical 1's bug made m_sdk non-null
+    // unconditionally; corrected, not merely reworded.)
     const bool supported = m_sdk->is_meeting_support_talkback();
     report("meeting_supported",
            std::string(R"("supported":)") + (supported ? "true" : "false"));

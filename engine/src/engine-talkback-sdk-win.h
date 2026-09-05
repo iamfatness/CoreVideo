@@ -2,7 +2,13 @@
 #include "talkback-sdk.h"
 #include "meeting_service_components/meeting_talkback_ctrl_interface.h"
 
-#if defined(WIN32)
+// Fix round 2: WIN32 is a CMake-supplied compile definition (this project's
+// own targets set it explicitly), not a compiler-defined one -- MSVC defines
+// _WIN32. This header had only ever been reached with WIN32 already true
+// because windows.h arrives transitively through engine-talkback.h's own
+// include chain before this file is ever included; testing the wrong macro
+// here was silently harmless, not silently correct.
+#if defined(_WIN32)
 #include <windows.h>
 #endif
 
@@ -56,22 +62,41 @@ public:
     // The Begin/Add/Execute sequence lives HERE and nowhere above. On this
     // platform an invite is three calls that must not interleave with another
     // batch; on macOS it is one call. The ladder is entitled to know neither.
+    //
+    // Fix round 2 (Important 3): chained exactly as every pre-Task-1 call
+    // site did (d7d41f2 engine-talkback.cpp:1528-1530, 2623-2625) -- each
+    // call runs ONLY if the previous one succeeded, and the reported code is
+    // whichever call FIRST failed. Two deltas the un-chained version had
+    // introduced: a failed Begin no longer aborted the sequence (Add and
+    // Execute still ran, driving the batch API into a state the old code
+    // never produced -- and a failing Begin is the M2 Major's own subject);
+    // and only Execute's code ever reached the ladder's report, when
+    // AddUserToInvite is the only call that carries the user id -- the only
+    // one that can mean "this specific talent is in a different breakout
+    // room" (CLAUDE.md's own documented `"stage":"invite",...,"code":2`).
     TalkbackResult invite_users(const std::string &channel_id,
                                 const std::vector<uint32_t> &user_ids) override
     {
         if (!m_ctrl) return no_controller();
         const std::basic_string<zchar_t> id_z = talkback_utf8_to_zchar(channel_id);
-        m_ctrl->BeginBatchInviteUsers(id_z.c_str());
+        ZOOMSDK::SDKError e = m_ctrl->BeginBatchInviteUsers(id_z.c_str());
         for (uint32_t id : user_ids)
-            m_ctrl->AddUserToInvite(id);
-        return map(m_ctrl->ExecuteBatchInviteUsers());
+            if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->AddUserToInvite(id);
+        if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->ExecuteBatchInviteUsers();
+        return map(e);
     }
 
+    // Fix round 2 (Important 3): same chaining as invite_users() above, and
+    // for the same reason -- see that method's comment. Preserves tick()'s
+    // empty-list case bit for bit: `channel_ids` empty means the loop below
+    // never runs, so Begin and (if it succeeded) Execute are still issued
+    // with nothing added between them, exactly as the old
+    // "e == SDKERR_SUCCESS && !channel_copy.empty()" guard around
+    // AddChannelToDestroy alone produced.
     TalkbackResult destroy_channels(
         const std::vector<std::string> &channel_ids) override
     {
         if (!m_ctrl) return no_controller();
-        m_ctrl->BeginBatchDestroyChannels();
         // Every id's zchar_t form must outlive AddChannelToDestroy() but need
         // not outlive this whole function -- collected up front only so the
         // loop below is not re-deriving the same conversion issue site by
@@ -79,9 +104,11 @@ public:
         std::vector<std::basic_string<zchar_t> > ids_z;
         ids_z.reserve(channel_ids.size());
         for (const auto &id : channel_ids) ids_z.push_back(talkback_utf8_to_zchar(id));
+        ZOOMSDK::SDKError e = m_ctrl->BeginBatchDestroyChannels();
         for (const auto &id_z : ids_z)
-            m_ctrl->AddChannelToDestroy(id_z.c_str());
-        return map(m_ctrl->ExecuteBatchDestroyChannels());
+            if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->AddChannelToDestroy(id_z.c_str());
+        if (e == ZOOMSDK::SDKERR_SUCCESS) e = m_ctrl->ExecuteBatchDestroyChannels();
+        return map(e);
     }
 
     TalkbackResult send_audio(const std::string &channel_id, const char *data,

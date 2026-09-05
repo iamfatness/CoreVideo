@@ -54,24 +54,24 @@ static TalkbackResult mac_tb_result(ZoomSDKTalkbackError e)
 - (void)onCreateChannelResponse:(NSString *)channelID
                           error:(ZoomSDKTalkbackError)error {
     if (_events) _events->on_create_channel_response(
-        channelID.UTF8String ?: "", mac_tb_result(error));
+        channelID.UTF8String ?: "", mac_tb_result(error), static_cast<int>(error));
 }
 - (void)onDestroyChannelResponse:(NSString *)channelID
                            error:(ZoomSDKTalkbackError)error {
     if (_events) _events->on_destroy_channel_response(
-        channelID.UTF8String ?: "", mac_tb_result(error));
+        channelID.UTF8String ?: "", mac_tb_result(error), static_cast<int>(error));
 }
 - (void)onChannelUserJoinResponse:(NSString *)channelID
                            userID:(unsigned int)userID
                             error:(ZoomSDKTalkbackError)error {
     if (_events) _events->on_channel_user_join_response(
-        channelID.UTF8String ?: "", userID, mac_tb_result(error));
+        channelID.UTF8String ?: "", userID, mac_tb_result(error), static_cast<int>(error));
 }
 - (void)onChannelUserLeaveResponse:(NSString *)channelID
                             userID:(unsigned int)userID
                              error:(ZoomSDKTalkbackError)error {
     if (_events) _events->on_channel_user_leave_response(
-        channelID.UTF8String ?: "", userID, mac_tb_result(error));
+        channelID.UTF8String ?: "", userID, mac_tb_result(error), static_cast<int>(error));
 }
 // Receive-side: this engine is the DIRECTOR, never talent. Stubbed for the
 // safe-superset reason above, not because they are expected to fire.

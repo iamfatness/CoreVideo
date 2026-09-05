@@ -445,10 +445,11 @@ if(BUILD_ZOOM_ENGINE)
         target_link_libraries(ZoomSdkAuthProbe PRIVATE ${ZOOM_SDK_LIBRARY})
         set_target_properties(ZoomSdkAuthProbe PROPERTIES WIN32_EXECUTABLE FALSE)
     elseif(APPLE)
-        # SCAFFOLD ONLY — the macOS engine is NOT the C++ engine. The macOS Zoom
-        # Meeting SDK (ZoomSDK.framework) is a pure Objective-C framework and
-        # exposes none of the ZOOMSDK:: C++ interfaces the shared ENGINE_SOURCES
-        # are written against (no zoom_sdk.h, no IMeetingService, ...). Those
+        # SCAFFOLD ONLY (macOS talkback ladder aside, added Task 2b below) —
+        # the macOS engine is NOT the C++ engine. The macOS Zoom Meeting SDK
+        # (ZoomSDK.framework) is a pure Objective-C framework and exposes none
+        # of the ZOOMSDK:: C++ interfaces the shared ENGINE_SOURCES are
+        # written against (no zoom_sdk.h, no IMeetingService, ...). Those
         # sources cannot compile here. Build a small Objective-C++ scaffold that
         # links the real framework (validating the SDK fetch + link path) and
         # fails loudly at runtime on any meeting request. A functional macOS
@@ -456,24 +457,27 @@ if(BUILD_ZOOM_ENGINE)
         #
         # -F<dir> adds the framework search path for both `#import <ZoomSDK/...>`
         # header resolution and `-framework ZoomSDK` linking.
-        # engine-talkback.cpp is deliberately NOT added here, despite this
-        # task's own brief listing it: EngineTalkback (engine-talkback.h)
-        # still directly implements ZOOMSDK::IMeetingTalkbackCtrlEvent and
-        # takes ZOOMSDK::IMeetingService* in probe()/nominate()/
-        # session_start()/resolve_roster_change() -- the Windows/Linux C++
-        # SDK's own namespace, which has no macOS counterpart at all (the
-        # macOS Zoom SDK is pure Objective-C; there is no zoom_sdk.h, no
-        # IMeetingService, nothing under ZOOMSDK::). Task 1's own report
-        # found this exact coupling (its "Finding 1") and the resulting
-        # decision was to leave engine-talkback.cpp Windows/Linux-only rather
-        # than widen TalkbackSdk into a second seam over IMeetingService --
-        # this compile attempt reconfirms it: adding engine-talkback.cpp here
-        # fails immediately with "'zoom_sdk.h' file not found", independent
-        # of anything in this file. Only the new adapter is added -- compiling
-        # IT clean against the real ZoomSDKTalkbackController is this task's
-        # actual offline proof.
+        #
+        # engine-talkback.cpp IS added here now (macOS talkback port Task 2b,
+        # 2026-09-05) — Task 2's own comment here (removed by this change)
+        # explained why it could not be: EngineTalkback directly implemented
+        # ZOOMSDK::IMeetingTalkbackCtrlEvent and took ZOOMSDK::IMeetingService*
+        # in probe()/nominate()/session_start()/resolve_roster_change(), the
+        # Windows/Linux C++ SDK's own namespace, which this pure-Objective-C
+        # SDK has no counterpart for at all. Task 2b removed that coupling:
+        # EngineTalkback now implements the portable TalkbackSdkEvents
+        # (src/talkback-sdk.h) and takes TalkbackHost* (src/talkback-host.h)
+        # throughout, both Zoom-type-free. engine-talkback-host-macos.mm is
+        # this platform's TalkbackHost adapter (TalkbackMacHost), the
+        # counterpart to engine-talkback-sdk-macos.mm's TalkbackMacSdk from
+        # Task 2. NEITHER adapter is wired into main-macos.mm's command loop by
+        # this task — compiling this target clean against the real
+        # ZoomSDKTalkbackController/ZoomSDKMeetingActionController is Task 2b's
+        # actual proof, same as Task 2's own scope; a later task drives them.
         add_executable(ZoomObsEngine engine/src/main-macos.mm
-            engine/src/engine-talkback-sdk-macos.mm)
+            engine/src/engine-talkback.cpp
+            engine/src/engine-talkback-sdk-macos.mm
+            engine/src/engine-talkback-host-macos.mm)
         target_include_directories(ZoomObsEngine PRIVATE src engine/src)
         # -F must be on BOTH the compile line (so `#import <ZoomSDK/ZoomSDK.h>`
         # resolves via the framework's Headers dir) and the link line (so

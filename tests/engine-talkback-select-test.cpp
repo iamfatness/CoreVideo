@@ -53,6 +53,13 @@
 #include "engine-talkback.h"
 #include "engine-writer.h"   // EngineIpc::test_sink() -- Task 5 fix round 3 (N6)
 #include "talkback-ring.h"   // the tap side of the ring, so drain_audio() has real audio
+// talkback_command_for() -- macOS talkback port, Task 3 (2026-09-05). No SDK
+// dependency of its own; included here so this target's own copy of the
+// ordering pin lives beside the engine it is dispatching for. See
+// tests/talkback-command-test.cpp for the platform-agnostic twin of this
+// same assertion set (this target is WIN32-gated at the CMakeLists level and
+// does not exist in a macOS build tree at all).
+#include "talkback-command.h"
 
 // Fix round 1 (Windows CI, 2026-09-05): these five used to arrive
 // TRANSITIVELY through engine-talkback.h, which included them unconditionally
@@ -3534,6 +3541,28 @@ int main()
         win_sdk.register_event();
         check(!win_sdk.events_registered(),
               "register_event() with a null controller reported success");
+    }
+
+    // (g) main-macos.mm's seven-command dispatch, extracted to
+    // talkback_command_for() (src/talkback-command.h) -- Task 3 of the macOS
+    // talkback port (2026-09-05). Windows never calls this function in
+    // production (main.cpp's command loop dispatches on IpcCommand, an enum
+    // parsed elsewhere); it is pinned in THIS target anyway because this is
+    // where engine-talkback.cpp itself is linked, and because
+    // tests/talkback-command-test.cpp (the platform-agnostic twin that
+    // actually runs on macOS, where this WIN32-gated target does not exist)
+    // must stay byte-for-byte in sync with it.
+    {
+        // "talkback_start" contains no other command as a substring, but
+        // "talkback_stop" and "talkback_start" share the "talkback_st" prefix
+        // and both contain "talkback_". Dispatch must land each on its own
+        // handler.
+        check(talkback_command_for(R"({"cmd":"talkback_stop"})") == TalkbackCmd::Stop,
+              "talkback_stop was routed somewhere else");
+        check(talkback_command_for(R"({"cmd":"talkback_start"})") == TalkbackCmd::Start,
+              "talkback_start was routed somewhere else");
+        check(talkback_command_for(R"({"cmd":"talkback_close"})") == TalkbackCmd::Close,
+              "talkback_close was routed somewhere else");
     }
 
     if (failures == 0)

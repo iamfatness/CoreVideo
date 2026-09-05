@@ -58,8 +58,17 @@
 
 #include "../../src/engine-ipc.h"
 #include "../../src/shm-generation.h"
+#include "../../src/talkback-command.h"
 #include "engine-writer.h"
 #include "tile-clock-log.h"
+// Talkback (macOS port Task 3, 2026-09-05): EngineTalkback itself and both
+// platform adapters Task 2/2b built but never wired anywhere. See the
+// "── Talkback ──" section below (right before ipc_setup) for what actually
+// constructs and drives them.
+#include "engine-talkback.h"
+#include "engine-talkback-sdk-macos.h"
+#include "engine-talkback-host-macos.h"
+#include "engine-talkback-pump-macos.h"
 
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -83,6 +92,21 @@
 static void handle_stop_media(const char *reason);
 static void share_attach();
 static void share_teardown();
+
+// ── Talkback (macOS port Task 3, 2026-09-05) ──────────────────────────────────
+// Declared here, near the top, rather than beside the rest of the talkback
+// wiring further down (search "Talkback (macOS port Task 3" for the
+// functions that actually use these): handle_leave(), just below, needs
+// g_talkback too, and a file-scope variable has no forward visibility in
+// C++ -- it must be declared before every use in the same translation unit.
+//
+// Static storage duration for the same reason main.cpp's `talkback`/
+// `talkback_sdk`/`talkback_host` have it: m_sdk/m_host inside g_talkback are
+// raw pointers into these objects, read for as long as a probe ladder or a
+// live key press lives, which outlives any one command's scope.
+static EngineTalkback g_talkback;
+static TalkbackMacSdk g_talkback_sdk;
+static TalkbackMacHost g_talkback_host;
 
 // Set false during teardown so the heartbeat thread stops before the IPC
 // sockets close. File scope because the heartbeat thread is detached and
@@ -765,6 +789,22 @@ static void handle_join(const std::string &line)
 
 static void handle_leave()
 {
+    // Talkback teardown (macOS port Task 3, 2026-09-05), mirroring
+    // main.cpp's own Leave branch: Leave() destroys the talkback channel(s)
+    // meeting-side, so anything still referencing them here has to let go
+    // first, not after. All three calls are idempotent (each bails
+    // immediately when there is nothing to tear down), so this is safe even
+    // when talkback was never opened this meeting. Unlike Windows there is
+    // no driving thread to signal-and-join first: tick() rides the shared
+    // main-queue pump, and this function itself runs on that same queue, so
+    // it cannot be racing a concurrent tick()/nomination_tick()/mic_tick()
+    // call by construction.
+    g_talkback.close_audio();
+    g_talkback.session_stop();
+    // Provisioned channels and their membership are meeting-scoped -- once
+    // Leave() below runs there is nothing left on Zoom's side for the
+    // nomination table to reference. Bookkeeping only, no SDK call.
+    g_talkback.nomination_reset();
     ZoomSDKMeetingService *svc = meeting_service();
     if (svc) [svc leaveMeetingWithCmd:LeaveMeetingCmd_Leave];
 }
@@ -2131,6 +2171,213 @@ static void handle_stop_media(const char *reason)
                      std::string(reason ? reason : "") + "\"}");
 }
 
+// ── Talkback (macOS port Task 3, 2026-09-05) ──────────────────────────────────
+// EngineTalkback and its two platform adapters (TalkbackMacSdk, Task 2;
+// TalkbackMacHost, Task 2b) compiled into this target since Task 2b but were
+// constructed and injected NOWHERE -- this section is what makes macOS
+// talkback actually drivable. Structure mirrors engine/src/main.cpp's own
+// talkback wiring as closely as the two platforms' threading models allow;
+// every deliberate divergence is called out where it happens.
+//
+// (g_talkback/g_talkback_sdk/g_talkback_host themselves are declared much
+// earlier in this file, right after the includes -- handle_leave(), above,
+// needs to reach g_talkback too, and C++ has no forward visibility for a
+// file-scope variable across a translation unit.)
+
+// Extracts a JSON array of strings, e.g. "nominees":["Sarah Muller","Luis
+// Ortiz"]. Ported verbatim from engine/src/main.cpp's own json_str_array()
+// (this file already duplicates its other JSON helpers rather than sharing a
+// header -- see json_str()/json_escape() above) -- same escape handling (a
+// backslash consumes the next character verbatim) and the same
+// `well_formed` contract: false for anything truncated or malformed, so a
+// request whose nominee list could not be parsed never reaches nominate()
+// and is refused instead of silently denominating (main.cpp's own Task 3 fix
+// round 1, Minor 1 -- an empty nominee list is a deliberate denominate, so
+// the failure interpretation must never collapse into it).
+static std::vector<std::string> json_str_array(const std::string &json, const std::string &key,
+                                                bool *well_formed = nullptr)
+{
+    std::vector<std::string> out;
+    if (well_formed) *well_formed = false;
+    const std::string needle = "\"" + key + "\":[";
+    auto pos = json.find(needle);
+    if (pos == std::string::npos) return out;
+    pos += needle.size();
+    while (pos < json.size() && json[pos] != ']') {
+        if (json[pos] == ',' || json[pos] == ' ') { ++pos; continue; }
+        if (json[pos] != '"') return out;   // non-string element: malformed
+        ++pos;
+        std::string s;
+        bool closed = false;
+        while (pos < json.size()) {
+            char c = json[pos++];
+            if (c == '\\') {
+                if (pos < json.size()) s += json[pos++];
+                continue;
+            }
+            if (c == '"') { closed = true; break; }
+            s += c;
+        }
+        // An unterminated string means the line was truncated (or a name
+        // carried an unescaped quote): everything after it is guesswork.
+        if (!closed) return out;
+        out.push_back(std::move(s));
+    }
+    if (pos >= json.size()) return out;     // ran off the end: no closing ']'
+    if (well_formed) *well_formed = true;
+    return out;
+}
+
+// Mirrors engine/src/main.cpp's inject_talkback_sdk lambda: fetches the
+// current talkback controller and injects it into g_talkback via set_sdk(),
+// so probe()/nominate()/session_start() never re-derive it internally (see
+// set_sdk()'s own comment in engine-talkback.h).
+//
+// HAZARD 2 (task-3-brief): inject nullptr, never a wrapper around null --
+// ctrl == nil must reach g_talkback.set_sdk(nullptr), not &g_talkback_sdk
+// wrapping a nil controller underneath, or every existing null check in
+// engine-talkback.cpp (the `no_controller` refusal) stops being reachable
+// and a key could go on air on a dead controller with every send
+// accepted-but-silent and the duck never restored (Task 1's review found
+// exactly this class of bug on Windows).
+//
+// HAZARD 3: `safe_to_inject` is each call site's OWN pre-check, computed from
+// the exact same public accessors (is_idle()/session_live()/
+// has_pending_work()) the engine function about to run gates on itself --
+// when false, this call touches NOTHING, leaving m_sdk exactly as the last
+// successful injection left it, instead of re-deriving it out from under a
+// call about to be refused (a probe pressed during a live key, a
+// re-nomination attempted while one is already provisioning, etc.). One bool
+// per call site, shared by both injections below, so the sdk and host
+// adapters can never disagree about whether it was safe to touch them.
+//
+// HAZARD 1: set_events(&g_talkback) is called exactly ONCE, at the top of
+// main() below, BEFORE this function's first call ever binds a controller.
+// TalkbackMacSdk::events_registered() reads true the instant bind() sees a
+// non-null controller, REGARDLESS of whether set_events() was ever called
+// (see that method's own comment in engine-talkback-sdk-macos.mm) -- so
+// probe()'s registration-refusal check can only mean anything here if the
+// forwarding target was set before the first bind(), never after.
+//
+// `register_event` mirrors main.cpp's call sites for readability, but does
+// nothing here: on Windows, rebind() (always) and register_event() (gated)
+// are two independent calls, so a call site can rebind the controller
+// WITHOUT re-registering the event sink (session_start()'s call site does
+// exactly that -- see its own comment in main.cpp). TalkbackMacSdk::bind()
+// has no such split: it is one call that both stores the controller pointer
+// AND calls setDelegate: whenever that pointer is non-null (see bind()'s own
+// comment in engine-talkback-sdk-macos.mm). There is no way to rebind on
+// macOS without also (re-)registering -- harmless here, since setDelegate:
+// is idempotent and the delegate's forwarding target (g_talkback) never
+// changes after the one set_events() call above.
+static void inject_talkback_sdk(bool /*register_event*/, bool safe_to_inject)
+{
+    if (!safe_to_inject) return;
+    ZoomSDKMeetingService *svc = meeting_service();
+    ZoomSDKTalkbackController *ctrl = svc ? [svc getTalkbackController] : nil;
+    g_talkback_sdk.bind((__bridge void *)ctrl);
+    g_talkback.set_sdk(ctrl ? &g_talkback_sdk : nullptr);
+}
+
+// Mirrors inject_talkback_host() in main.cpp -- same null-check (inject
+// nullptr when svc is genuinely absent, so probe()/nominate()/
+// session_start()'s own "no_meeting_service"/"not_in_meeting" refusals stay
+// reachable) and the same safe_to_inject gating, for the same reason.
+static void inject_talkback_host(bool safe_to_inject)
+{
+    if (!safe_to_inject) return;
+    ZoomSDKMeetingService *svc = meeting_service();
+    g_talkback_host.bind((__bridge void *)svc);
+    g_talkback.set_host(svc ? &g_talkback_host : nullptr);
+}
+
+// ── The seven command handlers ──────────────────────────────────────────────
+// Each one runs already dispatched onto the main queue by the reader loop
+// below (dispatch_async(dispatch_get_main_queue(), ...)) -- nothing in here
+// hops queues again. Structure mirrors main.cpp's TalkbackProbe/TalkbackOpen/
+// TalkbackStart/TalkbackNominate branches; the one structural difference is
+// that none of these spawns or joins a dedicated driving thread for tick() --
+// see engine-talkback-pump-macos.mm's own comment for why tick() rides the
+// SAME main-queue pump as nomination_tick()/mic_tick() here instead of a
+// Windows-style dedicated thread.
+
+static void handle_talkback_probe(const std::string &line)
+{
+    const std::string who = json_str(line, "participant");
+    if (!g_talkback.is_idle()) {
+        // Mirrors main.cpp's busy refusal verbatim -- a bare pipe write is
+        // the only safe action regardless of what else is going on
+        // concurrently (there is no separate driving thread here to race,
+        // unlike Windows, but the wire contract stays identical either way).
+        EngineIpc::write(
+            R"({"cmd":"talkback_probe","stage":"busy",)"
+            R"("reason":"a talkback probe is already in progress"})");
+        return;
+    }
+    // Fix-round-2 Critical 2's gating (main.cpp), same reasoning here:
+    // is_idle() is guaranteed true by the branch above; session_live() is
+    // the one a live key press from an earlier session_start() can leave
+    // true while a probe is pressed.
+    const bool safe_to_inject = g_talkback.is_idle() && !g_talkback.session_live();
+    inject_talkback_sdk(/*register_event=*/true, safe_to_inject);
+    inject_talkback_host(safe_to_inject);
+    // probe()'s return value is a contract on Windows: true means "spawn a
+    // driving thread for tick()". There is nothing to spawn here -- the pump
+    // started in main() below already calls tick() every 50ms on this same
+    // main queue for the life of the process, whether or not a probe is in
+    // flight -- so the return value is deliberately ignored.
+    g_talkback.probe(meeting_service() ? &g_talkback_host : nullptr, who);
+}
+
+static void handle_talkback_open(const std::string &line)
+{
+    g_talkback.open_audio(json_str(line, "region"),
+                          static_cast<uint32_t>(json_uint(line, "rate")),
+                          static_cast<uint16_t>(json_uint(line, "channels")));
+}
+
+static void handle_talkback_start(const std::string &line)
+{
+    // Task 3 (engine-talkback.h): a key press names a TARGET
+    // (kTalkbackAllTalentTarget or a nominee's name), not a participant to
+    // open a channel for -- session_start() selects an already-provisioned
+    // channel.
+    const std::string target = json_str(line, "target");
+    const bool safe_to_inject =
+        !g_talkback.session_live() && !g_talkback.has_pending_work();
+    // No event registration on this call site either, mirroring main.cpp's
+    // own comment: session_start() never calls set_events()/SetEvent().
+    inject_talkback_sdk(/*register_event=*/false, safe_to_inject);
+    inject_talkback_host(safe_to_inject);
+    g_talkback.session_start(meeting_service() ? &g_talkback_host : nullptr, target);
+}
+
+static void handle_talkback_nominate(const std::string &line)
+{
+    bool nominees_ok = false;
+    const std::vector<std::string> nominees =
+        json_str_array(line, "nominees", &nominees_ok);
+    const uint32_t attempt = json_uint(line, "attempt");
+    if (!nominees_ok) {
+        // Terminal for this attempt, so it carries the id too -- see
+        // main.cpp's matching comment.
+        EngineIpc::write(
+            R"({"cmd":"talkback_nominate","stage":"nominate","ok":false,)"
+            R"("reason":"malformed_nominees")" +
+            (attempt ? R"(,"attempt":)" + std::to_string(attempt)
+                     : std::string()) + "}");
+        return;
+    }
+    const bool safe_to_inject =
+        !g_talkback.session_live() && !g_talkback.has_pending_work();
+    inject_talkback_sdk(/*register_event=*/true, safe_to_inject);
+    inject_talkback_host(safe_to_inject);
+    if (!g_talkback.nominate(meeting_service() ? &g_talkback_host : nullptr,
+                            nominees, attempt)) {
+        EngineIpc::write(R"({"cmd":"debug","stage":"nominate_returned_false"})");
+    }
+}
+
 // Anything not yet ported fails loudly and never silently pretends.
 static void handle_unimplemented(const char *stage)
 {
@@ -2205,6 +2452,29 @@ int main()
     EngineIpc::init(e2p); // must be called before any writes
 
     EngineIpc::write(R"({"cmd":"ready"})");
+
+    // Talkback (macOS port Task 3, 2026-09-05). Two calls, both load-bearing
+    // in their ordering:
+    //
+    // set_events() FIRST, and exactly once, for the life of the process --
+    // HAZARD 1 (task-3-brief): TalkbackMacSdk::events_registered() reads
+    // true the instant bind() (called from inject_talkback_sdk(), way below,
+    // on every talkback_probe/talkback_nominate) sees a non-null controller,
+    // REGARDLESS of whether set_events() was ever called. Calling it here,
+    // before any bind() can possibly happen, is what keeps probe()'s
+    // registration-refusal check meaningful instead of vacuously true.
+    //
+    // talkback_pump_start() starts the main-queue timer that drives
+    // nomination_tick()/mic_tick()/tick() for the rest of the process's life
+    // -- see engine-talkback-pump-macos.mm for why this, and not a
+    // per-probe dedicated thread, is the only correct home for those calls
+    // on this platform. Started once, here, rather than per-probe: unlike
+    // Windows' driving thread (spawned only when probe() returns true),
+    // there is no cost to running it before any talkback command ever
+    // arrives -- tick()/nomination_tick()/mic_tick() are all cheap when
+    // idle (one mutex lock and a phase compare each).
+    g_talkback_sdk.set_events(&g_talkback);
+    talkback_pump_start(&g_talkback);
 
     // Heartbeat, matching engine/src/main.cpp: ping every ~2s so the plugin can
     // tell a hung-but-alive engine from a quiet one. Its absence here was not
@@ -2305,6 +2575,42 @@ int main()
                                msg.find(R"("isolate_audio":true)") != std::string::npos,
                                msg.find(R"("audience_audio":true)") != std::string::npos);
                 });
+            // The seven talkback commands (macOS port Task 3, 2026-09-05).
+            // talkback_command_for() (src/talkback-command.h) is the SAME
+            // substring-match dispatch this loop would otherwise write
+            // inline, extracted so tests/talkback-command-test.cpp and
+            // tests/engine-talkback-select-test.cpp can pin its ordering --
+            // inline in a reader loop it would be untestable, the exact
+            // shape both Majors this feature has already shipped took.
+            // Every branch dispatches to the main queue: the reader thread
+            // must never touch the SDK.
+            } else if (msg.find("talkback_") != std::string::npos) {
+                // if/else-if, not switch: a switch whose cases each contain
+                // an Objective-C block literal capturing `msg` (a
+                // std::string) does not compile here -- Clang treats each
+                // block as introducing a destructible object whose
+                // construction a later case's jump target would skip
+                // ("cannot jump from switch statement to this case label"),
+                // even though every case's block is fully self-contained and
+                // `break`s immediately. Wrapping each case in its own braces
+                // would also fix it; if/else-if matches this loop's own
+                // existing style instead of introducing a second idiom.
+                const TalkbackCmd cmd = talkback_command_for(msg);
+                if (cmd == TalkbackCmd::Nominate) {
+                    dispatch_async(dispatch_get_main_queue(), ^{ handle_talkback_nominate(msg); });
+                } else if (cmd == TalkbackCmd::Probe) {
+                    dispatch_async(dispatch_get_main_queue(), ^{ handle_talkback_probe(msg); });
+                } else if (cmd == TalkbackCmd::Audio) {
+                    dispatch_async(dispatch_get_main_queue(), ^{ g_talkback.drain_audio(); });
+                } else if (cmd == TalkbackCmd::Close) {
+                    dispatch_async(dispatch_get_main_queue(), ^{ g_talkback.close_audio(); });
+                } else if (cmd == TalkbackCmd::Open) {
+                    dispatch_async(dispatch_get_main_queue(), ^{ handle_talkback_open(msg); });
+                } else if (cmd == TalkbackCmd::Stop) {
+                    dispatch_async(dispatch_get_main_queue(), ^{ g_talkback.session_stop(); });
+                } else if (cmd == TalkbackCmd::Start) {
+                    dispatch_async(dispatch_get_main_queue(), ^{ handle_talkback_start(msg); });
+                }
             }
         }
 
@@ -2315,6 +2621,13 @@ int main()
             // into a descriptor that teardown has already closed (and that the
             // process may have handed to something else).
             g_running.store(false, std::memory_order_release);
+            // Cancel the talkback pump before tearing down the SDK: this
+            // whole block already runs on the main queue, so the pump's own
+            // timer callback cannot be mid-flight here (GCD serializes a
+            // queue's blocks), but leaving it armed while unInitSDK runs
+            // below is one exception to "every SDK call happens on the main
+            // queue" this file otherwise holds absolutely -- stop it first.
+            talkback_pump_stop();
             ipc_teardown(p2e, e2p);
             [[ZoomSDK sharedSDK] unInitSDK];
             exit(0);

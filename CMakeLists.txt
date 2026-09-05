@@ -470,14 +470,20 @@ if(BUILD_ZOOM_ENGINE)
         # throughout, both Zoom-type-free. engine-talkback-host-macos.mm is
         # this platform's TalkbackHost adapter (TalkbackMacHost), the
         # counterpart to engine-talkback-sdk-macos.mm's TalkbackMacSdk from
-        # Task 2. NEITHER adapter is wired into main-macos.mm's command loop by
-        # this task — compiling this target clean against the real
-        # ZoomSDKTalkbackController/ZoomSDKMeetingActionController is Task 2b's
-        # actual proof, same as Task 2's own scope; a later task drives them.
+        # Task 2. Neither adapter was wired into main-macos.mm's command loop
+        # by Task 2b — compiling this target clean against the real
+        # ZoomSDKTalkbackController/ZoomSDKMeetingActionController was Task
+        # 2b's actual proof, same as Task 2's own scope. Task 3 (2026-09-05)
+        # is what constructs and injects both, adding
+        # engine-talkback-pump-macos.mm below as the main-queue pump that
+        # drives nomination_tick()/mic_tick()/tick() — see that file for why
+        # a dispatch_source timer, not a Windows-style dedicated thread, is
+        # the only correct home for those calls on this platform.
         add_executable(ZoomObsEngine engine/src/main-macos.mm
             engine/src/engine-talkback.cpp
             engine/src/engine-talkback-sdk-macos.mm
-            engine/src/engine-talkback-host-macos.mm)
+            engine/src/engine-talkback-host-macos.mm
+            engine/src/engine-talkback-pump-macos.mm)
         target_include_directories(ZoomObsEngine PRIVATE src engine/src)
         # -F must be on BOTH the compile line (so `#import <ZoomSDK/ZoomSDK.h>`
         # resolves via the framework's Headers dir) and the link line (so
@@ -1227,6 +1233,23 @@ if(BUILD_TESTING)
     )
     add_test(NAME CoreVideoTalkbackLayoutTestCells
              COMMAND CoreVideoTalkbackLayoutTestCellsTest)
+
+    # talkback_command_for() (src/talkback-command.h) -- the pure extraction
+    # of main-macos.mm's seven-command dispatch (macOS talkback port, Task 3,
+    # 2026-09-05). Registered unconditionally, unlike
+    # CoreVideoEngineTalkbackSelectTest below: this header has no Zoom SDK,
+    # Qt, or OBS dependency at all, so it does not need that target's
+    # `WIN32 AND <SDK present>` gate, and giving it its own target is what
+    # lets the ordering mutation this task's brief describes actually run on
+    # a macOS build tree, where the WIN32-gated target does not exist.
+    add_executable(CoreVideoTalkbackCommandTest
+        tests/talkback-command-test.cpp
+    )
+    target_include_directories(CoreVideoTalkbackCommandTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoTalkbackCommand
+             COMMAND CoreVideoTalkbackCommandTest)
 
     # THE FIRST TEST TARGET THAT COMPILES AN ENGINE TRANSLATION UNIT.
     #

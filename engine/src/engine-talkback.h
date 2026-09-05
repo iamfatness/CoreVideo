@@ -16,8 +16,10 @@
 // host/co-host plus the Zoom Enhanced Media add-on, and this probe is how they
 // get tested rather than believed.
 //
-// Every rung reports its own SDKError and TalkbackError over E2P, so a failure
-// names the exact rung it fell off instead of surfacing as silence.
+// Every rung reports its own result (TalkbackResult for an SDK operation
+// crossing the seam below, Zoom's own TalkbackError for a raw async callback)
+// over E2P, so a failure names the exact rung it fell off instead of
+// surfacing as silence.
 //
 // engine-ipc.h must come before any Zoom SDK header: it pulls in <windows.h>
 // (under WIN32), and zoom_sdk_def.h uses HWND without including it itself.
@@ -43,6 +45,13 @@
 // talkback_plan() / TalkbackPlan / TalkbackPlannedChannel -- Task 1's pure
 // budget planner that nominate() (below) consumes. No SDK dependency itself.
 #include "../../src/talkback-plan.h"
+// TalkbackSdk / TalkbackResult -- the macOS-port seam (2026-09-04): every
+// call this file makes against IMeetingTalkbackController now goes through
+// this normalised interface instead of the raw Zoom type, so a raw SDKError
+// never reaches the ladder's own decisions (Law 2's backoff keys on exactly
+// one normalised value, TalkbackResult::TooFrequent). No SDK dependency
+// itself -- same reason talkback-plan.h has none.
+#include "../../src/talkback-sdk.h"
 
 #include <atomic>
 #include <chrono>
@@ -53,6 +62,34 @@
 
 class EngineTalkback : public ZOOMSDK::IMeetingTalkbackCtrlEvent {
 public:
+    // TalkbackSdk seam (Task 1, 2026-09-04): injects the adapter every
+    // controller OPERATION below (create/invite/destroy/send/volume/
+    // is_supported) is issued through. Callers own the adapter's lifetime and
+    // decide WHEN to (re)inject -- this class deliberately never calls
+    // m_svc->GetMeetingTalkbackController() to refresh it internally any
+    // more (Steps 1-6 of this task's brief). Two reasons, not one:
+    //   (1) a test must be able to inject a FakeTalkbackSdk and have it
+    //       actually reached; an internal re-derivation from m_svc would
+    //       silently overwrite it with whatever the test's fake meeting
+    //       service's own GetMeetingTalkbackController() returns (nothing, in
+    //       every existing fake), making the seam untestable.
+    //   (2) resolve_roster_change()'s fix-round-1 (M3) guard specifically
+    //       AVOIDS refreshing m_svc/the controller while a live key press or a
+    //       busy nomination holds them, because a transient null picked up
+    //       there used to persist for the rest of a live press. Removing the
+    //       internal refresh everywhere is a strictly SAFER generalisation of
+    //       that fix, not a narrower one: resolve_roster_change() now simply
+    //       never re-derives the adapter, in EITHER of its branches, so the
+    //       failure mode M3 closed cannot exist here at all. See
+    //       tasks-1-report.md for the full reasoning.
+    // On Windows, engine/src/main.cpp constructs a TalkbackWinSdk wrapping
+    // svc->GetMeetingTalkbackController() and calls this before probe(),
+    // nominate() and session_start() -- mirroring exactly where this class
+    // used to refresh m_svc/the controller itself. It deliberately does NOT
+    // call this before resolve_roster_change(): that function reuses whatever
+    // was last injected, which is what makes point (2) above true.
+    void set_sdk(TalkbackSdk *sdk) { m_sdk = sdk; }
+
     // Starts the probe ladder. Reports and returns without blocking; the
     // asynchronous rungs continue through the callbacks below and tick().
     //
@@ -415,25 +452,40 @@ public:
     // see that member's header comment for the two triggering sequences this
     // closes and why one alone is not enough.
     //
-    // FIX ROUND 1, M3 (Major): m_svc/m_ctrl are reassigned ONLY when no
-    // session is live. probe() and nominate() both refuse outright while
-    // m_session_live specifically because they touch these fields; this
-    // function cannot refuse outright (a rejoin mid-press must still be
-    // invited), so instead it leaves the press's own pointers alone and
-    // reuses them -- see the guard's own comment below for the failure mode
-    // this closes (m_ctrl silently going null for the rest of a live press).
+    // FIX ROUND 1, M3 (Major): m_svc used to be reassigned ONLY when no
+    // session is live -- probe() and nominate() both refuse outright while
+    // m_session_live specifically because they touch it; this function
+    // cannot refuse outright (a rejoin mid-press must still be invited), so
+    // it left the press's own pointer alone and reused it instead. The
+    // failure this closed: refreshing unconditionally could observe a
+    // TRANSIENT null from GetMeetingTalkbackController() (a reconnect/ending
+    // window) and that null then persisted for the rest of a live press.
     //
-    // Gated on has_pending_work() before touching m_ctrl, same as
-    // nominate()/session_start(): this reassigns m_svc/m_ctrl (when no
-    // session is live) and, when it invites, runs
-    // BeginBatchInviteUsers/AddUserToInvite/ExecuteBatchInviteUsers -- the
-    // same shape of Begin/Add/Execute sequence tick()'s own inventory
-    // documents as unsafe to interleave, on different threads, with the
-    // probe's driving thread. Unlike nominate()/session_start(), a refusal
-    // here is not reported back to an operator waiting on a command response
-    // -- it costs nothing but a delay, because nothing is marked resolved
-    // when it refuses: the next roster event (there is always another one
-    // eventually) gets another chance.
+    // TASK 1 (2026-09-04) GENERALISED THIS rather than narrowly porting it:
+    // this function no longer re-derives the SDK adapter (m_sdk) from m_svc
+    // AT ALL, in either branch -- see set_sdk()'s own comment for why. That
+    // makes the M3 failure mode structurally impossible here instead of
+    // conditionally avoided, at the cost of never picking up a legitimately
+    // fresher adapter via a roster event either; membership_pump_invite()
+    // (the only later reader of m_sdk this function's work feeds) simply
+    // keeps using whatever probe()/nominate()/session_start() last injected,
+    // which main.cpp keeps alive for the life of the meeting. m_svc itself
+    // keeps the ORIGINAL M3 conditional (reassigned only when no session is
+    // live and invites are allowed): current_roster()/resolve_participant()
+    // still read it, and that half of M3 is unrelated to the adapter.
+    //
+    // Gated on has_pending_work() before touching m_sdk, same as
+    // nominate()/session_start(): when it invites, this ends up spending a
+    // pacer turn on BeginBatchInviteUsers/AddUserToInvite/ExecuteBatchInviteUsers
+    // (via m_sdk->invite_users(), through membership_pump_invite() --
+    // never issued directly from here, see LAW 2) -- the same shape of
+    // Begin/Add/Execute sequence tick()'s own inventory documents as unsafe
+    // to interleave, on different threads, with the probe's driving thread.
+    // Unlike nominate()/session_start(), a refusal here is not reported back
+    // to an operator waiting on a command response -- it costs nothing but a
+    // delay, because nothing is marked resolved when it refuses: the next
+    // roster event (there is always another one eventually) gets another
+    // chance.
     void resolve_roster_change(ZOOMSDK::IMeetingService *svc);
 
     // True once the ladder is quiescent: Idle before the first probe() ever
@@ -466,10 +518,11 @@ public:
     // channel that nothing then destroys).
     //
     // R1-round-3 review fix: session_start() gates on this function believing
-    // "false" means the driving thread will not touch m_ctrl. That was wrong
+    // "false" means the driving thread will not touch m_sdk. That was wrong
     // for one specific window: drain_stray_channels() swaps m_stray_channels
     // into a local UNDER m_chan_mtx, releases the lock, and only THEN runs
-    // its Begin/Add/ExecuteBatchDestroyChannels loop against m_ctrl. In that
+    // its destroy_channels() calls (Begin/Add/ExecuteBatchDestroyChannels,
+    // Task 1) against m_sdk. In that
     // window the member m_stray_channels already reads empty and m_phase can
     // independently already read Done, so the two checks below would both
     // pass and this function would report "nothing to wait for" while the
@@ -967,9 +1020,18 @@ private:
     // callers. Two hand-written copies of the same sequence remain outside it
     // (drain_stray_channels() and tick()'s Destroying phase, both on the
     // probe's driving thread); the inventory at the top of tick() is the map.
-    // Never called with m_chan_mtx held (dereferences m_ctrl); *attempts (if
+    // Never called with m_chan_mtx held (dereferences m_sdk); *attempts (if
     // non-null) receives how many tries it took, for callers that report it.
-    ZOOMSDK::SDKError destroy_channel_retrying(const zchar_t *channelID, uint32_t *attempts);
+    //
+    // Task 1 (2026-09-04): takes the UTF-8 channel id (every caller already
+    // has one) and returns TalkbackResult rather than a raw ZOOMSDK::SDKError
+    // -- global constraint: the ladder never sees a raw SDK error code.
+    // Internally calls m_sdk->destroy_channels() with a single-element list
+    // per attempt, which is exactly the one-channel
+    // Begin/Add/ExecuteBatchDestroyChannels sequence this used to spell out
+    // by hand.
+    TalkbackResult destroy_channel_retrying(const std::string &channel_id_utf8,
+                                            uint32_t *attempts);
 
     // Resolves `name` to a live user id and, if found, invites it into the
     // already-created channel `channel_id_z`. Deliberately independent of
@@ -1002,7 +1064,20 @@ private:
                         const std::string &name, uint32_t retries);
 
     ZOOMSDK::IMeetingService          *m_svc  = nullptr;
-    ZOOMSDK::IMeetingTalkbackController *m_ctrl = nullptr;
+    // TalkbackSdk seam (Task 1, 2026-09-04): every SDK OPERATION this file
+    // needs (create/invite/destroy/send/volume/is_supported) now crosses
+    // through this normalised interface (src/talkback-sdk.h) instead of a raw
+    // ZOOMSDK::IMeetingTalkbackController*, so the ladder's own logic never
+    // sees a Zoom type or a raw SDKError. Set via set_sdk(), which this file
+    // itself never calls: production (engine/src/main.cpp) constructs a
+    // TalkbackWinSdk wrapping whatever m_svc->GetMeetingTalkbackController()
+    // returns and injects it before probe()/nominate()/session_start(); a
+    // test injects a FakeTalkbackSdk the same way. This deliberately REMOVES
+    // the internal `m_sdk = m_svc->GetMeetingTalkbackController()` refresh
+    // every entry point used to do for itself -- see set_sdk()'s own comment
+    // for why re-deriving it here would silently discard whatever a caller
+    // (test or production) just injected.
+    TalkbackSdk *m_sdk = nullptr;
 
     // m_phase is written from SDK callback threads (onCreateChannelResponse,
     // onChannelUserJoinResponse) and, once Task 5 wires tick() to the engine
@@ -1067,7 +1142,7 @@ private:
     // R1-round-3 review fix: true for exactly the window in which
     // drain_stray_channels() (driving thread) is between its m_chan_mtx-
     // protected swap of m_stray_channels and the end of its subsequent
-    // Begin/Add/ExecuteBatchDestroyChannels loop against m_ctrl. Neither
+    // Begin/Add/ExecuteBatchDestroyChannels loop against m_sdk. Neither
     // m_phase nor m_stray_channels alone can express "busy" for that window
     // -- by the time the SDK loop runs, the swap has already emptied the
     // member queue, and m_phase can independently already read Done -- so

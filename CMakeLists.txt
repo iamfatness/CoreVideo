@@ -1223,14 +1223,33 @@ if(BUILD_TESTING)
     # ZoomObsEngine is: without them this file cannot compile at all. NOMINMAX
     # /WIN32_LEAN_AND_MEAN mirror the engine target's, and for the same reason
     # -- talkback-plan.h calls std::min, and windows.h arrives transitively via
-    # zoom_sdk_def.h's HWND use.
-    # WIN32 gate, not just SDK-present: this target compiles the real
-    # engine/src/engine-talkback.cpp, and the engine is Windows-only (zchar_t
-    # = wchar_t, HWND via zoom_sdk_def.h). Linux CI carries a partial SDK
-    # include dir where zoom_sdk.h EXISTS but the meeting_service_components
-    # tree does not, so the SDK-present check alone let this target register
-    # there and fail at #include (PR #231 CI, 2026-08-27).
-    if(WIN32 AND EXISTS "${ZOOM_SDK_INCLUDE_DIR}/meeting_service_components/meeting_talkback_ctrl_interface.h")
+    # zoom_sdk_def.h's HWND use (Windows only; harmless to define elsewhere).
+    #
+    # NO LONGER WIN32-GATED (macOS talkback port, Task 1, 2026-09-04):
+    # engine-talkback.cpp and engine-talkback.h were retargeted onto
+    # TalkbackSdk (src/talkback-sdk.h) -- every call this file makes against
+    # IMeetingTalkbackController now goes through that seam, and
+    # tests/engine-talkback-select-test.cpp's FakeTalkbackSdk drives it with
+    # no Zoom type in the loop. zchar_t=wchar_t is no longer specific to this
+    # target's own portability either way: this file was never actually
+    # Windows-locked BY zchar_t, only by which SDK headers exist.
+    #
+    # The EXISTS check alone is what actually decides whether this can build
+    # anywhere, same as before -- Linux CI carries a partial SDK include dir
+    # where zoom_sdk.h EXISTS but the meeting_service_components tree does
+    # not, so the SDK-present check alone once let this target register there
+    # and fail at #include (PR #231 CI, 2026-08-27); WIN32 was the guard
+    # against exactly that, for a target that was Windows-only anyway. Task 1
+    # is NOT a claim that this repo's checked-in third_party/zoom-sdk/h (a
+    # trimmed snapshot; see its own header) is complete enough to build this
+    # target -- IMeetingService/IUserInfo/IMeetingParticipantsController are
+    # still real Zoom types this file depends on for reasons unrelated to
+    # talkback (roster/participant/mute), and this task did not touch them.
+    # EXISTS on meeting_talkback_ctrl_interface.h specifically is a proxy for
+    # "a real, sufficiently complete Zoom SDK is checked out here", exactly as
+    # it always was; it is what gates this target off wherever that is not
+    # true, macOS included, without a platform check standing in for it.
+    if(EXISTS "${ZOOM_SDK_INCLUDE_DIR}/meeting_service_components/meeting_talkback_ctrl_interface.h")
         add_executable(CoreVideoEngineTalkbackSelectTest
             tests/engine-talkback-select-test.cpp
             engine/src/engine-talkback.cpp

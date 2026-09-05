@@ -6,6 +6,12 @@
 #include "engine-audio.h"
 #include "engine-json.h"
 #include "engine-talkback.h"
+// TalkbackWinSdk (macOS-port Task 1, 2026-09-04): main.cpp is the ONE Windows-
+// only place that still constructs the seam's Windows adapter and wires it
+// into EngineTalkback -- see inject_talkback_sdk() below and set_sdk()'s own
+// comment in engine-talkback.h for why engine-talkback.cpp no longer derives
+// this internally.
+#include "engine-talkback-sdk-win.h"
 #include <zoom_sdk.h>
 #include <auth_service_interface.h>
 #include <setting_service_interface.h>
@@ -1480,6 +1486,38 @@ int main()
     // duration means the object outlives that, so the driving thread can
     // never dangle a reference to it (Ruling B, task-5-brief).
     static EngineTalkback talkback;
+    // Task 1 (2026-09-04): the seam's Windows adapter, wrapping whichever
+    // ZOOMSDK::IMeetingTalkbackController meeting_svc last handed out. Static
+    // storage duration for the SAME reason `talkback` above has it: m_sdk is
+    // a raw pointer into this object, read by tick()/nomination_tick()/
+    // drain_audio() etc. for as long as a probe's driving thread or a live
+    // key press lives, which can outlast any one command's local scope by a
+    // wide margin. Reassigned in place (never re-declared) by
+    // inject_talkback_sdk() below, so its ADDRESS -- the only thing m_sdk
+    // actually holds -- never moves.
+    static TalkbackWinSdk talkback_sdk(nullptr);
+    // Fetches the current talkback controller from `svc` and injects it into
+    // `talkback` via set_sdk(), mirroring exactly what engine-talkback.cpp
+    // used to do for itself at the top of probe()/nominate()/session_start()
+    // before Task 1 (see set_sdk()'s comment in engine-talkback.h for why
+    // that internal derivation was removed). `register_event` additionally
+    // calls SetEvent() on the REAL controller -- probe() and nominate() used
+    // to do this themselves; it is not one of TalkbackSdk's operations (the
+    // seam's own TalkbackSdkEvents shape does not match
+    // ZOOMSDK::IMeetingTalkbackCtrlEvent, which `talkback` still implements
+    // directly to receive Windows callbacks natively), so it happens here,
+    // on the raw pointer, exactly where the old internal code did it.
+    // Deliberately NOT called before resolve_roster_change(): that function's
+    // fix-round-1 (M3) guard depends on nothing re-deriving the adapter while
+    // a live session or a busy nomination holds it -- see
+    // EngineTalkback::resolve_roster_change()'s own comment.
+    auto inject_talkback_sdk = [](ZOOMSDK::IMeetingService *svc, bool register_event) {
+        ZOOMSDK::IMeetingTalkbackController *ctrl =
+            svc ? svc->GetMeetingTalkbackController() : nullptr;
+        talkback_sdk = TalkbackWinSdk(ctrl);
+        talkback.set_sdk(&talkback_sdk);
+        if (register_event && ctrl) ctrl->SetEvent(&talkback);
+    };
     // Task 4: wire the roster-change path (EngineParticipants' five SDK
     // callbacks) to EngineTalkback's re-resolution. Deferred until here
     // because it needs `talkback`, which is declared on this line -- and
@@ -1782,6 +1820,11 @@ int main()
                 // the ~30s bound.
                 if (talkback_thread.joinable()) talkback_thread.join();
                 talkback_stop.store(false, std::memory_order_release);
+                // Task 1: inject the seam's adapter (and register the event
+                // sink on the real controller) right before the call that
+                // used to do both internally -- see inject_talkback_sdk()'s
+                // own comment above.
+                inject_talkback_sdk(meeting_svc, /*register_event=*/true);
 
                 // probe() returns true if and only if it issued a
                 // CreateChannel -- every refusal, not just the re-entrancy
@@ -1882,6 +1925,10 @@ int main()
             // shape end-to-end (src/zoom-engine-client.cpp sends "target"
             // unconditionally) -- deleted.
             const std::string target = json_str(line, "target");
+            // Task 1: inject the adapter (no event registration -- session_
+            // start() never called SetEvent() either, before or after this
+            // task; see its own M4 comment on why).
+            inject_talkback_sdk(meeting_svc, /*register_event=*/false);
             talkback.session_start(meeting_svc, target);
 
         } else if (command == IpcCommand::TalkbackStop) {
@@ -1933,6 +1980,10 @@ int main()
                 // participate in the plugin's nomination state machine, so
                 // it can never double up with report_nomination()'s own
                 // terminal line.
+                // Task 1: inject the adapter and register the event sink
+                // right before the call that used to do both internally --
+                // see inject_talkback_sdk()'s own comment above.
+                inject_talkback_sdk(meeting_svc, /*register_event=*/true);
                 if (!talkback.nominate(meeting_svc, nominees, attempt)) {
                     EngineIpc::write(
                         R"({"cmd":"debug","stage":"nominate_returned_false"})");

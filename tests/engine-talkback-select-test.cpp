@@ -191,13 +191,21 @@ static std::basic_string<zchar_t> zstr_of(const std::string &s)
     return z;
 }
 
-// -- The fake talkback controller: a call log ------------------------------
-// Records what the engine asked Zoom to do. Everything returns success, so a
+// -- The fake talkback SDK: a call log --------------------------------------
+// Records what the engine asked the seam to do. Everything returns Ok, so a
 // test that sees no call cannot be excused by a failure the engine handled.
-class FakeTalkbackController : public ZOOMSDK::IMeetingTalkbackController {
+//
+// Task 1 (2026-09-04): this used to be FakeTalkbackController, subclassing
+// ZOOMSDK::IMeetingTalkbackController directly. It now implements TalkbackSdk
+// (src/talkback-sdk.h) instead -- the whole point of the macOS-port seam is
+// that this fake no longer needs a single Zoom type or a raw SDKError to
+// drive the engine's talkback ladder. Every recorded field below is
+// unchanged in MEANING from the pre-Task-1 fake; only the interface it is
+// recorded through changed.
+class FakeTalkbackSdk : public TalkbackSdk {
 public:
     int creates = 0;
-    std::vector<std::string> destroyed;      // ids passed to AddChannelToDestroy
+    std::vector<std::string> destroyed;      // ids destroy_channels() was given
     std::vector<std::pair<std::string, float> > volumes;
     std::vector<std::pair<std::string, unsigned int> > sends;  // (channel, bytes)
     bool supported = true;
@@ -209,60 +217,74 @@ public:
     int first_send_call = -1;
     int first_volume_call = -1;
 
-    ZOOMSDK::SDKError SetEvent(ZOOMSDK::IMeetingTalkbackCtrlEvent *) override
-    { return ZOOMSDK::SDKERR_SUCCESS; }
+    void set_events(TalkbackSdkEvents *) override {}
     // Task 5 fix round 3 (N6): lets a test drive CreateChannel()'s
-    // SYNCHRONOUS failure path (nomination_create_next()'s CreateChannel-!=-
-    // SUCCESS abort) without a real SDK error -- the round-2 re-review's
-    // mutant (c), "nothing pins the engine side". 1-based index of the
-    // `creates` call to fail; -1 (default) never fails.
+    // SYNCHRONOUS failure path (nomination_create_next()'s create-!=-Ok
+    // abort) without a real SDK error -- the round-2 re-review's mutant (c),
+    // "nothing pins the engine side". 1-based index of the `creates` call to
+    // fail; -1 (default) never fails.
     int fail_create_call = -1;
     // LIVE GATE RUN 1 (2026-08-26): the rate limit a real Zoom has and this
-    // fake never did. `rate_limit_next` is how many UPCOMING CreateChannel
-    // calls answer SDKERR_TOO_FREQUENT_CALL (18) -- the code the live gate saw
-    // when the ladder issued channel 2 from inside channel 1's response, 0ms
-    // apart. `rate_limited` counts how many actually were, so a test cannot
-    // mistake "the engine never called" for "the call was refused".
+    // fake never did. `rate_limit_next` is how many UPCOMING create_channel()
+    // calls answer TalkbackResult::TooFrequent (Windows spells this
+    // SDKERR_TOO_FREQUENT_CALL, enum position 18) -- the code the live gate
+    // saw when the ladder issued channel 2 from inside channel 1's response,
+    // 0ms apart. `rate_limited` counts how many actually were, so a test
+    // cannot mistake "the engine never called" for "the call was refused".
     int rate_limit_next = 0;
     int rate_limited = 0;
     // TALKBACK DELIVERY LAW 2 (ZComms, 2026-08-29): the SAME rate limit, on
     // INVITES. This is the half no fake in this file had, and the half our
     // engine had no handling for: `invite_rate_limit_next` is how many
-    // upcoming ExecuteBatchInviteUsers calls answer SDKERR_TOO_FREQUENT_CALL,
+    // upcoming invite_users() calls answer TalkbackResult::TooFrequent,
     // `invite_rate_limited` counts how many actually did (so a test cannot
     // mistake "the engine never called" for "the call was refused").
     int invite_rate_limit_next = 0;
     int invite_rate_limited = 0;
-    ZOOMSDK::SDKError CreateChannel(unsigned int) override
+    // Task 1, Step 2's pin (the seam's TalkbackResult normalisation reaching
+    // the ladder's own retry decision): a FIFO of results for successive
+    // create_channel() calls, checked BEFORE fail_create_call/rate_limit_next
+    // so it is a strict addition -- every pre-existing test leaves this
+    // empty and is unaffected. `create_calls()` is the same count as
+    // `creates`, exposed as a method because the brief's Step 2 test reads it
+    // that way.
+    std::vector<TalkbackResult> scripted_create_results;
+    void script_create_results(std::vector<TalkbackResult> results)
+    { scripted_create_results = std::move(results); }
+    int create_calls() const { return creates; }
+
+    TalkbackResult create_channel(uint32_t) override
     {
         ++creates;
-        if (creates == fail_create_call) return ZOOMSDK::SDKERR_UNKNOWN;
+        if (!scripted_create_results.empty()) {
+            const TalkbackResult r = scripted_create_results.front();
+            scripted_create_results.erase(scripted_create_results.begin());
+            return r;
+        }
+        if (creates == fail_create_call) return TalkbackResult::Unknown;
         if (rate_limit_next > 0) {
             --rate_limit_next;
             ++rate_limited;
-            return ZOOMSDK::SDKERR_TOO_FREQUENT_CALL;
+            return TalkbackResult::TooFrequent;
         }
-        return ZOOMSDK::SDKERR_SUCCESS;
+        return TalkbackResult::Ok;
     }
-    ZOOMSDK::IMeetingTalkbackChannel *GetChannelByID(const zchar_t *) override
-    { return nullptr; }
-    ZOOMSDK::IList<ZOOMSDK::IMeetingTalkbackChannel *> *GetChannelList() override
-    { return nullptr; }
-    ZOOMSDK::SDKError BeginBatchDestroyChannels() override
-    { return ZOOMSDK::SDKERR_SUCCESS; }
-    ZOOMSDK::SDKError AddChannelToDestroy(const zchar_t *id) override
-    { destroyed.push_back(utf8_of(id)); return ZOOMSDK::SDKERR_SUCCESS; }
-    ZOOMSDK::SDKError RemoveChannelFromDestroy(const zchar_t *) override
-    { return ZOOMSDK::SDKERR_SUCCESS; }
-    ZOOMSDK::SDKError ExecuteBatchDestroyChannels() override
-    { return ZOOMSDK::SDKERR_SUCCESS; }
+    TalkbackResult destroy_channels(const std::vector<std::string> &channel_ids) override
+    {
+        // Task 1: destroy_channels() is a single call over a whole list
+        // (Begin/Add/ExecuteBatchDestroyChannels collapsed by the seam), but
+        // every real call site in this codebase passes at most one id -- see
+        // engine-talkback-sdk-win.h's own comment on why the batch shape
+        // lives there and nowhere above it. Recorded exactly like the old
+        // fake's AddChannelToDestroy(), one push per id.
+        for (const auto &id : channel_ids) destroyed.push_back(id);
+        return TalkbackResult::Ok;
+    }
     // Task 4: BEGIN/ADD/EXECUTE recorded as committed (channel, user_id)
-    // pairs in `invited` -- the same Begin/Add/Execute shape `destroyed`
-    // above records for the destroy side, so the roster re-resolution tests
-    // can assert on invites the same way the existing tests assert on
-    // destroys: by counting real SDK calls, never by parsing report output.
-    std::basic_string<zchar_t> invite_channel_in_progress;
-    std::vector<unsigned int> invite_users_in_progress;
+    // pairs in `invited` -- the same shape `destroyed` above records for the
+    // destroy side, so the roster re-resolution tests can assert on invites
+    // the same way the existing tests assert on destroys: by counting real
+    // SDK calls, never by parsing report output.
     std::vector<std::pair<std::string, unsigned int> > invited;
     // 2026-08-29: ordering marker, the same device `first_send_call` and
     // `first_volume_call` already are. The neutral background-volume set has
@@ -270,60 +292,39 @@ public:
     // the gap at Zoom's ducked default -- which is the whole defect. A count
     // of invites cannot see that; a call index can.
     int first_invite_call = -1;
-    ZOOMSDK::SDKError BeginBatchInviteUsers(const zchar_t *channelID) override
+    TalkbackResult invite_users(const std::string &channel_id,
+                                const std::vector<uint32_t> &user_ids) override
     {
         if (first_invite_call < 0) first_invite_call = calls;
         ++calls;
-        invite_channel_in_progress = channelID;
-        invite_users_in_progress.clear();
-        return ZOOMSDK::SDKERR_SUCCESS;
-    }
-    ZOOMSDK::SDKError AddUserToInvite(unsigned int userID) override
-    {
-        invite_users_in_progress.push_back(userID);
-        return ZOOMSDK::SDKERR_SUCCESS;
-    }
-    ZOOMSDK::SDKError RemoveUserFromInvite(unsigned int) override
-    { return ZOOMSDK::SDKERR_SUCCESS; }
-    ZOOMSDK::SDKError ExecuteBatchInviteUsers() override
-    {
         // LAW 2: refuse BEFORE recording, so a refused invite does not appear
         // in `invited` -- Zoom did not accept it, and a test that counted it
         // would be asserting on a membership that does not exist.
         if (invite_rate_limit_next > 0) {
             --invite_rate_limit_next;
             ++invite_rate_limited;
-            return ZOOMSDK::SDKERR_TOO_FREQUENT_CALL;
+            return TalkbackResult::TooFrequent;
         }
-        for (unsigned int uid : invite_users_in_progress)
-            invited.push_back(std::make_pair(utf8_of(invite_channel_in_progress.c_str()), uid));
-        return ZOOMSDK::SDKERR_SUCCESS;
+        for (uint32_t uid : user_ids)
+            invited.push_back(std::make_pair(channel_id, uid));
+        return TalkbackResult::Ok;
     }
-    ZOOMSDK::SDKError BeginBatchRemoveUsers(const zchar_t *) override
-    { return ZOOMSDK::SDKERR_SUCCESS; }
-    ZOOMSDK::SDKError AddUserToRemove(unsigned int) override
-    { return ZOOMSDK::SDKERR_SUCCESS; }
-    ZOOMSDK::SDKError RemoveUserFromRemoveList(unsigned int) override
-    { return ZOOMSDK::SDKERR_SUCCESS; }
-    ZOOMSDK::SDKError ExecuteBatchRemoveUsers() override
-    { return ZOOMSDK::SDKERR_SUCCESS; }
-    ZOOMSDK::SDKError SendAudioDataToChannel(const zchar_t *id, const char *,
-                                             unsigned int len, unsigned int,
-                                             ZOOMSDK::ZoomSDKAudioChannel) override
+    TalkbackResult send_audio(const std::string &channel_id, const char *,
+                              uint32_t len, uint32_t, bool) override
     {
         if (first_send_call < 0) first_send_call = calls;
         ++calls;
-        sends.push_back(std::make_pair(utf8_of(id), len));
-        return ZOOMSDK::SDKERR_SUCCESS;
+        sends.push_back(std::make_pair(channel_id, len));
+        return TalkbackResult::Ok;
     }
-    ZOOMSDK::SDKError SetChannelBackgroundVolume(const zchar_t *id, float v) override
+    TalkbackResult set_background_volume(const std::string &channel_id, float v) override
     {
         if (first_volume_call < 0) first_volume_call = calls;
         ++calls;
-        volumes.push_back(std::make_pair(utf8_of(id), v));
-        return ZOOMSDK::SDKERR_SUCCESS;
+        volumes.push_back(std::make_pair(channel_id, v));
+        return TalkbackResult::Ok;
     }
-    bool IsMeetingSupportTalkBack() override { return supported; }
+    bool is_meeting_support_talkback() override { return supported; }
 };
 
 // -- The fake participants list/user info (Task 4) -------------------------
@@ -404,13 +405,13 @@ public:
 // before the first send" is the whole law, and a pair of counters cannot see
 // ordering.
 //
-// So this fake borrows FakeTalkbackController's monotonic `calls` clock rather
+// So this fake borrows FakeTalkbackSdk's monotonic `calls` clock rather
 // than keeping one of its own: the two controllers are different objects but
 // the ordering question spans both, and two independent counters cannot be
 // compared. `clock` is wired by FakeMeetingService's constructor.
 class FakeAudioController : public ZOOMSDK::IMeetingAudioController {
 public:
-    FakeTalkbackController *clock = nullptr;
+    FakeTalkbackSdk *clock = nullptr;
     std::vector<unsigned int> unmuted;   // user ids passed to UnMuteAudio
     std::vector<unsigned int> muted;     // user ids passed to MuteAudio
     int first_unmute_call = -1;
@@ -544,12 +545,20 @@ public:
 };
 
 // -- The fake meeting service ----------------------------------------------
-// Only GetMeetingTalkbackController() and GetMeetingParticipantsController()
-// are written by hand. The rest is the generated block described at the top
-// of this file: 57 overrides that exist solely so this class is concrete.
+// GetMeetingTalkbackController() and GetMeetingParticipantsController() are
+// written by hand. The rest is the generated block described at the top of
+// this file: 57 overrides that exist solely so this class is concrete.
 class FakeMeetingService : public ZOOMSDK::IMeetingService {
 public:
-    FakeTalkbackController ctrl;
+    // Task 1 (2026-09-04): FakeTalkbackSdk (formerly FakeTalkbackController)
+    // no longer implements ZOOMSDK::IMeetingTalkbackController, so it can no
+    // longer be returned from GetMeetingTalkbackController() -- see that
+    // method's own removal below. Kept as a member (not hoisted out to every
+    // test's own local) purely so every existing test's `svc.ctrl.xxx`
+    // read/write keeps compiling unchanged; a test now must ALSO call
+    // `tb.set_sdk(&svc.ctrl)` for the engine to actually reach it (every test
+    // in this file does, right after declaring `tb`).
+    FakeTalkbackSdk ctrl;
     FakeParticipantsController participants;
     // LAW 1 (2026-08-29). Wired to the talkback controller's monotonic call
     // clock in the constructor, so "the unmute happened before the first
@@ -557,14 +566,26 @@ public:
     // FakeAudioController.
     FakeAudioController audio;
     FakeMeetingService() { audio.clock = &ctrl; }
-    // Fix round 1, M3: simulates GetMeetingTalkbackController() returning
-    // null for one call -- the meeting reconnect/ending state the review
-    // named as the trigger for m_ctrl going null mid-press if
-    // resolve_roster_change() ever reassigns it without an m_session_live
-    // guard. Off by default so every pre-existing test is unaffected.
+    // Fix round 1, M3's test toggle used to simulate
+    // GetMeetingTalkbackController() returning null for one call -- the
+    // meeting reconnect/ending state the review named as the trigger for
+    // m_ctrl going null mid-press if resolve_roster_change() ever reassigned
+    // it without an m_session_live guard. Task 1 REMOVED that internal
+    // reassignment entirely (see EngineTalkback::set_sdk()'s comment): the
+    // adapter is now injected by the caller and never re-derived from this
+    // service, so the failure mode this toggle simulated is structurally
+    // unreachable any more -- nothing reads this field. Left in place
+    // (inert) so the one test that sets it (search `controller_returns_null`)
+    // still compiles and still documents the invariant it was written for.
     bool controller_returns_null = false;
+    // IMeetingService's pure virtual, still required to make this class
+    // concrete. Task 1: this fake's `ctrl` is TalkbackSdk-typed now, not
+    // ZOOMSDK::IMeetingTalkbackController*, so it can no longer be returned
+    // here -- and nothing in engine-talkback.cpp calls this method any more
+    // (the adapter is injected via EngineTalkback::set_sdk() instead), so
+    // returning null unconditionally changes nothing observable.
     ZOOMSDK::IMeetingTalkbackController *GetMeetingTalkbackController() override
-    { return controller_returns_null ? nullptr : &ctrl; }
+    { return nullptr; }
     ZOOMSDK::IMeetingParticipantsController *GetMeetingParticipantsController() override
     { return &participants; }
 
@@ -738,7 +759,7 @@ static bool volume_channels_distinct(
 // KEYED cycle starts from the same blank slate it had before provisioning set
 // anything. Without the first_volume_call reset, the provision-time neutral
 // set would make "the duck ran after the first send" trivially false.
-static void reset_volume_log(FakeTalkbackController &ctrl)
+static void reset_volume_log(FakeTalkbackSdk &ctrl)
 {
     ctrl.volumes.clear();
     ctrl.first_volume_call = -1;
@@ -754,6 +775,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         check(tb.nominate(&svc, {"Sarah", "Luis"}), "nominate refused a clean two-name plan");
         check(svc.ctrl.creates == 1,
               "nominate issued more (or fewer) than one CreateChannel up front");
@@ -788,6 +810,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         std::vector<std::string> nominees;
         for (int i = 0; i < 11; ++i) nominees.push_back("Talent " + std::to_string(i + 1));
         check(tb.nominate(&svc, nominees), "nominate refused an 11-name plan");
@@ -929,6 +952,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
@@ -983,6 +1007,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         std::vector<std::string> nominees;
         for (int i = 0; i < 11; ++i) nominees.push_back("Talent " + std::to_string(i + 1));
         check(tb.nominate(&svc, nominees), "nominate refused an 11-name plan");
@@ -1015,6 +1040,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
@@ -1041,6 +1067,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         check(!tb.nominate(&svc, {"Sarah", "all"}),
               "a nominee named \"all\" was nominated -- keying that name would go "
               "out to everyone");
@@ -1062,6 +1089,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         check(!tb.session_start(&svc, "Sarah"),
               "keying with nothing nominated was accepted");
         check(svc.ctrl.creates == 0,
@@ -1088,6 +1116,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         check(svc.ctrl.creates == 1, "nominate did not issue its first create");
 
@@ -1109,6 +1138,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         for (int i = 1; i <= 2; ++i)
             respond(tb, chan_id(i).c_str(), kOk);
@@ -1134,6 +1164,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);   // all-talent
         respond(tb, chan_id(2).c_str(), kOk);   // Sarah private
@@ -1210,6 +1241,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         check(tb.nominate(&svc, {"Ivan"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
@@ -1230,6 +1262,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
@@ -1263,6 +1296,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
@@ -1291,6 +1325,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
@@ -1343,6 +1378,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);   // all-talent
         respond(tb, chan_id(2).c_str(), kOk);   // Sarah private
@@ -1401,6 +1437,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         check(tb.nominate(&svc, {"Ivan"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
@@ -1441,6 +1478,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
@@ -1457,14 +1495,20 @@ int main()
               "keying Sarah's private channel was refused");
         check(tb.session_live(), "the key press did not report live");
 
-        // Simulate the reconnect/ending state the review describes:
-        // GetMeetingTalkbackController() would now return null if
-        // resolve_roster_change() called it.
+        // Simulate the reconnect/ending state the review describes. Task 1:
+        // `controller_returns_null` is now INERT -- resolve_roster_change()
+        // no longer calls GetMeetingTalkbackController() at all, in either of
+        // its branches (see EngineTalkback::set_sdk()'s comment), so this
+        // line no longer causes anything different to happen. Left set
+        // anyway, so this test still documents the scenario it was written
+        // against; the assertions below now hold for a stronger reason than
+        // before -- there is no internal re-derivation left to race at all,
+        // not merely one that is guarded correctly.
         svc.controller_returns_null = true;
         svc.participants.users.push_back(make_user(6001, "Someone Else"));
         resolve(tb, svc);   // a roster event mid-press
 
-        // m_ctrl must still be the ORIGINAL, valid controller: a buffer sent
+        // m_sdk must still be the ORIGINAL, valid adapter: a buffer sent
         // now must still reach Zoom, not silently become a no_channel_drops
         // for the rest of the press.
         int16_t pcm[480] = {0};
@@ -1496,6 +1540,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);   // all-talent
         respond(tb, chan_id(2).c_str(), kOk);   // Sarah private
@@ -1544,6 +1589,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -1597,6 +1643,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         // "Sarah" plans 2 channels: all-talent + her private.
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         check(svc.ctrl.creates == 1, "setup: the first create was not issued");
@@ -1628,6 +1675,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -1677,6 +1725,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -1728,6 +1777,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -1771,6 +1821,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -1805,6 +1856,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -1835,6 +1887,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -1894,6 +1947,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -1931,6 +1985,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -2007,6 +2062,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);   // all-talent
         respond(tb, chan_id(2).c_str(), kOk);   // Sarah private
@@ -2062,6 +2118,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
@@ -2110,6 +2167,7 @@ int main()
 
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         svc.participants.users.push_back(make_user(4101, "Sarah"));
         svc.participants.users.push_back(make_user(4102, "Luis"));
         check(tb.nominate(&svc, {"Sarah", "Luis"}), "nominate refused a two-name plan");
@@ -2186,6 +2244,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -2283,6 +2342,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         svc.participants.has_self = true;
         svc.participants.self = make_user(7700, "CoreVideo Engine");
         svc.participants.self.muted = false;   // already open
@@ -2312,6 +2372,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -2366,6 +2427,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         svc.participants.users.push_back(make_user(8001, "Sarah"));
         svc.participants.users.push_back(make_user(8002, "Luis"));
 
@@ -2428,6 +2490,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         svc.participants.users.push_back(make_user(8001, "Sarah"));
         svc.participants.users.push_back(make_user(8002, "Luis"));
         check(tb.nominate(&svc, {"Sarah", "Luis"}), "nominate refused a two-name plan");
@@ -2474,6 +2537,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         svc.participants.users.push_back(make_user(8201, "Sarah"));
         svc.participants.users.push_back(make_user(8202, "Luis"));
         check(tb.nominate(&svc, {"Sarah", "Luis"}), "nominate refused a two-name plan");
@@ -2523,6 +2587,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -2574,6 +2639,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -2655,6 +2721,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         svc.participants.users.push_back(make_user(8301, "Sarah"));
         svc.participants.users.push_back(make_user(8302, "Luis"));
 
@@ -2742,6 +2809,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         svc.participants.users.push_back(make_user(8401, "Sarah"));
         svc.participants.users.push_back(make_user(8402, "Luis"));
 
@@ -2798,6 +2866,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
         svc.participants.users.push_back(make_user(8501, "Sarah"));
 
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
@@ -2830,6 +2899,66 @@ int main()
         check(svc.ctrl.invited.size() == 1,
               "the backed-off invite never issued once its own deadline passed "
               "-- that is a stalled queue, not a paced one");
+    }
+
+    // -- Task 1 (2026-09-04): the TalkbackSdk seam's result normalisation
+    // reaches the ladder's own retry decision, not just the fake's own
+    // pass-through -----------------------------------------------------------
+    //
+    // Law 2's signal must survive the seam and reach the LADDER's retry
+    // decision. Asserting the fake returns what it was told is a tautology;
+    // what matters is that a too-frequent create is retried rather than
+    // reported as a terminal failure, which is the behaviour the whole backoff
+    // exists for.
+    //
+    // Two adjustments from task-1-brief.md's Step 2 sketch, both because the
+    // sketch's exact code does not compile/pass against the real engine (see
+    // task-1-report.md for why):
+    //   (1) `EngineTalkback::nominate_for_test()` does not exist and has no
+    //       natural equivalent -- nominate() is the ladder's one entry point
+    //       and needs an IMeetingService to gate against, even though this
+    //       test's whole point is to bypass the SDK via the seam. Driven with
+    //       the existing public nominate() plus a FakeMeetingService, exactly
+    //       as every other test in this file already is.
+    //   (2) `debug_expire_membership_floor_for_test()` alone only opens the
+    //       shared membership-call floor (m_membership_next_at); it never
+    //       touches the CREATE's own backoff schedule
+    //       (m_nomination_next_create_at, armed by nomination_schedule_create()
+    //       with a real 500/1000/2000/4000ms delay), so a retry scheduled
+    //       after a TooFrequent create would never actually fire within this
+    //       test. drain_membership() (already used by every retry-driving test
+    //       above) calls debug_expire_create_spacing_for_test() instead, which
+    //       expires all three of the pacer's deadlines -- exactly what is
+    //       needed to drive a create retry to completion.
+    {
+        FakeTalkbackSdk sdk;
+        sdk.script_create_results({TalkbackResult::TooFrequent,
+                                   TalkbackResult::TooFrequent,
+                                   TalkbackResult::Ok});
+        FakeMeetingService svc;   // unused by the seam itself (see (1) above);
+                                  // still required so nominate() has a
+                                  // meeting service to gate against.
+        EngineTalkback tb;
+        tb.set_sdk(&sdk);
+
+        std::vector<std::string> lines;
+        EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
+        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        drain_membership(tb);
+        EngineIpc::test_sink() = nullptr;
+
+        check(sdk.create_calls() == 3,
+              "a too-frequent create was not retried -- Law 2 backoff is not "
+              "reaching the ladder through the seam");
+        // count_abort_reports_because(), not a bare substring search: the
+        // diagnostic "create_rate_limited_retry" stage (expected here --
+        // it is the "waiting, will retry" line for each of the two
+        // TooFrequent results) contains "create_rate_limited" as a literal
+        // prefix, so a plain line_has() search matches it too and cannot
+        // tell "still retrying" from "gave up for this reason", which is
+        // the exact distinction this assertion exists to draw.
+        check(count_abort_reports_because(lines, "create_rate_limited") == 0,
+              "a create that eventually succeeded was reported as rate-limited");
     }
 
     if (failures == 0)

@@ -154,6 +154,60 @@ Every one of these is documented at length where it lives; the list is the map.
   directly (2026-08-18/19). Applied in both `zoom-source.cpp`
   (`output_audio_from_shared_memory`, shared by the main and director-preview
   slots) and `zoom-participant-audio-source.cpp`.
+- **Loudness coefficients follow the RUNTIME sample rate, never 48 kHz**
+  (`src/audio-loudness.h`, feat/panelist-feedback): BS.1770-4 publishes its
+  two K-weighting biquads' coefficients for 48 kHz and no other rate, and
+  this plugin has no guaranteed rate -- Zoom commonly delivers 32 kHz. The
+  coefficients are DERIVED from the analog prototype at whatever
+  `loudness_meter_configure()` is called with; at 48 kHz that derivation
+  reproduces the published table to fourteen digits, which is what the
+  engine's tests assert. Pinned at 48 kHz and fed 32 kHz, a 1 kHz tone
+  whose true value is -19.98 LUFS reads -18.66: 1.3 LU wrong, on a meter
+  whose whole product claim is that a 6 LU spread between panelists is
+  visible, and with nothing in the number to say it is wrong. The
+  gated-integration window carries the same fragility one level up:
+  `loudness_meter_clear_window()` is shared, on purpose, by
+  `loudness_meter_configure()` and `loudness_meter_reset_window()` so a
+  mid-stream format renegotiation (Zoom renegotiating, or a Mix/Isolated
+  role flip changing channel count on the same subscription) cannot leave
+  blocks measured under the OLD coefficients sitting in the same check
+  window as blocks measured under the new ones -- do not let those two
+  call sites diverge.
+- **Integrated loudness is gated, and the gate is load-bearing, not an
+  optimisation** (`audio-loudness.h`'s two-pass integration: an absolute
+  gate at -70 LUFS, then a relative gate at -10 LU below the
+  absolute-gated mean, over 400 ms blocks at a 100 ms hop): a panelist is
+  silent roughly 80% of a preshow, and ungated silence pulls the mean down
+  hard -- 4 s of -20 LUFS speech inside a 20 s window reads -27.08 LUFS
+  ungated and -20.16 gated, and -27.08 is not a usably-wrong number, it is
+  a differently-shaped one that would fail every panelist on every panel.
+  The board's reference is the panel **MEDIAN** of gated integrated
+  loudness, never the mean, and only panelists who have cleared the
+  minimum gated block count vote on it -- one laptop mic sitting at -35
+  LUFS should not get to drag the reference far enough to fail everyone
+  else, and a panelist who hasn't spoken yet should not vote at all.
+- **The readiness board's `kLoudnessBoardMinRowPx` is a SLOT PITCH, not a
+  drawn row height** (`src/loudness-board.h`): `loudness_board_visible_rows()`
+  divides available body height by it to decide how many rows fit; the row
+  actually drawn is that slot minus `kLoudnessBoardRowGapPx`. The test
+  asserts `last.h + kLoudnessBoardRowGapPx >= kLoudnessBoardMinRowPx`
+  specifically because `last.h >= kLoudnessBoardMinRowPx` is unsatisfiable
+  for any positive gap -- a future "simplification" to the un-added form
+  is a regression, not a cleanup. Label refresh on the same board is gated
+  on BOTH `model.signature` changing AND `shown` (the visible row count)
+  changing, because the signature encodes reference/names/statuses/
+  deviations but not how many rows the current canvas height reveals: a
+  signature-only gate leaves rows newly exposed by a resize blank
+  indefinitely whenever the panel's content hasn't otherwise moved --
+  worst during a silent preshow, which is the normal state, since every
+  parked row reads identically. The board's own 10 Hz rebuild
+  (`meter_video_tick`) is gated on `obs_source_showing()` for the same
+  reason as the Talkback dock's roster poll: a meter parked on an unused
+  scene should not pay for `g_sources_mtx` plus every live source's mutex
+  ten times a second forever. The accumulator SUBTRACTS the 100 ms
+  interval rather than zeroing on fire -- zeroing discards the remainder
+  that pushed a tick over threshold, which at 60 fps lands every 7 frames
+  (~117 ms, ~8.6 Hz) instead of the documented 10 Hz.
 - **ISO recording timing** (`src/iso-video-pacer.h`, `src/iso-audio-gap-fill.h`):
   raw video has no per-frame timestamps and ffmpeg cannot be trusted to
   invent correct ones from a byte stream — `-use_wallclock_as_timestamps`

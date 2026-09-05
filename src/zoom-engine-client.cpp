@@ -4,6 +4,7 @@
 #include "talkback-key.h"  // talkback_session_mic_blocked() -- Law 1
 #include "talkback-plan.h" // talkback_dedup_preserve_order() -- Task 5 fix round 1, F4
 #include "zoom-join-decision.h"
+#include "zoom-privilege-notice.h" // record-privilege handshake copy/classification
 #include "zoom-reconnect.h"
 #include "zoom-sdk-init-retry.h"
 #include <QJsonArray>
@@ -1361,6 +1362,34 @@ void ZoomEngineClient::set_error_and_notify(const std::string &message)
     for (const auto &cb : callbacks) cb(message);
 }
 
+void ZoomEngineClient::set_privilege_notice_and_notify(const std::string &message)
+{
+    std::vector<NoticeCallback> callbacks;
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        m_privilege_notice = message;
+        for (const auto &entry : m_notice_callbacks)
+            if (entry.second) callbacks.push_back(entry.second);
+    }
+    // m_mtx is released here — a callback may call back into this client, same
+    // reason as set_error_and_notify() above.
+    for (const auto &cb : callbacks) cb(message);
+}
+
+void ZoomEngineClient::clear_privilege_notice_and_notify()
+{
+    std::vector<NoticeCallback> callbacks;
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        if (m_privilege_notice.empty())
+            return; // nothing pending -- most raw_media_ready reports land here.
+        m_privilege_notice.clear();
+        for (const auto &entry : m_notice_callbacks)
+            if (entry.second) callbacks.push_back(entry.second);
+    }
+    for (const auto &cb : callbacks) cb(std::string());
+}
+
 void ZoomEngineClient::reader_loop()
 {
     std::string line;
@@ -1416,9 +1445,15 @@ void ZoomEngineClient::handle_event(const std::string &line)
             while (m_debug_events.size() > 300)
                 m_debug_events.pop_front();
         }
-        if (stage == "raw_media_ready")
+        if (stage == "raw_media_ready") {
             m_media_active.store(true, std::memory_order_release);
-        else if (stage == "raw_media_stopped")
+            // raw_media_ready is the engine event that means the record-
+            // privilege handshake (if one was in progress) just succeeded --
+            // see src/zoom-privilege-notice.h. A notice that never clears is
+            // its own defect, so clear it on every successful start, not just
+            // ones that followed a notice.
+            clear_privilege_notice_and_notify();
+        } else if (stage == "raw_media_stopped")
             m_media_active.store(false, std::memory_order_release);
         return;
     }
@@ -1584,6 +1619,13 @@ void ZoomEngineClient::handle_event(const std::string &line)
             talkback_nomination_reset(m_talkback_nomination_status);
             m_talkback_nomination_pending = TalkbackNominationPending{};
             talkback_presence_reset(m_talkback_channel_presence);
+            // A leave/rejoin starts a fresh handshake; a notice from the
+            // previous meeting must not survive into it. No separate notify
+            // call needed -- like the resets above, this is picked up by the
+            // dock's own poll (pending_privilege_notice()) on its next tick,
+            // same as this "left" handler has never notified roster callbacks
+            // either (see this function's own doc comment).
+            m_privilege_notice.clear();
             keep_failed = !m_last_error.empty() &&
                 !m_user_leaving.load(std::memory_order_acquire);
         }
@@ -1691,19 +1733,26 @@ void ZoomEngineClient::handle_event(const std::string &line)
         // lands moments later (121ms observed live 2026-08-20) followed by
         // raw_media_ready. Routing it into the join-failure tail flipped a
         // healthy joined session to Failed, which then gated start_engine,
-        // resubscription and recovery for the rest of the session. Surface
-        // the message; never vote against the meeting.
+        // resubscription and recovery for the rest of the session. Never vote
+        // against the meeting -- unchanged from before this fix.
+        //
+        // What changed (live defect, 2026-09-05): this used to ALSO set
+        // m_last_error and fire the error-callback list, which is what pops
+        // the "Zoom Join" QMessageBox -- so a session working exactly as
+        // designed showed the operator a modal reading "raw recording
+        // failed". A pending grant is a STATE, not a failure, so it now goes
+        // to the separate notice-callback list instead (see NoticeCallback's
+        // doc comment in zoom-engine-client.h) and m_last_error is left
+        // untouched -- other code (e.g. the "left" handler's keep_failed
+        // check) reads that field as "the session actually failed", which
+        // this is not. src/zoom-privilege-notice.h picks the operator-facing
+        // copy and tells a first request apart from a repeat one (the engine
+        // only asks the host once per meeting; every later report is the same
+        // still-pending wait, distinguished only by its "detail" text).
         if (emsg == "raw_media_start_failed" &&
             obj.value("privilege_requested").toBool()) {
-            std::vector<ErrorCallback> error_callbacks;
-            const std::string error_message = zoom_error_message(obj);
-            {
-                std::lock_guard<std::mutex> lk(m_mtx);
-                m_last_error = error_message;
-                for (const auto &entry : m_error_callbacks)
-                    if (entry.second) error_callbacks.push_back(entry.second);
-            }
-            for (const auto &cb : error_callbacks) cb(error_message);
+            const std::string detail = obj.value("detail").toString().toStdString();
+            set_privilege_notice_and_notify(zoom_privilege_notice_text(detail));
             return;
         }
         if (emsg == "video_subscribe_failed") {
@@ -1907,6 +1956,12 @@ std::string ZoomEngineClient::last_error() const
     return m_last_error;
 }
 
+std::string ZoomEngineClient::pending_privilege_notice() const
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    return m_privilege_notice;
+}
+
 void ZoomEngineClient::clear_last_error()
 {
     std::vector<ErrorCallback> callbacks;
@@ -1960,6 +2015,21 @@ void ZoomEngineClient::remove_error_callback(void *key)
 {
     std::lock_guard<std::mutex> lk(m_mtx);
     m_error_callbacks.erase(key);
+}
+
+void ZoomEngineClient::add_notice_callback(void *key, NoticeCallback cb)
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    if (cb)
+        m_notice_callbacks[key] = std::move(cb);
+    else
+        m_notice_callbacks.erase(key);
+}
+
+void ZoomEngineClient::remove_notice_callback(void *key)
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    m_notice_callbacks.erase(key);
 }
 
 bool ZoomEngineClient::write_json(const std::string &json)

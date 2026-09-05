@@ -801,6 +801,17 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoJoinDecision
              COMMAND CoreVideoJoinDecisionTest)
 
+    # Record-privilege handshake notice copy/classification (2026-09-05 live
+    # defect fix). Header-only logic; no Qt/OBS/SDK dependencies.
+    add_executable(CoreVideoPrivilegeNoticeTest
+        tests/zoom-privilege-notice-test.cpp
+    )
+    target_include_directories(CoreVideoPrivilegeNoticeTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoPrivilegeNotice
+             COMMAND CoreVideoPrivilegeNoticeTest)
+
     # IPC line-I/O framing and write-failure semantics (POSIX socket-based test).
     if(NOT WIN32)
         add_executable(CoreVideoIpcLineIoTest

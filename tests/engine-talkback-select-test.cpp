@@ -665,6 +665,90 @@ public:
     IListFactory* GetListFactory() override { return {}; }
 };
 
+// -- The fake TalkbackHost (Task 2b, 2026-09-05) ----------------------------
+// Mirrors TalkbackWinHost (engine/src/engine-talkback-host-win.h) against
+// these same fakes rather than the real SDK: the roster walk goes through
+// FakeParticipantsController exactly as resolve_participant()/
+// current_roster() do in production, and the mute calls go through
+// FakeAudioController exactly as ensure_mic_open()/restore_mic_state() do.
+// Every test in this file constructs one alongside its FakeMeetingService and
+// injects both (`tb.set_sdk(&svc.ctrl); tb.set_host(&host);`), mirroring
+// main.cpp's own paired injection.
+class FakeTalkbackHost : public TalkbackHost {
+public:
+    explicit FakeTalkbackHost(FakeMeetingService &svc) : m_svc(&svc) {}
+
+    std::vector<TalkbackParticipant> roster() override
+    {
+        std::vector<TalkbackParticipant> out;
+        IList<unsigned int> *ids = m_svc->participants.GetParticipantsList();
+        if (!ids) return out;
+        for (int i = 0; i < ids->GetCount(); ++i) {
+            const unsigned int uid = ids->GetItem(i);
+            IUserInfo *u = m_svc->participants.GetUserByUserID(uid);
+            if (!u) continue;
+            TalkbackParticipant p;
+            p.user_id = uid;
+            p.display_name = utf8_of(u->GetUserName());
+            p.supports_talkback = u->IsSupportTalkback();
+            out.push_back(std::move(p));
+        }
+        return out;
+    }
+
+    bool myself(TalkbackParticipant &out) override
+    {
+        IUserInfo *self = m_svc->participants.GetMySelfUser();
+        if (!self) return false;
+        out.user_id = self->GetUserID();
+        out.display_name = utf8_of(self->GetUserName());
+        out.supports_talkback = self->IsSupportTalkback();
+        return true;
+    }
+
+    // HAZARD (this task's brief): an unknown mic state must never read as
+    // "not muted". Fails CLOSED (true, i.e. "muted") when there is no self
+    // user to ask, mirroring TalkbackWinHost's own is_self_muted().
+    bool is_self_muted() override
+    {
+        IUserInfo *self = m_svc->participants.GetMySelfUser();
+        if (!self) return true;
+        return self->IsAudioMuted();
+    }
+
+    // Step 11 (this task's brief): lets a test drive set_self_muted()
+    // FAILING without touching FakeAudioController's own unmute_result (which
+    // simulates a real SDK refusal, not a missing controller) -- the
+    // mutation-provable invariant is "an unmute the seam itself cannot
+    // complete still leaves m_mic_open false", distinct from "Zoom refused
+    // the unmute", which FakeAudioController::unmute_result already covers.
+    bool fail_set_self_muted = false;
+
+    TalkbackResult set_self_muted(bool muted) override
+    {
+        if (fail_set_self_muted) {
+            m_last_raw_code = -1;
+            return TalkbackResult::Unknown;
+        }
+        IUserInfo *self = m_svc->participants.GetMySelfUser();
+        if (!self) {
+            m_last_raw_code = -1;
+            return TalkbackResult::NotExist;
+        }
+        const ZOOMSDK::SDKError e = muted
+            ? m_svc->audio.MuteAudio(self->GetUserID(), true)
+            : m_svc->audio.UnMuteAudio(self->GetUserID());
+        m_last_raw_code = static_cast<int>(e);
+        return e == ZOOMSDK::SDKERR_SUCCESS ? TalkbackResult::Ok : TalkbackResult::Unknown;
+    }
+
+    int last_raw_code() const override { return m_last_raw_code; }
+
+private:
+    FakeMeetingService *m_svc;
+    int m_last_raw_code = -1;
+};
+
 // Builds a roster entry for FakeParticipantsController::users. Every test
 // below that simulates a join pushes one of these; a leave is simulated by
 // removing it, and a rejoin under a NEW id (the realistic case -- ids are
@@ -724,19 +808,73 @@ static void drain_membership(EngineTalkback &tb)
     }
 }
 
+// Task 2b: the test-side mirror of engine-talkback-sdk-win.h's
+// talkback_win_tb_result() -- this file drives EngineTalkback's own
+// on_*_response() methods directly now (it implements TalkbackSdkEvents, not
+// ZOOMSDK::IMeetingTalkbackCtrlEvent, any more), so something here has to do
+// the same TalkbackError->TalkbackResult translation the real adapter does in
+// production. Deliberately not #including engine-talkback-sdk-win.h to reuse
+// its version: that header also declares TalkbackWinSdk's full
+// ZOOMSDK::IMeetingTalkbackCtrlEvent override set, which would make this TU
+// implicitly depend on the real controller's SetEvent() shape matching too --
+// a coupling this file's own fakes exist to avoid. Only Ok/AlreadyExist are
+// ever compared against by the ladder (see that function's own comment for
+// why every other value maps to Unknown); the raw `err` is threaded through
+// separately as `raw_code` regardless, so no test assertion depends on this
+// mapping being any richer.
+static TalkbackResult test_tb_result(IMeetingTalkbackCtrlEvent::TalkbackError err)
+{
+    switch (err) {
+    case IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_OK: return TalkbackResult::Ok;
+    case IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_ALREADY_EXIST:
+        return TalkbackResult::AlreadyExists;
+    default: return TalkbackResult::Unknown;
+    }
+}
+
+// Task 2b: thin shims preserving every existing call site's argument shape
+// (a zchar_t* channel id, a bare TalkbackError) while calling EngineTalkback's
+// renamed, portable methods -- on_create_channel_response()/
+// on_channel_user_join_response()/on_channel_user_leave_response(), which take
+// (UTF-8 string, TalkbackResult, raw_code) instead of
+// (const zchar_t*, TalkbackError). Mechanical translation only: every value
+// a test already passes (chan_id(N).c_str(), a user id, kOk/kAlreadyExist/
+// kNoPermission/...) is unchanged.
+static void tb_create_response(EngineTalkback &tb, const zchar_t *id,
+                               IMeetingTalkbackCtrlEvent::TalkbackError err)
+{
+    tb.on_create_channel_response(utf8_of(id), test_tb_result(err),
+                                  static_cast<int>(err));
+}
+static void tb_join_response(EngineTalkback &tb, const zchar_t *id, unsigned int user_id,
+                            IMeetingTalkbackCtrlEvent::TalkbackError err)
+{
+    tb.on_channel_user_join_response(utf8_of(id), user_id, test_tb_result(err),
+                                     static_cast<int>(err));
+}
+static void tb_leave_response(EngineTalkback &tb, const zchar_t *id, unsigned int user_id,
+                             IMeetingTalkbackCtrlEvent::TalkbackError err)
+{
+    tb.on_channel_user_leave_response(utf8_of(id), user_id, test_tb_result(err),
+                                      static_cast<int>(err));
+}
+
 static void respond(EngineTalkback &tb, const zchar_t *id,
                     IMeetingTalkbackCtrlEvent::TalkbackError err)
 {
-    tb.onCreateChannelResponse(id, err);
+    tb_create_response(tb, id, err);
     drain_membership(tb);
 }
 
 // LAW 2: resolve_roster_change() decides WHO needs inviting and the pacer
 // decides WHEN, so a test that wants to see the invites has to let the pacer
 // run. Every call site that asserts on invites goes through this.
-static void resolve(EngineTalkback &tb, ZOOMSDK::IMeetingService &svc)
+//
+// Task 2b: takes FakeTalkbackHost now instead of ZOOMSDK::IMeetingService --
+// resolve_roster_change() itself takes TalkbackHost*.
+static void resolve(EngineTalkback &tb, FakeTalkbackHost &host)
 {
-    tb.resolve_roster_change(&svc);
+    tb.resolve_roster_change(&host);
     drain_membership(tb);
 }
 
@@ -791,9 +929,11 @@ int main()
     // back, so two in flight cannot be told apart when the responses land.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
-        check(tb.nominate(&svc, {"Sarah", "Luis"}), "nominate refused a clean two-name plan");
+        tb.set_host(&host);
+        check(tb.nominate(&host, {"Sarah", "Luis"}), "nominate refused a clean two-name plan");
         check(svc.ctrl.creates == 1,
               "nominate issued more (or fewer) than one CreateChannel up front");
 
@@ -803,7 +943,7 @@ int main()
         // after a successful CreateChannel, nothing else in the suite
         // notices -- the pure state machine is still correct, it is just not
         // being told anything.
-        check(!tb.nominate(&svc, {"Ivan"}),
+        check(!tb.nominate(&host, {"Ivan"}),
               "a second nominate() was accepted while a create was outstanding");
         check(svc.ctrl.creates == 1,
               "a refused nominate() still issued a CreateChannel -- two would be "
@@ -826,11 +966,13 @@ int main()
     // destroy anything on the way, which is the entire milestone.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         std::vector<std::string> nominees;
         for (int i = 0; i < 11; ++i) nominees.push_back("Talent " + std::to_string(i + 1));
-        check(tb.nominate(&svc, nominees), "nominate refused an 11-name plan");
+        check(tb.nominate(&host, nominees), "nominate refused an 11-name plan");
         // 2 all-talent + 11 private = 13 channels.
         for (int i = 1; i <= 13; ++i)
             respond(tb, chan_id(i).c_str(), kOk);
@@ -881,7 +1023,7 @@ int main()
         check(tb.open_audio(region_name, 48000, 1),
               "the engine refused to open the test's talkback ring");
 
-        check(tb.session_start(&svc, kTalkbackAllTalentTarget),
+        check(tb.session_start(&host, kTalkbackAllTalentTarget),
               "keying the all-talent target was refused after a complete nomination");
         check(tb.session_live(), "a successful key press did not report the session live");
         check(svc.ctrl.creates == creates_after_provisioning,
@@ -948,7 +1090,7 @@ int main()
               "after a press must be identical to idle before the first one");
 
         // A second press must still work, from the same standing channels.
-        check(tb.session_start(&svc, kTalkbackAllTalentTarget),
+        check(tb.session_start(&host, kTalkbackAllTalentTarget),
               "the second key press was refused -- the channels did not survive the first");
         check(svc.ctrl.creates == creates_after_provisioning,
               "the second key press created a channel");
@@ -968,9 +1110,11 @@ int main()
     // which CLAUDE.md calls a routine mistake.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.set_host(&host);
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
 
@@ -985,7 +1129,7 @@ int main()
         check(!tb.open_audio(bad_name, 48000, 1),
               "the engine accepted a ring whose layout it cannot address");
 
-        check(!tb.session_start(&svc, "Sarah"),
+        check(!tb.session_start(&host, "Sarah"),
               "A KEY WENT LIVE OVER A DEAD AUDIO PATH -- the director is cued, "
               "told they are live, and nothing they say ever reaches Zoom");
         check(!tb.session_live(),
@@ -1005,7 +1149,7 @@ int main()
         talkback_ring_init(static_cast<ShmAudioHeader *>(good.ptr), 48000, 1);
         check(tb.open_audio(good_name, 48000, 1),
               "the engine refused a sound ring after an earlier rejection");
-        check(tb.session_start(&svc, "Sarah"),
+        check(tb.session_start(&host, "Sarah"),
               "a failed open poisoned the next press -- the reason outlived its "
               "own attempt");
         tb.session_stop();
@@ -1023,15 +1167,17 @@ int main()
     // all.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         std::vector<std::string> nominees;
         for (int i = 0; i < 11; ++i) nominees.push_back("Talent " + std::to_string(i + 1));
-        check(tb.nominate(&svc, nominees), "nominate refused an 11-name plan");
+        check(tb.nominate(&host, nominees), "nominate refused an 11-name plan");
         // Answer ONE create: all-talent slice 1 of 2 exists, slice 2 does not.
         respond(tb, chan_id(1).c_str(), kOk);
 
-        check(!tb.session_start(&svc, kTalkbackAllTalentTarget),
+        check(!tb.session_start(&host, kTalkbackAllTalentTarget),
               "keying a HALF-PROVISIONED all-talent target was accepted -- the "
               "director would brief ten of eleven and be told it was live");
         check(!tb.session_live(), "a refused mid-ladder key reported the session live");
@@ -1042,7 +1188,7 @@ int main()
         // order (all-talent slices first, then privates).
         respond(tb, chan_id(2).c_str(), kOk);   // all-talent 2/2
         respond(tb, chan_id(3).c_str(), kOk);   // Talent 1 private
-        check(tb.session_start(&svc, "Talent 1"),
+        check(tb.session_start(&host, "Talent 1"),
               "keying a fully-provisioned private target was refused just because "
               "OTHER channels were still being created");
         tb.session_stop();
@@ -1056,13 +1202,15 @@ int main()
     // channel, toned at them, and destroyed it from tick().
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.set_host(&host);
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
 
-        check(tb.probe(&svc, "Someone"), "the probe refused to start after a nomination");
+        check(tb.probe(&host, "Someone"), "the probe refused to start after a nomination");
         // The SDK redelivers the response for a PROVISIONED channel while the
         // probe is waiting for its own.
         respond(tb, chan_id(1).c_str(), kOk);
@@ -1083,21 +1231,23 @@ int main()
     // capitalisation looks intermittent to an operator.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
-        check(!tb.nominate(&svc, {"Sarah", "all"}),
+        tb.set_host(&host);
+        check(!tb.nominate(&host, {"Sarah", "all"}),
               "a nominee named \"all\" was nominated -- keying that name would go "
               "out to everyone");
         check(svc.ctrl.creates == 0, "a refused nomination still created a channel");
-        check(!tb.nominate(&svc, {"Sarah", "All"}),
+        check(!tb.nominate(&host, {"Sarah", "All"}),
               "the sentinel collision was case-sensitive, so the failure comes and "
               "goes with a participant's capitalisation");
 
         // ...and the refusal leaves an existing nomination untouched.
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a clean plan");
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a clean plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
-        check(!tb.nominate(&svc, {"ALL"}), "a colliding re-nomination was accepted");
+        check(!tb.nominate(&host, {"ALL"}), "a colliding re-nomination was accepted");
         check(svc.ctrl.destroyed.empty(),
               "a REFUSED nomination destroyed the standing channels anyway");
     }
@@ -1105,20 +1255,22 @@ int main()
     // -- An unprovisioned target is refused, never created on demand -------
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
-        check(!tb.session_start(&svc, "Sarah"),
+        tb.set_host(&host);
+        check(!tb.session_start(&host, "Sarah"),
               "keying with nothing nominated was accepted");
         check(svc.ctrl.creates == 0,
               "keying an unprovisioned target CREATED a channel -- that is exactly "
               "the behaviour this milestone removes");
         check(!tb.session_live(), "a refused key press reported the session live");
 
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         for (int i = 1; i <= 2; ++i)
             respond(tb, chan_id(i).c_str(), kOk);
         const int creates_after_provisioning = svc.ctrl.creates;
-        check(!tb.session_start(&svc, "Someone Else"),
+        check(!tb.session_start(&host, "Someone Else"),
               "keying a name nobody nominated was accepted");
         check(svc.ctrl.creates == creates_after_provisioning,
               "keying an unnominated name created a channel for them");
@@ -1132,9 +1284,11 @@ int main()
     // that nothing drains).
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.set_host(&host);
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         check(svc.ctrl.creates == 1, "nominate did not issue its first create");
 
         tb.nomination_reset();                        // what Leave/quit do
@@ -1147,21 +1301,23 @@ int main()
 
         // And the feature is usable again afterwards: the arbiter was
         // released by that response, not left claimed forever.
-        check(tb.nominate(&svc, {"Ivan"}),
+        check(tb.nominate(&host, {"Ivan"}),
               "nomination was refused after a cancelled create finally resolved");
     }
 
     // -- Re-nomination replaces the standing set ---------------------------
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.set_host(&host);
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         for (int i = 1; i <= 2; ++i)
             respond(tb, chan_id(i).c_str(), kOk);
         check(svc.ctrl.destroyed.empty(), "a clean ladder destroyed something");
 
-        check(tb.nominate(&svc, {"Ivan"}),
+        check(tb.nominate(&host, {"Ivan"}),
               "a re-nomination was refused -- the talent list would be frozen for "
               "the rest of the meeting");
         check(svc.ctrl.destroyed.size() == 2,
@@ -1180,9 +1336,11 @@ int main()
     // -- names, never ids, is the entire point of this milestone.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.set_host(&host);
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);   // all-talent
         respond(tb, chan_id(2).c_str(), kOk);   // Sarah private
 
@@ -1195,7 +1353,7 @@ int main()
         // Sarah joins. This is what main.cpp's onUserJoin (etc.) calls on
         // the engine's behalf after rebuild_roster()/send_roster().
         svc.participants.users.push_back(make_user(1001, "Sarah"));
-        resolve(tb, svc);
+        resolve(tb, host);
         check(svc.ctrl.invited.size() == 2,
               "SARAH'S JOIN DID NOT INVITE HER INTO BOTH HER CHANNELS -- "
               "all-talent and her own private channel");
@@ -1204,8 +1362,8 @@ int main()
         // underlying change (e.g. onUserJoin then onUserAudioStatusChange).
         // Nothing changed since the last resolution -- this must invite
         // nobody again.
-        resolve(tb, svc);
-        resolve(tb, svc);
+        resolve(tb, host);
+        resolve(tb, host);
         check(svc.ctrl.invited.size() == 2,
               "RE-RESOLVING WITH NOTHING CHANGED RE-INVITED -- a burst of "
               "roster callbacks for one join must do the work once, not once "
@@ -1217,9 +1375,9 @@ int main()
         // treated as confirmed presence, never as a failure to retry.
         static const IMeetingTalkbackCtrlEvent::TalkbackError kAlreadyExist =
             IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_ALREADY_EXIST;
-        tb.onChannelUserJoinResponse(chan_id(1).c_str(), 1001, kAlreadyExist);
-        tb.onChannelUserJoinResponse(chan_id(2).c_str(), 1001, kOk);
-        resolve(tb, svc);
+        tb_join_response(tb, chan_id(1).c_str(), 1001, kAlreadyExist);
+        tb_join_response(tb, chan_id(2).c_str(), 1001, kOk);
+        resolve(tb, host);
         check(svc.ctrl.invited.size() == 2,
               "TALKBACK_ERROR_ALREADY_EXIST WAS TREATED AS A FAILURE -- Sarah "
               "was re-invited into a channel the SDK already says she is in");
@@ -1244,9 +1402,9 @@ int main()
         // and nothing promises Zoom reuses them. She must be invited again,
         // with no operator action, resolved by NAME alone.
         svc.participants.users.clear();
-        resolve(tb, svc);   // onUserLeft
+        resolve(tb, host);   // onUserLeft
         svc.participants.users.push_back(make_user(1002, "Sarah"));
-        resolve(tb, svc);   // onUserJoin
+        resolve(tb, host);   // onUserJoin
         check(svc.ctrl.invited.size() == 4,
               "A REJOIN UNDER A NEW USER ID WAS NOT RE-INVITED -- resolving "
               "by name, not id, is the whole point of storing nominations as "
@@ -1257,15 +1415,17 @@ int main()
     // resolved, never silently skipped ---------------------------------------
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
-        check(tb.nominate(&svc, {"Ivan"}), "nominate refused a one-name plan");
+        tb.set_host(&host);
+        check(tb.nominate(&host, {"Ivan"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
 
         svc.participants.users.push_back(
             make_user(2001, "Ivan", /*supports_talkback=*/false));
-        resolve(tb, svc);
+        resolve(tb, host);
         check(svc.ctrl.invited.size() == 2,
               "A REJOINER WHOSE CLIENT FAILS IsSupportTalkback() WAS SILENTLY "
               "SKIPPED -- the gate is reported (resolve_participant()'s "
@@ -1278,17 +1438,19 @@ int main()
     // create -------------------------------------------------------------
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.set_host(&host);
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
 
-        check(tb.probe(&svc, "Someone"), "the probe refused to start");
+        check(tb.probe(&host, "Someone"), "the probe refused to start");
         const int creates_before_roster_event = svc.ctrl.creates;
 
         svc.participants.users.push_back(make_user(3001, "Sarah"));
-        resolve(tb, svc);
+        resolve(tb, host);
         check(svc.ctrl.creates == creates_before_roster_event,
               "ROSTER RE-RESOLUTION ISSUED A CreateChannel while the probe "
               "was busy");
@@ -1312,15 +1474,17 @@ int main()
     // one catches it.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.set_host(&host);
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
         const int creates_before_resolution = svc.ctrl.creates;
 
         svc.participants.users.push_back(make_user(3101, "Sarah"));
-        resolve(tb, svc);
+        resolve(tb, host);
         check(svc.ctrl.invited.size() == 2,
               "the setup for the M2 regression test did not actually invite "
               "-- this block is meaningless if nothing was invited");
@@ -1341,25 +1505,27 @@ int main()
     // than staying suppressed forever.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.set_host(&host);
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
 
         svc.participants.users.push_back(make_user(4001, "Sarah"));
-        resolve(tb, svc);
+        resolve(tb, host);
         check(svc.ctrl.invited.size() == 2,
               "Sarah's join did not invite her into both her channels");
 
         // She leaves BEFORE either onChannelUserJoinResponse ever arrives --
         // the two pending entries for uid 4001 are still outstanding.
         svc.participants.users.clear();
-        resolve(tb, svc);   // onUserLeft
+        resolve(tb, host);   // onUserLeft
 
         // She rejoins under a brand new id.
         svc.participants.users.push_back(make_user(4002, "Sarah"));
-        resolve(tb, svc);   // onUserJoin
+        resolve(tb, host);   // onUserJoin
         check(svc.ctrl.invited.size() == 4,
               "A REJOIN AFTER AN UNANSWERED INVITE WAS PERMANENTLY SUPPRESSED "
               "-- the stale pending entries for the OLD id must be pruned the "
@@ -1373,9 +1539,9 @@ int main()
         // still match, the fresh invites issued for 4002 above would double
         // up or the count would be inconsistent; asserting the count again
         // after feeding them is the check that they were inert.
-        tb.onChannelUserJoinResponse(chan_id(1).c_str(), 4001, kOk);
-        tb.onChannelUserJoinResponse(chan_id(2).c_str(), 4001, kOk);
-        resolve(tb, svc);
+        tb_join_response(tb, chan_id(1).c_str(), 4001, kOk);
+        tb_join_response(tb, chan_id(2).c_str(), 4001, kOk);
+        resolve(tb, host);
         check(svc.ctrl.invited.size() == 4,
               "A STALE RESPONSE FOR A DEAD ID RE-TRIGGERED AN INVITE OR "
               "CONFUSED THE PENDING TABLE");
@@ -1394,14 +1560,16 @@ int main()
     // for "sleep 10 seconds", which no unit test should do for real.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.set_host(&host);
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);   // all-talent
         respond(tb, chan_id(2).c_str(), kOk);   // Sarah private
 
         svc.participants.users.push_back(make_user(8001, "Sarah"));
-        resolve(tb, svc);
+        resolve(tb, host);
         check(svc.ctrl.invited.size() == 2, "Sarah's join did not invite her");
 
         // Neither response ever arrives -- the two pending entries are still
@@ -1413,7 +1581,7 @@ int main()
         // -- is what must trigger the sweep: this pins THAT the sweep runs
         // inside resolve_roster_change() itself, not on some separate timer
         // this file does not have.
-        resolve(tb, svc);
+        resolve(tb, host);
         check(svc.ctrl.invited.size() == 4,
               "THE DEADLINE-EXPIRED ENTRY WAS NEVER RE-INVITED -- with the "
               "uid still in the roster and no departure ever reported, ONLY "
@@ -1429,8 +1597,8 @@ int main()
         // indistinguishable from one answering the fresh invite, so it
         // legitimately confirms it -- present must land at exactly one
         // entry per channel, not zero (lost) and not two (double-counted).
-        tb.onChannelUserJoinResponse(chan_id(1).c_str(), 8001, kOk);
-        tb.onChannelUserJoinResponse(chan_id(2).c_str(), 8001, kOk);
+        tb_join_response(tb, chan_id(1).c_str(), 8001, kOk);
+        tb_join_response(tb, chan_id(2).c_str(), 8001, kOk);
         check(svc.ctrl.invited.size() == 4,
               "A LATE RESPONSE FOR AN EXPIRED ENTRY CAUSED AN EXTRA INVITE");
         std::size_t present = 0, total = 0;
@@ -1443,7 +1611,7 @@ int main()
         // Re-resolving again with nothing changed must still be idempotent
         // -- the healed state must not itself become a source of repeated
         // invites.
-        resolve(tb, svc);
+        resolve(tb, host);
         check(svc.ctrl.invited.size() == 4,
               "THE POST-EXPIRY HEALED STATE WAS NOT IDEMPOTENT");
     }
@@ -1453,26 +1621,28 @@ int main()
     // next join transition -------------------------------------------------
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
-        check(tb.nominate(&svc, {"Ivan"}), "nominate refused a one-name plan");
+        tb.set_host(&host);
+        check(tb.nominate(&host, {"Ivan"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
 
         svc.participants.users.push_back(make_user(5001, "Ivan"));
-        resolve(tb, svc);
+        resolve(tb, host);
         check(svc.ctrl.invited.size() == 2, "Ivan's join did not invite him");
 
         // Both invites come back permanently rejected.
         static const IMeetingTalkbackCtrlEvent::TalkbackError kNoPermission =
             IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_NOPERMISSION;
-        tb.onChannelUserJoinResponse(chan_id(1).c_str(), 5001, kNoPermission);
-        tb.onChannelUserJoinResponse(chan_id(2).c_str(), 5001, kNoPermission);
+        tb_join_response(tb, chan_id(1).c_str(), 5001, kNoPermission);
+        tb_join_response(tb, chan_id(2).c_str(), 5001, kNoPermission);
 
         // Five more roster events for the SAME presence stint -- the shape
         // onUserAudioStatusChange/onUserVideoStatusChange produce on every
         // mute and camera toggle by anyone in the meeting, not just Ivan.
-        for (int i = 0; i < 5; ++i) resolve(tb, svc);
+        for (int i = 0; i < 5; ++i) resolve(tb, host);
         check(svc.ctrl.invited.size() == 2,
               "A PERMANENTLY FAILING INVITE WAS RETRIED ON EVERY ROSTER "
               "EVENT -- a genuine gate (IsSupportTalkback() == false, most "
@@ -1482,9 +1652,9 @@ int main()
         // He leaves and rejoins -- the one signal that plausibly changes the
         // outcome -- and gets a fresh attempt.
         svc.participants.users.clear();
-        resolve(tb, svc);
+        resolve(tb, host);
         svc.participants.users.push_back(make_user(5002, "Ivan"));
-        resolve(tb, svc);
+        resolve(tb, host);
         check(svc.ctrl.invited.size() == 4,
               "A REJOIN AFTER A PERMANENT FAILURE DID NOT GET A FRESH INVITE "
               "ATTEMPT");
@@ -1494,9 +1664,11 @@ int main()
     // m_ctrl for the rest of the press ---------------------------------------
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.set_host(&host);
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
 
@@ -1508,7 +1680,7 @@ int main()
         talkback_ring_init(static_cast<ShmAudioHeader *>(region.ptr), 48000, 1);
         check(tb.open_audio(region_name, 48000, 1),
               "the engine refused to open the test's talkback ring");
-        check(tb.session_start(&svc, "Sarah"),
+        check(tb.session_start(&host, "Sarah"),
               "keying Sarah's private channel was refused");
         check(tb.session_live(), "the key press did not report live");
 
@@ -1523,7 +1695,7 @@ int main()
         // not merely one that is guarded correctly.
         svc.controller_returns_null = true;
         svc.participants.users.push_back(make_user(6001, "Someone Else"));
-        resolve(tb, svc);   // a roster event mid-press
+        resolve(tb, host);   // a roster event mid-press
 
         // m_sdk must still be the ORIGINAL, valid adapter: a buffer sent
         // now must still reach Zoom, not silently become a no_channel_drops
@@ -1556,26 +1728,28 @@ int main()
     // channel -----------------------------------------------------------
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.set_host(&host);
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);   // all-talent
         respond(tb, chan_id(2).c_str(), kOk);   // Sarah private
 
         svc.participants.users.push_back(make_user(7001, "Sarah"));
-        resolve(tb, svc);
+        resolve(tb, host);
         check(svc.ctrl.invited.size() == 2, "Sarah's join did not invite her");
-        tb.onChannelUserJoinResponse(chan_id(1).c_str(), 7001, kOk);
-        tb.onChannelUserJoinResponse(chan_id(2).c_str(), 7001, kOk);
+        tb_join_response(tb, chan_id(1).c_str(), 7001, kOk);
+        tb_join_response(tb, chan_id(2).c_str(), 7001, kOk);
 
         // Sarah stays in the MEETING throughout -- this is a channel-side
         // removal (host action / Zoom-side eviction), not a departure
         // resolve_roster_change()'s roster diff would ever see.
-        tb.onChannelUserLeaveResponse(chan_id(1).c_str(), 7001, kOk);
+        tb_leave_response(tb, chan_id(1).c_str(), 7001, kOk);
 
         // Re-resolving with Sarah still in the meeting must invite her back
         // into channel 1 ONLY -- channel 2 still has her confirmed present.
-        resolve(tb, svc);
+        resolve(tb, host);
         check(svc.ctrl.invited.size() == 3,
               "A CHANNEL-SIDE LEAVE DID NOT DECREMENT `present` -- Sarah was "
               "never re-invited into the channel she was removed from, and "
@@ -1586,8 +1760,8 @@ int main()
         // A leave for someone not present in a channel (already handled, or
         // a stray/duplicate response) must be a no-op, not a crash or a
         // spurious decrement.
-        tb.onChannelUserLeaveResponse(chan_id(1).c_str(), 7001, kOk);
-        tb.onChannelUserLeaveResponse(chan_id(9).c_str(), 9999, kOk);
+        tb_leave_response(tb, chan_id(1).c_str(), 7001, kOk);
+        tb_leave_response(tb, chan_id(9).c_str(), 9999, kOk);
     }
 
     // -- Task 5 fix round 3 (N6, Major): every ladder-abort path must emit
@@ -1605,13 +1779,15 @@ int main()
     // already "fixed" with no test able to notice a regression.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
         svc.ctrl.fail_create_call = 1;   // fail the very first CreateChannel()
-        check(!tb.nominate(&svc, {"Sarah"}),
+        check(!tb.nominate(&host, {"Sarah"}),
               "nominate() did not report failure when CreateChannel() itself failed");
         check(count_abort_reports(lines) == 1,
               "a synchronous CreateChannel() failure did not emit exactly one "
@@ -1659,13 +1835,15 @@ int main()
     // precisely what happens in between.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         // "Sarah" plans 2 channels: all-talent + her private.
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         check(svc.ctrl.creates == 1, "setup: the first create was not issued");
 
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+        tb_create_response(tb, chan_id(1).c_str(), kOk);
         check(svc.ctrl.creates == 1,
               "THE LIVE GATE DEFECT: channel 2's CreateChannel was issued from "
               "inside channel 1's onCreateChannelResponse, 0ms after it -- Zoom "
@@ -1691,13 +1869,15 @@ int main()
     // the "no abort" and "completed" checks below both fail.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);   // schedules channel 2
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
+        tb_create_response(tb, chan_id(1).c_str(), kOk);   // schedules channel 2
 
         // Zoom refuses exactly the next create -- the live gate's shape, only
         // now with 300ms of spacing already spent and Zoom still saying "not
@@ -1741,8 +1921,10 @@ int main()
     // reason this reason string exists.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -1751,7 +1933,7 @@ int main()
         // with a retry armed, so nominate() must still assign its plan -- see
         // nomination_create_next()'s declaration comment. A false here would
         // mean the retry fires against an empty queue.
-        check(tb.nominate(&svc, {"Sarah"}),
+        check(tb.nominate(&host, {"Sarah"}),
               "nominate() gave up on the first create instead of arming a retry");
 
         // More pumps than the cap, so "stopped retrying" is observable rather
@@ -1793,17 +1975,19 @@ int main()
     // to hold (Task 5 fix rounds 2 and 3 are both about exactly that).
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         // Channel 1 lands: the arbiter is released by the response, and
         // channel 2 is scheduled but not yet issued. This is the window.
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+        tb_create_response(tb, chan_id(1).c_str(), kOk);
 
-        check(!tb.nominate(&svc, {"Ivan"}),
+        check(!tb.nominate(&host, {"Ivan"}),
               "A RE-NOMINATION INSIDE THE LADDER'S SPACING WINDOW WAS ACCEPTED "
               "-- it would destroy the running ladder's channels and leave that "
               "ladder with no terminal report at all");
@@ -1837,12 +2021,14 @@ int main()
     // channel 1 succeeds and is provisioned, channel 2's response fails.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         check(svc.ctrl.destroyed.empty(),
               "setup: channel 1 was destroyed before the failure even arrived");
@@ -1872,18 +2058,20 @@ int main()
     // own lazy self-heal is what discovers and reports the abandonment.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         check(svc.ctrl.creates == 1, "setup: the first channel's create was not issued");
         tb.debug_expire_pending_create_for_test();
         // A denominate (empty list) is enough to trigger the self-heal at
         // the top of nominate() -- it runs before this call's own plan is
         // even computed, so an empty plan afterward does not mask it.
-        check(tb.nominate(&svc, {}), "an empty-list denominate was refused");
+        check(tb.nominate(&host, {}), "an empty-list denominate was refused");
 
         check(count_abort_reports(lines) == 1,
               "a swallowed create response's lazy self-heal did not emit "
@@ -1903,13 +2091,15 @@ int main()
     // engine's job is to make the two attempts distinguishable on the wire.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
         // Ladder A: attempt 99, two channels (all-talent + Sarah private).
-        check(tb.nominate(&svc, {"Sarah"}, 99), "nominate refused a one-name plan");
+        check(tb.nominate(&host, {"Sarah"}, 99), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
 
         // Attempt 100 arrives MID-LADDER and is refused at the arbiter gate
@@ -1917,7 +2107,7 @@ int main()
         // and the exact interleaving C1 rides in on. Its refusal must carry
         // 100, never 99: reporting the running ladder's id for a refusal is
         // the confusion the id exists to remove.
-        check(!tb.nominate(&svc, {"Dave"}, 100),
+        check(!tb.nominate(&host, {"Dave"}, 100),
               "a re-nomination mid-ladder was accepted");
         bool refusal_tagged_100 = false;
         for (const auto &l : lines)
@@ -1963,12 +2153,14 @@ int main()
     // attempt.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
-        check(tb.nominate(&svc, {"Sarah"}, 43), "nominate refused a one-name plan");
+        check(tb.nominate(&host, {"Sarah"}, 43), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(),
             IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_NOPERMISSION);
@@ -2001,14 +2193,16 @@ int main()
     // already played, and not one sample reached Zoom.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
         std::vector<std::string> nominees;
         for (int i = 0; i < 11; ++i) nominees.push_back("Talent " + std::to_string(i + 1));
-        check(tb.nominate(&svc, nominees), "nominate refused an 11-name plan");
+        check(tb.nominate(&host, nominees), "nominate refused an 11-name plan");
         // 2 all-talent slices + 11 privates = 13. Answer only the two slices:
         // "all" is fully provisioned, the ladder is still running.
         respond(tb, chan_id(1).c_str(), kOk);
@@ -2022,7 +2216,7 @@ int main()
         talkback_ring_init(static_cast<ShmAudioHeader *>(region.ptr), 48000, 1);
         check(tb.open_audio(region_name, 48000, 1),
               "the engine refused to open the test's talkback ring");
-        check(tb.session_start(&svc, kTalkbackAllTalentTarget),
+        check(tb.session_start(&host, kTalkbackAllTalentTarget),
               "keying a fully-provisioned all-talent target mid-ladder was "
               "refused -- that refusal would deny a ready target for an "
               "unrelated reason");
@@ -2078,17 +2272,19 @@ int main()
     // present", and that person hears nothing.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.set_host(&host);
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);   // all-talent
         respond(tb, chan_id(2).c_str(), kOk);   // Sarah private
 
         svc.participants.users.push_back(make_user(8001, "Sarah"));
-        resolve(tb, svc);
+        resolve(tb, host);
         check(svc.ctrl.invited.size() == 2, "setup: Sarah's join did not invite her");
-        tb.onChannelUserJoinResponse(chan_id(1).c_str(), 8001, kOk);
-        tb.onChannelUserJoinResponse(chan_id(2).c_str(), 8001, kOk);
+        tb_join_response(tb, chan_id(1).c_str(), 8001, kOk);
+        tb_join_response(tb, chan_id(2).c_str(), 8001, kOk);
         std::size_t present = 0, total = 0;
         tb.members_present_for_target("Sarah", &present, &total);
         check(present == 1 && total == 1, "setup: Sarah was not counted as present");
@@ -2098,7 +2294,7 @@ int main()
         // NAME under a DIFFERENT uid.
         svc.participants.users.clear();
         svc.participants.users.push_back(make_user(9001, "Sarah"));
-        resolve(tb, svc);
+        resolve(tb, host);
 
         check(svc.ctrl.invited.size() == 4,
               "M1: A REJOIN UNDER A NEW USER ID WAS NEVER RE-INVITED -- the "
@@ -2112,8 +2308,8 @@ int main()
               "prune and the new id's own join response -- \"1 of 1 present\" "
               "for someone who hears nothing is the whole finding");
 
-        tb.onChannelUserJoinResponse(chan_id(1).c_str(), 9001, kOk);
-        tb.onChannelUserJoinResponse(chan_id(2).c_str(), 9001, kOk);
+        tb_join_response(tb, chan_id(1).c_str(), 9001, kOk);
+        tb_join_response(tb, chan_id(2).c_str(), 9001, kOk);
         tb.members_present_for_target("Sarah", &present, &total);
         check(present == 1 && total == 1,
               "M1: the re-invited id's own join response did not restore the "
@@ -2121,7 +2317,7 @@ int main()
 
         // Idempotent afterwards: the healed state must not itself become a
         // source of repeated invites.
-        resolve(tb, svc);
+        resolve(tb, host);
         check(svc.ctrl.invited.size() == 4, "M1: the healed state re-invited");
     }
 
@@ -2134,24 +2330,26 @@ int main()
     // destroyed.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        tb.set_host(&host);
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
 
         svc.participants.users.push_back(make_user(8001, "Sarah"));
-        resolve(tb, svc);
-        tb.onChannelUserJoinResponse(chan_id(1).c_str(), 8001, kOk);
-        tb.onChannelUserJoinResponse(chan_id(2).c_str(), 8001, kOk);
+        resolve(tb, host);
+        tb_join_response(tb, chan_id(1).c_str(), 8001, kOk);
+        tb_join_response(tb, chan_id(2).c_str(), 8001, kOk);
         const std::size_t invited_before = svc.ctrl.invited.size();
 
         // A probe claims the arbiter: has_pending_work() is now true.
-        check(tb.probe(&svc, "Someone"), "setup: the probe refused to start");
+        check(tb.probe(&host, "Someone"), "setup: the probe refused to start");
 
         svc.participants.users.clear();
         svc.participants.users.push_back(make_user(9001, "Sarah"));
-        resolve(tb, svc);
+        resolve(tb, host);
 
         std::size_t present = 0, total = 0;
         tb.members_present_for_target("Sarah", &present, &total);
@@ -2183,11 +2381,14 @@ int main()
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
         FakeMeetingService svc;
+
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         svc.participants.users.push_back(make_user(4101, "Sarah"));
         svc.participants.users.push_back(make_user(4102, "Luis"));
-        check(tb.nominate(&svc, {"Sarah", "Luis"}), "nominate refused a two-name plan");
+        check(tb.nominate(&host, {"Sarah", "Luis"}), "nominate refused a two-name plan");
         // 1 all-talent + 2 private = 3 channels.
         for (int i = 1; i <= 3; ++i)
             respond(tb, chan_id(i).c_str(), kOk);
@@ -2234,7 +2435,7 @@ int main()
         svc.participants.users.clear();
         svc.participants.users.push_back(make_user(4201, "Sarah"));
         svc.participants.users.push_back(make_user(4202, "Luis"));
-        resolve(tb, svc);
+        resolve(tb, host);
         check(svc.ctrl.invited.size() > invited_before,
               "setup: the rejoin never re-invited, so this proves nothing about "
               "what a late member join does to volume");
@@ -2260,8 +2461,10 @@ int main()
     // is the failure mode the whole talkback feature is written against.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -2272,7 +2475,7 @@ int main()
         svc.participants.self.muted = true;
         svc.participants.users.push_back(make_user(7001, "Sarah"));
 
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
 
@@ -2285,7 +2488,7 @@ int main()
         check(tb.open_audio(region_name, 48000, 1),
               "the engine refused to open the test's talkback ring");
 
-        check(tb.session_start(&svc, "Sarah"), "keying Sarah's channel was refused");
+        check(tb.session_start(&host, "Sarah"), "keying Sarah's channel was refused");
         check(svc.audio.unmuted.size() == 1 && svc.audio.unmuted[0] == 7700,
               "THE KEY WENT LIVE OVER A MUTED BOT -- talkback delivers only "
               "while this client's own meeting audio is open, and every send "
@@ -2358,17 +2561,19 @@ int main()
     // state it was never given.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         svc.participants.has_self = true;
         svc.participants.self = make_user(7700, "CoreVideo Engine");
         svc.participants.self.muted = false;   // already open
         svc.participants.users.push_back(make_user(7001, "Sarah"));
 
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
-        check(tb.session_start(&svc, "Sarah"), "keying Sarah's channel was refused");
+        check(tb.session_start(&host, "Sarah"), "keying Sarah's channel was refused");
         check(svc.audio.unmuted.empty(),
               "an already-open mic was unmuted anyway -- an SDK call on the key "
               "path that changes nothing is exactly what the key path may not "
@@ -2388,8 +2593,10 @@ int main()
     // the host" is a sentence the banner can only say if this field exists.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -2399,10 +2606,10 @@ int main()
         svc.audio.unmute_result = ZOOMSDK::SDKERR_NO_PERMISSION;
         svc.participants.users.push_back(make_user(7001, "Sarah"));
 
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
-        check(tb.session_start(&svc, "Sarah"),
+        check(tb.session_start(&host, "Sarah"),
               "a mic the meeting refuses to unmute must not REFUSE the key -- "
               "the channels are live and a host can still unmute the bot");
         check(tb.session_live(), "the key did not report live");
@@ -2426,6 +2633,80 @@ int main()
         EngineIpc::test_sink() = nullptr;
     }
 
+    // (f) TASK 2B (2026-09-05): THE SEAM ITSELF FAILING, WITH NO SDK OBJECT
+    // INVOLVED AT ALL. Test (e) above drives FakeAudioController::unmute_result
+    // -- a genuine Zoom-side refusal, reaching ensure_mic_open() through
+    // TalkbackHost::set_self_muted() returning TalkbackResult::Unknown after
+    // actually calling UnMuteAudio(). This one drives
+    // FakeTalkbackHost::fail_set_self_muted, which returns
+    // TalkbackResult::Unknown WITHOUT touching FakeAudioController at all --
+    // the seam-level failure shape (e.g. a concrete adapter that could not
+    // even resolve a controller to call). The invariant this task's brief
+    // names is that ensure_mic_open() must treat ANY non-Ok TalkbackResult
+    // from set_self_muted() the same way, regardless of why the seam
+    // returned it: m_mic_open stays false, the key stays LIVE (Law 1 never
+    // refuses the key over a mic it cannot open), and the live line reports
+    // "mic":"blocked" -- never "open".
+    //
+    // MUTATION-PROVEN (see task-2b-report.md for the run): changing
+    // ensure_mic_open()'s `m_mic_open = (r == TalkbackResult::Ok);` to an
+    // unconditional `m_mic_open = true;` makes this test's "mic":"blocked"/
+    // "mic":"open" assertions fail (traced by hand, not executed by ctest --
+    // this file is Windows-gated and this machine has no Windows toolchain;
+    // see the report for what WAS executed).
+    {
+        FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
+        EngineTalkback tb;
+        tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
+        std::vector<std::string> lines;
+        EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
+
+        svc.participants.has_self = true;
+        svc.participants.self = make_user(7700, "CoreVideo Engine");
+        svc.participants.self.muted = true;
+        host.fail_set_self_muted = true;
+        svc.participants.users.push_back(make_user(7001, "Sarah"));
+
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
+        respond(tb, chan_id(1).c_str(), kOk);
+        respond(tb, chan_id(2).c_str(), kOk);
+        check(tb.session_start(&host, "Sarah"),
+              "a mic the SEAM itself could not open must not refuse the key "
+              "-- the channels are live and a host can still unmute the bot "
+              "by hand");
+        check(tb.session_live(), "the key did not report live");
+        check(svc.audio.unmuted.empty(),
+              "fail_set_self_muted was set, so no real UnMuteAudio call "
+              "should have reached the fake audio controller at all");
+
+        bool live_says_blocked = false;
+        bool live_says_open = false;
+        for (const auto &l : lines) {
+            if (!line_has(l, "\"cmd\":\"talkback_session\"") ||
+                !line_has(l, "\"live\":true"))
+                continue;
+            if (line_has(l, "\"mic\":\"blocked\"")) live_says_blocked = true;
+            if (line_has(l, "\"mic\":\"open\"")) live_says_open = true;
+        }
+        check(live_says_blocked,
+              "A SEAM-LEVEL set_self_muted() FAILURE DID NOT REPORT "
+              "\"mic\":\"blocked\" -- m_mic_open must stay false when the seam "
+              "cannot open the mic, exactly as when the SDK itself refuses");
+        check(!live_says_open,
+              "a failed set_self_muted() was read as an open mic -- the exact "
+              "fail-open shape this task's brief warns against");
+
+        tb.session_stop();
+        check(svc.audio.muted.empty(),
+              "a key whose seam-level unmute FAILED still re-muted on "
+              "release -- it never opened anything, so it has nothing to "
+              "restore");
+
+        EngineIpc::test_sink() = nullptr;
+    }
+
     // ═══ TALKBACK DELIVERY LAW 2: ONE MEMBERSHIP CALL PER ~600ms ════════════
     //
     // ZComms, 2026-08-29, live 12-person meeting: Zoom's rate limit is per
@@ -2443,18 +2724,20 @@ int main()
     // pinned is precisely what does NOT happen in between.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         svc.participants.users.push_back(make_user(8001, "Sarah"));
         svc.participants.users.push_back(make_user(8002, "Luis"));
 
         // Two nominees plan 3 channels: all-talent (both) + one private each.
-        check(tb.nominate(&svc, {"Sarah", "Luis"}), "nominate refused a two-name plan");
+        check(tb.nominate(&host, {"Sarah", "Luis"}), "nominate refused a two-name plan");
         check(svc.ctrl.creates == 1, "setup: the first create was not issued");
 
         // Channel 1 is the all-talent slice, so its response queues TWO
         // invites -- the exact back-to-back burst Zoom refuses.
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);
+        tb_create_response(tb, chan_id(1).c_str(), kOk);
         check(svc.ctrl.invited.empty(),
               "THE UNPACED BURST: the provisioning branch issued its invites "
               "inline, back to back, from inside onCreateChannelResponse -- "
@@ -2506,13 +2789,15 @@ int main()
     }
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         svc.participants.users.push_back(make_user(8001, "Sarah"));
         svc.participants.users.push_back(make_user(8002, "Luis"));
-        check(tb.nominate(&svc, {"Sarah", "Luis"}), "nominate refused a two-name plan");
+        check(tb.nominate(&host, {"Sarah", "Luis"}), "nominate refused a two-name plan");
 
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);   // all-talent: 2 invites queued
+        tb_create_response(tb, chan_id(1).c_str(), kOk);   // all-talent: 2 invites queued
         tb.debug_expire_create_spacing_for_test();
         tb.nomination_tick();                                   // create 2
         tb.debug_expire_create_spacing_for_test();
@@ -2521,7 +2806,7 @@ int main()
                   svc.ctrl.invited[0].first == utf8_of(chan_id(1).c_str()),
               "setup: the first invite did not go to the all-talent channel");
 
-        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);   // a private: 1 invite queued
+        tb_create_response(tb, chan_id(2).c_str(), kOk);   // a private: 1 invite queued
         tb.debug_expire_create_spacing_for_test();
         tb.nomination_tick();                                   // create 3
         tb.debug_expire_create_spacing_for_test();
@@ -2553,13 +2838,15 @@ int main()
     // once invites became the other half of the same budget.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         svc.participants.users.push_back(make_user(8201, "Sarah"));
         svc.participants.users.push_back(make_user(8202, "Luis"));
-        check(tb.nominate(&svc, {"Sarah", "Luis"}), "nominate refused a two-name plan");
+        check(tb.nominate(&host, {"Sarah", "Luis"}), "nominate refused a two-name plan");
 
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);   // 2 invites queued
+        tb_create_response(tb, chan_id(1).c_str(), kOk);   // 2 invites queued
         tb.debug_expire_create_spacing_for_test();
         tb.nomination_tick();                                   // turn: create 2
         check(svc.ctrl.creates == 2, "setup: the second create never issued");
@@ -2569,7 +2856,7 @@ int main()
 
         // Channel 2 answers, so a THIRD create is now scheduled -- and an
         // invite went out a moment ago, so the shared floor is fresh.
-        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);
+        tb_create_response(tb, chan_id(2).c_str(), kOk);
         const int creates_before = svc.ctrl.creates;
 
         // The create's OWN deadline passes. The floor has not.
@@ -2603,13 +2890,15 @@ int main()
     // their private channel happened a second later.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
         svc.participants.users.push_back(make_user(8101, "Sarah"));
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
 
         // Zoom refuses exactly the next invite.
         svc.ctrl.invite_rate_limit_next = 1;
@@ -2655,8 +2944,10 @@ int main()
     // accepted-but-silent ghost surviving the law written to expose it.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -2665,10 +2956,10 @@ int main()
         svc.participants.self.muted = false;     // opens clean
         svc.participants.users.push_back(make_user(7001, "Sarah"));
 
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
-        check(tb.session_start(&svc, "Sarah"), "keying Sarah's channel was refused");
+        check(tb.session_start(&host, "Sarah"), "keying Sarah's channel was refused");
 
         auto count_state_lines = [&](const char *mic) {
             int n = 0;
@@ -2737,12 +3028,14 @@ int main()
     // this pump would batch against a thread that may be mid batch-destroy.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         svc.participants.users.push_back(make_user(8301, "Sarah"));
         svc.participants.users.push_back(make_user(8302, "Luis"));
 
-        check(tb.nominate(&svc, {"Sarah", "Luis"}), "nominate refused a two-name plan");
+        check(tb.nominate(&host, {"Sarah", "Luis"}), "nominate refused a two-name plan");
 
         // DRIVE THE LADDER TO ITS TERMINAL WITH THE INVITES STILL QUEUED --
         // which is the whole trigger, and is what nominate_done means: it
@@ -2752,13 +3045,13 @@ int main()
         //
         // NOT respond(): that helper drains the pacer to quiescence, which is
         // exactly the state this test must NOT be in.
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);   // all-talent: +2
+        tb_create_response(tb, chan_id(1).c_str(), kOk);   // all-talent: +2
         tb.debug_expire_create_spacing_for_test();
         tb.nomination_tick();                                   // create 2
-        tb.onCreateChannelResponse(chan_id(2).c_str(), kOk);   // Sarah private: +1
+        tb_create_response(tb, chan_id(2).c_str(), kOk);   // Sarah private: +1
         tb.debug_expire_create_spacing_for_test();
         tb.nomination_tick();                                   // create 3
-        tb.onCreateChannelResponse(chan_id(3).c_str(), kOk);   // Luis private: +1
+        tb_create_response(tb, chan_id(3).c_str(), kOk);   // Luis private: +1
         check(svc.ctrl.creates == 3, "setup: the plan did not provision 3 channels");
         check(svc.ctrl.invited.empty(),
               "setup: an invite escaped, so the queue this test needs is short");
@@ -2769,7 +3062,7 @@ int main()
         // `true`. From here until the probe settles, the driving thread may be
         // inside drain_stray_channels() or the Destroying phase's own
         // batch-destroy at any moment.
-        check(tb.probe(&svc, "Sarah"),
+        check(tb.probe(&host, "Sarah"),
               "setup: the probe refused to start, so this proves nothing about "
               "the exclusion -- and the refusal itself would be the M2 trigger "
               "disappearing, not the hazard");
@@ -2794,7 +3087,7 @@ int main()
         // queue is untouched, so the moment the probe settles the same invites
         // go out. A gate that dropped them would trade a batch hazard for
         // silently unconfirmed talent, which is the worse of the two.
-        tb.onCreateChannelResponse(
+        tb_create_response(tb, 
             chan_id(9).c_str(),
             IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_NOPERMISSION);
         check(!tb.has_pending_work(),
@@ -2825,13 +3118,15 @@ int main()
     // dies: it has a backoff deadline in the future and nothing else to do.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         svc.participants.users.push_back(make_user(8401, "Sarah"));
         svc.participants.users.push_back(make_user(8402, "Luis"));
 
-        check(tb.nominate(&svc, {"Sarah", "Luis"}), "nominate refused a two-name plan");
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);   // 2 invites queued
+        check(tb.nominate(&host, {"Sarah", "Luis"}), "nominate refused a two-name plan");
+        tb_create_response(tb, chan_id(1).c_str(), kOk);   // 2 invites queued
 
         // Zoom refuses every invite, so both stay queued behind a backoff.
         svc.ctrl.invite_rate_limit_next = 2;
@@ -2848,7 +3143,7 @@ int main()
 
         // The ladder dies and takes its channels with it.
         const std::size_t destroyed_before = svc.ctrl.destroyed.size();
-        tb.onCreateChannelResponse(chan_id(2).c_str(),
+        tb_create_response(tb, chan_id(2).c_str(),
                                    IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_NOPERMISSION);
         check(svc.ctrl.destroyed.size() > destroyed_before,
               "setup: the failing ladder did not tear its channels down");
@@ -2882,12 +3177,14 @@ int main()
     // for the create-side floor, one field over, in the same change.
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         svc.participants.users.push_back(make_user(8501, "Sarah"));
 
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
-        tb.onCreateChannelResponse(chan_id(1).c_str(), kOk);   // 1 invite queued
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
+        tb_create_response(tb, chan_id(1).c_str(), kOk);   // 1 invite queued
 
         svc.ctrl.invite_rate_limit_next = 1;
         tb.debug_expire_create_spacing_for_test();
@@ -2952,15 +3249,17 @@ int main()
         sdk.script_create_results({TalkbackResult::TooFrequent,
                                    TalkbackResult::TooFrequent,
                                    TalkbackResult::Ok});
-        FakeMeetingService svc;   // unused by the seam itself (see (1) above);
-                                  // still required so nominate() has a
-                                  // meeting service to gate against.
+        // svc/host: unused by the seam itself (see (1) above); still required
+        // so nominate() has a host to gate against.
+        FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&sdk);
+        tb.set_host(&host);
 
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
-        check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
+        check(tb.nominate(&host, {"Sarah"}), "nominate refused a one-name plan");
         drain_membership(tb);
         EngineIpc::test_sink() = nullptr;
 
@@ -2990,10 +3289,12 @@ int main()
     // probe_refused_without_ladder();`) this restored. -----------------------
     {
         FakeMeetingService svc;
+        FakeTalkbackHost host(svc);
         EngineTalkback tb;
         tb.set_sdk(&svc.ctrl);
+        tb.set_host(&host);
         svc.ctrl.events_registered_value = false;
-        check(!tb.probe(&svc, "Someone"),
+        check(!tb.probe(&host, "Someone"),
               "probe() proceeded after a failed event registration");
         check(svc.ctrl.creates == 0,
               "a probe with no callback sink still issued CreateChannel");

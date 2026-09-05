@@ -128,7 +128,22 @@ cat > "$BUNDLE/Contents/Info.plist" <<PLIST
 PLIST
 
 cp "$MODULE" "$BUNDLE/Contents/MacOS/obs-zoom-plugin"
-[ -d "$SRC_DIR/data/locale" ] && cp -R "$SRC_DIR/data/locale" "$BUNDLE/Contents/Resources/"
+
+# EVERYTHING under data/, not a hand-listed subset. This used to copy only
+# data/locale, so data/effects never reached the bundle and the Tiles feature
+# was dead on every macOS install with one line in the log to say so:
+#   "Tiles effect not found: effects/corevideo-tiles.effect is missing from the
+#    plugin's data directory"
+# Caught live 2026-09-05. A hand-listed subset silently drops whatever is added
+# to data/ next, which is the same shape as the missing-engine bug fixed the
+# same day: the script knew what it needed and enumerated it by hand instead of
+# copying what is there. obs_module_file() resolves to Contents/Resources on
+# macOS, so the layout under data/ carries over verbatim.
+if [ -d "$SRC_DIR/data" ]; then
+    for d in "$SRC_DIR/data"/*; do
+        [ -e "$d" ] && cp -R "$d" "$BUNDLE/Contents/Resources/"
+    done
+fi
 
 # The engine and the OAuth helper must sit BESIDE the module: both are resolved
 # relative to the loaded module (dladdr) at runtime.

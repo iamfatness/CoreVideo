@@ -7,6 +7,56 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.45-beta.1] - 2026-09-05
+
+macOS-only pre-release. Windows users should stay on v0.1.44 — nothing here
+changes Windows behaviour, and this release ships no Windows asset.
+
+**This is the first notarized macOS build.** Previous macOS betas were ad-hoc
+signed, so Gatekeeper quarantined them and testers had to clear the attribute by
+hand. This one is signed with a Developer ID, notarized by Apple and stapled, so
+it installs like any other signed app and works offline on first launch. It is
+also the first macOS build to carry the whole v0.1.33–v0.1.44 line of audio and
+recording work, which the last macOS beta (v0.1.32-beta.1, 2026-08-01) predates.
+
+### Added
+- **Developer ID signing and notarization for macOS.**
+  `scripts/make-macos-bundle.sh` gained `--entitlements` and `--notarize`, turns
+  on the hardened runtime for a real identity, and signs the Zoom SDK's ~98
+  nested frameworks, bundles and dylibs deepest-first. Sealing them inside the
+  engine app is not enough — Apple requires every executable item to carry its
+  own signature. The engine alone gets
+  `com.apple.security.cs.disable-library-validation`, which is load-bearing
+  rather than precautionary: the SDK loads sibling bundles through the main
+  bundle's `Frameworks` directory, and library validation is exactly what
+  refuses that.
+
+### Fixed
+- **Tiles now works on macOS.** The bundle script copied `data/locale` and
+  nothing else, so `data/effects/corevideo-tiles.effect` never reached the
+  bundle and the feature was dead on every macOS install. The plugin logged the
+  precise cause on every load and nothing acted on it. It now copies everything
+  under `data/`, so the next addition cannot be dropped the same way.
+- **The record-privilege handshake no longer pops an error dialog.** Zoom
+  requires local-recording permission before raw data will start, so
+  `canStartRawRecording` returns `NoPermission(6)` on the first attempt, the
+  engine requests the privilege, and the operator starts the engine again once
+  the host grants it. That normal first half was surfacing as a modal error.
+  It is now a dismissible notice that says what to do and clears itself when
+  raw media starts. Genuine failures still raise an error.
+- **A macOS bundle can no longer be built without its engine.** The assembly
+  step had no `else`, so a build configured without `BUILD_ZOOM_ENGINE`
+  produced a plugin-only bundle that loads into OBS, shows its dock and sources,
+  and then cannot join a meeting. Now a hard error, with `--no-engine` as the
+  explicit opt-out.
+
+### Known limitations
+- Apple Silicon only. Intel Macs are not supported.
+- **Talkback is Windows-only in this release.** The macOS Talkback dock is
+  present but inert and says so; the engine-side port is in progress.
+- Capturing your own screen should use OBS's native macOS Screen Capture source
+  — the CoreVideo share source carries *other participants'* shares.
+
 ## [0.1.44] - 2026-08-22
 
 ### Fixed

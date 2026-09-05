@@ -1165,6 +1165,34 @@ Every one of these is documented at length where it lives; the list is the map.
   rather than copied, because an instrument painting its own approximation would
   verify a layout the product does not have.
 
+- **Panelist loudness meter is fed on the audio lane, per source, from the
+  WIRE format** (`src/zoom-participant-audio-source.cpp`, feat/panelist-feedback
+  Task 5): each `CoreVideoAudioSource` now owns a `LoudnessMeter`
+  (`src/audio-loudness.h`, a pure BS.1770-4 header from earlier tasks in this
+  feature). `output_audio_frame()` feeds it inside the per-slot drain loop --
+  same rule as everywhere else in this file: a media event is a coalescing
+  PROMPT, feeding "the buffer that woke us" instead of every drained slot
+  reads low by a load-dependent amount. It is fed the pre-publish WIRE PCM
+  (post resume-fade, pre Mono/Stereo assembly) because the operator's
+  Mono/Stereo routing choice for OBS is not what the panelist actually sent,
+  and mono-summing a stereo feed reads ~3 LU different from the same person
+  carried as stereo. A reset request is an atomic flag consumed on the audio
+  lane's own next slot, never called directly from another thread, because a
+  reset has to land on a hop boundary the meter itself controls. Display name
+  is cached (`ctx->display_name`, guarded by `ctx->mtx`) from the roster
+  callback's already-fetched roster copy in `maybe_resubscribe_for_roster()`
+  -- never re-resolved per buffer, since `ZoomEngineClient::roster()`
+  deep-copies every `ParticipantInfo` under a hot mutex and the readiness
+  board this feeds polls at ~10 Hz. `corevideo_loudness_readings()` /
+  `corevideo_reset_loudness_windows()` mirror `corevideo_audio_source_infos()`'s
+  registry pattern exactly, including its `g_sources_mtx`-then-`ctx->mtx` lock
+  order; the audio lane never touches `g_sources_mtx`, so the order cannot
+  invert. The window resets on every (un)subscribe transition
+  (`unsubscribe_audio()`, `forget_subscription_for_new_engine()`), because
+  integrated loudness is scoped to one panelist's mic check, not the source's
+  whole lifetime -- without it a re-subscribed source's number is polluted by
+  whoever spoke before on the same source.
+
 ## Live testing against a real meeting
 
 The control API (TCP line-JSON, `127.0.0.1:19870`, no HTTP) drives a full

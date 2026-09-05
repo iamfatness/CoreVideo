@@ -994,6 +994,20 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoAudioLoudness
              COMMAND CoreVideoAudioLoudnessTest)
 
+    # The readiness board's model: panel MEDIAN (not mean, so one laptop mic
+    # cannot drag the reference), deviation in LU, pass/fail, deterministic
+    # row order, and the row/bar rectangle arithmetic. The layout is pinned
+    # here rather than looked at on screen because this repo has no headless
+    # GPU harness and has ruled against building one. See src/loudness-board.h.
+    add_executable(CoreVideoLoudnessBoardTest
+        tests/loudness-board-test.cpp
+    )
+    target_include_directories(CoreVideoLoudnessBoardTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoLoudnessBoard
+             COMMAND CoreVideoLoudnessBoardTest)
+
     # Backfills silence into an ISO WAV across gaps so its own timeline
     # tracks real elapsed time instead of shrinking by every silent
     # stretch — 2026-08-21 design review ("does ZoomISO handle variable

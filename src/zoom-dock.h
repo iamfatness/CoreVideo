@@ -47,6 +47,7 @@ private:
     void update_recovery_panel();
     void update_credentials_banner();
     void show_update_banner(const QString &tag, const QString &html_url);
+    void update_privilege_banner(const QString &message);
     void start_pending_oauth_join();
     void stop_pending_oauth_join();
 
@@ -76,6 +77,10 @@ private:
     // Non-intrusive "a newer CoreVideo build is available" notice
     CvBanner    *m_update_banner      = nullptr;
     QString      m_update_url;
+    // Record-privilege handshake notice (src/zoom-privilege-notice.h): a
+    // non-error banner telling the operator the host needs to grant recording
+    // permission, in place of the modal QMessageBox this used to pop.
+    CvBanner    *m_privilege_banner   = nullptr;
 
     // Join controls
     QLineEdit   *m_meeting_id   = nullptr;

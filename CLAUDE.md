@@ -1164,6 +1164,46 @@ Every one of these is documented at length where it lives; the list is the map.
   extracted from `refresh()` (`paint_banner()`/`paint_plan()`) and are SHARED
   rather than copied, because an instrument painting its own approximation would
   verify a layout the product does not have.
+- **The record-privilege handshake is a STATE, not an error** (live defect,
+  2026-09-05, launch day: starting the engine popped a "Zoom Join" modal
+  reading "raw recording failed" on a session working exactly as designed).
+  `canStartRawRecording()` returning `NoPermission(6)` is the NORMAL first
+  half of Zoom's record-privilege handshake -- the engine asks the host
+  (`requestLocalRecordingPrivilege()`, `engine/src/main-macos.mm`'s
+  `handle_start_media()`), the host grants it, and `raw_media_ready` follows
+  on its own. `handle_event()`'s `raw_media_start_failed` +
+  `privilege_requested` branch already refused (before this fix, and
+  unchanged by it) to route this into the join-failure/reconnect machinery --
+  its own comment documents a live incident where doing so once flipped a
+  healthy joined session to Failed and gated `start_engine`, resubscription
+  and recovery for the rest of the session. What it still got wrong: it set
+  `m_last_error` and fired every registered `ErrorCallback`, which is what
+  pops the dock's `QMessageBox`. Fixed with a SEPARATE `NoticeCallback` list
+  (`ZoomEngineClient::add_notice_callback()`/`m_privilege_notice`,
+  `src/zoom-engine-client.h`) rather than a severity flag on the existing one:
+  every `ErrorCallback` subscriber's contract -- today just the dock, but a
+  public extension point -- is "this means show a failure", so a severity
+  field is a branch every current and future subscriber has to remember to
+  check, where a separate list makes "this can never reach a QMessageBox" true
+  by construction. `m_last_error` is deliberately left untouched, because
+  other code (the `"left"` handler's `keep_failed` check) reads it as "the
+  session actually failed," which a pending grant is not. The operator-facing
+  copy and the first-vs-repeat classification (the engine asks the host only
+  ONCE per meeting; every later report is the same still-pending wait, told
+  apart only by its `"detail"` text containing "already requested") are pure
+  functions in `src/zoom-privilege-notice.h`, extracted for the same reason
+  `zoom-join-decision.h`/`join-watchdog.h` are: host-tested without Qt/OBS in
+  `tests/zoom-privilege-notice-test.cpp`, three mutations run and killed
+  (breaking the classifier substring, collapsing the two notices to identical
+  copy, and inverting the fail-safe so an empty/unrecognized `detail` reads as
+  already-requested). The notice CLEARS on `raw_media_ready` (the engine event
+  that means the grant landed) and on the `"left"` per-meeting reset, and the
+  dock's `update_privilege_banner()` is driven BOTH by the callback and by a
+  100ms poll of `pending_privilege_notice()` in `update_state_indicator()` --
+  the poll is what actually hides a stale banner after a leave/rejoin, since
+  the `"left"` handler clears the field without a separate notify call, same
+  as it has never notified roster callbacks either. Rendered as a
+  `CvBanner(Warning)` under the engine controls, not the modal it replaces.
 
 ## Live testing against a real meeting
 

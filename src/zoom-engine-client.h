@@ -291,6 +291,13 @@ public:
     bool is_media_active() const { return m_media_active.load(std::memory_order_acquire); }
     std::string last_error() const;
     void clear_last_error();
+    // Empty when no record-privilege notice is pending. See
+    // src/zoom-privilege-notice.h for what this state means and
+    // add_notice_callback() below for how it is pushed. Exposed as a getter
+    // too, mirroring last_error(), so a dock can resync on its own poll tick
+    // (update_state_indicator()'s 100ms timer) rather than depend solely on
+    // catching the callback.
+    std::string pending_privilege_notice() const;
     uint32_t active_speaker_id() const;
     uint32_t raw_active_speaker_id() const;
     std::vector<ParticipantInfo> roster() const;
@@ -321,6 +328,19 @@ public:
     using ErrorCallback = std::function<void(const std::string &message)>;
     void add_error_callback(void *key, ErrorCallback cb);
     void remove_error_callback(void *key);
+    // A SEPARATE callback from ErrorCallback above, deliberately. Every
+    // existing (and future) error-callback subscriber's contract is "this
+    // means show the operator a failure" -- the dock's own registration pops
+    // a QMessageBox unconditionally whenever the message is non-empty. The
+    // record-privilege wait (src/zoom-privilege-notice.h) is not a failure,
+    // so it never enters that list at all; the invariant "this can never
+    // reach a QMessageBox" is enforced by which list a report goes to, not by
+    // a severity flag every subscriber has to remember to check. Empty
+    // message means "clear the notice", exactly like ErrorCallback's empty
+    // message convention (see clear_last_error()).
+    using NoticeCallback = std::function<void(const std::string &message)>;
+    void add_notice_callback(void *key, NoticeCallback cb);
+    void remove_notice_callback(void *key);
 
 private:
     // Starts the two media dispatch lanes; see MediaDispatchLane below.
@@ -348,6 +368,16 @@ private:
     // this client (the dock reads last_error() from one) and m_mtx is not
     // recursive.
     void set_error_and_notify(const std::string &message);
+    // Same snapshot-then-dispatch shape as set_error_and_notify(), over
+    // m_privilege_notice / m_notice_callbacks instead of m_last_error /
+    // m_error_callbacks -- see NoticeCallback's doc comment above for why
+    // these are separate lists rather than one.
+    void set_privilege_notice_and_notify(const std::string &message);
+    // Clears m_privilege_notice and dispatches an empty message, but only if
+    // a notice was actually pending -- called from the "raw_media_ready"
+    // debug stage on every media start, most of which never had a notice to
+    // clear.
+    void clear_privilege_notice_and_notify();
     // Runs on the monitor thread ONLY (see m_init_teardown_pending). Stops the
     // engine process, then surfaces the operator-facing failure.
     void fail_after_init_retries_exhausted();
@@ -417,7 +447,12 @@ private:
     std::unordered_map<std::string, SourceCallbacks> m_sources;
     std::unordered_map<void *, RosterCallback> m_roster_callbacks;
     std::unordered_map<void *, ErrorCallback> m_error_callbacks;
+    std::unordered_map<void *, NoticeCallback> m_notice_callbacks;
     std::string m_last_error;
+    // Empty when no record-privilege notice is pending. Deliberately NEVER
+    // written to/from m_last_error -- see pending_privilege_notice()'s doc
+    // comment and NoticeCallback's above. Guarded by m_mtx like m_last_error.
+    std::string m_privilege_notice;
     // Raw compact JSON of the most recent talkback_probe stage line; see
     // talkback_probe_status() above.
     std::string m_talkback_probe_status;

@@ -698,6 +698,15 @@ ZoomDock::ZoomDock(QWidget *parent)
     engine_layout->addWidget(m_stop_engine_btn);
     vLayout->addWidget(engine_group);
 
+    // Record-privilege handshake notice. Hidden until (and unless) the engine
+    // reports the host needs to grant recording permission -- see
+    // src/zoom-privilege-notice.h for why this is a notice and not the
+    // "Zoom Join" error modal. Placed right under the engine controls: this
+    // is specifically about clicking Start Engine again once the host acts.
+    m_privilege_banner = new CvBanner(CvBannerKind::Warning, QString(), this);
+    m_privilege_banner->setVisible(false);
+    vLayout->addWidget(m_privilege_banner);
+
     auto *routing_group = new QGroupBox("Routing", this);
     auto *routing_layout = new QHBoxLayout(routing_group);
     routing_layout->setSpacing(8);
@@ -828,6 +837,12 @@ ZoomDock::ZoomDock(QWidget *parent)
                 QMessageBox::warning(self, "Zoom Join", text);
         }, Qt::QueuedConnection);
     });
+    ZoomEngineClient::instance().add_notice_callback(this, [self, alive](const std::string &message) {
+        QMetaObject::invokeMethod(self, [self, alive, message]() {
+            if (!alive->load(std::memory_order_acquire)) return;
+            self->update_privilege_banner(QString::fromStdString(message));
+        }, Qt::QueuedConnection);
+    });
 
     // -- Apply stylesheet last so all properties are set before evaluation -----
     setStyleSheet(cv_stylesheet());
@@ -844,6 +859,7 @@ ZoomDock::~ZoomDock()
         m_join_thread.join();
     ZoomEngineClient::instance().remove_roster_callback(this);
     ZoomEngineClient::instance().remove_error_callback(this);
+    ZoomEngineClient::instance().remove_notice_callback(this);
 }
 
 void ZoomDock::prepare_shutdown()
@@ -859,6 +875,7 @@ void ZoomDock::prepare_shutdown()
         QObject::disconnect(m_speaker_exclude_combo_2, nullptr, this, nullptr);
     ZoomEngineClient::instance().remove_roster_callback(this);
     ZoomEngineClient::instance().remove_error_callback(this);
+    ZoomEngineClient::instance().remove_notice_callback(this);
     stop_pending_oauth_join();
     if (m_countdown_timer)
         m_countdown_timer->stop();
@@ -911,6 +928,19 @@ void ZoomDock::show_update_banner(const QString &tag, const QString &html_url)
     m_update_url = html_url;
     m_update_banner->setText(QString("CoreVideo %1 is available.").arg(tag));
     m_update_banner->setVisible(true);
+}
+
+void ZoomDock::update_privilege_banner(const QString &message)
+{
+    if (!m_alive->load(std::memory_order_acquire) || !m_privilege_banner)
+        return;
+    // Empty means the handshake resolved (raw_media_ready) or was reset by a
+    // fresh leave/rejoin -- see clear_privilege_notice_and_notify() and the
+    // "left" handler in zoom-engine-client.cpp. A notice that never clears is
+    // its own defect, so this path has to be exercised as often as the one
+    // that shows it.
+    m_privilege_banner->setText(message);
+    m_privilege_banner->setVisible(!message.isEmpty());
 }
 
 void ZoomDock::start_pending_oauth_join()
@@ -1050,6 +1080,13 @@ void ZoomDock::update_state_indicator()
     if (media_active && !m_last_media_active)
         ZoomOutputManager::instance().resubscribe_all();
     m_last_media_active = media_active;
+    // Resync from the getter as well as the callback (last_error()/
+    // is_media_active() above get the same dual treatment): the "left"
+    // handler clears m_privilege_notice without a separate notify call, so
+    // this 100ms poll is what actually hides a stale banner after a
+    // leave/rejoin, not the callback.
+    update_privilege_banner(QString::fromStdString(
+        ZoomEngineClient::instance().pending_privilege_notice()));
     m_join_btn->setEnabled(!in_meeting && !transitioning && !recovering);
     m_leave_btn->setEnabled(in_meeting || transitioning || recovering);
     m_leave_btn->setText(in_meeting ? "Leave" : "Cancel");

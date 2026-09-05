@@ -356,6 +356,18 @@ Every one of these is documented at length where it lives; the list is the map.
      and the plugin's handler takes a mutex per line. `m_mic_open` exists to
      be that comparison — before M1b it was written in six places and read in
      none, under a comment describing the code above.
+     **Diagnostic delta from the macOS talkback port (2026-09-05,
+     `TalkbackHost` seam)**: `ensure_mic_open()` used to distinguish
+     `"no_participants_controller"` from `"no_self_user"` as two separate
+     `"reason"` strings on the `mic_open` stage line. `TalkbackHost::myself()`
+     collapses both into one call the abstraction cannot see inside of, so
+     both now report `"no_self_user"` — nothing on the wire consumes either
+     string today, but it is a real, Windows-visible delta on the exact
+     diagnostic Law 1 post-mortems read, worth knowing before blaming a
+     missing participants controller for what the log now calls a missing
+     self user. `"no_audio_controller"` is unchanged (kept intact via
+     `TalkbackResult::NotExist`, the same sentinel `TalkbackSdk::
+     no_controller()` uses).
      **The leak question, answered from the code rather than assumed**: `Join`
      sets `isAudioOff = false` / `isMyVoiceInMix = true`
      (`engine/src/main.cpp`) and **nothing in this repository calls

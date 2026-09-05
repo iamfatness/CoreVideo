@@ -96,15 +96,29 @@ bool TalkbackMacHost::is_self_muted()
     ZoomSDKUserInfo *u = c ? [c getMyself] : nil;
     if (!u) return true;
     // macOS has no IsAudioMuted() equivalent bool -- getAudioStatus() answers
-    // with a status enum instead (confirmed against the real header and
-    // already folded onto a bool the same way in main-macos.mm's own
-    // user_to_info()). Muted/MutedByHost/MutedAllByHost are all "muted" for
-    // Law 1's purposes -- what matters is whether audio the client sends
-    // would currently be heard, not who muted it.
+    // with a status enum instead. WHITELIST THE UNMUTED STATES, do not
+    // blacklist the muted ones -- fix round 1 (Critical 1) inverted Law 1 by
+    // doing the latter: the real enum (ZoomSDKErrors.h) starts at
+    // ZoomSDKAudioStatus_None = 0, documented "For initialization" -- i.e.
+    // audio not joined yet / genuinely unknown -- and a blacklist of the three
+    // Muted enumerators returns false (not muted) for that value and for any
+    // future enumerator an SDK revision adds ahead of ever being told about
+    // it. That is the exact HAZARD talkback-host.h's own comment on this
+    // method forbids: an unknown mic state read as "not muted" is what makes
+    // ensure_mic_open() skip the unmute attempt entirely and report
+    // "mic":"open" for a client whose meeting audio was never established --
+    // the accepted-but-silent ghost Law 1 exists to catch.
+    // main-macos.mm's user_to_info() folds the SAME enum onto a bool with the
+    // opposite (blacklist) polarity, and that is not a precedent this method
+    // can reuse: that fold is for the roster's DISPLAY field about OTHER
+    // participants, where "not muted" is a benign default for an unknown
+    // state nobody is about to act on. This is the AUTHORITATIVE gate for
+    // whether THIS client's own audio can be unmuted at all; the two
+    // predicates answer different questions and must not share a polarity.
     const ZoomSDKAudioStatus audio = [u getAudioStatus];
-    return audio == ZoomSDKAudioStatus_Muted ||
-           audio == ZoomSDKAudioStatus_MutedByHost ||
-           audio == ZoomSDKAudioStatus_MutedAllByHost;
+    return !(audio == ZoomSDKAudioStatus_UnMuted ||
+             audio == ZoomSDKAudioStatus_UnMutedByHost ||
+             audio == ZoomSDKAudioStatus_UnMutedAllByHost);
 }
 
 TalkbackResult TalkbackMacHost::set_self_muted(bool muted)

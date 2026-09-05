@@ -3521,23 +3521,22 @@ void EngineTalkback::drain_audio()
     // merely unlikely.
     //
     // Copy the ids out under m_chan_mtx, release, THEN call the SDK -- the
-    // one rule this file never bends. `channels` and `channel_ids_utf8` are
-    // the same UTF-8 strings under two names (Task 2b: m_session_channels
-    // used to store the raw zchar_t identifier and this file re-encoded it
-    // per drain via zchar_to_utf8(); TalkbackSdkEvents/TalkbackSdk both
-    // already deliver/take UTF-8 exclusively, so there is nothing left to
-    // convert) -- kept as a plain copy rather than collapsing the two names,
-    // since both are read independently below.
+    // one rule this file never bends. Fix round (review, Minor): this used
+    // to make a SECOND full copy under the name `channel_ids_utf8`, on the
+    // claim that it and `channels` were "read independently below" -- false,
+    // checked by grep: every remaining read of `channels` after this point is
+    // `.empty()`/`.size()`, never the contents, so the second copy bought
+    // nothing but an allocation on every drain_audio() call (50-100/s while a
+    // key is down). One vector now; SendCtx points at it directly.
     std::vector<std::string> channels;
     {
         std::lock_guard<std::mutex> lock(m_chan_mtx);
         channels = m_session_channels;
     }
-    std::vector<std::string> channel_ids_utf8 = channels;
 
     auto *hdr = static_cast<ShmAudioHeader *>(m_audio_region.ptr);
 
-    SendCtx ctx{m_sdk, &channel_ids_utf8,
+    SendCtx ctx{m_sdk, &channels,
                 m_audio_rate,
                 m_audio_channels > 1,
                 0, 0, 0, 0};
@@ -3568,7 +3567,7 @@ void EngineTalkback::drain_audio()
     if (m_session_duck_pending) {
         m_session_duck_pending = false;
         if (m_sdk && !channels.empty()) {
-            for (const auto &id : channel_ids_utf8)
+            for (const auto &id : channels)
                 m_sdk->set_background_volume(id, kBackgroundDucked);
             m_session_ducked = true;
             report_session("audio_duck", R"("channels":)" +
@@ -3594,7 +3593,7 @@ void EngineTalkback::drain_audio()
             // behind a healthy-looking count. "channels" is what makes the
             // two readable together.
             report_session("audio_send", R"("code":)" + std::to_string(ctx.last_err) +
-                   R"(,"channels":)" + std::to_string(channel_ids_utf8.size()) +
+                   R"(,"channels":)" + std::to_string(channels.size()) +
                    R"(,"sent":)" + std::to_string(ctx.sent) +
                    R"(,"failed":)" + std::to_string(ctx.failed) +
                    R"(,"lost":)" + std::to_string(lost) +

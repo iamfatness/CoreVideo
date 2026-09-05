@@ -1124,7 +1124,7 @@ private:
     // fields it is unsafe to reason about from phase ordering alone.
     std::atomic<Phase> m_phase{Phase::Idle};
 
-    // m_channel_id / m_channel_id / m_stray_channels are NOT safe under
+    // m_channel_id / m_stray_channels are NOT safe under
     // acquire/release on m_phase alone and must go through m_chan_mtx for
     // EVERY access from here down, cross-thread or not -- no exceptions, so
     // nobody has to re-derive which phases are "safe".

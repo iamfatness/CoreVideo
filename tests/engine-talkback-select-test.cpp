@@ -84,6 +84,22 @@
 #include "meeting_service_components/meeting_audio_interface.h"
 #include "meeting_service_components/meeting_participants_ctrl_interface.h"
 
+// Fix round (review, Important 3): the REAL production adapters, driven
+// directly against the fakes above -- everything that moved in this task
+// (the roster walk, the self null-guard, the fail-closed is_self_muted(),
+// the no_controller()->NotExist sentinel, the event translation) used to be
+// unpinned: no test constructed TalkbackWinHost or TalkbackWinSdk, only the
+// hand-written parallel FakeTalkbackHost, so the two could silently diverge
+// (and did: FakeTalkbackHost::set_self_muted() mapped SDKERR_* to Ok/Unknown
+// directly, while TalkbackWinHost maps through talkback_win_result(), which
+// also answers TooFrequent/NoPermission -- harmless only because it never
+// answers NotExist, so it never collided with the no_controller sentinel
+// ensure_mic_open() keys on, and nothing pinned that). Safe to include
+// unconditionally here (not behind a second macro): this whole translation
+// unit is already WIN32-gated at the CMakeLists level.
+#include "engine-talkback-host-win.h"
+#include "engine-talkback-sdk-win.h"
+
 #include <iostream>
 #include <string>
 #include <utility>
@@ -631,6 +647,15 @@ public:
     // (inert) so the one test that sets it (search `controller_returns_null`)
     // still compiles and still documents the invariant it was written for.
     bool controller_returns_null = false;
+    // Fix round (review, Important 3): lets the new "real adapters" block
+    // near the end of main() below drive set_self_muted()'s "no controller
+    // to call" path
+    // (TalkbackResult::NotExist) via a genuinely null audio controller, not
+    // only via an unresolvable self -- both routes reach the same
+    // no_controller() sentinel in TalkbackWinHost, but the review asked for
+    // this one by name. Off by default so every pre-existing test is
+    // unaffected.
+    bool audio_controller_null = false;
     // IMeetingService's pure virtual, still required to make this class
     // concrete. Task 1: this fake's `ctrl` is TalkbackSdk-typed now, not
     // ZOOMSDK::IMeetingTalkbackController*, so it can no longer be returned
@@ -665,7 +690,8 @@ public:
     SDKError GetMeetingShareStatisticInfo(MeetingASVStatisticInfo& info) override { return {}; }
     IMeetingVideoController* GetMeetingVideoController() override { return {}; }
     IMeetingShareController* GetMeetingShareController() override { return {}; }
-    IMeetingAudioController* GetMeetingAudioController() override { return &audio; }
+    IMeetingAudioController* GetMeetingAudioController() override
+    { return audio_controller_null ? nullptr : &audio; }
     IMeetingRecordingController* GetMeetingRecordingController() override { return {}; }
     IMeetingWaitingRoomController* GetMeetingWaitingRoomController() override { return {}; }
     IMeetingWebinarController* GetMeetingWebinarController() override { return {}; }
@@ -947,6 +973,36 @@ static void reset_volume_log(FakeTalkbackSdk &ctrl)
     ctrl.volumes.clear();
     ctrl.first_volume_call = -1;
 }
+
+// Fix round (review, Important 3): a plain capturing TalkbackSdkEvents, so
+// TalkbackWinSdk's onCreateChannelResponse()/etc -- the event TRANSLATION
+// half of the seam, previously exercised by nothing at all -- can be driven
+// directly and its output inspected. Deliberately not reused for anything
+// else in this file: EngineTalkback itself IS a TalkbackSdkEvents and is what
+// every other test in this file drives instead.
+class TestSdkEventsSink : public TalkbackSdkEvents {
+public:
+    struct Call {
+        std::string channel_id;
+        uint32_t user_id = 0;
+        TalkbackResult result = TalkbackResult::Unknown;
+        int raw_code = 0;
+    };
+    std::vector<Call> create_calls, destroy_calls, join_calls, leave_calls;
+
+    void on_create_channel_response(const std::string &channel_id,
+                                    TalkbackResult result, int raw_code) override
+    { create_calls.push_back({channel_id, 0, result, raw_code}); }
+    void on_destroy_channel_response(const std::string &channel_id,
+                                     TalkbackResult result, int raw_code) override
+    { destroy_calls.push_back({channel_id, 0, result, raw_code}); }
+    void on_channel_user_join_response(const std::string &channel_id, uint32_t user_id,
+                                       TalkbackResult result, int raw_code) override
+    { join_calls.push_back({channel_id, user_id, result, raw_code}); }
+    void on_channel_user_leave_response(const std::string &channel_id, uint32_t user_id,
+                                        TalkbackResult result, int raw_code) override
+    { leave_calls.push_back({channel_id, user_id, result, raw_code}); }
+};
 
 int main()
 {
@@ -2674,12 +2730,22 @@ int main()
     // refuses the key over a mic it cannot open), and the live line reports
     // "mic":"blocked" -- never "open".
     //
-    // MUTATION-PROVEN (see task-2b-report.md for the run): changing
+    // MUTATION TRACED, NOT EXECUTED ON THIS MACHINE (review round, Important
+    // 4: the previous wording here led with "MUTATION-PROVEN" and only
+    // qualified it two lines later, which is what a future reader would
+    // quote -- this project has documented history of guards whose tests
+    // could not fail, and an overclaimed one is how that keeps happening).
+    // What was actually done, in full, is in task-2b-report.md: changing
     // ensure_mic_open()'s `m_mic_open = (r == TalkbackResult::Ok);` to an
-    // unconditional `m_mic_open = true;` makes this test's "mic":"blocked"/
-    // "mic":"open" assertions fail (traced by hand, not executed by ctest --
-    // this file is Windows-gated and this machine has no Windows toolchain;
-    // see the report for what WAS executed).
+    // unconditional `m_mic_open = true;` was applied to the real source,
+    // confirmed to still compile (the macOS engine target), and reverted --
+    // never run against this test, because this file is Windows-gated and
+    // this machine has no Windows toolchain. Tracing it by hand: with that
+    // mutation, `r` is ignored, `m_mic_open` reads true regardless of what
+    // set_self_muted() answered, `session_start()` reports "mic":"open", and
+    // this test's `check(live_says_blocked, ...)` / `check(!live_says_open,
+    // ...)` would both fail. That is a trace, not a run; the test pins the
+    // invariant either way, so this comment states only what happened.
     {
         FakeMeetingService svc;
         FakeTalkbackHost host(svc);
@@ -3324,6 +3390,150 @@ int main()
               "probe() proceeded after a failed event registration");
         check(svc.ctrl.creates == 0,
               "a probe with no callback sink still issued CreateChannel");
+    }
+
+    // ═══ FIX ROUND (review, Important 3): THE REAL ADAPTERS, DRIVEN DIRECTLY ═
+    //
+    // Every test above drives FakeTalkbackHost/FakeTalkbackSdk -- hand-written
+    // parallels of TalkbackWinHost/TalkbackWinSdk that nothing ever proved
+    // agree with the real thing. This block constructs the REAL adapters
+    // against the SAME FakeMeetingService/FakeParticipantsController/
+    // FakeAudioController fakes those already derive from the real ZOOMSDK
+    // interfaces used throughout this file -- cheap, because nothing new has
+    // to be faked.
+    {
+        // (a) THE SELF NULL-GUARD. No self resolvable (has_self defaults to
+        // false) -- myself() must report failure, not a zeroed-out
+        // TalkbackParticipant that looks like a real but anonymous user.
+        FakeMeetingService svc;
+        TalkbackWinHost host(&svc);
+        TalkbackParticipant self;
+        check(!host.myself(self),
+              "TalkbackWinHost::myself() succeeded with no self user in the "
+              "fake participants controller");
+
+        // (b) is_self_muted() FAILS CLOSED (true, i.e. "muted") on that same
+        // unresolvable self -- the Law 1 hazard this task's brief named by
+        // name, and the one Critical this review round found on the macOS
+        // sibling. Pinning it on Windows too, since nothing did before.
+        check(host.is_self_muted(),
+              "TalkbackWinHost::is_self_muted() read an unresolvable self as "
+              "NOT muted -- an unknown mic state must never read as open");
+
+        // (c) NotExist ON A CONTROLLER SET_SELF_MUTED() CANNOT CALL. Two
+        // independent routes to the same no_controller() sentinel, both
+        // exercised: no self at all (already the case here), and a self that
+        // resolves but a null audio controller (below).
+        const TalkbackResult r_no_self = host.set_self_muted(false);
+        check(r_no_self == TalkbackResult::NotExist,
+              "set_self_muted() with no self resolvable did not return "
+              "NotExist -- ensure_mic_open()'s \"no_audio_controller\" report "
+              "shape keys on exactly this sentinel");
+
+        svc.participants.has_self = true;
+        svc.participants.self = make_user(7700, "CoreVideo Engine");
+        svc.audio_controller_null = true;
+        const TalkbackResult r_no_audio = host.set_self_muted(false);
+        check(r_no_audio == TalkbackResult::NotExist,
+              "set_self_muted() with a null audio controller did not return "
+              "NotExist");
+        svc.audio_controller_null = false;
+
+        // (d) is_self_muted() reads a REAL, resolvable self correctly in
+        // both directions -- not just the fail-closed default -- and
+        // myself()/roster() carry the fields resolve_participant()/
+        // current_roster() actually read.
+        svc.participants.self.muted = true;
+        check(host.is_self_muted(), "a genuinely muted self read as unmuted");
+        svc.participants.self.muted = false;
+        check(!host.is_self_muted(), "a genuinely unmuted self read as muted");
+
+        TalkbackParticipant self2;
+        check(host.myself(self2) && self2.user_id == 7700 &&
+                  self2.display_name == "CoreVideo Engine",
+              "myself() did not carry the real self user's id/name through");
+
+        svc.participants.users.push_back(make_user(1001, "Sarah", true));
+        svc.participants.users.push_back(make_user(1002, "Ivan", false));
+        const std::vector<TalkbackParticipant> roster = host.roster();
+        check(roster.size() == 2, "roster() did not carry both fake users");
+        bool found_sarah = false, found_ivan_no_support = false;
+        for (const auto &p : roster) {
+            if (p.user_id == 1001 && p.display_name == "Sarah" && p.supports_talkback)
+                found_sarah = true;
+            if (p.user_id == 1002 && p.display_name == "Ivan" && !p.supports_talkback)
+                found_ivan_no_support = true;
+        }
+        check(found_sarah && found_ivan_no_support,
+              "roster() did not carry user_id/display_name/supports_talkback "
+              "for the fake users verbatim");
+
+        // (e) raw_code ROUND-TRIPS THE SDK ENUM VERBATIM -- never
+        // TalkbackResult's own numbering. SDKERR_NO_PERMISSION is chosen
+        // because it maps to a DIFFERENT TalkbackResult (NoPermission) than
+        // TalkbackWinSdk's operations' own SDKERR_UNKNOWN sentinel (Unknown),
+        // so a test that only checked "some code came through" could not
+        // catch last_raw_code() reading TalkbackResult instead of the SDK's
+        // own value.
+        svc.audio.unmute_result = ZOOMSDK::SDKERR_NO_PERMISSION;
+        const TalkbackResult r_refused = host.set_self_muted(false);
+        check(r_refused == TalkbackResult::NoPermission,
+              "a real SDKERR_NO_PERMISSION did not map to TalkbackResult::"
+              "NoPermission through TalkbackWinHost");
+        check(host.last_raw_code() == static_cast<int>(ZOOMSDK::SDKERR_NO_PERMISSION),
+              "TalkbackWinHost::last_raw_code() did not round-trip the raw "
+              "SDKError verbatim -- a report line reading this would show "
+              "the wrong number to an operator reading CLAUDE.md's documented "
+              "codes");
+        svc.audio.unmute_result = ZOOMSDK::SDKERR_SUCCESS;
+    }
+
+    // (f) TalkbackWinSdk's EVENT TRANSLATION -- onCreateChannelResponse()/
+    // onChannelUserJoinResponse()/onChannelUserLeaveResponse(), called
+    // directly (no real ZOOMSDK::IMeetingTalkbackController needed: these
+    // methods only translate their own arguments and forward, they never
+    // touch m_ctrl). Constructed with a null controller deliberately, to
+    // prove that too: the translation must not depend on one existing.
+    {
+        TalkbackWinSdk win_sdk(nullptr);
+        TestSdkEventsSink sink;
+        win_sdk.set_events(&sink);
+
+        win_sdk.onCreateChannelResponse(
+            chan_id(1).c_str(), IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_ALREADY_EXIST);
+        check(sink.create_calls.size() == 1 &&
+                  sink.create_calls[0].channel_id == "chan-1" &&
+                  sink.create_calls[0].result == TalkbackResult::AlreadyExists &&
+                  sink.create_calls[0].raw_code ==
+                      static_cast<int>(IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_ALREADY_EXIST),
+              "onCreateChannelResponse() did not forward (channel_id, "
+              "TalkbackResult::AlreadyExists, raw_code) through set_events()");
+
+        win_sdk.onChannelUserJoinResponse(chan_id(2).c_str(), 4242, IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_OK);
+        check(sink.join_calls.size() == 1 &&
+                  sink.join_calls[0].channel_id == "chan-2" &&
+                  sink.join_calls[0].user_id == 4242 &&
+                  sink.join_calls[0].result == TalkbackResult::Ok,
+              "onChannelUserJoinResponse() did not forward correctly");
+
+        win_sdk.onChannelUserLeaveResponse(chan_id(2).c_str(), 4242, IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_OK);
+        check(sink.leave_calls.size() == 1 && sink.leave_calls[0].user_id == 4242,
+              "onChannelUserLeaveResponse() did not forward correctly");
+
+        win_sdk.onDestroyChannelResponse(chan_id(1).c_str(), IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_OK);
+        check(sink.destroy_calls.size() == 1 &&
+                  sink.destroy_calls[0].channel_id == "chan-1",
+              "onDestroyChannelResponse() did not forward correctly");
+
+        // register_event() with a null controller: the no_controller() path,
+        // same convention as every other operation on this adapter.
+        check(!win_sdk.events_registered(),
+              "a TalkbackWinSdk constructed with a null controller reported "
+              "events_registered() true before register_event() was even "
+              "called");
+        win_sdk.register_event();
+        check(!win_sdk.events_registered(),
+              "register_event() with a null controller reported success");
     }
 
     if (failures == 0)

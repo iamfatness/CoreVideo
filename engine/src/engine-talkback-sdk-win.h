@@ -103,6 +103,34 @@ public:
     explicit TalkbackWinSdk(ZOOMSDK::IMeetingTalkbackController *ctrl)
         : m_ctrl(ctrl) {}
 
+    // Fix round (review, Important 2): the ONLY way to change which
+    // controller this adapter wraps, once constructed. main.cpp used to
+    // copy-assign a whole fresh `TalkbackWinSdk(ctrl)` over the static
+    // instance on every injection -- which, now that this class also IS the
+    // SDK's registered ZOOMSDK::IMeetingTalkbackCtrlEvent (Task 2b), is a
+    // live object the SDK can be calling back into at that exact moment.
+    // Copy-assignment nulled m_events for the instant between the assignment
+    // and the following set_events() call (a callback landing there hit
+    // `if (m_events)` and was silently dropped -- and a dropped
+    // onCreateChannelResponse for an untracked channel never reaches
+    // m_stray_channels, leaking a Zoom channel against the 16-channel budget
+    // with no diagnostic, precisely in the Idle/Done injection window the
+    // stray-channel machinery exists to handle) and was an unsynchronised
+    // whole-object overwrite of m_ctrl/m_events/m_last_raw_code racing
+    // callback threads reading those same fields. rebind() only ever touches
+    // m_ctrl and m_events_registered -- m_events is set once (main.cpp calls
+    // set_events() a single time, not on every injection) and is never
+    // touched here, so there is no window where it reads null while a
+    // callback could still be in flight for the object whose address never
+    // moves. What remains is a single pointer store, the same shape the
+    // pre-Task-2b code had for m_ctrl before this class had any events of its
+    // own to protect.
+    void rebind(ZOOMSDK::IMeetingTalkbackController *ctrl)
+    {
+        m_ctrl = ctrl;
+        m_events_registered = false;
+    }
+
     bool is_meeting_support_talkback() override
     {
         return m_ctrl && m_ctrl->IsMeetingSupportTalkBack();

@@ -1522,6 +1522,18 @@ int main()
     // inject_talkback_sdk() below, so its ADDRESS -- the only thing m_sdk
     // actually holds -- never moves.
     static TalkbackWinSdk talkback_sdk(nullptr);
+    // Fix round (review, Important 2): set the forwarding target ONCE, right
+    // here at construction, never again on every injection. `talkback_sdk`
+    // is now itself the SDK's registered ZOOMSDK::IMeetingTalkbackCtrlEvent
+    // (Task 2b) -- a live object the SDK can be calling back into for as long
+    // as the process runs -- and inject_talkback_sdk() below used to
+    // copy-assign a fresh `TalkbackWinSdk(ctrl)` over it on every injection,
+    // which nulled this exact field for the instant between that assignment
+    // and the following set_events() call. See rebind()'s own comment
+    // (engine-talkback-sdk-win.h) for what that window cost. `talkback` is
+    // declared on the line above and does not change identity for the life
+    // of the process, so there is nothing to re-set later.
+    talkback_sdk.set_events(&talkback);
     // Fetches the current talkback controller from `svc` and injects it into
     // `talkback` via set_sdk(), mirroring exactly what engine-talkback.cpp
     // used to do for itself at the top of probe()/nominate()/session_start()
@@ -1587,16 +1599,16 @@ int main()
         if (!safe_to_inject) return;
         ZOOMSDK::IMeetingTalkbackController *ctrl =
             svc ? svc->GetMeetingTalkbackController() : nullptr;
-        talkback_sdk = TalkbackWinSdk(ctrl);
-        // Task 2b: set_events() wires the forwarding target (talkback_sdk's
-        // own onCreateChannelResponse/etc, now the concrete
-        // ZOOMSDK::IMeetingTalkbackCtrlEvent implementation, translate and
-        // call into this) every time the adapter is rebuilt, since the
-        // reassignment above (`talkback_sdk = TalkbackWinSdk(ctrl)`) is a
-        // fresh object with no events target of its own yet. register_event()
-        // no longer takes `&talkback` -- it registers itself with the SDK;
-        // see that method's own comment.
-        talkback_sdk.set_events(&talkback);
+        // Fix round (review, Important 2): rebind(), never a whole-object
+        // copy-assignment -- see that method's own comment
+        // (engine-talkback-sdk-win.h) for why. This is now the single pointer
+        // store the pre-Task-2b code had for m_ctrl, plus resetting
+        // m_events_registered so a stale "yes" cannot survive a controller
+        // that just went null. register_event() no longer takes `&talkback`
+        // -- it registers itself with the SDK; see that method's own comment.
+        // set_events() is NOT called here any more -- see its one call site,
+        // at construction, above.
+        talkback_sdk.rebind(ctrl);
         if (register_event) talkback_sdk.register_event();
         talkback.set_sdk(ctrl ? &talkback_sdk : nullptr);
     };

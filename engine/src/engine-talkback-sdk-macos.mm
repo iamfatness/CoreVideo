@@ -84,10 +84,23 @@ static TalkbackResult mac_tb_result(ZoomSDKTalkbackError e)
 // `delegate` on ZoomSDKTalkbackController is declared `assign` (confirmed
 // against the real header: `@property(nonatomic,assign,nullable)
 // id<ZoomSDKTalkbackControllerDelegate> delegate;`) -- i.e. UNSAFE UNRETAINED,
-// the SDK does not keep our delegate alive. Impl holds the only strong
-// reference, so the delegate's lifetime is exactly the adapter's. Let this go
-// out of scope while a session is live and the SDK calls back through a
-// dangling pointer, which is a crash with no diagnostic pointing here.
+// the SDK does not keep our delegate alive.
+//
+// Fix round (review, Minor): the previous wording here described ARC release
+// semantics -- "Impl holds the only strong reference... let this go out of
+// scope... a dangling pointer" -- and this target has no -fobjc-arc anywhere
+// in the build (checked: neither CMakeLists.txt nor this file's own compile
+// options set it), so `CVTalkbackDelegate *delegate` is a plain pointer with
+// no automatic retain/release at all. Nothing in this file ever calls
+// `release` on it, so the actual failure mode is the OPPOSITE of dangling:
+// the object `alloc`'d in the constructor is never freed and LEAKS for the
+// life of the process, rather than being released out from under a still-live
+// SDK registration. The conclusion this comment exists to state is
+// unchanged -- do not let anything outlive-and-call-back into a
+// shorter-lived TalkbackMacSdk -- but the mechanism is a permanent
+// per-instance leak (bounded: one delegate object, since this class is
+// constructed once with static storage duration in production), not a
+// use-after-free.
 struct TalkbackMacSdk::Impl {
     ZoomSDKTalkbackController *ctrl = nil;   // not owned
     CVTalkbackDelegate *delegate = nil;      // OWNED -- see above
@@ -119,6 +132,25 @@ TalkbackMacSdk::~TalkbackMacSdk() = default;
 
 void TalkbackMacSdk::bind(void *controller)
 {
+    // Fix round (review, Minor), left for whichever task wires this class
+    // into main-macos.mm's command loop: events_registered() reads true here
+    // the moment `controller` is non-null, regardless of whether
+    // set_events(TalkbackSdkEvents*) (talkback-sdk.h's own interface) was
+    // EVER called -- "registered" on this platform means only "setDelegate:
+    // was last called with a non-null controller" (see events_registered's
+    // own doc comment on the header), and CVTalkbackDelegate forwards to
+    // `m_impl->delegate.events` regardless of whether that is still nullptr.
+    // On Windows, TalkbackWinSdk::register_event()'s SetEvent() call and
+    // set_events() are two independent calls a caller can sequence either
+    // way and this same gap exists there too in principle -- but nothing
+    // calls register_event() before set_events() in main.cpp today. Here,
+    // with nothing wired into main-macos.mm yet, there is no caller at all to
+    // check the ordering of -- so the concrete risk is only for whoever wires
+    // this next: call set_events() before (or without ever skipping) bind(),
+    // or a forwarding target that is silently never called (m_events null in
+    // CVTalkbackDelegate, guarded by its own `if (_events)`) will look
+    // identical to a healthy, registered adapter to probe()'s own
+    // events_registered() refusal check.
     m_impl->ctrl = (__bridge ZoomSDKTalkbackController *)controller;
     if (m_impl->ctrl) {
         [m_impl->ctrl setDelegate:m_impl->delegate];

@@ -24,13 +24,20 @@ public:
     // Rebound whenever the meeting service hands us one. `zoom_meeting_service`
     // is really a ZoomSDKMeetingService* smuggled through as void* so this
     // header never has to import ZoomSDK; the caller owns that lifetime, this
-    // class does not retain it. Wraps the MEETING SERVICE itself, not a single
-    // controller -- unlike TalkbackMacSdk (which wraps ZoomSDKTalkbackController
-    // directly, because every one of its operations targets that one
-    // controller), this class's methods need TWO different controllers off the
-    // same service (getMeetingActionController() for the roster/self lookup
-    // AND the mute action), mirroring TalkbackWinHost's own reason for
-    // wrapping ZOOMSDK::IMeetingService* rather than one sub-controller.
+    // class does not retain it. Wraps the MEETING SERVICE itself, not the
+    // controller directly -- unlike TalkbackMacSdk (which wraps
+    // ZoomSDKTalkbackController directly, because every one of its operations
+    // targets that one controller). Fix round (review, Minor): this used to
+    // say the reason was needing TWO different controllers off the service,
+    // mirroring TalkbackWinHost -- wrong, and contradicted by this class's own
+    // .mm: the macOS SDK has no split at all, one ZoomSDKMeetingActionController
+    // (fetched via getMeetingActionController(), see the .mm's own divergence
+    // note) owns BOTH the roster/self lookup and the mute action. The real
+    // reason to wrap the service rather than the controller is simpler --
+    // getMeetingActionController() can itself return nil at different times
+    // (e.g. between meetings), so resolving it lazily on every call, the same
+    // way ctrl() does in the .mm, is what lets one TalkbackMacHost instance
+    // outlive a single meeting the way TalkbackWinHost does.
     void bind(void *zoom_meeting_service);
 
     std::vector<TalkbackParticipant> roster() override;

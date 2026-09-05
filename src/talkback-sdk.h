@@ -19,19 +19,38 @@ enum class TalkbackResult {
 };
 
 // Callbacks, in the shape the ladder already consumes them.
+//
+// `raw_code` on every method (macOS-port Task 2b, 2026-09-05 -- this class
+// was dead code before this task, flagged as such in Task 1's review;
+// wiring it up for the first time is what surfaced this gap). The sketch
+// this class was first written from carried only (channel_id, result) and
+// said, in TalkbackSdk::set_self_muted()'s own doc comment one file over,
+// that "the raw SDK code stays available through the same last_raw_code()
+// convention TalkbackSdk uses" -- true of TalkbackSdk's OPERATIONS, which
+// share one adapter instance a caller can query right after the call
+// returns, but false of these EVENTS: they arrive asynchronously, and two
+// can be in flight (or interleaved with an unrelated operation) before the
+// ladder reads a single "last" value back. A per-event field is the only
+// way to keep the wire's "code" fields carrying raw SDK numbers (the
+// constraint every report line in engine-talkback.cpp is written under) once
+// events cross this seam instead of arriving as a raw native callback.
 class TalkbackSdkEvents {
 public:
     virtual ~TalkbackSdkEvents() = default;
     virtual void on_create_channel_response(const std::string &channel_id,
-                                            TalkbackResult result) = 0;
+                                            TalkbackResult result,
+                                            int raw_code) = 0;
     virtual void on_destroy_channel_response(const std::string &channel_id,
-                                             TalkbackResult result) = 0;
+                                             TalkbackResult result,
+                                             int raw_code) = 0;
     virtual void on_channel_user_join_response(const std::string &channel_id,
                                                uint32_t user_id,
-                                               TalkbackResult result) = 0;
+                                               TalkbackResult result,
+                                               int raw_code) = 0;
     virtual void on_channel_user_leave_response(const std::string &channel_id,
                                                 uint32_t user_id,
-                                                TalkbackResult result) = 0;
+                                                TalkbackResult result,
+                                                int raw_code) = 0;
 };
 
 // The operations the ladder needs, stated SEMANTICALLY. invite_users() and

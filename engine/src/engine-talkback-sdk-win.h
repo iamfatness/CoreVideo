@@ -1,5 +1,6 @@
 #pragma once
 #include "talkback-sdk.h"
+#include "engine-json.h"     // zchar_to_utf8() -- Task 2b's event forwarding
 #include "meeting_service_components/meeting_talkback_ctrl_interface.h"
 
 // Fix round 2: WIN32 is a CMake-supplied compile definition (this project's
@@ -25,6 +26,49 @@ inline TalkbackResult talkback_win_result(ZOOMSDK::SDKError e)
     }
 }
 
+// Task 2b (2026-09-05): the EVENT-side counterpart of talkback_win_result()
+// above -- maps TalkbackError (meeting_talkback_ctrl_interface.h's async
+// callback error type, NOT ZOOMSDK::SDKError) onto this seam's TalkbackResult.
+//
+// TalkbackError IS NESTED INSIDE ZOOMSDK::IMeetingTalkbackCtrlEvent, not at
+// namespace or global scope (confirmed by tests/engine-talkback-select-test.cpp's
+// own top-of-file comment: "TalkbackError is nested INSIDE
+// IMeetingTalkbackCtrlEvent, which is why engine-talkback.h's overrides take
+// it unqualified -- they are members of a subclass"). engine-talkback.cpp's
+// pre-Task-2b code and this file's own onCreateChannelResponse()/etc overrides
+// above could reference it bare for exactly that reason: unqualified lookup of
+// a base class's nested type resolves inside a derived class's own member
+// declarations. A FREE function has no such derived-class scope, so this one
+// -- unlike the methods above -- must qualify it fully.
+//
+// DIVERGENCE FROM WHAT COULD BE VERIFIED HERE: only TALKBACK_ERROR_OK and
+// TALKBACK_ERROR_ALREADY_EXIST are confirmed real (both appeared, qualified
+// only by the enclosing class exactly as here, in the pre-Task-2b
+// engine-talkback.cpp and in tests/engine-talkback-select-test.cpp, both of
+// which shipped and passed Windows CI). This machine has no Windows Zoom SDK
+// headers to check the remaining enumerators against
+// (TALKBACK_ERROR_NOPERMISSION/REJECTED are named only in this codebase's own
+// COMMENTS, never in code, and this task cannot build Windows to confirm the
+// rest at all). The ladder does not need finer resolution than this to make
+// its OWN decisions -- engine-talkback.cpp's event handlers only ever compare
+// a TalkbackResult against Ok or AlreadyExists, everything else is "not that"
+// -- so every other TalkbackError value maps to Unknown here, and the
+// human-diagnostic value survives anyway through `raw_code` (threaded
+// separately into every on_*_response() call), never through TalkbackResult's
+// own numbering. If a future task narrows this further, verify the enumerator
+// names against the real header first.
+inline TalkbackResult talkback_win_tb_result(ZOOMSDK::IMeetingTalkbackCtrlEvent::TalkbackError e)
+{
+    switch (e) {
+    case ZOOMSDK::IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_OK:
+        return TalkbackResult::Ok;
+    case ZOOMSDK::IMeetingTalkbackCtrlEvent::TALKBACK_ERROR_ALREADY_EXIST:
+        return TalkbackResult::AlreadyExists;
+    default:
+        return TalkbackResult::Unknown;
+    }
+}
+
 // The reverse of engine-json.h's zchar_to_utf8(): every SDK call on
 // IMeetingTalkbackController takes a channel id as `const zchar_t*`
 // (wchar_t* on Windows), but the seam's currency is UTF-8 (src/talkback-sdk.h
@@ -43,7 +87,18 @@ inline std::basic_string<zchar_t> talkback_utf8_to_zchar(const std::string &s)
     return out;
 }
 
-class TalkbackWinSdk : public TalkbackSdk {
+// Task 2b (2026-09-05): this class now ALSO implements
+// ZOOMSDK::IMeetingTalkbackCtrlEvent directly -- EngineTalkback used to (it
+// implemented the real SDK interface and received Windows callbacks
+// natively), but Task 2b retargeted it onto TalkbackSdkEvents (talkback-sdk.h)
+// so the macOS engine target could compile it too, and something concrete
+// still has to receive the SDK's native callbacks on Windows. This adapter is
+// the natural place: it already holds the real
+// ZOOMSDK::IMeetingTalkbackController to register against, and its job is
+// already translating this seam's currency (UTF-8 strings, TalkbackResult) to
+// and from the raw SDK types for every OPERATION -- the events are the same
+// translation, in the other direction.
+class TalkbackWinSdk : public TalkbackSdk, public ZOOMSDK::IMeetingTalkbackCtrlEvent {
 public:
     explicit TalkbackWinSdk(ZOOMSDK::IMeetingTalkbackController *ctrl)
         : m_ctrl(ctrl) {}
@@ -140,23 +195,73 @@ public:
     int last_raw_code() const override { return m_last_raw_code; }
     bool events_registered() const override { return m_events_registered; }
 
-    // Fix round 1 (Finding 2): NOT one of TalkbackSdk's operations -- the
-    // real ZOOMSDK::IMeetingTalkbackCtrlEvent this registers is what
-    // EngineTalkback still implements directly (Windows callbacks arrive
-    // natively; TalkbackSdkEvents above is not wired to anything on this
-    // platform), so a portable `TalkbackSdk*` cannot be handed this call at
-    // all -- only code that already holds a concrete TalkbackWinSdk can make
-    // it, which is main.cpp, at the same point it constructs this adapter.
-    // Records both last_raw_code() and events_registered() exactly as every
-    // other call here does, so probe() can refuse on a failed registration
-    // precisely as it did before this seam existed.
-    void register_event(ZOOMSDK::IMeetingTalkbackCtrlEvent *event)
+    // Fix round 1 (Finding 2): NOT one of TalkbackSdk's operations -- a
+    // portable `TalkbackSdk*` cannot be handed this call at all, only code
+    // that already holds a concrete TalkbackWinSdk can make it, which is
+    // main.cpp, at the same point it constructs this adapter. Records both
+    // last_raw_code() and events_registered() exactly as every other call
+    // here does, so probe() can refuse on a failed registration precisely as
+    // it did before this seam existed.
+    //
+    // Task 2b (2026-09-05): registers ITSELF (`this`), not an external event
+    // object -- see the class comment for why. set_events() (TalkbackSdk's
+    // own interface, above) is the separate call that wires the FORWARDING
+    // target; main.cpp calls both, in either order, before the first
+    // probe()/nominate()/session_start().
+    void register_event()
     {
         if (!m_ctrl) { no_controller(); m_events_registered = false; return; }
-        const ZOOMSDK::SDKError e = m_ctrl->SetEvent(event);
+        const ZOOMSDK::SDKError e = m_ctrl->SetEvent(this);
         m_last_raw_code = static_cast<int>(e);
         m_events_registered = (e == ZOOMSDK::SDKERR_SUCCESS);
     }
+
+    // ZOOMSDK::IMeetingTalkbackCtrlEvent (Task 2b): forwards every callback
+    // into whichever TalkbackSdkEvents* set_events() last set, translating
+    // the raw wchar_t* channel id and native TalkbackError the same way every
+    // OPERATION above already translates its own arguments/return value --
+    // UTF-8 in, TalkbackResult out, with the platform's own raw code
+    // threaded through separately (`raw_code`) so the ladder's report lines
+    // keep carrying real SDK numbers even though TalkbackResult itself never
+    // does. `m_events` null-checked exactly like every other optional
+    // forwarding target in this codebase (e.g. CVTalkbackDelegate's own
+    // `if (_events)` guard on macOS) -- a callback that arrives before
+    // set_events() or after teardown is a no-op, not a crash.
+    void onCreateChannelResponse(const zchar_t *channelID, TalkbackError error) override
+    {
+        if (m_events) m_events->on_create_channel_response(
+            zchar_to_utf8(channelID), talkback_win_tb_result(error),
+            static_cast<int>(error));
+    }
+    void onDestroyChannelResponse(const zchar_t *channelID, TalkbackError error) override
+    {
+        if (m_events) m_events->on_destroy_channel_response(
+            zchar_to_utf8(channelID), talkback_win_tb_result(error),
+            static_cast<int>(error));
+    }
+    void onChannelUserJoinResponse(const zchar_t *channelID, unsigned int userID,
+                                   TalkbackError error) override
+    {
+        if (m_events) m_events->on_channel_user_join_response(
+            zchar_to_utf8(channelID), userID, talkback_win_tb_result(error),
+            static_cast<int>(error));
+    }
+    void onChannelUserLeaveResponse(const zchar_t *channelID, unsigned int userID,
+                                    TalkbackError error) override
+    {
+        if (m_events) m_events->on_channel_user_leave_response(
+            zchar_to_utf8(channelID), userID, talkback_win_tb_result(error),
+            static_cast<int>(error));
+    }
+    // Receive-side: this engine is the DIRECTOR, never talent -- stubbed for
+    // the same reason CVTalkbackDelegate's macOS equivalents are (that file's
+    // own comment: the safe superset costs nothing). TalkbackSdkEvents has no
+    // equivalent of these three at all (they were never part of the ladder's
+    // own logic; EngineTalkback's pre-Task-2b versions were empty bodies
+    // too), so there is nothing to forward them to.
+    void onJoinTalkbackChannel(unsigned int) override {}
+    void onLeaveTalkbackChannel(unsigned int) override {}
+    void onInviterAudioLevel(unsigned int, unsigned int) override {}
 
 private:
     TalkbackResult map(ZOOMSDK::SDKError e)

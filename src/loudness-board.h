@@ -318,3 +318,22 @@ inline size_t loudness_board_visible_rows(int canvas_h, size_t row_count)
     if (capacity == 0) return 0;
     return row_count < capacity ? row_count : capacity;
 }
+
+// Whether the meter source's already-applied child text labels need
+// refreshing. `signature` captures the panel's own content -- reference,
+// names, statuses, quantised deviations -- but NOT how many rows are
+// currently being DRAWN: `shown` is a function of the canvas, not the
+// panel, via loudness_board_visible_rows() above. A bare signature
+// comparison misses exactly the case that matters most for this board:
+// resizing the source taller reveals rows that were previously off-screen
+// (and so still hold an empty applied string) while every panelist sits
+// unchanged at "no audio" during a silent preshow -- the signature never
+// moves, so a refresh gated on it alone would leave those newly-visible
+// rows blank until the next status change happened to fix it. Comparing
+// `shown` as well means either changing alone forces a refresh.
+inline bool loudness_board_needs_label_refresh(
+    const std::string &applied_signature, size_t applied_shown,
+    const std::string &signature, size_t shown)
+{
+    return applied_signature != signature || applied_shown != shown;
+}

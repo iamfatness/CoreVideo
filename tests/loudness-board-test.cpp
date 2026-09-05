@@ -333,6 +333,28 @@ int main()
               "readable slot height");
     }
 
+    // -- The label refresh gate fires on shown OR signature, not signature
+    // alone -----------------------------------------------------------------
+    // A canvas resize changes `shown` without touching a single panelist's
+    // reading -- the silent-preshow case, where every row sits stably at
+    // "no audio" and the signature never moves at all. If the gate ignored
+    // `shown`, newly-revealed rows would keep whatever text (usually none)
+    // was applied while they were off-screen.
+    {
+        check(!loudness_board_needs_label_refresh("sig-a", 3, "sig-a", 3),
+              "an unchanged signature and unchanged shown count asked for a "
+              "refresh");
+        check(loudness_board_needs_label_refresh("sig-a", 3, "sig-b", 3),
+              "a changed signature with unchanged shown did not ask for a "
+              "refresh");
+        check(loudness_board_needs_label_refresh("sig-a", 3, "sig-a", 5),
+              "a changed shown count with an UNCHANGED signature did not ask "
+              "for a refresh -- this is the canvas-resize-during-a-silent-"
+              "preshow case the gate exists for");
+        check(loudness_board_needs_label_refresh("sig-a", 3, "sig-b", 5),
+              "both changing at once did not ask for a refresh");
+    }
+
     if (failures == 0)
         std::cout << "loudness-board: all tests passed\n";
     return failures == 0 ? 0 : 1;

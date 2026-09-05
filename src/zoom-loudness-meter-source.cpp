@@ -66,6 +66,15 @@ struct loudness_meter_source {
     std::mutex         mutex;                 // guards `model` and `rows`
     LoudnessBoardModel model;
     std::string        applied_signature;
+    // How many rows were applied alongside `applied_signature`. The
+    // signature encodes reference/names/statuses/quantised deviations but
+    // NOT `shown` -- `shown` depends on the CANVAS, not the panel -- so a
+    // height change that newly reveals rows whose signature has not moved
+    // (e.g. every row parked at "no audio" during a silent preshow, the
+    // exact case this board exists for) must still trigger a refresh, or
+    // those rows draw their band/chip/centre-line with no name and no value
+    // until the next status change self-heals it.
+    size_t              applied_shown = static_cast<size_t>(-1);
     meter_row_widgets  rows[kMeterMaxRows];
 
     float rebuild_accum = 0.0f;
@@ -83,12 +92,9 @@ struct loudness_meter_source {
 // on different platforms and has renamed both across versions. A build with
 // neither must lose the labels and keep the bars, loudly -- never render an
 // empty board with no explanation.
-static const char *meter_text_source_id()
+static const char *probe_meter_text_source_id()
 {
-    static const char *cached = nullptr;
-    static bool probed = false;
-    if (probed) return cached;
-    probed = true;
+    const char *cached = nullptr;
     static const char *candidates[] = {
         "text_ft2_source_v2", "text_gdiplus_v3", "text_gdiplus_v2",
         "text_ft2_source",    "text_gdiplus",
@@ -112,6 +118,20 @@ static const char *meter_text_source_id()
              cached);
     }
     return cached;
+}
+
+static const char *meter_text_source_id()
+{
+    // Function-local static initialisation is thread-safe as of C++11 (the
+    // standard guarantees the initializer runs exactly once even under a
+    // race) -- load-bearing here, unlike the plain function-static
+    // cached/probed pair this replaced: meter_create() can run on the UI
+    // thread, a scene-load thread, or the control-API thread, and two
+    // meters created concurrently on a fresh load raced that pair, with a
+    // real chance of the probe (and its log line) running twice. "One log
+    // line, not a stream" is a documented acceptance check for this source.
+    static const char *id = probe_meter_text_source_id();
+    return id;
 }
 
 static obs_source_t *make_text_child(const char *private_name, int px,
@@ -329,12 +349,26 @@ static void meter_enum_active_sources(void *data,
 // audio lane holds for a whole drain -- so asking it 60 times a second would
 // put the graphics thread in contention with the media path for no visible
 // gain: the numbers it reports move on a 100 ms hop anyway.
+//
+// Also gated on obs_source_showing(): OBS calls video_tick for every source
+// regardless of whether it is on a visible scene, so a meter parked in an
+// unused scene would otherwise poll g_sources_mtx plus every live source's
+// own ctx->mtx ten times a second forever. CLAUDE.md records the
+// mirror-image defect on the Talkback dock's roster poll (a folded, hidden
+// section still rebuilding at 10 Hz) -- same fix, same reasoning: a source
+// nobody is looking at should cost nothing.
 static void meter_video_tick(void *data, float seconds)
 {
     auto *ctx = static_cast<loudness_meter_source *>(data);
+    if (!obs_source_showing(ctx->source)) return;
     ctx->rebuild_accum += seconds;
     if (ctx->rebuild_accum < 0.1f) return;
-    ctx->rebuild_accum = 0.0f;
+    // Subtract the interval rather than zeroing: zeroing discards whatever
+    // remainder pushed this tick over 0.1s, and at 60 fps (16.7 ms/frame)
+    // that landed every 7 frames -- ~117 ms, an ~8.6 Hz cadence, not the
+    // 10 Hz this comment (and the brief) claims. Subtracting keeps the
+    // carried remainder so the average cadence is the documented 10 Hz.
+    ctx->rebuild_accum -= 0.1f;
 
     const auto readings = corevideo_loudness_readings();
     const double tol =
@@ -409,11 +443,34 @@ static void meter_video_render(void *data, gs_effect_t *)
     // its string changes: obs_source_update() allocates and takes the source's
     // own lock, and doing it per frame per row is the churn shape this project
     // already has a live incident about.
+    //
+    // Gated on `shown` changing as well as `model.signature`: the signature
+    // encodes reference/names/statuses/quantised deviations but NOT `shown`,
+    // which depends on the CANVAS. Growing the source's height can newly
+    // reveal rows that previously held an empty string while the panel's own
+    // signature has not moved (every row parked at "no audio" during a
+    // silent preshow is exactly that case), and gating on the signature
+    // alone would leave those rows drawing a band/chip/centre-line with no
+    // text until the next status change happened to self-heal it.
+    //
+    // set_text_child() calls obs_source_update(), which takes libobs's own
+    // source lock and allocates an obs_data_t -- neither belongs inside
+    // ctx->mutex. What to apply is decided under the lock into a local
+    // vector of (slot, text) pairs; the OBS calls happen after the lock is
+    // released.
     const std::string head = header_text(model, shown, total);
+    struct PendingLabel {
+        obs_source_t *child;
+        std::string   text;
+    };
+    std::vector<PendingLabel> pending;
     {
         std::lock_guard<std::mutex> lk(ctx->mutex);
-        if (ctx->applied_signature != model.signature) {
+        if (loudness_board_needs_label_refresh(ctx->applied_signature,
+                                               ctx->applied_shown,
+                                               model.signature, shown)) {
             ctx->applied_signature = model.signature;
+            ctx->applied_shown     = shown;
             for (size_t i = 0; i < kMeterHeaderSlot; ++i) {
                 const std::string name_text =
                     (i < shown) ? model.rows[i].name : std::string();
@@ -421,15 +478,17 @@ static void meter_video_render(void *data, gs_effect_t *)
                     (i < shown) ? row_value_text(model.rows[i]) : std::string();
                 if (ctx->rows[i].name_text != name_text) {
                     ctx->rows[i].name_text = name_text;
-                    set_text_child(ctx->rows[i].name, name_text.c_str());
+                    pending.push_back({ctx->rows[i].name, name_text});
                 }
                 if (ctx->rows[i].value_text != value_text) {
                     ctx->rows[i].value_text = value_text;
-                    set_text_child(ctx->rows[i].value, value_text.c_str());
+                    pending.push_back({ctx->rows[i].value, value_text});
                 }
             }
         }
     }
+    for (const PendingLabel &p : pending)
+        set_text_child(p.child, p.text.c_str());
 
     for (size_t i = 0; i < shown; ++i) {
         const LoudnessBoardRect band =
@@ -457,13 +516,17 @@ static void meter_video_render(void *data, gs_effect_t *)
     // "showing N of M" count changes with the CANVAS as well as the panel.
     if (ctx->rows[kMeterHeaderSlot].name) {
         obs_source_t *header = ctx->rows[kMeterHeaderSlot].name;
+        bool needs_update = false;
         {
             std::lock_guard<std::mutex> lk(ctx->mutex);
             if (ctx->rows[kMeterHeaderSlot].name_text != head) {
                 ctx->rows[kMeterHeaderSlot].name_text = head;
-                set_text_child(header, head.c_str());
+                needs_update = true;
             }
         }
+        // Same rule as the row labels above: obs_source_update() must not
+        // run while ctx->mutex is held.
+        if (needs_update) set_text_child(header, head.c_str());
         gs_matrix_push();
         gs_matrix_translate3f(12.0f, 4.0f, 0.0f);
         obs_source_video_render(header);

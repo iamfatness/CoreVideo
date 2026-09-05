@@ -120,3 +120,185 @@ inline LoudnessBiquadCoeffs bs1770_stage2_coeffs(uint32_t sample_rate)
     c.a2 = (1.0 - K / kBs1770Stage2Q + K * K) / d;
     return c;
 }
+
+// The standard's absolute offset. It exists to cancel the K-weighting's
+// +0.691 dB gain at 997 Hz, which is why a 1 kHz tone's LUFS value equals
+// 10*log10 of its un-weighted mean square exactly.
+constexpr double kLoudnessOffsetDb = -0.691;
+
+// Block/hop geometry. 400 ms blocks advancing every 100 ms is 75% overlap,
+// which is what BS.1770-4 specifies for gated integration; momentary IS one
+// such block, and short-term is 30 hops.
+constexpr uint32_t kLoudnessHopMs        = 100;
+constexpr uint32_t kLoudnessMomentaryHops = 4;   // 400 ms
+constexpr uint32_t kLoudnessShortTermHops = 30;  // 3 s
+
+// L = -0.691 + 10*log10(sum of G_i * z_i). Returns -HUGE_VAL for a
+// non-positive mean square rather than letting log10 produce -inf/NaN at an
+// arbitrary call site; every caller in this header checks for it.
+inline double loudness_lufs_from_mean_square(double z)
+{
+    if (!(z > 0.0)) return -HUGE_VAL;
+    return kLoudnessOffsetDb + 10.0 * std::log10(z);
+}
+
+// BS.1770-4 channel weights, in the standard's channel order
+// (L, R, C, LFE, Ls, Rs). Zoom participant audio is mono or stereo, so in
+// practice only the G = 1.0 terms are ever reached -- but a source configured
+// for more channels must not silently weight a surround channel as if it were
+// a front one, and the LFE must not be counted at all.
+inline double loudness_channel_weight(uint16_t channels, uint16_t channel)
+{
+    if (channels <= 2) return 1.0;
+    switch (channel) {
+    case 0: case 1: case 2: return 1.00;  // L, R, C
+    case 3:                 return 0.00;  // LFE is excluded, not attenuated
+    case 4: case 5:         return 1.41;  // Ls, Rs
+    default:                return 0.00;
+    }
+}
+
+// A running BS.1770-4 measurement for ONE participant.
+//
+// OWNERSHIP: not thread-safe and deliberately so. In the plugin exactly one
+// thread -- the audio lane that owns output_audio_frame() -- feeds it, under
+// the same ctx->mtx that already guards the source's timeline, and readers
+// take that mutex to copy the three numbers out. Adding a lock in here would
+// put one on the media path for no gain.
+struct LoudnessMeter {
+    uint32_t sample_rate = 0;
+    uint16_t channels    = 0;
+
+    LoudnessBiquadCoeffs c1{};
+    LoudnessBiquadCoeffs c2{};
+    std::vector<LoudnessBiquadState> s1;   // stage 1 state, one per channel
+    std::vector<LoudnessBiquadState> s2;   // stage 2 state, one per channel
+
+    // Current partial 100 ms hop.
+    uint32_t hop_frames = 0;      // frames per hop at the configured rate
+    uint32_t hop_filled = 0;
+    double   hop_acc    = 0.0;    // sum over frames of sum_ch(G * y^2)
+
+    // The last kLoudnessShortTermHops completed hops, newest at
+    // (hop_total - 1) % kLoudnessShortTermHops.
+    double   hop_ring[kLoudnessShortTermHops] = {};
+    uint64_t hop_total = 0;
+};
+
+// (Re)configures for a rate/channel count and clears all filter state. Called
+// automatically by loudness_meter_feed_int16() whenever the wire format
+// changes -- which it can, mid-source: Zoom renegotiates, and the operator's
+// Mix/Isolated role flip changes the channel count on the same subscription.
+// Carrying filter history across that would smear one format's transient into
+// the other's measurement.
+inline void loudness_meter_configure(LoudnessMeter &m, uint32_t sample_rate,
+                                     uint16_t channels)
+{
+    const uint32_t rate = loudness_usable_rate(sample_rate);
+    m.sample_rate = rate;
+    m.channels    = channels == 0 ? 1 : channels;
+    m.c1 = bs1770_stage1_coeffs(rate);
+    m.c2 = bs1770_stage2_coeffs(rate);
+    m.s1.assign(m.channels, LoudnessBiquadState{});
+    m.s2.assign(m.channels, LoudnessBiquadState{});
+    m.hop_frames = (rate * kLoudnessHopMs) / 1000;
+    if (m.hop_frames == 0) m.hop_frames = 1;
+    m.hop_filled = 0;
+    m.hop_acc    = 0.0;
+    for (uint32_t i = 0; i < kLoudnessShortTermHops; ++i) m.hop_ring[i] = 0.0;
+    m.hop_total = 0;
+}
+
+// Hook the gated integrator into the hop boundary. Defined in Task 3; the
+// forward declaration keeps feed_int16 below unchanged when it lands.
+inline void loudness_meter_on_hop_complete(LoudnessMeter &m);
+
+// Feeds interleaved 16-bit signed PCM -- the format the engine writes into
+// the SHM ring, unconverted.
+//
+// SCALING: /32768.0, not /32767.0. int16 is asymmetric and full negative
+// scale is -32768; dividing by 32767 would let a legitimate sample exceed
+// -1.0 and is the wrong direction for a measurement.
+//
+// PARTIAL BUFFERS ARE THE NORMAL CASE. Zoom delivers ~10 ms buffers and one
+// media event can carry eight of them, so a 100 ms hop is assembled from many
+// calls. The hop boundary is decided by frame count alone and never by call
+// boundaries, which is what makes "feed the whole drain loop" identical to
+// "feed one big buffer" -- pinned as chunk invariance in the test.
+inline void loudness_meter_feed_int16(LoudnessMeter &m, const int16_t *pcm,
+                                      size_t frames, uint16_t channels,
+                                      uint32_t sample_rate)
+{
+    if (pcm == nullptr || frames == 0 || channels == 0) return;
+    if (m.sample_rate != loudness_usable_rate(sample_rate) ||
+        m.channels != channels) {
+        loudness_meter_configure(m, sample_rate, channels);
+    }
+
+    for (size_t f = 0; f < frames; ++f) {
+        double frame_sum = 0.0;
+        for (uint16_t ch = 0; ch < channels; ++ch) {
+            const double g = loudness_channel_weight(channels, ch);
+            const double x = static_cast<double>(pcm[f * channels + ch]) /
+                             32768.0;
+            const double y1 = loudness_biquad_step(m.c1, m.s1[ch], x);
+            const double y2 = loudness_biquad_step(m.c2, m.s2[ch], y1);
+            // The filters run even for a zero-weight channel: their state is
+            // per channel and skipping them would make the LFE's history
+            // depend on how long it had been zero-weighted.
+            frame_sum += g * y2 * y2;
+        }
+        m.hop_acc += frame_sum;
+        if (++m.hop_filled >= m.hop_frames) {
+            const double hop_mean = m.hop_acc /
+                                    static_cast<double>(m.hop_frames);
+            m.hop_ring[m.hop_total % kLoudnessShortTermHops] = hop_mean;
+            ++m.hop_total;
+            m.hop_acc    = 0.0;
+            m.hop_filled = 0;
+            loudness_meter_on_hop_complete(m);
+        }
+    }
+}
+
+// Mean of the newest `n` completed hops. False when fewer than `n` exist --
+// which is the honest answer for a panelist who has just been subscribed, and
+// is why every getter here returns bool rather than a sentinel loudness.
+inline bool loudness_hop_mean(const LoudnessMeter &m, uint32_t n, double *out)
+{
+    if (n == 0 || n > kLoudnessShortTermHops || m.hop_total < n) return false;
+    double sum = 0.0;
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint64_t idx = m.hop_total - 1 - i;
+        sum += m.hop_ring[idx % kLoudnessShortTermHops];
+    }
+    *out = sum / static_cast<double>(n);
+    return true;
+}
+
+// Momentary (M): one 400 ms block, ungated.
+inline bool loudness_meter_momentary(const LoudnessMeter &m, double *out_lufs)
+{
+    double z = 0.0;
+    if (!loudness_hop_mean(m, kLoudnessMomentaryHops, &z)) return false;
+    const double l = loudness_lufs_from_mean_square(z);
+    if (!std::isfinite(l)) return false;
+    *out_lufs = l;
+    return true;
+}
+
+// Short-term (S): 3 s, ungated. The number an operator reads while the
+// panelist is talking.
+inline bool loudness_meter_short_term(const LoudnessMeter &m, double *out_lufs)
+{
+    double z = 0.0;
+    if (!loudness_hop_mean(m, kLoudnessShortTermHops, &z)) return false;
+    const double l = loudness_lufs_from_mean_square(z);
+    if (!std::isfinite(l)) return false;
+    *out_lufs = l;
+    return true;
+}
+
+// Placeholder until Task 3 lands the gated integrator. Declared above so
+// feed_int16 already calls it; defined empty here so this task builds alone.
+inline void loudness_meter_on_hop_complete(LoudnessMeter &) {}

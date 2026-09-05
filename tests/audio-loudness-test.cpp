@@ -117,6 +117,146 @@ int main()
               "feedback tap (a2) is not being applied");
     }
 
+    // ── Reference tones: the numbers an implementer can check by hand ──────
+    //
+    // The K-weighting curve has a gain of exactly +0.691 dB at 997 Hz, and
+    // BS.1770's -0.691 dB offset is there to cancel it. So for a ~1 kHz sine
+    // the whole measurement collapses to L = 10*log10(mean square of the
+    // un-weighted signal), which is a number that can be worked out on paper:
+    //
+    //   peak 1.0        -> mean square 0.5    -> -3.01 LUFS
+    //   peak 0.1        -> mean square 0.005  -> -23.01 LUFS
+    //   RMS  0.1        -> mean square 0.01   -> -20.00 LUFS
+    //
+    // The third is the one to remember: a 1 kHz tone at -20 dBFS RMS reads
+    // -20.0 LUFS. If that does not hold, the offset, the channel weight, the
+    // int16 scaling or the K-weighting is wrong, and no amount of relative
+    // comparison downstream will save the reading.
+    auto feed_sine = [](LoudnessMeter &m, uint32_t rate, double peak,
+                        double freq, double seconds) {
+        const size_t n = static_cast<size_t>(rate * seconds);
+        std::vector<int16_t> pcm(n);
+        for (size_t i = 0; i < n; ++i) {
+            const double v = peak * std::sin(2.0 * 3.14159265358979323846 *
+                                             freq * static_cast<double>(i) /
+                                             static_cast<double>(rate));
+            double s = v * 32767.0;
+            if (s > 32767.0)  s =  32767.0;
+            if (s < -32767.0) s = -32767.0;
+            pcm[i] = static_cast<int16_t>(std::lround(s));
+        }
+        loudness_meter_feed_int16(m, pcm.data(), n, 1, rate);
+    };
+
+    {
+        LoudnessMeter m;
+        feed_sine(m, 48000, 1.0, 1000.0, 5.0);
+        double lufs = 0.0;
+        check(loudness_meter_momentary(m, &lufs),
+              "momentary loudness was unavailable after 5 s of tone");
+        check(near(lufs, -3.01, 0.10),
+              "a full-scale 1 kHz sine at 48 kHz did not read -3.01 LUFS");
+    }
+    {
+        LoudnessMeter m;
+        feed_sine(m, 48000, 0.1, 1000.0, 5.0);
+        double lufs = 0.0;
+        check(loudness_meter_momentary(m, &lufs), "momentary unavailable");
+        check(near(lufs, -23.01, 0.10),
+              "a 1 kHz sine of peak amplitude 0.1 at 48 kHz did not read "
+              "-23.01 LUFS");
+    }
+    {
+        // -20 dBFS RMS: peak = sqrt(2) * 0.1.
+        LoudnessMeter m;
+        feed_sine(m, 48000, std::sqrt(2.0) * 0.1, 1000.0, 5.0);
+        double lufs = 0.0;
+        check(loudness_meter_momentary(m, &lufs), "momentary unavailable");
+        check(near(lufs, -20.00, 0.10),
+              "a -20 dBFS RMS 1 kHz sine at 48 kHz did not read -20.0 LUFS -- "
+              "K-weighting is ~0 dB at 1 kHz once the -0.691 offset is "
+              "applied, so this is an equality, not an approximation");
+    }
+
+    // ── The same tone at 32 kHz must read the same, not 1.3 LU high ────────
+    // This is the assertion the whole runtime-rate design exists for. With
+    // the 48 kHz coefficients applied to 32 kHz audio this tone reads
+    // -18.66 LUFS instead of -19.98: it passes a "looks like a plausible
+    // loudness" eyeball test and fails here.
+    {
+        LoudnessMeter m;
+        feed_sine(m, 32000, std::sqrt(2.0) * 0.1, 1000.0, 5.0);
+        double lufs = 0.0;
+        check(loudness_meter_momentary(m, &lufs), "momentary unavailable at 32 kHz");
+        check(near(lufs, -19.98, 0.12),
+              "a -20 dBFS RMS 1 kHz sine at 32 kHz did not read -20 LUFS -- "
+              "the coefficients are not following the runtime rate");
+        check(lufs < -19.5,
+              "the 32 kHz reading is more than 0.5 LU hot, which is the "
+              "signature of 48 kHz coefficients being used at 32 kHz");
+    }
+
+    // ── Short-term needs 3 s; momentary needs 400 ms ───────────────────────
+    {
+        LoudnessMeter m;
+        feed_sine(m, 48000, std::sqrt(2.0) * 0.1, 1000.0, 0.35);
+        double lufs = 0.0;
+        check(!loudness_meter_momentary(m, &lufs),
+              "momentary reported a value before a full 400 ms block existed");
+        feed_sine(m, 48000, std::sqrt(2.0) * 0.1, 1000.0, 0.20);
+        check(loudness_meter_momentary(m, &lufs),
+              "momentary was still unavailable after 550 ms");
+        check(!loudness_meter_short_term(m, &lufs),
+              "short-term reported a value before 3 s of audio existed");
+        feed_sine(m, 48000, std::sqrt(2.0) * 0.1, 1000.0, 3.0);
+        check(loudness_meter_short_term(m, &lufs),
+              "short-term was still unavailable after 3.5 s");
+        check(near(lufs, -20.00, 0.15), "short-term did not read -20 LUFS");
+    }
+
+    // ── Stereo: two identical channels are +3 dB, not the same as mono ─────
+    // BS.1770 sums the weighted per-channel mean squares (G = 1.0 for L and
+    // R), it does not average them. Averaging is the mistake that makes a
+    // stereo panelist read 3 LU quieter than the identical mono one beside
+    // them, which is exactly the comparison this feature exists to make.
+    {
+        LoudnessMeter mono;
+        feed_sine(mono, 48000, std::sqrt(2.0) * 0.1, 1000.0, 2.0);
+        double mono_lufs = 0.0;
+        check(loudness_meter_momentary(mono, &mono_lufs), "mono unavailable");
+
+        LoudnessMeter st;
+        const size_t n = 48000 * 2;
+        std::vector<int16_t> pcm(n * 2);
+        for (size_t i = 0; i < n; ++i) {
+            const double v = std::sqrt(2.0) * 0.1 *
+                std::sin(2.0 * 3.14159265358979323846 * 1000.0 *
+                         static_cast<double>(i) / 48000.0);
+            const int16_t s = static_cast<int16_t>(std::lround(v * 32767.0));
+            pcm[i * 2]     = s;
+            pcm[i * 2 + 1] = s;
+        }
+        loudness_meter_feed_int16(st, pcm.data(), n, 2, 48000);
+        double st_lufs = 0.0;
+        check(loudness_meter_momentary(st, &st_lufs), "stereo unavailable");
+        check(near(st_lufs - mono_lufs, 3.01, 0.05),
+              "dual-mono stereo was not +3.01 LU relative to mono -- the "
+              "channels are being averaged instead of summed");
+    }
+
+    // ── Digital silence never produces NaN or -inf leaking to a caller ─────
+    {
+        LoudnessMeter m;
+        std::vector<int16_t> zeros(48000, 0);
+        loudness_meter_feed_int16(m, zeros.data(), zeros.size(), 1, 48000);
+        double lufs = 0.0;
+        const bool have = loudness_meter_momentary(m, &lufs);
+        check(!have || std::isfinite(lufs),
+              "true digital silence produced a non-finite momentary reading -- "
+              "a panelist who has not spoken yet is the normal case here, not "
+              "an edge case");
+    }
+
     if (failures == 0)
         std::cout << "audio-loudness: all tests passed\n";
     return failures == 0 ? 0 : 1;

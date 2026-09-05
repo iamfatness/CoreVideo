@@ -42,9 +42,17 @@ static constexpr uint32_t kMeterLoudArgb    = 0xFFE04B4Bu;
 static constexpr uint32_t kMeterQuietArgb   = 0xFFE0A03Cu;
 static constexpr uint32_t kMeterIdleArgb    = 0xFF3A424Eu;
 
-// Shared with the Tiles wall by file, not by handle: libobs caches effects
-// created from a file, so this second tiles_effect_load() resolves the same
-// compiled effect rather than compiling it twice.
+// Shared with the Tiles wall only by FILE PATH, not by handle -- and that is
+// not the free dedupe it sounds like. gs_effect_create_from_file() allocates
+// a brand-new gs_effect_t on every call; libobs does NOT cache or dedupe
+// effects compiled from the same file. This second tiles_effect_load() call
+// (the Tiles wall makes its own, separate one) compiles a second, independent
+// copy of corevideo-tiles.effect. Harmless as written -- two handles, each
+// destroyed exactly once by its own owner (this file's unload vs. the Tiles
+// source's) -- but do NOT "deduplicate" the two loads into one shared
+// gs_effect_t* on the strength of a caching story that isn't true: sharing a
+// handle between two owners that each call gs_effect_destroy() on it once is
+// a double-free at unload.
 static TilesEffect s_meter_effect;
 static bool s_meter_pass_failed_logged = false;
 
@@ -430,9 +438,15 @@ static void meter_video_render(void *data, gs_effect_t *)
         meter_fill_rect(LoudnessBoardRect{zero.x - 1, band.y, 2, band.h},
                         kMeterCentreArgb);
 
-        if (row.has_deviation) {
+        // Driven by short-term deviation when it exists (the fast measure
+        // that should move live while the panelist talks), falling back to
+        // the integrated deviation otherwise -- see loudness_board_bar_input().
+        // The row's pass/fail colour still comes from `row.status`, which is
+        // the integrated verdict: only the bar's POSITION is live.
+        double bar_dev_lu = 0.0;
+        if (loudness_board_bar_input(row, &bar_dev_lu)) {
             const LoudnessBoardRect bar = loudness_board_bar_rect(
-                band, row.deviation_lu, kLoudnessBoardFullScaleLu);
+                band, bar_dev_lu, kLoudnessBoardFullScaleLu);
             meter_fill_rect(LoudnessBoardRect{bar.x, bar.y + 4, bar.w,
                                               bar.h > 8 ? bar.h - 8 : bar.h},
                             status_color(row.status));

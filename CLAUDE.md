@@ -1246,6 +1246,77 @@ Every one of these is documented at length where it lives; the list is the map.
   integrated loudness is scoped to one panelist's mic check, not the source's
   whole lifetime -- without it a re-subscribed source's number is polluted by
   whoever spoke before on the same source.
+- **Only Participant-kind sources vote on the panel median, or appear on the
+  board at all** (final whole-branch review, 2026-09-05, Critical). Three
+  kinds of CoreVideo audio source exist (`CoreVideoAudioKind`,
+  `src/audio-subscription-state.h`): Participant, ActiveSpeaker (a resolved
+  duplicate of whoever is currently talking) and Audience (the whole-meeting
+  mix, no participant id). `corevideo_loudness_readings()` used to hand ALL
+  three to the board with no distinction: an ActiveSpeaker source in a scene
+  with 4 Participant sources put a duplicate of whoever was talking into a
+  5-value median, shifting the reference by up to a full LU on an even/odd
+  flip and moving every panelist's pass/fail with it; an Audience source put
+  the whole-room mix into a reference meant to describe individual
+  microphones; both rendered as phantom `"- unassigned -"` rows since neither
+  carries a participant id or (for Audience) ever gets a cached display name.
+  `LoudnessReading` now carries `kind`, and the filtering lives in the PURE
+  header (`src/loudness-board.h`'s `loudness_panel_median()` and
+  `loudness_board_build()`), not in the OBS glue that calls it -- both are
+  pinned by a test that a median over a mixed vector equals the median of the
+  Participants alone, and the board excludes non-Participant readings from
+  rows entirely rather than showing them as read-only entries: the board's
+  whole model is "one row per panelist's mic", and a row for a duplicate
+  speaker or the room mix is the same mystery-row defect wearing a label,
+  not a fix for it. **The board shows SOURCES, not the roster** -- see the
+  header comment on `src/zoom-loudness-meter-source.h`: a row exists because
+  an operator created a Participant-kind source and pointed it at somebody,
+  so a panelist with no source never appears, and a rejoin (participant ids
+  are meeting-scoped and do not survive one) drops a row to
+  "- unassigned -"/"no audio" until the operator re-points it. Correct
+  behaviour, documented because it is the most likely way an operator
+  concludes the board itself is broken.
+- **The deviation bar is driven by short-term deviation, the row TEXT stays on
+  the integrated verdict** (`loudness_board_bar_input()`,
+  `src/loudness-board.h`). `LoudnessBoardRow::has_short_term`/`short_term_lufs`
+  were measured and carried all the way to the board and read by nothing --
+  `row_value_text()` only ever printed the integrated number. Ruling: bars
+  are geometry the renderer fills every frame regardless of the label-refresh
+  gate, so driving the bar's position from the fast (short-term) measure costs
+  no extra text-child churn, while folding short-term into
+  `LoudnessBoardModel::signature` would rebuild every row's text children
+  ~10x/sec for a value the text never shows -- exactly what
+  `loudness_board_needs_label_refresh()` exists to prevent. Where a short-term
+  reading or a reference is unavailable, `loudness_board_bar_input()` falls
+  back to the integrated deviation the bar always used, rather than showing no
+  bar at all.
+- **No `log10` in the relative gate's hot loop**
+  (`loudness_meter_integrated()`, `src/audio-loudness.h`). Pass 2 used to
+  convert every gated block (up to `kLoudnessMaxGatedBlocks` = 6000) to LUFS
+  with `loudness_lufs_from_mean_square()` (a `log10()`) just to compare it
+  against a LUFS threshold, once per source per 100 ms poll, on the graphics
+  thread inside `corevideo_loudness_readings()`, under the same mutex the
+  audio drain holds for its whole drain. The relative gate
+  (`kLoudnessRelativeGateLu` = -10 LU below the absolute-gated mean) is
+  exactly a factor of ten in LINEAR mean square -- `L(z) > L(mean) - 10 <=>
+  z > mean/10` -- so the comparison is now `z > 0.1 * abs_mean_z` with no
+  log10 anywhere in the loop, which also removes a float round-trip that
+  could flip a block sitting exactly on the threshold. The pinned -27.08/
+  -20.16 and -22.96/-20.06 figures in `tests/audio-loudness-test.cpp` are
+  unchanged. `loudness_meter_configure()` also now `reserve()`s `gated` to
+  `kLoudnessMaxGatedBlocks` up front, so the audio lane is provably
+  allocation-free after configure.
+- **`corevideo_loudness_readings()` uses `try_lock` on each source's mutex,
+  never a blocking `lock()`** (final whole-branch review, 2026-09-05,
+  Important). It runs on the OBS graphics thread via `meter_video_tick()` and
+  takes the exact `ctx->mtx` that `output_audio_frame()` holds across an
+  entire drain -- including `shm_region_open_readwrite()`,
+  `obs_source_output_audio()`, and rate-limited `blog()` calls that write to
+  disk. A blocking lock here could stall the graphics thread for the length
+  of one source's drain. A source that is busy is simply skipped for that
+  poll; its numbers reappear on the next 100 ms tick, invisible on a board
+  that redraws at 10 Hz. `corevideo_audio_source_infos()` (the sibling
+  registry walk) is unchanged and still blocks -- it is called far less often
+  and from a different context.
 
 ## Live testing against a real meeting
 

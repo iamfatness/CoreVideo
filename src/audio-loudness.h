@@ -217,6 +217,18 @@ inline void loudness_meter_clear_window(LoudnessMeter &m)
     m.hop_total   = 0;
 }
 
+// 6000 blocks is 10 minutes of continuously-gated audio at a 100 ms hop. A
+// mic check is 20-60 s (~200-600 blocks), so this is never reached in the
+// use this was built for; past it the window keeps the most RECENT 10 minutes
+// rather than growing without bound. Documented rather than silent, because
+// "the oldest audio quietly leaves the window" is a real semantic and an
+// operator who leaves a board running all show is entitled to know it.
+//
+// Declared here, ahead of loudness_meter_configure(), so that function can
+// reserve() the gated vector to this cap up front instead of leaving it to
+// grow lazily off the audio lane.
+constexpr size_t kLoudnessMaxGatedBlocks = 6000;
+
 // (Re)configures for a rate/channel count and clears all filter state. Called
 // automatically by loudness_meter_feed_int16() whenever the wire format
 // changes -- which it can, mid-source: Zoom renegotiates, and the operator's
@@ -238,6 +250,13 @@ inline void loudness_meter_configure(LoudnessMeter &m, uint32_t sample_rate,
     m.s2.assign(m.channels, LoudnessBiquadState{});
     m.hop_frames = (rate * kLoudnessHopMs) / 1000;
     if (m.hop_frames == 0) m.hop_frames = 1;
+    // Reserved once, here, rather than left to push_back() in
+    // loudness_meter_on_hop_complete() to grow it lazily: `gated` never grows
+    // past kLoudnessMaxGatedBlocks (it becomes a ring at that point), so
+    // reserving the cap up front makes the audio lane provably
+    // allocation-free after configure -- no realloc can ever land on the
+    // media path once a source is subscribed.
+    m.gated.reserve(kLoudnessMaxGatedBlocks);
     loudness_meter_clear_window(m);
 }
 
@@ -340,14 +359,6 @@ inline bool loudness_meter_short_term(const LoudnessMeter &m, double *out_lufs)
 constexpr double kLoudnessAbsoluteGateLufs = -70.0;
 constexpr double kLoudnessRelativeGateLu   = -10.0;
 
-// 6000 blocks is 10 minutes of continuously-gated audio at a 100 ms hop. A
-// mic check is 20-60 s (~200-600 blocks), so this is never reached in the
-// use this was built for; past it the window keeps the most RECENT 10 minutes
-// rather than growing without bound. Documented rather than silent, because
-// "the oldest audio quietly leaves the window" is a real semantic and an
-// operator who leaves a board running all show is entitled to know it.
-constexpr size_t kLoudnessMaxGatedBlocks = 6000;
-
 // Called at every completed 100 ms hop. A 400 ms block is the newest four
 // hops, so admitting one block per hop is the standard's 75% overlap.
 inline void loudness_meter_on_hop_complete(LoudnessMeter &m)
@@ -396,17 +407,31 @@ inline bool loudness_meter_integrated(const LoudnessMeter &m, double *out_lufs)
 
     double sum = 0.0;
     for (double z : m.gated) sum += z;
-    const double abs_mean_lufs =
-        loudness_lufs_from_mean_square(sum / static_cast<double>(m.gated.size()));
+    const double abs_mean_z = sum / static_cast<double>(m.gated.size());
+    const double abs_mean_lufs = loudness_lufs_from_mean_square(abs_mean_z);
     if (!std::isfinite(abs_mean_lufs)) return false;
 
-    const double relative_threshold = abs_mean_lufs + kLoudnessRelativeGateLu;
+    // The relative gate (kLoudnessRelativeGateLu = -10 LU below the
+    // absolute-gated mean) is exactly a factor of ten in linear mean square,
+    // not a log10() comparison:
+    //     L(z) > L(mean) - 10
+    //     10*log10(z) - 10*log10(mean) > -10
+    //     log10(z / mean) > -1
+    //     z > mean / 10
+    // This pass used to call loudness_lufs_from_mean_square() (a log10())
+    // once per gated block -- up to kLoudnessMaxGatedBlocks = 6000 -- every
+    // 100 ms poll, on the graphics thread's corevideo_loudness_readings()
+    // call, under the same ctx->mtx the audio drain holds. Comparing in the
+    // linear domain removes every one of those calls from the loop and also
+    // removes a float round-trip (linear -> LUFS -> compared to a LUFS
+    // threshold) that could flip a block sitting exactly on the gate.
+    const double relative_threshold_z = 0.1 * std::fabs(abs_mean_z);
     double sum2 = 0.0;
     size_t n2 = 0;
     for (double z : m.gated) {
         // Strictly greater, per BS.1770-4: a block exactly on the threshold
         // is excluded.
-        if (loudness_lufs_from_mean_square(z) > relative_threshold) {
+        if (z > relative_threshold_z) {
             sum2 += z;
             ++n2;
         }

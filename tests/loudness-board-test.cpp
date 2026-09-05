@@ -126,6 +126,78 @@ int main()
               "an empty panel produced a reference value");
     }
 
+    // ── CRITICAL: only Participant-kind readings vote on the median ────────
+    // ActiveSpeaker resolves to whichever Participant is currently talking
+    // (a duplicate vote for that person) and Audience is the whole-meeting
+    // mix (no one microphone at all). A median computed over a vector that
+    // mixes all three kinds must equal the median of the Participants alone.
+    {
+        std::vector<LoudnessReading> participants_only = {
+            measured("Ana", -18.0), measured("Ben", -21.0),
+            measured("Cara", -23.0), measured("Dev", -24.0),
+        };
+        double participants_median = 0.0;
+        check(loudness_panel_median(participants_only, kLoudnessBoardMinBlocks,
+                                    &participants_median),
+              "no median from the Participants-only panel");
+
+        std::vector<LoudnessReading> mixed = participants_only;
+        LoudnessReading speaker = measured("ActiveSpeakerDup", -21.0);
+        speaker.kind = CoreVideoAudioKind::ActiveSpeaker;
+        mixed.push_back(speaker);
+        LoudnessReading audience = measured("WholeRoomMix", -12.0);
+        audience.kind = CoreVideoAudioKind::Audience;
+        audience.display_name.clear();
+        audience.participant_id = 0;
+        mixed.push_back(audience);
+
+        double mixed_median = 0.0;
+        check(loudness_panel_median(mixed, kLoudnessBoardMinBlocks,
+                                    &mixed_median),
+              "no median from the mixed-kind panel");
+        check(near(mixed_median, participants_median, 1e-9),
+              "an ActiveSpeaker or Audience reading voted on the panel "
+              "median -- only Participant-kind readings may");
+
+        // The board must not render ActiveSpeaker/Audience as rows either --
+        // a duplicate row for the current speaker, or a phantom
+        // "- unassigned -" row for the room mix, is the same defect wearing
+        // a different face.
+        LoudnessBoardModel model = loudness_board_build(
+            mixed, LoudnessReference::PanelMedian,
+            kLoudnessBoardDefaultToleranceLu, kLoudnessBoardMinBlocks);
+        check(model.rows.size() == participants_only.size(),
+              "a non-Participant reading produced a row on the board");
+        for (const LoudnessBoardRow &row : model.rows) {
+            check(row.name != "ActiveSpeakerDup" && row.name != "WholeRoomMix" &&
+                  row.name != "- unassigned -",
+                  "a non-Participant reading's name leaked onto the board");
+        }
+    }
+
+    // ── A single qualifying panelist is always its own reference ───────────
+    // With only one Participant clearing the minimum block count, the median
+    // degenerates to that one value, so their own deviation is always 0 LU --
+    // they must always pass, regardless of what absolute level they measured
+    // at.
+    {
+        std::vector<LoudnessReading> panel = {
+            measured("Solo", -41.0),   // far outside any EBU/ATSC/streaming target
+        };
+        LoudnessBoardModel model = loudness_board_build(
+            panel, LoudnessReference::PanelMedian,
+            kLoudnessBoardDefaultToleranceLu, kLoudnessBoardMinBlocks);
+        check(model.has_reference, "a single qualifying panelist produced no reference");
+        check(near(model.reference_lufs, -41.0, 1e-9),
+              "a single panelist's own reading is not their own reference");
+        check(model.rows.size() == 1, "wrong row count for a solo panelist");
+        check(model.rows[0].has_deviation && near(model.rows[0].deviation_lu, 0.0, 1e-9),
+              "a solo panelist's deviation from their own reference is not 0 LU");
+        check(model.rows[0].status == LoudnessRowStatus::Pass,
+              "a solo panelist -- always their own reference -- must always "
+              "pass, at any absolute loudness level");
+    }
+
     // ── Deviation sign, and status ─────────────────────────────────────────
     {
         std::vector<LoudnessReading> panel = {
@@ -217,6 +289,68 @@ int main()
               "reported as still measuring");
         check(!m.rows[1].has_deviation,
               "a still-measuring panelist was given a deviation");
+    }
+
+    // ── IMPORTANT 2: the deviation bar is driven by short-term deviation,
+    // falling back to integrated deviation, never vanishing ─────────────────
+    {
+        // A row with both short-term and integrated deviation available:
+        // the bar must prefer short-term.
+        LoudnessBoardRow both;
+        both.has_short_term_deviation = true;
+        both.short_term_deviation_lu  = 1.5;
+        both.has_deviation            = true;
+        both.deviation_lu             = -3.0;
+        double bar_lu = 0.0;
+        check(loudness_board_bar_input(both, &bar_lu),
+              "no bar input produced when both deviations were available");
+        check(near(bar_lu, 1.5, 1e-9),
+              "the bar did not prefer short-term deviation over integrated");
+
+        // Short-term unavailable: falls back to integrated, not to nothing.
+        LoudnessBoardRow integrated_only;
+        integrated_only.has_deviation = true;
+        integrated_only.deviation_lu  = -3.0;
+        bar_lu = 0.0;
+        check(loudness_board_bar_input(integrated_only, &bar_lu),
+              "the bar vanished when short-term deviation was unavailable "
+              "instead of falling back to integrated");
+        check(near(bar_lu, -3.0, 1e-9),
+              "the bar's fallback value was not the integrated deviation");
+
+        // Neither available: no bar input at all.
+        LoudnessBoardRow neither;
+        bar_lu = 12345.0;
+        check(!loudness_board_bar_input(neither, &bar_lu),
+              "a bar input was produced with neither deviation available");
+    }
+
+    // ── loudness_board_build() populates short-term deviation, and it is NOT
+    // part of the signature ─────────────────────────────────────────────────
+    {
+        std::vector<LoudnessReading> panel = {
+            measured("Ana", -20.0, -20.0, 200),
+            measured("Ben", -24.0, -18.0, 200),   // integrated -24, short-term -18
+        };
+        const LoudnessBoardModel m1 = loudness_board_build(
+            panel, LoudnessReference::PanelMedian, 2.0, kLoudnessBoardMinBlocks);
+        check(m1.has_reference, "no reference produced");
+        // reference is the median of the two integrated values: -22.
+        check(m1.rows[1].has_short_term_deviation,
+              "Ben's short-term deviation was not populated");
+        check(near(m1.rows[1].short_term_deviation_lu, -18.0 - m1.reference_lufs,
+                   1e-9),
+              "Ben's short-term deviation is not short_term_lufs - reference");
+
+        // Moving ONLY the short-term value must not change the signature --
+        // folding it in would rebuild every row's text children ~10x/sec for
+        // a value the row text never shows (see loudness_board_bar_input()).
+        panel[1].short_term_lufs = -10.0;
+        const LoudnessBoardModel m2 = loudness_board_build(
+            panel, LoudnessReference::PanelMedian, 2.0, kLoudnessBoardMinBlocks);
+        check(m1.signature == m2.signature,
+              "the board signature changed when only short-term loudness "
+              "moved -- short-term must not force a text-child rebuild");
     }
 
     // ── The signature changes on content and NOT on input order ────────────

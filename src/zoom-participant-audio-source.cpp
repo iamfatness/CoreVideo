@@ -205,18 +205,33 @@ std::vector<LoudnessReading> corevideo_loudness_readings()
     std::vector<LoudnessReading> out;
     // Same lock order as corevideo_audio_source_infos(): g_sources_mtx first,
     // then each source's own mutex. The audio lane takes only ctx->mtx and
-    // never touches g_sources_mtx, so this can never invert.
+    // never touches g_sources_mtx, so this can never invert. Unlike that
+    // function, this one takes each ctx->mtx with try_lock rather than
+    // lock() -- see the comment at the try_lock site below -- so it never
+    // waits on g_sources_mtx's own critical section for longer than the
+    // registry walk itself.
     std::lock_guard<std::mutex> lk(g_sources_mtx);
     out.reserve(g_sources.size());
     for (CoreVideoAudioSource *ctx : g_sources) {
         if (!ctx) continue;
         LoudnessReading r;
         r.source_uuid = ctx->source_uuid;
+        r.kind        = ctx->kind;
         r.participant_id =
             ctx->current_participant_id.load(std::memory_order_acquire);
         r.subscribed = ctx->subscribed.load(std::memory_order_acquire);
         {
-            std::lock_guard<std::mutex> ctx_lk(ctx->mtx);
+            // try_lock, not lock: output_audio_frame() holds this exact mutex
+            // across a whole drain -- shm_region_open_readwrite(),
+            // obs_source_output_audio(), rate-limited blog() calls that write
+            // to disk -- and this runs on the OBS graphics thread via
+            // meter_video_tick(). A blocking lock() here would let one busy
+            // audio source stall the graphics thread for the length of its
+            // drain. Skipping a busy source for this poll costs nothing an
+            // operator can see: its numbers reappear on the next 100 ms tick,
+            // invisible on a board that redraws at 10 Hz anyway.
+            std::unique_lock<std::mutex> ctx_lk(ctx->mtx, std::try_to_lock);
+            if (!ctx_lk.owns_lock()) continue;
             r.display_name   = ctx->display_name;
             r.has_short_term = loudness_meter_short_term(ctx->loudness,
                                                          &r.short_term_lufs);

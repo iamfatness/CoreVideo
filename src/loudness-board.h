@@ -21,6 +21,8 @@
 //
 // Pure: no libobs, no Qt, no Zoom SDK.
 
+#include "audio-subscription-state.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -33,10 +35,21 @@
 // is a different statement from any loudness value, and collapsing it to a
 // sentinel number is how a board ends up confidently reporting -70 LUFS for
 // somebody who simply has not spoken yet.
+//
+// `kind` is why this struct exists rather than just handing the board a
+// vector of doubles. Three kinds of CoreVideo audio source can feed a
+// LoudnessMeter (src/audio-subscription-state.h): Participant, ActiveSpeaker
+// (a resolved duplicate of whoever is currently talking) and Audience (the
+// whole-meeting mix, no participant id at all). Only Participant readings may
+// vote on the panel median -- see loudness_panel_median() below -- and only
+// Participant readings are shown as rows at all -- see loudness_board_build()
+// -- because an ActiveSpeaker row is a duplicate that shifts the reference on
+// every speaker change and an Audience row has no panelist to describe.
 struct LoudnessReading {
-    std::string source_uuid;
-    std::string display_name;
-    uint32_t    participant_id  = 0;
+    std::string        source_uuid;
+    std::string        display_name;
+    uint32_t            participant_id  = 0;
+    CoreVideoAudioKind kind             = CoreVideoAudioKind::Participant;
     bool        subscribed      = false;
     bool        has_short_term  = false;
     double      short_term_lufs = 0.0;
@@ -90,10 +103,47 @@ struct LoudnessBoardRow {
     double            deviation_lu   = 0.0;
     bool              has_short_term = false;
     double            short_term_lufs = 0.0;
+    // Short-term deviation from the panel reference, i.e. short_term_lufs -
+    // reference. Populated whenever both a short-term reading and a
+    // reference exist, independent of `has_deviation` (which gates on
+    // gated_blocks meeting kLoudnessBoardMinBlocks -- a verdict requirement
+    // that a live, ungated number should not inherit). This is what
+    // loudness_board_bar_input() prefers: the bar is meant to move live while
+    // the panelist talks, and short-term is the fast measure that does that;
+    // the row TEXT stays on the integrated verdict.
+    bool              has_short_term_deviation = false;
+    double            short_term_deviation_lu  = 0.0;
     bool              has_integrated = false;
     double            integrated_lufs = 0.0;
     LoudnessRowStatus status = LoudnessRowStatus::NoAudio;
 };
+
+// What the deviation BAR should be driven from for this row: short-term
+// deviation when it exists (the fast, live-moving measure), falling back to
+// the integrated deviation the bar has always used when it does not --
+// falling back rather than vanishing, so a panelist between hops still shows
+// a bar. Returns false only when neither exists, e.g. before a reference has
+// ever been established.
+//
+// Deliberately NOT part of LoudnessBoardModel::signature: the signature
+// drives child TEXT-source rebuilds (obs_source_update(), one per row, per
+// CLAUDE.md's note on the churn that caused), and short-term moves roughly
+// every 100 ms hop -- folding it in would rebuild every row's text children
+// ~10x/sec for a value that never reaches the text. Bars are geometry the
+// renderer fills every frame regardless, so reading this per-frame costs
+// nothing extra.
+inline bool loudness_board_bar_input(const LoudnessBoardRow &row, double *out_lu)
+{
+    if (row.has_short_term_deviation) {
+        *out_lu = row.short_term_deviation_lu;
+        return true;
+    }
+    if (row.has_deviation) {
+        *out_lu = row.deviation_lu;
+        return true;
+    }
+    return false;
+}
 
 struct LoudnessBoardModel {
     bool              has_reference  = false;
@@ -125,12 +175,21 @@ inline bool loudness_reference_fixed_target(LoudnessReference kind, double *out)
 // produced a check. Even counts average the two middle values, which is the
 // ordinary definition and keeps a two-person panel from arbitrarily electing
 // one of them as the reference.
+//
+// Only Participant-kind readings vote. ActiveSpeaker resolves to whichever
+// Participant is currently talking, so counting it too is counting that
+// person twice and shifting the reference by up to a full LU depending on an
+// arbitrary even/odd flip; Audience is the whole-meeting mix and describes no
+// one microphone at all. Both are display concerns, not reference concerns --
+// see loudness_board_build(), which excludes them from rows entirely for the
+// same reason.
 inline bool loudness_panel_median(const std::vector<LoudnessReading> &readings,
                                   uint64_t min_blocks, double *out)
 {
     std::vector<double> values;
     values.reserve(readings.size());
     for (const LoudnessReading &r : readings) {
+        if (r.kind != CoreVideoAudioKind::Participant) continue;
         if (!r.has_integrated) continue;
         if (r.gated_blocks < min_blocks) continue;
         if (!std::isfinite(r.integrated_lufs)) continue;
@@ -177,9 +236,23 @@ inline LoudnessBoardModel loudness_board_build(
 
     // Ordered by CONTENT alone -- name, then uuid to break a duplicate-name
     // tie -- so a roster that merely reorders produces an identical board.
+    //
+    // Only Participant-kind readings become rows. ActiveSpeaker is a resolved
+    // duplicate of whichever Participant is currently talking (a second row
+    // for the same person), and Audience has no participant id and so no
+    // display name -- both used to reach this board and either duplicate a
+    // real panelist's row or render as a phantom "- unassigned -" entry.
+    // Filtering here, in the pure header, rather than in the OBS glue that
+    // calls it: this repo's convention is that pure logic gets unit tests and
+    // OBS glue does not, and which readings become rows is exactly the kind
+    // of decision this file exists to hold so it can be pinned without a
+    // meeting.
     std::vector<const LoudnessReading *> ordered;
     ordered.reserve(readings.size());
-    for (const LoudnessReading &r : readings) ordered.push_back(&r);
+    for (const LoudnessReading &r : readings) {
+        if (r.kind != CoreVideoAudioKind::Participant) continue;
+        ordered.push_back(&r);
+    }
     std::sort(ordered.begin(), ordered.end(),
               [](const LoudnessReading *a, const LoudnessReading *b) {
                   if (a->display_name != b->display_name)
@@ -199,6 +272,13 @@ inline LoudnessBoardModel loudness_board_build(
         row.short_term_lufs = r->short_term_lufs;
         row.has_integrated  = r->has_integrated;
         row.integrated_lufs = r->integrated_lufs;
+
+        if (row.has_short_term && model.has_reference &&
+            std::isfinite(row.short_term_lufs)) {
+            row.has_short_term_deviation = true;
+            row.short_term_deviation_lu =
+                row.short_term_lufs - model.reference_lufs;
+        }
 
         if (!r->has_integrated || r->gated_blocks == 0) {
             row.status = LoudnessRowStatus::NoAudio;

@@ -449,6 +449,17 @@ int main()
               "a degenerate feed advanced the measurement");
     }
 
+    // ── loudness_meter_configure() reserves the gated vector up front ──────
+    // so the audio lane is provably allocation-free after configure -- no
+    // realloc can land on the media path once a source is subscribed.
+    {
+        LoudnessMeter m;
+        loudness_meter_configure(m, 48000, 1);
+        check(m.gated.capacity() >= kLoudnessMaxGatedBlocks,
+              "loudness_meter_configure() did not reserve the gated vector "
+              "to kLoudnessMaxGatedBlocks");
+    }
+
     if (failures == 0)
         std::cout << "audio-loudness: all tests passed\n";
     return failures == 0 ? 0 : 1;

@@ -94,8 +94,12 @@ struct TilesEffect {
 bool tiles_effect_load(TilesEffect &out);
 
 // Drops our reference to the effect and resets the struct. Safe to call on
-// an unloaded/failed TilesEffect. Note: libobs caches effects created from a
-// file, so gs_effect_destroy() here is effectively a no-op until graphics
-// shutdown rather than an immediate release — not a leak, just not the
-// literal "release" the name suggests.
+// an unloaded/failed TilesEffect. Note: gs_effect_create_from_file() allocates
+// a fresh gs_effect_t on every call -- libobs does NOT cache or dedupe
+// effects compiled from the same file (an earlier version of this comment
+// claimed otherwise). gs_effect_destroy() here is a real, immediate release
+// of THIS handle. Every caller that loads its own TilesEffect from this file
+// (the Tiles wall and the Loudness Meter each compile an independent copy)
+// owns exactly one handle and must destroy it exactly once; two owners must
+// never share one gs_effect_t*, or the second destroy is a double-free.
 void tiles_effect_destroy(TilesEffect &fx);

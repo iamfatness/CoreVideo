@@ -19,6 +19,9 @@
 #                     ~/Developer/zoom-sdk-macos)
 #   --link-sdk        Symlink the SDK into the engine app instead of copying it.
 #                     Fast for local iteration; NOT distributable.
+#   --no-engine       Allow a bundle with NO ZoomObsEngine. Such a bundle loads
+#                     into OBS and cannot join a meeting; without this flag a
+#                     missing engine is a hard error, not a warning.
 #   --install         Also copy into ~/Library/Application Support/obs-studio/plugins
 #   --sign IDENTITY   codesign identity (default: "-", ad-hoc)
 #   --entitlements F  Engine entitlements plist
@@ -48,6 +51,8 @@ OBS_APP="/Applications/OBS.app"
 ZOOM_SDK="${ZOOM_SDK_DIR:-$HOME/Developer/zoom-sdk-macos}"
 LINK_SDK=0
 DO_INSTALL=0
+ALLOW_NO_ENGINE=0
+ENGINE_STAGED=0
 SIGN_ID="-"
 ENTITLEMENTS=""
 NOTARIZE_PROFILE=""
@@ -63,6 +68,7 @@ while [ $# -gt 0 ]; do
         --entitlements) ENTITLEMENTS="$2"; shift 2 ;;
         --notarize)  NOTARIZE_PROFILE="$2"; shift 2 ;;
         --link-sdk)  LINK_SDK=1;     shift ;;
+        --no-engine) ALLOW_NO_ENGINE=1; shift ;;
         --install)   DO_INSTALL=1;   shift ;;
         -h|--help)   sed -n '2,31p' "$0"; exit 0 ;;
         *) echo "error: unknown argument '$1'" >&2; exit 2 ;;
@@ -176,6 +182,8 @@ PLIST
         echo "         Pass --zoom-sdk DIR or set ZOOM_SDK_DIR." >&2
     fi
 
+    ENGINE_STAGED=1
+
     # The build tree binary carries an absolute rpath to the developer's SDK
     # checkout. Leave it in place and the shipped engine silently prefers that
     # machine-specific path over its own bundled copy, so the bundle would be
@@ -192,6 +200,25 @@ PLIST
             "$ENGINE_APP/Contents/MacOS/ZoomObsEngine"
     fi
 fi
+
+# The engine is not optional, and this `if` used to have no `else`: with no
+# ZoomObsEngine in the build dir the whole block above was silently skipped and
+# the script cheerfully produced a plugin-only bundle. It looks correct --
+# it loads into OBS, the dock appears, the sources appear -- and then cannot
+# join a meeting, because the process that links the Zoom SDK is not in it.
+# Caught 2026-09-05 the obvious way: a bundle built without BUILD_ZOOM_ENGINE
+# came out at 2.3 MB instead of 613 MB and was installed before anyone noticed.
+# The requirement was already stated in this file's comments and in
+# release-macos.yml ("a release bundle without the engine would..."); it was
+# just never enforced anywhere, which is the whole failure.
+if [ "$ENGINE_STAGED" -eq 0 ] && [ "$ALLOW_NO_ENGINE" -eq 0 ]; then
+    echo "error: no engine at '$BUILD_DIR/ZoomObsEngine', so this bundle could" >&2
+    echo "       not join a meeting. Configure with -DBUILD_ZOOM_ENGINE=ON (and" >&2
+    echo "       -DZOOM_SDK_DIR=<sdk>) and rebuild, or pass --no-engine if you" >&2
+    echo "       genuinely want a plugin-only bundle." >&2
+    exit 3
+fi
+
 [ -d "$BUILD_DIR/CoreVideoOAuthCallback.app" ] && \
     ditto "$BUILD_DIR/CoreVideoOAuthCallback.app" \
           "$BUNDLE/Contents/MacOS/CoreVideoOAuthCallback.app"

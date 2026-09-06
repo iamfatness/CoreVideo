@@ -1391,6 +1391,33 @@ Every one of these is documented at length where it lives; the list is the map.
   (`unsubscribe_audio()`, `forget_subscription_for_new_engine()`, the roster
   callback) moved to `name_mtx` alongside the reader.
 
+## macOS raw-media lifecycle (2026-09-06 soak remediation candidate)
+
+`src/raw-media-lifecycle.h` owns Start intent separately from permission and room
+readiness; `engine/src/main-macos.mm` applies its effects on the SDK main queue.
+The two grant callbacks cannot issue duplicate starts, and callbacks retained
+from a retired record delegate cannot resurrect Stop/leave/replacement intent.
+Only `ZoomSDKError_NoPermission` triggers the once-per-meeting host request.
+SDK request status 2 is **Timeout**, not Denied; SDK error 21 is **NoLicense**,
+not evidence of a temporary permission failure. No new timed session retry loop
+is justified by those codes; terminal start failures stay joined and permit an
+explicit Start retry or a fresh room readiness transition.
+
+Breakout entry/exit invalidates SDK video/share renderers and the one global
+audio subscription while preserving desired source bindings and SHM generations.
+Delegates detach before `destroyRender:`. A fresh InMeeting checks raw readiness
+and restores current eligible placeholders once; missing room-scoped participant
+ids stay pending for plugin roster rebinding. Failed video subscriptions retain
+placeholders, so recovery or an ordinary retry cannot lose bindings; removals and
+rebinding update the same current table. Target `requested_resolution` survives
+recovery; shared-renderer quality arbitration is a separate follow-up.
+`raw_media_ready` still means raw recording started, **not** that every source is
+healthy. Additive `raw_media_state` invalidates client session readiness during
+permission loss/recovery/failure; per-source subscribe errors and first-frame
+logs remain independent evidence. Offline CoreVideoRawMediaLifecycle sequences
+and a real SDK build cover these code defects; repeated live delayed-grant and
+breakout resource-lifetime/recovery-time acceptance remains outstanding.
+
 ## Live testing against a real meeting
 
 The control API (TCP line-JSON, `127.0.0.1:19870`, no HTTP) drives a full

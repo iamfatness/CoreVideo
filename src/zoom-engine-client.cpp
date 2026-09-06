@@ -1453,6 +1453,10 @@ void ZoomEngineClient::handle_event(const std::string &line)
             // its own defect, so clear it on every successful start, not just
             // ones that followed a notice.
             clear_privilege_notice_and_notify();
+        } else if (stage == "raw_media_state") {
+            // Session readiness is separate from per-source frame health.
+            if (obj.value("state").toString() != "active")
+                m_media_active.store(false, std::memory_order_release);
         } else if (stage == "raw_media_stopped")
             m_media_active.store(false, std::memory_order_release);
         return;

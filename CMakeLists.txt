@@ -1426,6 +1426,10 @@ if(BUILD_TESTING)
     # Retry pacing for the tiles silent-slot sweep: the sweep interval and the
     # per-slot exponential backoff / attempt cap that stop an unbounded
     # renderer create-destroy loop in the engine.
+    add_executable(CoreVideoRawMediaLifecycleTest tests/raw-media-lifecycle-test.cpp)
+    target_include_directories(CoreVideoRawMediaLifecycleTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    add_test(NAME CoreVideoRawMediaLifecycle COMMAND CoreVideoRawMediaLifecycleTest)
+
     add_executable(CoreVideoTileRetryTest
         tests/tile-retry-test.cpp
     )

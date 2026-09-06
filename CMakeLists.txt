@@ -804,6 +804,10 @@ if(BUILD_TESTING)
 
     # Record-privilege handshake notice copy/classification (2026-09-05 live
     # defect fix). Header-only logic; no Qt/OBS/SDK dependencies.
+    add_executable(CoreVideoMediaFailureStateTest tests/media-failure-state-test.cpp)
+    target_include_directories(CoreVideoMediaFailureStateTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    add_test(NAME CoreVideoMediaFailureState COMMAND CoreVideoMediaFailureStateTest)
+
     add_executable(CoreVideoPrivilegeNoticeTest
         tests/zoom-privilege-notice-test.cpp
     )

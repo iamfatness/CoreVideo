@@ -1419,6 +1419,7 @@ bool ZoomSource::output_video_from_shared_memory(
     uint32_t h = 0;
     uint32_t y_len = 0;
     uint64_t hdr_capture_ns = 0;
+    const uint64_t delivery_ticket = ZoomEngineClient::instance().media_delivery_ticket(uuid, resolved_participant_id);
     const ShmFrameRead read_status =
         shm_read_i420_frame(video_shm, IPC_SHM_PREFIX + uuid, event_width,
                             event_height, event_shm_gen, video_shm_gen,
@@ -1455,6 +1456,8 @@ bool ZoomSource::output_video_from_shared_memory(
         }
         return false;
     }
+
+    ZoomEngineClient::instance().acknowledge_media_delivery(uuid, resolved_participant_id, delivery_ticket);
 
     const auto *y_ptr = video_buf.data();
     const auto *u_ptr = y_ptr + y_len;

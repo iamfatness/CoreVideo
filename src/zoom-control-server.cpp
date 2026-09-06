@@ -515,6 +515,7 @@ void ZoomControlServer::handle_line(QPointer<QTcpSocket> socket, const QByteArra
             {"ok", true},
             {"meeting_state", meeting_state_to_string(ZoomEngineClient::instance().state())},
             {"media_active", ZoomEngineClient::instance().is_media_active()},
+            {"media_notice", QString::fromStdString(ZoomEngineClient::instance().pending_privilege_notice())},
             {"last_error", QString::fromStdString(
                 ZoomEngineClient::instance().last_error())},
             {"active_speaker_id", static_cast<double>(

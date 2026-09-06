@@ -1531,3 +1531,29 @@ The site builder keeps `MAC_VERSION` separate from the stable Windows version.
 The macOS download is the locally signed/notarized `.pkg` on v0.1.45-beta.1;
 its GitHub filename includes `v`. Do not restore the withdrawn macOS ZIP link.
 Home, download, and plugin docs point to `/download/#macos`.
+
+## Media failure presentation (2026-09-06 soak)
+
+`MediaFailureState` tracks current source media failures, bounded
+by live source assignments. Eight tiles × three failed attempts retain all
+24 raw error diagnostics but emit one nonmodal episode notice. Dock polling
+updates the affected count and escalates after three attempts or ten seconds
+to Retry Media; it must show media errors while the meeting remains joined.
+Connection errors still own `m_last_error` and the fatal callback path;
+media failures must never vote in meeting leave/reconnect classification.
+
+Only a successful shared-memory read (both standalone and supersource paths)
+may acknowledge video recovery. Capture an assignment ticket before reading,
+then validate ticket and participant; do not clear source failures at session
+`raw_media_ready` or at a retry subscribe. Removal/reassignment retires only
+that source's membership. Never dispatch UI/source callbacks from the frame
+acknowledgement while a source lock is held. Permission notices are deduped;
+Mac grants start automatically. Denial and timeout are distinct
+`raw_media_state` debug events, not necessarily `raw_media_start_failed`.
+
+`raw_data_controller_unavailable` follows the same per-participant video
+recovery path. `shm_create_failed`, `subscribe_rejected`, and
+`shm_name_collision` stay as persistent per-source media diagnostics (one
+nonmodal notice per episode), clearable by removal, explicit stop, or meeting
+reset. Their wire reports do not reliably identify a media lane, so neither
+a successful video read nor `raw_media_ready` may clear them.

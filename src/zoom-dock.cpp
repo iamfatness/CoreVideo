@@ -1068,7 +1068,8 @@ void ZoomDock::update_state_indicator()
         m_error_label->setVisible(true);
     } else {
         m_state_label->setText(state_label_text(s));
-        m_error_label->setVisible(false);
+        m_error_label->setText(QString::fromStdString(last_error));
+        m_error_label->setVisible(!last_error.empty());
     }
 
     const bool in_meeting    = (s == MeetingState::InMeeting);
@@ -1091,7 +1092,9 @@ void ZoomDock::update_state_indicator()
     m_leave_btn->setEnabled(in_meeting || transitioning || recovering);
     m_leave_btn->setText(in_meeting ? "Leave" : "Cancel");
     if (m_start_engine_btn && m_stop_engine_btn) {
-        m_start_engine_btn->setEnabled(in_meeting && !media_active && !transitioning && !recovering);
+        const bool media_failed = in_meeting && !last_error.empty();
+        m_start_engine_btn->setText(media_failed ? "Retry Media" : "Start Engine");
+        m_start_engine_btn->setEnabled(in_meeting && (!media_active || media_failed) && !transitioning && !recovering);
         m_stop_engine_btn->setEnabled(in_meeting && media_active && !transitioning);
     }
 
@@ -1861,6 +1864,7 @@ void ZoomDock::on_start_engine_clicked()
         return;
     }
     ZoomEngineClient::instance().start_media();
+    ZoomOutputManager::instance().resubscribe_all();
     update_state_indicator();
 }
 

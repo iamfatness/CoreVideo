@@ -422,6 +422,7 @@ static void tile_feed_on_frame(const TileFeedPtr &feed, uint32_t event_width,
     uint64_t epoch = 0;
     if (!feed->slot.begin_frame(event_participant_id, epoch)) return;
 
+    const uint64_t delivery_ticket = ZoomEngineClient::instance().media_delivery_ticket(feed->uuid, event_participant_id);
     std::lock_guard<std::mutex> lock(feed->mtx);
     if (!feed->alive) return;
 
@@ -436,6 +437,7 @@ static void tile_feed_on_frame(const TileFeedPtr &feed, uint32_t event_width,
     // Odd dimensions have no valid I420 chroma layout to sample.
     if ((w & 1u) || (h & 1u)) return;
 
+    ZoomEngineClient::instance().acknowledge_media_delivery(feed->uuid, event_participant_id, delivery_ticket);
     feed->width = w;
     feed->height = h;
     feed->frame_epoch = epoch;

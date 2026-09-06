@@ -132,17 +132,36 @@ BUNDLE_EXEC="$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" \
 
 # codesign --verify --strict, not just `codesign -d`: the latter happily
 # describes a signature that no longer matches the bundle's actual contents
-# (e.g. touched after signing). --strict is what catches that, and what an
-# ad-hoc ("-") signature also fails, which is exactly the "unsigned" case this
-# check exists for -- pkgbuild does not itself refuse an ad-hoc-signed
-# component, and shipping one would silently hand out a build Gatekeeper
-# rejects on a tester's Mac.
+# (e.g. touched after signing). --strict catches a broken seal. It does NOT,
+# however, distinguish a Developer ID signature from an ad-hoc signature, so
+# the distributable path performs a separate Authority check immediately
+# below. pkgbuild itself will accept an ad-hoc-signed component.
 codesign --verify --strict "$BUNDLE" 2>&1 || {
     echo "error: '$BUNDLE' failed codesign --verify --strict; it is" >&2
-    echo "       unsigned, ad-hoc signed, or its signature no longer" >&2
+    echo "       unsigned or its signature no longer" >&2
     echo "       matches its contents. Build with make-macos-bundle.sh's" >&2
     echo "       --sign \"Developer ID Application: ...\" first." >&2
     exit 1; }
+
+# A signed/notarized installer must contain Developer ID Application-signed
+# code. `codesign --verify --strict` alone also succeeds for the default ad-hoc
+# signature produced by make-macos-bundle.sh, which made it possible to sign
+# the outer .pkg while silently leaving Gatekeeper-rejected code inside it.
+# Keep accepting ad-hoc bundles for the explicitly unsigned local-test path.
+if [ -n "$SIGN_ID" ] || [ -n "$NOTARIZE_PROFILE" ]; then
+    BUNDLE_SIGNATURE="$(codesign -dvv "$BUNDLE" 2>&1)"
+    printf '%s\n' "$BUNDLE_SIGNATURE" | \
+        grep -q '^Authority=Developer ID Application:' || {
+        echo "error: '$BUNDLE' is not signed with a Developer ID Application" >&2
+        echo "       certificate. A valid/ad-hoc code seal is not sufficient" >&2
+        echo "       for distribution through a signed installer." >&2
+        printf '%s\n' "$BUNDLE_SIGNATURE" | \
+            grep -E '^(Authority|TeamIdentifier|Signature)=' >&2 || true
+        echo "       Rebuild it with make-macos-bundle.sh --sign" >&2
+        echo "       \"Developer ID Application: ...\"." >&2
+        exit 1
+    }
+fi
 
 # The engine is not optional -- see make-macos-bundle.sh's own hard stop for
 # the identical check and the live incident that motivated it (a bundle
@@ -238,6 +257,24 @@ fi
 productbuild --distribution "$DIST_XML" --package-path "$WORKDIR" \
     ${DIST_SIGN_ARGS[@]+"${DIST_SIGN_ARGS[@]}"} \
     "$OUT_PKG"
+
+# Confirm the artifact users will double-click, not merely the intermediate
+# component package. This also prints the certificate chain into the build log
+# so a report of "macOS says it isn't signed" has actionable evidence.
+if [ -n "$SIGN_ID" ]; then
+    PKG_SIGNATURE="$(pkgutil --check-signature "$OUT_PKG" 2>&1)" || {
+        printf '%s\n' "$PKG_SIGNATURE" >&2
+        echo "error: final installer package signature validation failed" >&2
+        exit 1
+    }
+    printf '%s\n' "$PKG_SIGNATURE"
+    printf '%s\n' "$PKG_SIGNATURE" | \
+        grep -q 'Developer ID Installer:' || {
+        echo "error: final package is not signed with a Developer ID Installer" >&2
+        echo "       certificate; do not distribute it." >&2
+        exit 1
+    }
+fi
 
 echo "built: $OUT_PKG (version $VERSION)"
 

@@ -55,3 +55,24 @@ void shared_video_accept_resolution(Subscription &subscription,
             std::to_string(subscription.resolution) + "}");
     }
 }
+
+// Entire successful creation publication sequence, including fallback diagnostics.
+template<class Subscription, class Publish>
+void shared_video_publish_created_resolution(Subscription &subscription,
+    uint32_t accepted, const std::string &source_uuid, Publish publish)
+{
+    shared_video_accept_resolution(subscription, accepted, publish);
+    const auto target = subscription.targets.find(source_uuid);
+    // The selected recovery caller may be a 360 tile sharing a 1080 request.
+    // Its trailing diagnostic must describe its own request, not the maximum.
+    if (target != subscription.targets.end() &&
+        accepted < target->second.requested_resolution) {
+        const auto requested = target->second.requested_resolution;
+        publish(
+            R"({"cmd":"debug","stage":"video_resolution_downgraded","source_uuid":")" +
+            source_uuid + R"(","participant_id":)" +
+            std::to_string(subscription.participant_id) + R"(,"requested":)" +
+            std::to_string(requested) + R"(,"actual":)" +
+            std::to_string(accepted) + "}");
+    }
+}

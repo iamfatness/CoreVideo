@@ -83,5 +83,24 @@ int main()
           events[0].find("\"actual\":2") != std::string::npos &&
           events[1].find("\"actual\":2") != std::string::npos,
           "successful HD creation must update both deferred targets too");
+    // Drive the entire creation sequence: a trailing source-scoped fallback
+    // event must not overwrite the tile's own request with the shared maximum.
+    bool tile_downgraded = true;
+    bool fixed_downgraded = false;
+    shared_video_publish_created_resolution(recovered, 1, "tile",
+        [&](const std::string &event) {
+            const bool tile = event.find("\"source_uuid\":\"tile\"") != std::string::npos;
+            const auto request_pos = event.find("\"requested\":");
+            const auto actual_pos = event.find("\"actual\":");
+            check(request_pos != std::string::npos && actual_pos != std::string::npos,
+                  "quality event carries accepted and requested levels");
+            if (request_pos == std::string::npos || actual_pos == std::string::npos) return;
+            const int requested = std::stoi(event.substr(request_pos + 12));
+            const int actual = std::stoi(event.substr(actual_pos + 9));
+            if (tile) tile_downgraded = actual < requested;
+            else fixed_downgraded = actual < requested;
+        });
+    check(!tile_downgraded && fixed_downgraded,
+          "full 720 fallback sequence exceeds tile360 request but downgrades fixed1080");
     return failures ? 1 : 0;
 }

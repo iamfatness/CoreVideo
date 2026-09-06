@@ -1610,3 +1610,9 @@ persistent source failures, and session raw-media errors; source recovery still
 requires acknowledged delivery/removal. Explicit `join`, `left`, and engine
 `stop` reset media session state. The Qt-backed CoreVideoEngineClientMediaSession
 regression drives the production JSON handler with offline host boundaries.
+
+Successful renderer creation publishes each retained target's own quality request.
+A trailing fallback diagnostic must use the selected target's own request too,
+never the shared maximum: a 360 tile sharing a 1080 source at accepted 720 is
+healthy while the 1080 source is downgraded. The complete creation publication
+sequence lives in `shared_video_publish_created_resolution` and its regression.

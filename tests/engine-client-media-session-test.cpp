@@ -68,7 +68,8 @@ int main() {
     event(R"({"cmd":"joined"})");
     check(cleared_notices == 1 && client.last_error().empty(), "joined clears independent connection error");
     event(R"({"cmd":"joined"})");
-    event(R"({"cmd":"raw_media_ready"})");
+    event(R"({"cmd":"debug","stage":"raw_media_ready"})");
+    check(client.is_media_active(), "raw media readiness traverses production debug dispatch");
     check(client.source_media_failed("fixed"), "duplicate joined and room readiness retain unresolved failure");
     check(client.media_delivery_ticket("fixed", 42) == ticket, "engine restore retains assignment without client subscribe");
     client.acknowledge_media_delivery("fixed", 42, ticket);

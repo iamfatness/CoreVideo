@@ -1274,16 +1274,9 @@ static void video_subscribe(uint32_t participant_id, const std::string &source_u
         if (sub_err == ZoomSDKError_Success) {
             pending.renderer = renderer;
             pending.delegate = delegate;
-            shared_video_accept_resolution(pending, static_cast<uint32_t>(candidate),
+            shared_video_publish_created_resolution(pending, static_cast<uint32_t>(candidate),
+                source_uuid,
                 [](const std::string &event) { EngineIpc::write(event); });
-            if (static_cast<uint32_t>(candidate) != resolution) {
-                EngineIpc::write(
-                    R"({"cmd":"debug","stage":"video_resolution_downgraded","source_uuid":")" +
-                    source_uuid + R"(","participant_id":)" +
-                    std::to_string(participant_id) + R"(,"requested":)" +
-                    std::to_string(resolution) + R"(,"actual":)" +
-                    std::to_string(candidate) + "}");
-            }
             return;
         }
 

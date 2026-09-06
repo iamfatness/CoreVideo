@@ -44,6 +44,21 @@ void SpeakerDirector::reset()
     m_last_switch_ms = 0;
     m_last_forced_fill_ms = 0;
     m_forced_vacancy = false;
+    m_latest_time_ms = 0;
+    ++m_session_id;
+    if (m_session_id == 0)
+        ++m_session_id;
+    m_promotion_sequence = 0;
+    m_last_promotion = {};
+    m_recent_promotions.clear();
+}
+
+uint64_t SpeakerDirector::normalize_time_locked(uint64_t now_ms)
+{
+    if (now_ms < m_latest_time_ms)
+        return m_latest_time_ms;
+    m_latest_time_ms = now_ms;
+    return now_ms;
 }
 
 // Strict vetting for NEW candidates only. The incumbent is judged by
@@ -134,16 +149,36 @@ uint32_t SpeakerDirector::choose_candidate_locked(uint32_t raw_speaker_id) const
     return it != m_roster.end() ? it->user_id : 0;
 }
 
-bool SpeakerDirector::promote_locked(uint32_t participant_id, uint64_t now_ms)
+bool SpeakerDirector::promote_locked(uint32_t participant_id, uint64_t now_ms,
+                                     SpeakerPromotionReason reason,
+                                     uint32_t effective_sensitivity_ms,
+                                     uint32_t effective_hold_ms,
+                                     uint64_t candidate_age_ms,
+                                     uint64_t incumbent_held_ms)
 {
     if (participant_id == 0 || participant_id == m_directed_speaker_id)
         return false;
-    m_last_speaker_id = m_directed_speaker_id;
+    const uint32_t previous_speaker_id = m_directed_speaker_id;
+    m_last_speaker_id = previous_speaker_id;
     m_directed_speaker_id = participant_id;
     m_candidate_speaker_id = 0;
     m_candidate_since_ms = 0;
     m_last_switch_ms = now_ms;
     m_forced_vacancy = false;
+    m_last_promotion.reason = reason;
+    m_last_promotion.session_id = m_session_id;
+    m_last_promotion.sequence = ++m_promotion_sequence;
+    m_last_promotion.previous_speaker_id = previous_speaker_id;
+    m_last_promotion.promoted_speaker_id = participant_id;
+    m_last_promotion.promoted_at_ms = now_ms;
+    m_last_promotion.effective_sensitivity_ms = effective_sensitivity_ms;
+    m_last_promotion.effective_hold_ms = effective_hold_ms;
+    m_last_promotion.candidate_age_ms = candidate_age_ms;
+    m_last_promotion.incumbent_held_ms = incumbent_held_ms;
+    constexpr size_t kPromotionHistoryLimit = 16;
+    if (m_recent_promotions.size() == kPromotionHistoryLimit)
+        m_recent_promotions.erase(m_recent_promotions.begin());
+    m_recent_promotions.push_back(m_last_promotion);
     return true;
 }
 
@@ -188,7 +223,9 @@ bool SpeakerDirector::fill_vacancy_locked(uint32_t candidate, uint64_t now_ms)
     if (candidate == 0)
         return false;
 
-    if (m_forced_vacancy) {
+    const bool forced_vacancy = m_forced_vacancy;
+    uint32_t effective_sensitivity_ms = 0;
+    if (forced_vacancy) {
         const bool immediate_fill_available =
             m_last_forced_fill_ms == 0 || now_ms < m_last_forced_fill_ms ||
             now_ms - m_last_forced_fill_ms >= m_hold_ms;
@@ -197,26 +234,44 @@ bool SpeakerDirector::fill_vacancy_locked(uint32_t candidate, uint64_t now_ms)
              now_ms - m_candidate_since_ms < m_sensitivity_ms)) {
             return false;
         }
+        if (!immediate_fill_available)
+            effective_sensitivity_ms = m_sensitivity_ms;
         m_last_forced_fill_ms = now_ms;
     }
 
-    return promote_locked(candidate, now_ms);
+    const uint64_t candidate_age = now_ms >= m_candidate_since_ms
+        ? now_ms - m_candidate_since_ms : 0;
+    const uint64_t incumbent_held_ms = forced_vacancy &&
+                                       now_ms >= m_last_switch_ms
+        ? now_ms - m_last_switch_ms : 0;
+    return promote_locked(candidate, now_ms,
+                          forced_vacancy
+                              ? SpeakerPromotionReason::ForcedVacancy
+                              : SpeakerPromotionReason::Automatic,
+                          effective_sensitivity_ms, 0, candidate_age,
+                          incumbent_held_ms);
 }
 
 bool SpeakerDirector::set_manual_speaker(uint32_t participant_id, uint64_t now_ms)
 {
     std::lock_guard<std::mutex> lk(m_mtx);
+    now_ms = normalize_time_locked(now_ms);
     if (!participant_allowed_locked(participant_id))
         return false;
     m_manual_speaker_id = participant_id;
     m_candidate_speaker_id = 0;
     m_candidate_since_ms = 0;
-    return promote_locked(participant_id, now_ms);
+    const uint64_t held_for = now_ms >= m_last_switch_ms
+        ? now_ms - m_last_switch_ms : 0;
+    return promote_locked(participant_id, now_ms,
+                          SpeakerPromotionReason::ManualTake,
+                          0, 0, 0, held_for);
 }
 
 bool SpeakerDirector::clear_manual_speaker(uint64_t now_ms)
 {
     std::lock_guard<std::mutex> lk(m_mtx);
+    now_ms = normalize_time_locked(now_ms);
     if (m_manual_speaker_id == 0)
         return false;
     m_manual_speaker_id = 0;
@@ -230,12 +285,17 @@ bool SpeakerDirector::update_roster(const std::vector<ParticipantInfo> &roster,
                                     uint64_t now_ms)
 {
     std::lock_guard<std::mutex> lk(m_mtx);
+    now_ms = normalize_time_locked(now_ms);
     m_roster = roster;
     m_raw_speaker_id = raw_speaker_id;
 
     enforce_incumbent_eligibility_locked(now_ms);
     if (m_manual_speaker_id != 0)
-        return promote_locked(m_manual_speaker_id, now_ms);
+        return promote_locked(m_manual_speaker_id, now_ms,
+                              SpeakerPromotionReason::ManualTake,
+                              0, 0, 0,
+                              now_ms >= m_last_switch_ms
+                                  ? now_ms - m_last_switch_ms : 0);
 
     const uint32_t candidate = choose_candidate_locked(raw_speaker_id);
     if (m_directed_speaker_id == 0)
@@ -259,7 +319,11 @@ bool SpeakerDirector::tick_locked(uint64_t now_ms)
 {
     enforce_incumbent_eligibility_locked(now_ms);
     if (m_manual_speaker_id != 0)
-        return promote_locked(m_manual_speaker_id, now_ms);
+        return promote_locked(m_manual_speaker_id, now_ms,
+                              SpeakerPromotionReason::ManualTake,
+                              0, 0, 0,
+                              now_ms >= m_last_switch_ms
+                                  ? now_ms - m_last_switch_ms : 0);
 
     if (m_directed_speaker_id == 0) {
         return fill_vacancy_locked(choose_candidate_locked(m_raw_speaker_id),
@@ -274,12 +338,16 @@ bool SpeakerDirector::tick_locked(uint64_t now_ms)
     if (candidate_age < m_sensitivity_ms || held_for < m_hold_ms)
         return false;
 
-    return promote_locked(m_candidate_speaker_id, now_ms);
+    return promote_locked(m_candidate_speaker_id, now_ms,
+                          SpeakerPromotionReason::Automatic,
+                          m_sensitivity_ms, m_hold_ms,
+                          candidate_age, held_for);
 }
 
 bool SpeakerDirector::tick(uint64_t now_ms)
 {
     std::lock_guard<std::mutex> lk(m_mtx);
+    now_ms = normalize_time_locked(now_ms);
     return tick_locked(now_ms);
 }
 
@@ -292,6 +360,7 @@ uint32_t SpeakerDirector::directed_speaker_id() const
 SpeakerDirectorSnapshot SpeakerDirector::snapshot(uint64_t now_ms) const
 {
     std::lock_guard<std::mutex> lk(m_mtx);
+    now_ms = std::max(now_ms, m_latest_time_ms);
     SpeakerDirectorSnapshot s;
     s.raw_speaker_id = m_raw_speaker_id;
     s.directed_speaker_id = m_directed_speaker_id;
@@ -309,5 +378,7 @@ SpeakerDirectorSnapshot SpeakerDirector::snapshot(uint64_t now_ms) const
     s.excluded_participant_ids = m_excluded_participant_ids;
     s.require_video = m_require_video;
     s.manual_active = m_manual_speaker_id != 0;
+    s.last_promotion = m_last_promotion;
+    s.recent_promotions = m_recent_promotions;
     return s;
 }

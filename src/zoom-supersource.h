@@ -29,3 +29,7 @@ void zoom_supersource_unload_gfx();
 // reconcile on each, so nothing suppressed while it was on is lost. See
 // src/zoom-supersource.cpp's request_audio_reconcile for the full reasoning.
 void zoom_supersource_set_collection_loading(bool loading);
+
+// Explicit operator action only: reopen silent tiles' retry budgets and issue
+// their next subscribe without clearing assignments or media failure state.
+void zoom_supersource_retry_media();

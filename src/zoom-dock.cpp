@@ -800,6 +800,7 @@ ZoomDock::ZoomDock(QWidget *parent)
     m_refresh_timer->setInterval(100);
     connect(m_refresh_timer, &QTimer::timeout, this, [this]() {
         SpeakerDirector::instance().tick(os_gettime_ns() / 1000000ULL);
+        log_speaker_director_promotion();
         update_state_indicator();
     });
     m_refresh_timer->start();
@@ -905,6 +906,40 @@ void ZoomDock::apply_speaker_director_settings()
 
     SpeakerDirector::instance().configure(
         sensitivity_ms, hold_ms, settings.speaker_require_video, excluded);
+}
+
+void ZoomDock::log_speaker_director_promotion()
+{
+    const uint64_t flushed_at_ms = os_gettime_ns() / 1000000ULL;
+    const auto snapshot = SpeakerDirector::instance().snapshot(flushed_at_ms);
+    for (const auto &promotion : snapshot.recent_promotions) {
+        if (promotion.session_id < m_director_log_session_id ||
+            (promotion.session_id == m_director_log_session_id &&
+             promotion.sequence <= m_director_log_sequence)) {
+            continue;
+        }
+        const char *reason = "automatic";
+        if (promotion.reason == SpeakerPromotionReason::ManualTake)
+            reason = "manual_take";
+        else if (promotion.reason == SpeakerPromotionReason::ForcedVacancy)
+            reason = "forced_vacancy";
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] speaker_director_promotion "
+             "session=%llu sequence=%llu reason=%s from_id=%u to_id=%u "
+             "promoted_at_ms=%llu flushed_at_ms=%llu "
+             "effective_sensitivity_ms=%u effective_hold_ms=%u "
+             "candidate_age_ms=%llu incumbent_held_ms=%llu",
+             static_cast<unsigned long long>(promotion.session_id),
+             static_cast<unsigned long long>(promotion.sequence), reason,
+             promotion.previous_speaker_id, promotion.promoted_speaker_id,
+             static_cast<unsigned long long>(promotion.promoted_at_ms),
+             static_cast<unsigned long long>(flushed_at_ms),
+             promotion.effective_sensitivity_ms, promotion.effective_hold_ms,
+             static_cast<unsigned long long>(promotion.candidate_age_ms),
+             static_cast<unsigned long long>(promotion.incumbent_held_ms));
+        m_director_log_session_id = promotion.session_id;
+        m_director_log_sequence = promotion.sequence;
+    }
 }
 
 // -- Internal helpers ----------------------------------------------------------
@@ -1068,7 +1103,8 @@ void ZoomDock::update_state_indicator()
         m_error_label->setVisible(true);
     } else {
         m_state_label->setText(state_label_text(s));
-        m_error_label->setVisible(false);
+        m_error_label->setText(QString::fromStdString(last_error));
+        m_error_label->setVisible(!last_error.empty());
     }
 
     const bool in_meeting    = (s == MeetingState::InMeeting);
@@ -1091,7 +1127,9 @@ void ZoomDock::update_state_indicator()
     m_leave_btn->setEnabled(in_meeting || transitioning || recovering);
     m_leave_btn->setText(in_meeting ? "Leave" : "Cancel");
     if (m_start_engine_btn && m_stop_engine_btn) {
-        m_start_engine_btn->setEnabled(in_meeting && !media_active && !transitioning && !recovering);
+        const bool media_failed = in_meeting && !last_error.empty();
+        m_start_engine_btn->setText(media_failed ? "Retry Media" : "Start Engine");
+        m_start_engine_btn->setEnabled(in_meeting && (!media_active || media_failed) && !transitioning && !recovering);
         m_stop_engine_btn->setEnabled(in_meeting && media_active && !transitioning);
     }
 
@@ -1860,7 +1898,7 @@ void ZoomDock::on_start_engine_clicked()
             "Join the Zoom meeting before starting the broadcast engine.");
         return;
     }
-    ZoomEngineClient::instance().start_media();
+    ZoomOutputManager::instance().retry_media();
     update_state_indicator();
 }
 

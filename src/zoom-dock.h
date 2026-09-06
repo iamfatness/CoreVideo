@@ -44,6 +44,7 @@ private:
     void on_cancel_recovery_clicked();
     void update_state_indicator();
     void apply_speaker_director_settings();
+    void log_speaker_director_promotion();
     void update_recovery_panel();
     void update_credentials_banner();
     void show_update_banner(const QString &tag, const QString &html_url);
@@ -71,6 +72,8 @@ private:
     QComboBox   *m_speaker_override_combo = nullptr;
     QPushButton *m_speaker_take_btn = nullptr;
     QPushButton *m_speaker_release_btn = nullptr;
+    uint64_t     m_director_log_session_id = 0;
+    uint64_t     m_director_log_sequence = 0;
 
     // First-run credentials notice
     CvBanner    *m_credentials_banner = nullptr;

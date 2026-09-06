@@ -34,6 +34,14 @@
 #define IPC_EVT_AUDIO       "audio"
 #define IPC_EVT_ERROR       "error"
 
+// macOS debug lifecycle events (additive; Windows and older peers may omit):
+// raw_media_state: state = stopped | waiting_permission | denied | recovering |
+// starting | active | failed; reason describes the triggering event. Timeout is
+// reason=privilege_request_timeout, not a denial. Any non-active state invalidates
+// session readiness. raw_media_ready remains the compatible successful raw-start
+// event; it does NOT certify source subscriptions or first frames. Per-source
+// frame events and subscribe errors remain the health authority.
+
 // Shared-memory name prefix (no leading slash — added per-platform below)
 #define IPC_SHM_PREFIX "ZoomObsPlugin_"
 

@@ -58,7 +58,11 @@
 
 #include "../../src/engine-ipc.h"
 #include "../../src/shm-generation.h"
+#include "../../src/raw-media-lifecycle.h"
+#include "../../src/video-quality-policy.h"
+#include "../../src/meeting-callback-epoch.h"
 #include "engine-writer.h"
+#include "macos-admission-state.h"
 #include "tile-clock-log.h"
 
 #include <sys/socket.h>
@@ -81,6 +85,7 @@
 // release renderers and SHM regions when the meeting ends, and attach the
 // screen-share controller once the meeting is up.
 static void handle_stop_media(const char *reason);
+static void raw_media_event(RawMediaEvent event, const char *reason, int sdk_code = 0);
 static void share_attach();
 static void share_teardown();
 
@@ -510,8 +515,15 @@ static void send_roster()
 // use are stubbed rather than omitted — same shape as the Windows engine's block
 // of empty overrides. An omitted @required method is an unrecognized-selector
 // crash the moment the SDK calls it.
+static MeetingCallbackEpoch g_meeting_callbacks;
+@class CVMeetingDelegate;
+static CVMeetingDelegate *g_meeting_delegate = nil;
+
 @interface CVMeetingDelegate : NSObject <ZoomSDKMeetingServiceDelegate,
                                          ZoomSDKMeetingActionControllerDelegate>
+- (void)handleCurrentMeetingStatus:(ZoomSDKMeetingStatus)state
+                     meetingError:(ZoomSDKMeetingError)error
+                        EndReason:(EndMeetingReason)reason;
 @end
 
 @implementation CVMeetingDelegate
@@ -519,6 +531,30 @@ static void send_roster()
 - (void)onMeetingStatusChange:(ZoomSDKMeetingStatus)state
                  meetingError:(ZoomSDKMeetingError)error
                     EndReason:(EndMeetingReason)reason
+{
+    const auto ticket = g_meeting_callbacks.capture();
+    void (^deliver)(void) = ^{
+        const bool terminal = state == ZoomSDKMeetingStatus_Disconnecting ||
+            state == ZoomSDKMeetingStatus_Ended || state == ZoomSDKMeetingStatus_Failed;
+        g_meeting_callbacks.deliver(ticket, terminal, [&] {
+            if (g_meeting_delegate != self) return;
+            macos_dispatch_meeting_status(
+                state,
+                [](const std::string &event) { EngineIpc::write(event); },
+                [&] {
+                    [self handleCurrentMeetingStatus:state
+                                       meetingError:error
+                                          EndReason:reason];
+                });
+        });
+    };
+    if (![NSThread isMainThread]) dispatch_async(dispatch_get_main_queue(), deliver);
+    else deliver();
+}
+
+- (void)handleCurrentMeetingStatus:(ZoomSDKMeetingStatus)state
+                     meetingError:(ZoomSDKMeetingError)error
+                        EndReason:(EndMeetingReason)reason
 {
     EngineIpc::write(R"({"cmd":"debug","stage":"meeting_status","status":)" +
                      std::to_string(static_cast<int>(state)) +
@@ -540,8 +576,13 @@ static void send_roster()
         share_attach();
         rebuild_roster();
         send_roster();
+        raw_media_event(RawMediaEvent::InMeeting, "in_meeting");
         break;
     }
+    case ZoomSDKMeetingStatus_Join_Breakout_Room:
+    case ZoomSDKMeetingStatus_Leave_Breakout_Room:
+        raw_media_event(RawMediaEvent::Transition, "breakout_transition");
+        break;
     case ZoomSDKMeetingStatus_Disconnecting:
     case ZoomSDKMeetingStatus_Ended: {
         handle_stop_media("meeting_left");
@@ -663,8 +704,6 @@ static void send_roster()
 
 @end
 
-static CVMeetingDelegate *g_meeting_delegate = nil;
-
 // The join context is deliberately a never-released global. main.cpp keeps its
 // JoinParam strings alive for the same reason: Join/joinMeeting: is asynchronous
 // and this file is built without ARC, so releasing the context on return would
@@ -706,9 +745,6 @@ static void handle_join(const std::string &line)
         return;
     }
 
-    if (!g_meeting_delegate) g_meeting_delegate = [[CVMeetingDelegate alloc] init];
-    svc.delegate = g_meeting_delegate;
-
     long long meeting_number = 0;
     try {
         meeting_number = std::stoll(meeting_id);
@@ -717,6 +753,16 @@ static void handle_join(const std::string &line)
         return;
     }
 
+    // Invalidate queued status work before retiring the old delegate. A copied
+    // dispatch block retains self, so its identity cannot be recycled underneath it.
+    g_meeting_callbacks.begin();
+    auto *actions = action_controller();
+    if (actions && actions.delegate == g_meeting_delegate) actions.delegate = nil;
+    svc.delegate = nil;
+    [g_meeting_delegate release];
+    g_meeting_delegate = [[CVMeetingDelegate alloc] init];
+    svc.delegate = g_meeting_delegate;
+    handle_stop_media("replacement_meeting");
     g_join_ctx = [[ZoomSDKJoinMeetingElements alloc] init];
     g_join_ctx.userType          = ZoomSDKUserType_WithoutLogin;
     g_join_ctx.meetingNumber     = meeting_number;
@@ -765,6 +811,10 @@ static void handle_join(const std::string &line)
 
 static void handle_leave()
 {
+    // Cancel statuses queued before Leave and reject subsequent nonterminal
+    // statuses, but keep the delegate for the SDK's leave-completion notification.
+    g_meeting_callbacks.leave();
+    handle_stop_media("meeting_leave_requested");
     ZoomSDKMeetingService *svc = meeting_service();
     if (svc) [svc leaveMeetingWithCmd:LeaveMeetingCmd_Leave];
 }
@@ -824,6 +874,7 @@ struct VideoTarget {
     ShmRegion shm;
     uint64_t  frame_count = 0;
     uint32_t  shm_gen = 0;          // bumped per region (re)create; sent per frame
+    uint32_t  requested_resolution = 1; // desired quality survives recovery
     bool      shm_fail_reported = false;
 };
 
@@ -1136,19 +1187,28 @@ static void video_subscribe(uint32_t participant_id, const std::string &source_u
     }
     g_source_participant[source_uuid] = participant_id;
 
-    auto existing = g_video.find(participant_id);
-    if (existing != g_video.end()) {
-        existing->second.targets.emplace(source_uuid, VideoTarget{});
-        return;                     // one renderer already serves this participant
+    auto &pending = g_video[participant_id];
+    pending.participant_id = participant_id;
+    pending.targets[source_uuid].requested_resolution = resolution;
+    resolution = shared_video_requested_resolution(pending.targets, resolution);
+    if (pending.renderer) {
+        shared_video_upgrade_resolution(pending.resolution, resolution,
+            [&](uint32_t requested) {
+                const ZoomSDKError result =
+                    [pending.renderer setResolution:sdk_resolution(requested)];
+                EngineIpc::write(
+                    R"({"cmd":"debug","stage":"set_resolution","source_uuid":")" +
+                    source_uuid + R"(","participant_id":)" +
+                    std::to_string(participant_id) + R"(,"code":)" +
+                    std::to_string(static_cast<int>(result)) + R"(,"resolution":)" +
+                    std::to_string(requested) + "}");
+                return static_cast<int>(result);
+            });
+        shared_video_accept_resolution(pending, pending.resolution,
+            [](const std::string &event) { EngineIpc::write(event); });
+        return;
     }
-
     if (!g_raw_media_active) {
-        // Remember the binding; the renderer is created when raw media starts.
-        VideoSubscription pending;
-        pending.participant_id = participant_id;
-        pending.resolution = resolution;
-        pending.targets.emplace(source_uuid, VideoTarget{});
-        g_video.emplace(participant_id, std::move(pending));
         EngineIpc::write(
             R"({"cmd":"debug","stage":"video_subscribe_deferred","source_uuid":")" +
             source_uuid + R"(","participant_id":)" +
@@ -1193,6 +1253,15 @@ static void video_subscribe(uint32_t participant_id, const std::string &source_u
             std::to_string(static_cast<int>(res_err)) + R"(,"resolution":)" +
             std::to_string(candidate) + "}");
 
+        if (res_err != ZoomSDKError_Success) {
+            // An unaccepted request is not negotiated quality. Try the next
+            // candidate before subscribing this new (not yet warm) renderer.
+            renderer.delegate = nil;
+            [delegate release];
+            [rdc destroyRender:renderer];
+            continue;
+        }
+
         const ZoomSDKError sub_err =
             [renderer subscribe:participant_id rawDataType:ZoomSDKRawDataType_Video];
         EngineIpc::write(
@@ -1203,21 +1272,11 @@ static void video_subscribe(uint32_t participant_id, const std::string &source_u
             std::to_string(candidate) + "}");
 
         if (sub_err == ZoomSDKError_Success) {
-            VideoSubscription sub;
-            sub.participant_id = participant_id;
-            sub.resolution = static_cast<uint32_t>(candidate);
-            sub.renderer = renderer;
-            sub.delegate = delegate;
-            sub.targets.emplace(source_uuid, VideoTarget{});
-            g_video.emplace(participant_id, std::move(sub));
-            if (static_cast<uint32_t>(candidate) != resolution) {
-                EngineIpc::write(
-                    R"({"cmd":"debug","stage":"video_resolution_downgraded","source_uuid":")" +
-                    source_uuid + R"(","participant_id":)" +
-                    std::to_string(participant_id) + R"(,"requested":)" +
-                    std::to_string(resolution) + R"(,"actual":)" +
-                    std::to_string(candidate) + "}");
-            }
+            pending.renderer = renderer;
+            pending.delegate = delegate;
+            shared_video_publish_created_resolution(pending, static_cast<uint32_t>(candidate),
+                source_uuid,
+                [](const std::string &event) { EngineIpc::write(event); });
             return;
         }
 
@@ -1933,13 +1992,18 @@ static void resubscribe_raw_media(const char *reason)
         std::lock_guard<std::mutex> lock(g_video_mtx);
         for (auto &entry : g_video) {
             if (entry.second.renderer) continue;   // already live
-            for (auto &t : entry.second.targets) {
-                pending.emplace_back(entry.first, t.first, entry.second.resolution);
+            // Participant ids are room-scoped. Keep missing assignments pending
+            // until the plugin resolves/rebinds them from the new roster.
+            if (std::none_of(g_roster.begin(), g_roster.end(), [&](const auto &p) {
+                    return p.user_id == entry.first;
+                })) continue;
+            // One attempt per participant; placeholders retain ALL bindings even
+            // if the SDK rejects every resolution. Unsubscribe can still remove them.
+            if (!entry.second.targets.empty()) {
+                const auto &t = *entry.second.targets.begin();
+                pending.emplace_back(entry.first, t.first, t.second.requested_resolution);
             }
         }
-        // video_subscribe re-creates these entries; drop the placeholders first
-        // so it does not short-circuit on "a subscription already exists".
-        for (auto &p : pending) g_video.erase(std::get<0>(p));
     }
 
     EngineIpc::write(R"({"cmd":"debug","stage":"raw_media_resubscribe","reason":")" +
@@ -1966,13 +2030,9 @@ static void resubscribe_raw_media(const char *reason)
     }
 }
 
-// Guards the privilege-request retry loop: without it, a host who denies the
-// request would have us re-ask on every callback.
-static bool g_privilege_requested = false;
-
-// Defined below; the record delegate retries the start once the host grants
-// local-recording permission.
-static void handle_start_media(const char *reason);
+static RawMediaLifecycle g_raw_lifecycle;
+@class CVRecordDelegate;
+static CVRecordDelegate *g_record_delegate = nil;
 
 @interface CVRecordDelegate : NSObject <ZoomSDKMeetingRecordDelegate>
 @end
@@ -1984,20 +2044,27 @@ static void handle_start_media(const char *reason);
     EngineIpc::write(
         R"({"cmd":"debug","stage":"local_recording_privilege_status","status":)" +
         std::to_string(static_cast<int>(status)) + "}");
-    if (status == ZoomSDKRequestLocalRecordingStatus_Granted) {
-        handle_start_media("privilege_granted");
-        return;
-    }
-    EngineIpc::write(
-        R"({"cmd":"error","msg":"raw_media_start_failed","reason":"local_recording_privilege_denied","status":)" +
-        std::to_string(static_cast<int>(status)) + "}");
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_record_delegate != self) return;
+        if (status == ZoomSDKRequestLocalRecordingStatus_Granted) {
+            raw_media_event(RawMediaEvent::Grant, "privilege_granted");
+        } else if (status == ZoomSDKRequestLocalRecordingStatus_Denied) {
+            raw_media_event(RawMediaEvent::Denied, "privilege_denied");
+        } else if (status == ZoomSDKRequestLocalRecordingStatus_Timeout) {
+            raw_media_event(RawMediaEvent::Timeout, "privilege_request_timeout");
+        }
+    });
 }
 
 - (void)onRecordPrivilegeChange:(BOOL)canRec
 {
     EngineIpc::write(R"({"cmd":"debug","stage":"record_privilege_change","can_record":)" +
                      std::string(canRec ? "true" : "false") + "}");
-    if (canRec && !g_raw_media_active) handle_start_media("privilege_changed");
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_record_delegate != self) return;
+        raw_media_event(canRec ? RawMediaEvent::Grant : RawMediaEvent::Denied,
+                        canRec ? "privilege_changed" : "privilege_revoked");
+    });
 }
 
 - (void)onRecord2MP4Done:(BOOL)success Path:(NSString *)recordPath {}
@@ -2014,91 +2081,135 @@ static void handle_start_media(const char *reason);
 
 @end
 
-static CVRecordDelegate *g_record_delegate = nil;
+// Invalidate SDK resources at a demonstrated lifecycle boundary, preserving
+// desired bindings and SHM generations. Never use the destructive manual Stop
+// path here: it erases assignments required for grant/room recovery.
+static void suspend_raw_media()
+{
+    g_raw_media_active = false;
+    {
+        std::lock_guard<std::mutex> lock(g_video_mtx);
+        for (auto &entry : g_video) {
+            auto &sub = entry.second;
+            if (sub.renderer) {
+                sub.renderer.delegate = nil;
+                [sub.renderer unSubscribe];
+                auto *rdc = raw_data_controller();
+                if (rdc) [rdc destroyRender:sub.renderer];
+                sub.renderer = nil;
+            }
+            [sub.delegate release];
+            sub.delegate = nil;
+            // Restart the diagnostic first-frame counter, not SHM generation.
+            for (auto &target : sub.targets) target.second.frame_count = 0;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_share_mtx);
+        share_unsubscribe_renderer_locked();
+    }
+    if (g_audio_subscribed) {
+        ZoomSDKRawDataController *rdc = raw_data_controller();
+        ZoomSDKAudioRawDataHelper *helper = nil;
+        if (rdc && [rdc getAudioRawDataHelper:&helper] == ZoomSDKError_Success && helper)
+            [helper unSubscribe];
+        g_audio_subscribed = false;
+    }
+    auto *svc = meeting_service();
+    auto *rec = svc ? [svc getRecordController] : nil;
+    if (rec) {
+        const auto err = [rec stopRawRecording];
+        EngineIpc::write(R"({"cmd":"debug","stage":"stop_raw_recording","code":)" +
+                         std::to_string(static_cast<int>(err)) + "}");
+    }
+}
+
+static void raw_media_event(RawMediaEvent event, const char *reason, int sdk_code)
+{
+    // All callers either run on the command main queue or dispatch callbacks
+    // onto it. The decision is committed before any potentially reentrant SDK call.
+    const std::string before = g_raw_lifecycle.state();
+    const RawMediaAction action = g_raw_lifecycle.on(event);
+    if (before != g_raw_lifecycle.state() || event == RawMediaEvent::Timeout) {
+        EngineIpc::write(R"({"cmd":"debug","stage":"raw_media_state","state":")" +
+                         std::string(g_raw_lifecycle.state()) + R"(","reason":")" +
+                         std::string(reason ? reason : "") + "\"}");
+    }
+    if (action == RawMediaAction::None) return;
+    if (action == RawMediaAction::Suspend) {
+        suspend_raw_media();
+        return;
+    }
+    if (action == RawMediaAction::Fail) {
+        EngineIpc::write(R"({"cmd":"error","msg":"raw_media_start_failed","reason":")" +
+                         std::string(reason ? reason : "") + R"(","code":)" +
+                         std::to_string(sdk_code) +
+                         R"(,"detail":"Raw media could not start. Check recording permission and SDK licensing, then retry Start. The meeting remains joined."})");
+        return;
+    }
+    if (action == RawMediaAction::Restore) {
+        g_raw_media_active = true;
+        // Session readiness is NOT proof of healthy video; first frames and
+        // individual subscribe failures remain the source-health authority.
+        EngineIpc::write(R"({"cmd":"debug","stage":"raw_media_ready","reason":")" +
+                         std::string(reason ? reason : "") + "\"}");
+        resubscribe_raw_media(reason);
+        return;
+    }
+    auto *svc = meeting_service();
+    auto *rec = svc ? [svc getRecordController] : nil;
+    if (!rec) {
+        raw_media_event(RawMediaEvent::CheckFailed, "recording_controller_unavailable", -1);
+        return;
+    }
+    if (!g_record_delegate) g_record_delegate = [[CVRecordDelegate alloc] init];
+    rec.delegate = g_record_delegate;
+    if (action == RawMediaAction::Check) {
+        const auto err = [rec canStartRawRecording];
+        EngineIpc::write(R"({"cmd":"debug","stage":"can_start_raw_recording","code":)" +
+                         std::to_string(static_cast<int>(err)) + "}");
+        // Only NoPermission authorizes a host request. NoLicense (21), WrongUsage
+        // and service errors are not evidence that the host withheld permission.
+        raw_media_event(err == ZoomSDKError_Success ? RawMediaEvent::CheckReady :
+                        err == ZoomSDKError_NoPermission ? RawMediaEvent::NoPermission :
+                        RawMediaEvent::CheckFailed, "cannot_start_raw_recording", static_cast<int>(err));
+    } else if (action == RawMediaAction::Request) {
+        const auto support = [rec isSupportRequestLocalRecordingPrivilege];
+        const auto err = support == ZoomSDKError_Success ? [rec requestLocalRecordingPrivilege] : support;
+        EngineIpc::write(R"({"cmd":"debug","stage":"request_recording_privilege","code":)" +
+                         std::to_string(static_cast<int>(err)) + "}");
+        if (err != ZoomSDKError_Success) {
+            raw_media_event(RawMediaEvent::RequestFailed, "recording_privilege_request_failed", static_cast<int>(err));
+        } else {
+            EngineIpc::write(R"({"cmd":"error","msg":"raw_media_start_failed","reason":"cannot_start_raw_recording","privilege_requested":true,"detail":"Raw recording needs local-recording permission. The meeting host must allow this participant to record."})");
+        }
+    } else if (action == RawMediaAction::Start) {
+        const auto err = [rec startRawRecording];
+        EngineIpc::write(R"({"cmd":"debug","stage":"start_raw_recording","code":)" +
+                         std::to_string(static_cast<int>(err)) + "}");
+        raw_media_event(err == ZoomSDKError_Success ? RawMediaEvent::StartSucceeded :
+                        RawMediaEvent::StartFailed, err == ZoomSDKError_Success ? "raw_recording_started" :
+                        "start_raw_recording_failed", static_cast<int>(err));
+    }
+}
 
 static void handle_start_media(const char *reason)
 {
-    ZoomSDKMeetingService *svc = meeting_service();
-    if (!svc) {
-        EngineIpc::write(
-            R"({"cmd":"error","msg":"raw_media_start_failed","reason":"not_in_meeting"})");
-        return;
-    }
-    ZoomSDKMeetingRecordController *rec = [svc getRecordController];
-    if (!rec) {
-        EngineIpc::write(R"({"cmd":"debug","stage":"recording_controller","code":-1})");
-        EngineIpc::write(
-            R"({"cmd":"error","msg":"raw_media_start_failed",)"
-            R"("reason":"recording_controller_unavailable"})");
-        return;
-    }
-
-    // Attach before asking: the grant arrives asynchronously on this delegate.
-    if (!g_record_delegate) g_record_delegate = [[CVRecordDelegate alloc] init];
-    rec.delegate = g_record_delegate;
-
-    const ZoomSDKError can_raw = [rec canStartRawRecording];
-    EngineIpc::write(R"({"cmd":"debug","stage":"can_start_raw_recording","code":)" +
-                     std::to_string(static_cast<int>(can_raw)) + "}");
-    if (can_raw != ZoomSDKError_Success && g_privilege_requested) {
-        // Already asked once this meeting; do not re-prompt the host on every
-        // retry. Report and stop.
-        EngineIpc::write(
-            R"({"cmd":"error","msg":"raw_media_start_failed","reason":"cannot_start_raw_recording",)"
-            R"("code":)" + std::to_string(static_cast<int>(can_raw)) +
-            R"(,"privilege_requested":true,"detail":"Local-recording permission was )"
-            R"(already requested and has not been granted."})");
-        return;
-    }
-    if (can_raw != ZoomSDKError_Success) {
-        // Usually NoPermission(6): the engine joined as a participant and the
-        // host has not granted local recording. Ask for it rather than giving
-        // up — same fallback as main.cpp. The host sees a prompt; when they
-        // accept, onLocalRecordingPrivilegeRequestStatus fires and we retry.
-        const ZoomSDKError support_req = [rec isSupportRequestLocalRecordingPrivilege];
-        EngineIpc::write(
-            R"({"cmd":"debug","stage":"support_recording_privilege_request","code":)" +
-            std::to_string(static_cast<int>(support_req)) + "}");
-        const ZoomSDKError req = [rec requestLocalRecordingPrivilege];
-        g_privilege_requested = true;
-        EngineIpc::write(
-            R"({"cmd":"debug","stage":"request_recording_privilege","code":)" +
-            std::to_string(static_cast<int>(req)) + "}");
-        EngineIpc::write(
-            R"({"cmd":"error","msg":"raw_media_start_failed","reason":"cannot_start_raw_recording",)"
-            R"("code":)" + std::to_string(static_cast<int>(can_raw)) +
-            R"(,"privilege_requested":)" +
-            std::string(req == ZoomSDKError_Success ? "true" : "false") +
-            R"(,"detail":"Raw recording needs local-recording permission. )"
-            R"(The meeting host must allow this participant to record."})");
-        return;
-    }
-
-    const ZoomSDKError start_raw = [rec startRawRecording];
-    EngineIpc::write(R"({"cmd":"debug","stage":"start_raw_recording","code":)" +
-                     std::to_string(static_cast<int>(start_raw)) + "}");
-    if (start_raw != ZoomSDKError_Success) {
-        EngineIpc::write(
-            R"({"cmd":"error","msg":"raw_media_start_failed","reason":"start_raw_recording_failed","code":)" +
-            std::to_string(static_cast<int>(start_raw)) + "}");
-        return;
-    }
-
-    g_raw_media_active = true;
-    // The plugin flips its media-active flag on this exact debug stage
-    // (zoom-engine-client.cpp). Without it every output stays labelled
-    // "Raw media not ready" in the Output Manager while frames are visibly
-    // arriving — health that contradicts the picture on screen.
-    EngineIpc::write(R"({"cmd":"debug","stage":"raw_media_ready","reason":")" +
-                     std::string(reason ? reason : "") + "\"}");
-    resubscribe_raw_media(reason);
+    raw_media_event(RawMediaEvent::Start, reason);
 }
 
 static void handle_stop_media(const char *reason)
 {
     g_raw_media_active = false;
-    // Per-meeting state: a fresh meeting should be allowed to ask again.
-    g_privilege_requested = false;
+    raw_media_event(RawMediaEvent::Stop, reason);
+    if (std::string(reason ? reason : "") != "manual_stop")
+        raw_media_event(RawMediaEvent::Reset, reason);
+    auto *record_service = meeting_service();
+    auto *record_controller = record_service ? [record_service getRecordController] : nil;
+    if (record_controller && record_controller.delegate == g_record_delegate)
+        record_controller.delegate = nil;
+    [g_record_delegate release];
+    g_record_delegate = nil; // queued callbacks from the retired delegate are ignored
     {
         std::lock_guard<std::mutex> lock(g_video_mtx);
         std::vector<uint32_t> ids;

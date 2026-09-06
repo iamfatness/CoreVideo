@@ -4,7 +4,8 @@
 #include "talkback-key.h"  // talkback_session_mic_blocked() -- Law 1
 #include "talkback-plan.h" // talkback_dedup_preserve_order() -- Task 5 fix round 1, F4
 #include "zoom-join-decision.h"
-#include "zoom-privilege-notice.h" // record-privilege handshake copy/classification
+#include "zoom-privilege-notice.h"
+#include "zoom-engine-error-dispatch.h" // record-privilege handshake copy/classification
 #include "zoom-reconnect.h"
 #include "zoom-sdk-init-retry.h"
 #include <QJsonArray>
@@ -706,6 +707,9 @@ void ZoomEngineClient::stop_for_reconnect()
     // both costs nothing and covers every trigger.
     {
         std::lock_guard<std::mutex> lk(m_mtx);
+        m_raw_media_error.clear();
+        m_privilege_notice.clear();
+        m_media_failures.reset();
         talkback_nomination_reset(m_talkback_nomination_status);
         m_talkback_nomination_pending = TalkbackNominationPending{};
         talkback_presence_reset(m_talkback_channel_presence);
@@ -897,6 +901,10 @@ bool ZoomEngineClient::join(const std::string &meeting_id,
         m_last_jwt, meeting_id, passcode, display_name, kind, tokens);
     {
         std::lock_guard<std::mutex> lk(m_mtx);
+        // An explicit join replaces the session; room-level joined reports do not.
+        m_raw_media_error.clear();
+        m_privilege_notice.clear();
+        m_media_failures.reset();
         m_join_pending = true;
         m_pending_meeting_id = meeting_id;
         m_pending_passcode = passcode;
@@ -915,6 +923,12 @@ bool ZoomEngineClient::join(const std::string &meeting_id,
 void ZoomEngineClient::subscribe_spotlight(const std::string &source_uuid, uint32_t slot)
 {
     if (!m_running.load(std::memory_order_acquire) || source_uuid.empty()) return;
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        // Engine-selected participant; failure membership still records the
+        // actual participant and only that participant's read can recover it.
+        m_media_failures.assign(source_uuid, 0);
+    }
     write_json(R"({"cmd":"subscribe","source_uuid":")" + json_escape(source_uuid) +
         R"(","mode":"spotlight","slot":)" + std::to_string(slot) + "}");
 }
@@ -922,6 +936,12 @@ void ZoomEngineClient::subscribe_spotlight(const std::string &source_uuid, uint3
 void ZoomEngineClient::subscribe_screenshare(const std::string &source_uuid)
 {
     if (!m_running.load(std::memory_order_acquire) || source_uuid.empty()) return;
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        // Engine-selected participant; failure membership still records the
+        // actual participant and only that participant's read can recover it.
+        m_media_failures.assign(source_uuid, 0);
+    }
     write_json(R"({"cmd":"subscribe","source_uuid":")" + json_escape(source_uuid) +
         R"(","mode":"screenshare"})");
 }
@@ -1103,6 +1123,10 @@ void ZoomEngineClient::subscribe(const std::string &source_uuid,
                                  bool video_only)
 {
     if (!m_running.load(std::memory_order_acquire) || source_uuid.empty()) return;
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        m_media_failures.assign(source_uuid, participant_id);
+    }
     write_json(R"({"cmd":"subscribe","source_uuid":")" + json_escape(source_uuid) +
         R"(","participant_id":)" + std::to_string(participant_id) +
         R"(,"resolution":)" + std::to_string(static_cast<int>(video_resolution)) +
@@ -1128,6 +1152,10 @@ bool ZoomEngineClient::subscribe_audio(const std::string &source_uuid,
 
 void ZoomEngineClient::unsubscribe(const std::string &source_uuid)
 {
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        m_media_failures.remove(source_uuid);
+    }
     if (!m_running.load(std::memory_order_acquire) || source_uuid.empty()) return;
     write_json(R"({"cmd":"unsubscribe","source_uuid":")" + json_escape(source_uuid) + "\"}");
 }
@@ -1143,6 +1171,27 @@ void ZoomEngineClient::unregister_source(const std::string &source_uuid)
 {
     std::lock_guard<std::mutex> lk(m_mtx);
     m_sources.erase(source_uuid);
+    m_media_failures.remove(source_uuid);
+}
+
+bool ZoomEngineClient::source_media_failed(const std::string &uuid) const
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    return m_media_failures.failed(uuid);
+}
+
+uint64_t ZoomEngineClient::media_delivery_ticket(const std::string &uuid, uint32_t participant) const
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    return m_media_failures.ticket(uuid, participant);
+}
+
+void ZoomEngineClient::acknowledge_media_delivery(const std::string &uuid, uint32_t participant, uint64_t ticket)
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    m_media_failures.delivered(uuid, participant, ticket);
+    // Dock polling observes recovery. Never call UI/source callbacks while a
+    // source's frame lock may be held, or queue one UI task per video frame.
 }
 
 bool ZoomEngineClient::launch_engine()
@@ -1367,6 +1416,7 @@ void ZoomEngineClient::set_privilege_notice_and_notify(const std::string &messag
     std::vector<NoticeCallback> callbacks;
     {
         std::lock_guard<std::mutex> lk(m_mtx);
+        if (m_privilege_notice == message) return;
         m_privilege_notice = message;
         for (const auto &entry : m_notice_callbacks)
             if (entry.second) callbacks.push_back(entry.second);
@@ -1452,9 +1502,26 @@ void ZoomEngineClient::handle_event(const std::string &line)
             // see src/zoom-privilege-notice.h. A notice that never clears is
             // its own defect, so clear it on every successful start, not just
             // ones that followed a notice.
+            {
+                std::lock_guard<std::mutex> lk(m_mtx);
+                m_raw_media_error.clear();
+            }
             clear_privilege_notice_and_notify();
-        } else if (stage == "raw_media_stopped")
+        } else if (stage == "raw_media_state") {
+            // Session readiness is separate from per-source frame health.
+            const auto media_state = obj.value("state").toString().toStdString();
+            if (media_state != "active")
+                m_media_active.store(false, std::memory_order_release);
+            const auto notice = zoom_raw_media_state_notice(media_state,
+                obj.value("reason").toString().toStdString());
+            if (!notice.empty()) set_privilege_notice_and_notify(notice);
+            else if (media_state == "stopped") clear_privilege_notice_and_notify();
+        } else if (stage == "raw_media_stopped") {
             m_media_active.store(false, std::memory_order_release);
+            std::lock_guard<std::mutex> lk(m_mtx);
+            m_raw_media_error.clear();
+            m_media_failures.stop();
+        }
         return;
     }
     if (cmd == "talkback_probe") {
@@ -1589,9 +1656,11 @@ void ZoomEngineClient::handle_event(const std::string &line)
     if (cmd == "joined") {
         m_awaiting_admission.store(false, std::memory_order_release);
         m_state.store(MeetingState::InMeeting, std::memory_order_release);
-        // A successful join supersedes whatever failed before it; without
+        // A successful join supersedes connection errors; without
         // this the dock keeps showing "Connection failed" from a previous
-        // attempt over a perfectly healthy meeting.
+        // attempt over a perfectly healthy meeting. Breakout return also
+        // emits joined: preserve source assignments and unresolved media
+        // failures while the engine restores subscriptions itself.
         clear_last_error();
         ZoomReconnectManager::instance().on_join_success();
         return;
@@ -1626,6 +1695,8 @@ void ZoomEngineClient::handle_event(const std::string &line)
             // same as this "left" handler has never notified roster callbacks
             // either (see this function's own doc comment).
             m_privilege_notice.clear();
+            m_raw_media_error.clear();
+            m_media_failures.reset();
             keep_failed = !m_last_error.empty() &&
                 !m_user_leaving.load(std::memory_order_acquire);
         }
@@ -1678,12 +1749,19 @@ void ZoomEngineClient::handle_event(const std::string &line)
             }
         }
         blog(LOG_ERROR, "[obs-zoom-plugin] Zoom engine event: %s", line.c_str());
+        {
+            std::lock_guard<std::mutex> lk(m_mtx);
+            m_debug_events.push_back({os_gettime_ns() / 1000000ULL,
+                obj.value("msg").toString().toStdString(),
+                obj.value("source_uuid").toString().toStdString(),
+                static_cast<uint32_t>(obj.value("participant_id").toInt()), line});
+            while (m_debug_events.size() > 300) m_debug_events.pop_front();
+        }
         const QString emsg = obj.value("msg").toString();
         // Media-path errors: the meeting itself is still healthy, so surface
         // them loudly to the operator but do NOT tear the session down or
         // trigger the reconnect flow.
-        if (emsg == "shm_create_failed" || emsg == "subscribe_rejected" ||
-            emsg == "shm_name_collision") {
+        if (zoom_persistent_source_media_failure(emsg.toStdString())) {
             const std::string uuid =
                 obj.value("source_uuid").toString().toStdString();
             std::string error_message;
@@ -1714,7 +1792,18 @@ void ZoomEngineClient::handle_event(const std::string &line)
                     (limit > 0 ? " (limit " + std::to_string(limit) + ")"
                                : std::string());
             }
-            set_error_and_notify(error_message);
+            std::vector<NoticeCallback> callbacks;
+            std::string notice;
+            {
+                std::lock_guard<std::mutex> lk(m_mtx);
+                if (m_media_failures.persistent_fail(uuid, error_message,
+                        m_sources.find(uuid) != m_sources.end()) && m_privilege_notice.empty()) {
+                    notice = m_media_failures.status(os_gettime_ns() / 1000000ULL);
+                    for (const auto &entry : m_notice_callbacks)
+                        if (entry.second) callbacks.push_back(entry.second);
+                }
+            }
+            for (const auto &cb : callbacks) cb(notice);
             return;
         }
         // Another media-path error: sources keep their participant binding
@@ -1723,100 +1812,83 @@ void ZoomEngineClient::handle_event(const std::string &line)
         // reassigns the source or that participant comes back. Subscribing
         // to an absent participant is therefore a waiting state, not an
         // error — stay quiet and let the recovery loop keep retrying. If the
-        // participant IS in the roster the failure is real and stays loud,
+        // participant IS in the roster it joins the current recovery episode,
         // but either way the meeting itself is healthy: never route this
         // into the join-failure / reconnect machinery below (doing so
         // flipped the session to "Connection failed" mid-meeting).
-        // raw_media_start_failed with privilege_requested is the NORMAL first
-        // half of the record-privilege handshake: canStartRawRecording returns
-        // NoPermission(6), the engine requests the privilege, and the grant
-        // lands moments later (121ms observed live 2026-08-20) followed by
-        // raw_media_ready. Routing it into the join-failure tail flipped a
-        // healthy joined session to Failed, which then gated start_engine,
-        // resubscription and recovery for the rest of the session. Never vote
-        // against the meeting -- unchanged from before this fix.
-        //
-        // What changed (live defect, 2026-09-05): this used to ALSO set
-        // m_last_error and fire the error-callback list, which is what pops
-        // the "Zoom Join" QMessageBox -- so a session working exactly as
-        // designed showed the operator a modal reading "raw recording
-        // failed". A pending grant is a STATE, not a failure, so it now goes
-        // to the separate notice-callback list instead (see NoticeCallback's
-        // doc comment in zoom-engine-client.h) and m_last_error is left
-        // untouched -- other code (e.g. the "left" handler's keep_failed
-        // check) reads that field as "the session actually failed", which
-        // this is not. src/zoom-privilege-notice.h picks the operator-facing
-        // copy and tells a first request apart from a repeat one (the engine
-        // only asks the host once per meeting; every later report is the same
-        // still-pending wait, distinguished only by its "detail" text).
-        if (emsg == "raw_media_start_failed" &&
-            obj.value("privilege_requested").toBool()) {
-            const std::string detail = obj.value("detail").toString().toStdString();
-            set_privilege_notice_and_notify(zoom_privilege_notice_text(detail));
-            return;
-        }
-        if (emsg == "video_subscribe_failed") {
+        if (zoom_source_video_failure(emsg.toStdString())) {
             const uint32_t participant_id =
                 static_cast<uint32_t>(obj.value("participant_id").toInt());
             const std::string uuid =
                 obj.value("source_uuid").toString().toStdString();
-            bool known = false;
-            std::string error_message;
-            std::vector<ErrorCallback> error_callbacks;
+            bool first = false;
+            std::vector<NoticeCallback> callbacks;
+            std::string notice;
             {
                 std::lock_guard<std::mutex> lk(m_mtx);
-                for (const auto &p : m_roster) {
-                    if (p.user_id == participant_id) {
-                        known = true;
-                        break;
-                    }
-                }
-                if (known) {
-                    error_message =
-                        "Zoom engine could not subscribe to video for source " +
-                        (uuid.empty() ? std::string("(unknown)") : uuid);
-                    m_last_error = error_message;
-                    for (const auto &entry : m_error_callbacks)
-                        if (entry.second)
-                            error_callbacks.push_back(entry.second);
+                const bool known = std::any_of(m_roster.begin(), m_roster.end(),
+                    [&](const ParticipantInfo &p) { return p.user_id == participant_id; });
+                first = m_media_failures.fail(uuid, participant_id,
+                    emsg.toStdString() + " (code " + std::to_string(obj.value("code").toInt()) + ")",
+                    os_gettime_ns() / 1000000ULL, known);
+                if (first && m_privilege_notice.empty()) {
+                    notice = m_media_failures.status(os_gettime_ns() / 1000000ULL);
+                    for (const auto &entry : m_notice_callbacks)
+                        if (entry.second) callbacks.push_back(entry.second);
                 }
             }
-            if (!known) {
-                blog(LOG_INFO,
-                     "[obs-zoom-plugin] Video subscribe for absent participant %u (source %s) - waiting for them to join",
-                     participant_id, uuid.c_str());
-                return;
-            }
-            for (const auto &cb : error_callbacks) cb(error_message);
+            for (const auto &cb : callbacks) cb(notice);
             return;
         }
-        const QString reason = obj.value("reason").toString();
-        const int code = obj.value("code").toInt(0);
-        set_error_and_notify(zoom_error_message(obj));
-        // Permanent failures: auth, license, host-ended.
-        if (cmd == "auth_fail" || reason == "auth_fail") {
-            m_state.store(MeetingState::Failed, std::memory_order_release);
-            ZoomReconnectManager::instance().on_join_failed(true);
-        } else if (obj.value("msg").toString() == "meeting_failed" &&
-                   is_permanent_meeting_failure(code)) {
-            m_state.store(MeetingState::Failed, std::memory_order_release);
-            blog(LOG_ERROR,
-                 "[obs-zoom-plugin] Permanent Zoom meeting failure %d (%s) - not retrying",
-                 code, reason.toUtf8().constData());
-            ZoomReconnectManager::instance().on_join_failed(true);
-        } else if (reason == "license") {
-            m_state.store(MeetingState::Failed, std::memory_order_release);
-            ZoomReconnectManager::instance().trigger(RecoveryReason::LicenseError);
-        } else if (reason == "host_ended") {
-            ZoomReconnectManager::instance().trigger(RecoveryReason::HostEndedMeeting);
-        } else {
-            // Retriable failure — let reconnect manager decide.
-            if (!m_user_leaving.load(std::memory_order_acquire)) {
-                ZoomReconnectManager::instance().on_join_failed(false);
-            } else {
-                m_state.store(MeetingState::Failed, std::memory_order_release);
-            }
-        }
+        dispatch_zoom_engine_failure(cmd.toStdString(), emsg.toStdString(),
+            obj.value("privilege_requested").toBool(),
+            [&](bool pending) {
+                // Media failure never votes against meeting/reconnect state.
+                // Store terminal diagnostics separately: the left handler reads
+                // m_last_error as proof that the meeting failed.
+                m_media_active.store(false, std::memory_order_release);
+                const auto detail = obj.value("detail").toString().toStdString();
+                const auto reason = obj.value("reason").toString();
+                const auto message = pending ? zoom_privilege_notice_text(detail) :
+                    (reason == "privilege_denied"
+                        ? std::string("Recording permission denied. Ask the host to allow recording; media will start automatically when granted.")
+                        : reason == "privilege_request_timeout"
+                        ? std::string("Recording permission request timed out. Ask the host to allow recording, then click Retry Media.")
+                        : (detail.empty() ? zoom_error_message(obj) : detail) + " Click Retry Media.");
+                {
+                    std::lock_guard<std::mutex> lk(m_mtx);
+                    m_raw_media_error = pending ? std::string() : message;
+                }
+                set_privilege_notice_and_notify(message);
+            }, [&] {
+                const QString reason = obj.value("reason").toString();
+                const int code = obj.value("code").toInt(0);
+                set_error_and_notify(zoom_error_message(obj));
+                // Permanent failures: auth, license, host-ended.
+                if (cmd == "auth_fail" || reason == "auth_fail") {
+                    m_state.store(MeetingState::Failed, std::memory_order_release);
+                    ZoomReconnectManager::instance().on_join_failed(true);
+                } else if (obj.value("msg").toString() == "meeting_failed" &&
+                           is_permanent_meeting_failure(code)) {
+                    m_state.store(MeetingState::Failed, std::memory_order_release);
+                    blog(LOG_ERROR,
+                         "[obs-zoom-plugin] Permanent Zoom meeting failure %d (%s) - not retrying",
+                         code, reason.toUtf8().constData());
+                    ZoomReconnectManager::instance().on_join_failed(true);
+                } else if (reason == "license") {
+                    m_state.store(MeetingState::Failed, std::memory_order_release);
+                    ZoomReconnectManager::instance().trigger(RecoveryReason::LicenseError);
+                } else if (reason == "host_ended") {
+                    ZoomReconnectManager::instance().trigger(RecoveryReason::HostEndedMeeting);
+                } else {
+                    // Retriable failure — let reconnect manager decide.
+                    if (!m_user_leaving.load(std::memory_order_acquire)) {
+                        ZoomReconnectManager::instance().on_join_failed(false);
+                    } else {
+                        m_state.store(MeetingState::Failed, std::memory_order_release);
+                    }
+                }
+            });
         return;
     }
 
@@ -1844,6 +1916,10 @@ void ZoomEngineClient::handle_event(const std::string &line)
                 p.is_sharing_screen = po.value("is_sharing_screen").toBool();
                 m_roster.push_back(std::move(p));
             }
+            m_media_failures.prune([&](uint32_t id) {
+                return std::any_of(m_roster.begin(), m_roster.end(),
+                    [&](const ParticipantInfo &p) { return p.user_id == id; });
+            });
             SpeakerDirector::instance().update_roster(
                 m_roster, m_active_speaker_id, os_gettime_ns() / 1000000ULL);
         });
@@ -1953,13 +2029,19 @@ uint32_t ZoomEngineClient::raw_active_speaker_id() const
 std::string ZoomEngineClient::last_error() const
 {
     std::lock_guard<std::mutex> lk(m_mtx);
-    return m_last_error;
+    // Control status and diagnostics still expose terminal media failure,
+    // while internal meeting classification uses only m_last_error.
+    if (!m_last_error.empty()) return m_last_error;
+    if (!m_raw_media_error.empty()) return m_raw_media_error;
+    const auto now = os_gettime_ns() / 1000000ULL;
+    return m_media_failures.terminal(now) ? m_media_failures.status(now) : std::string();
 }
 
 std::string ZoomEngineClient::pending_privilege_notice() const
 {
     std::lock_guard<std::mutex> lk(m_mtx);
-    return m_privilege_notice;
+    if (!m_privilege_notice.empty()) return m_privilege_notice;
+    return m_media_failures.status(os_gettime_ns() / 1000000ULL);
 }
 
 void ZoomEngineClient::clear_last_error()

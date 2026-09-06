@@ -1172,6 +1172,7 @@ void ZoomDiagnosticsDialog::export_diagnostics()
     engine_status["running"] = ZoomEngineClient::instance().is_running();
     engine_status["meeting_state"] = state_text(ZoomEngineClient::instance().state());
     engine_status["media_active"] = ZoomEngineClient::instance().is_media_active();
+    engine_status["media_notice"] = QString::fromStdString(ZoomEngineClient::instance().pending_privilege_notice());
     engine_status["authenticated"] = ZoomEngineClient::instance().is_authenticated();
     engine_status["active_speaker_id"] =
         static_cast<double>(ZoomEngineClient::instance().active_speaker_id());

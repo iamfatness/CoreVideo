@@ -1,3 +1,5 @@
+#include "video-quality-policy.h"
+#include "zoom-supersource.h"
 #include "zoom-output-manager.h"
 #include "zoom-engine-client.h"
 #include "zoom-output-health.h"
@@ -40,7 +42,7 @@ void remember_quality_event(ZoomOutputInfo &info,
         info.last_set_resolution_code =
             json_int_or(obj, "code", info.last_set_resolution_code);
         const int resolution = json_int_or(obj, "resolution", -1);
-        if (resolution >= 0)
+        if (video_quality_request_accepted(json_int_or(obj, "code", -1), resolution))
             info.negotiated_resolution = resolution;
         return;
     }
@@ -49,7 +51,7 @@ void remember_quality_event(ZoomOutputInfo &info,
         info.last_video_subscribe_code =
             json_int_or(obj, "code", info.last_video_subscribe_code);
         const int resolution = json_int_or(obj, "resolution", -1);
-        if (resolution >= 0)
+        if (video_quality_request_accepted(json_int_or(obj, "code", -1), resolution))
             info.negotiated_resolution = resolution;
         return;
     }
@@ -67,8 +69,8 @@ void remember_quality_event(ZoomOutputInfo &info,
                                           static_cast<int>(info.video_resolution));
         if (actual >= 0)
             info.negotiated_resolution = actual;
-        if (actual >= 0 && requested >= 0 && actual < requested)
-            info.subscription_downgraded = true;
+        if (actual >= 0 && requested >= 0)
+            info.subscription_downgraded = actual < requested;
         return;
     }
 
@@ -85,8 +87,8 @@ void remember_quality_event(ZoomOutputInfo &info,
                                           static_cast<int>(info.video_resolution));
         if (active >= 0)
             info.negotiated_resolution = active;
-        if (active >= 0 && requested >= 0 && active < requested)
-            info.subscription_downgraded = true;
+        if (active >= 0 && requested >= 0)
+            info.subscription_downgraded = active < requested;
         return;
     }
 }
@@ -226,6 +228,13 @@ bool ZoomOutputManager::configure_output_ex(const std::string &source_name,
                                 audience_audio, audio_delay_ms);
     ZoomIsoRecorder::instance().on_output_updated(source->output_info());
     return true;
+}
+
+void ZoomOutputManager::retry_media()
+{
+    ZoomEngineClient::instance().start_media();
+    resubscribe_all();
+    zoom_supersource_retry_media();
 }
 
 void ZoomOutputManager::resubscribe_all()

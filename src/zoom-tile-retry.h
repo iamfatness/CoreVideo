@@ -83,3 +83,27 @@ inline bool tile_retry_due(uint64_t now_ns, uint64_t last_retry_ns,
     if (now_ns <= last_retry_ns) return false;
     return now_ns - last_retry_ns >= tile_retry_cooldown_ns(attempts);
 }
+
+// Manual action is the only trigger that may reopen an exhausted budget.
+// Claiming a retry changes pacing only, never assignment or delivery health.
+enum class TileRetryTrigger { Automatic, Manual };
+inline bool tile_retry_claim(uint64_t now_ns, uint64_t &last_retry_ns,
+                             uint32_t &attempts, TileRetryTrigger trigger)
+{
+    if (trigger == TileRetryTrigger::Manual) {
+        last_retry_ns = 0;
+        attempts = 0;
+    }
+    if (!tile_retry_due(now_ns, last_retry_ns, attempts)) return false;
+    last_retry_ns = now_ns;
+    ++attempts;
+    return true;
+}
+
+inline bool tile_retry_needed(bool current_frame, bool current_failure, TileRetryTrigger trigger,
+                              uint64_t now_ns = 0, uint64_t last_frame_ns = 0)
+{
+    const bool stale = now_ns > last_frame_ns &&
+        now_ns - last_frame_ns >= kTileRetryBaseCooldownNs;
+    return !current_frame || (trigger == TileRetryTrigger::Manual && (current_failure || stale));
+}

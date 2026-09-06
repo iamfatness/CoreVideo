@@ -62,39 +62,16 @@ int main()
     check(!zoom_privilege_already_requested("some unrelated future detail text"),
           "unrecognized detail: not classified as already-requested");
 
-    // ── The two notices are distinct copy, not the same string twice ────────
-    // If a future edit collapsed both branches to identical text, the "handle
-    // both, and the second warrants firmer copy" requirement this fix was
-    // written against would silently stop being true.
-    const std::string first_copy = zoom_privilege_notice_first_request();
-    const std::string still_copy = zoom_privilege_notice_still_pending();
-    check(!first_copy.empty(), "first-request copy non-empty");
-    check(!still_copy.empty(), "still-pending copy non-empty");
-    check(first_copy != still_copy, "the two notices are distinct copy");
+    const std::string expected = "Waiting for the host to allow recording. Media will start automatically when permission is granted.";
+    check(zoom_privilege_notice_text(first_request_detail) == expected, "automatic recovery guidance");
+    check(zoom_privilege_notice_text(still_pending_detail) == expected, "repeat request is same wait episode");
 
-    // ── Copy names the ACTION, not the error code ────────────────────────────
-    // The owner's ask, verbatim: "capture this error and not display an
-    // error... you just hit it again". Neither string may leak a raw SDK
-    // error code digit, and both must name the actual button the operator
-    // has to press.
-    auto has_digit = [](const std::string &s) {
-        return s.find_first_of("0123456789") != std::string::npos;
-    };
-    check(!has_digit(first_copy), "first-request copy: no error code digits");
-    check(!has_digit(still_copy), "still-pending copy: no error code digits");
-    check(first_copy.find("Start Engine") != std::string::npos,
-          "first-request copy: names the Start Engine action");
-    check(still_copy.find("Start Engine") != std::string::npos,
-          "still-pending copy: names the Start Engine action");
-
-    // ── The still-pending copy is the firmer one ─────────────────────────────
-    // A repeat report means the host has not acted yet; the copy should say
-    // so rather than reading like a brand-new ask. Pinned narrowly (not by
-    // wording, which is free to change) as: it says the host has not granted
-    // it / nothing will start, which the first-request copy does not.
-    check(still_copy.find("Still waiting") != std::string::npos ||
-              still_copy.find("nothing will") != std::string::npos,
-          "still-pending copy: reads as a repeat wait, not a fresh ask");
+    const auto denied = zoom_raw_media_state_notice("denied", "privilege_denied");
+    check(denied.find("Ask the host") != std::string::npos, "denial has host action");
+    check(zoom_raw_media_state_notice("starting", "privilege_granted") != denied, "grant replaces denial");
+    check(zoom_raw_media_state_notice("waiting_permission", "privilege_request_timeout").find("timed out") != std::string::npos, "timeout distinguished from denial");
+    check(zoom_raw_media_state_notice("active", "privilege_request_timeout").empty(), "late timeout cannot demote active media");
+    check(zoom_raw_media_state_notice("failed", "start_raw_recording_failed").empty(), "terminal failure retains SDK error path");
 
     if (g_failures == 0) {
         std::cout << "zoom-privilege-notice-test: all checks passed\n";

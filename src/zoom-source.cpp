@@ -1,4 +1,5 @@
 #include "zoom-source.h"
+#include "video-quality-policy.h"
 #include "director-handover.h"
 #include "director-preview-frame-guard.h"
 #include "shm-resubscribe.h"
@@ -74,16 +75,6 @@ static uint64_t stale_recover_cooldown_ns(uint32_t attempts)
     return kStaleRecoverCooldownNs << shift;
 }
 static constexpr uint64_t kQualityUpgradeStableNs = 20'000'000'000ULL;
-static constexpr uint64_t kQualityUpgradeBaseCooldownNs = 60'000'000'000ULL;
-
-static uint64_t quality_upgrade_cooldown_ns(uint32_t completed_attempts)
-{
-    // Keep trying during long meetings, but cap automatic retry pressure at
-    // eight minutes. A feed that reaches the requested resolution resets this.
-    const uint32_t shift = std::min<uint32_t>(completed_attempts, 3);
-    return kQualityUpgradeBaseCooldownNs << shift;
-}
-
 static AudioChannelMode audio_mode_from_data(obs_data_t *s)
 {
     return obs_data_get_int(s, PROP_AUDIO_CHANNELS) == AUDIO_CH_STEREO
@@ -381,7 +372,9 @@ static std::string recovery_status_label(const ZoomOutputInfo &info)
         return "Screen share follows Zoom's active share feed.";
     if (output_signal_below_requested(info)) {
         std::string text = "Using best available feed below requested canvas";
-        if (info.quality_upgrade_cooldown_ms > 0)
+        if (!quality_upgrade_retry_allowed(info.quality_upgrade_attempts, false))
+            text += "; automatic quality retries exhausted; manual retry available";
+        else if (info.quality_upgrade_cooldown_ms > 0)
             text += "; next quality retry in " +
                 std::to_string(info.quality_upgrade_cooldown_ms) + " ms";
         else if (info.quality_upgrade_attempts > 0)
@@ -632,7 +625,8 @@ ZoomOutputInfo ZoomSource::output_info() const
         }
         const uint64_t last_upgrade_ns =
             m_last_quality_upgrade_ns.load(std::memory_order_relaxed);
-        if (last_upgrade_ns != 0) {
+        if (last_upgrade_ns != 0 && quality_upgrade_retry_allowed(
+                m_quality_upgrade_attempts.load(std::memory_order_relaxed), false)) {
             const uint64_t upgrade_age_ns =
                 now_ns > last_upgrade_ns ? now_ns - last_upgrade_ns : 0;
             const uint64_t cooldown_ns = quality_upgrade_cooldown_ns(
@@ -1048,6 +1042,8 @@ bool ZoomSource::upgrade_low_quality_video(uint64_t now_ns, bool force)
         m_last_quality_upgrade_ns.load(std::memory_order_acquire);
     const uint32_t completed_attempts =
         m_quality_upgrade_attempts.load(std::memory_order_acquire);
+    if (!quality_upgrade_retry_allowed(completed_attempts, force))
+        return false;
     if (!force && last_upgrade_ns != 0 &&
         now_ns - last_upgrade_ns < quality_upgrade_cooldown_ns(completed_attempts))
         return false;
@@ -1419,6 +1415,7 @@ bool ZoomSource::output_video_from_shared_memory(
     uint32_t h = 0;
     uint32_t y_len = 0;
     uint64_t hdr_capture_ns = 0;
+    const uint64_t delivery_ticket = ZoomEngineClient::instance().media_delivery_ticket(uuid, resolved_participant_id);
     const ShmFrameRead read_status =
         shm_read_i420_frame(video_shm, IPC_SHM_PREFIX + uuid, event_width,
                             event_height, event_shm_gen, video_shm_gen,
@@ -1455,6 +1452,8 @@ bool ZoomSource::output_video_from_shared_memory(
         }
         return false;
     }
+
+    ZoomEngineClient::instance().acknowledge_media_delivery(uuid, resolved_participant_id, delivery_ticket);
 
     const auto *y_ptr = video_buf.data();
     const auto *u_ptr = y_ptr + y_len;

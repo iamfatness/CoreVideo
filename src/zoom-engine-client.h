@@ -2,6 +2,7 @@
 
 #include "engine-ipc.h"
 #include "media-event-queue.h"
+#include "media-failure-state.h"
 #include "talkback-nomination.h"
 #include "zoom-types.h"
 #include <atomic>
@@ -289,9 +290,12 @@ public:
         return m_awaiting_admission.load(std::memory_order_acquire);
     }
     bool is_media_active() const { return m_media_active.load(std::memory_order_acquire); }
+    // Meeting error first, otherwise the terminal raw-media diagnostic. Internal
+    // meeting/leave classification deliberately reads only m_last_error.
     std::string last_error() const;
     void clear_last_error();
-    // Empty when no record-privilege notice is pending. See
+    // Record-privilege notice or actionable terminal raw-media diagnostic.
+    // Empty when neither is pending. See
     // src/zoom-privilege-notice.h for what this state means and
     // add_notice_callback() below for how it is pushed. Exposed as a getter
     // too, mirroring last_error(), so a dock can resync on its own poll tick
@@ -305,6 +309,12 @@ public:
 
     void register_source(const std::string &source_uuid, SourceCallbacks callbacks);
     void unregister_source(const std::string &source_uuid);
+    // Capture before the shared-memory read, acknowledge only a successful
+    // read. Reassignment during the read invalidates the ticket.
+    bool source_media_failed(const std::string &uuid) const;
+    uint64_t media_delivery_ticket(const std::string &uuid, uint32_t participant) const;
+    void acknowledge_media_delivery(const std::string &uuid, uint32_t participant, uint64_t ticket);
+
     using RosterCallback = std::function<void()>;
     // Roster callbacks are invoked on the engine reader thread with this
     // client's internal lock RELEASED, so a callback may call back into the
@@ -449,6 +459,10 @@ private:
     std::unordered_map<void *, ErrorCallback> m_error_callbacks;
     std::unordered_map<void *, NoticeCallback> m_notice_callbacks;
     std::string m_last_error;
+    // Terminal raw-media diagnostic, surfaced by last_error() only as fallback.
+    // Never consulted by meeting/reconnect classification. Guarded by m_mtx.
+    std::string m_raw_media_error;
+    MediaFailureState m_media_failures;
     // Empty when no record-privilege notice is pending. Deliberately NEVER
     // written to/from m_last_error -- see pending_privilege_notice()'s doc
     // comment and NoticeCallback's above. Guarded by m_mtx like m_last_error.

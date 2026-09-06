@@ -233,7 +233,8 @@ int main()
     promotion = director.snapshot(t).last_promotion;
     if (promotion.reason != SpeakerPromotionReason::ForcedVacancy ||
         promotion.effective_sensitivity_ms != 0 ||
-        promotion.effective_hold_ms != 0)
+        promotion.effective_hold_ms != 0 ||
+        promotion.incumbent_held_ms != 10)
         fail("immediate forced-vacancy attribution is wrong");
 
     // The flap: 0.3 s later the exclusion set swings onto the NEW on-air
@@ -252,6 +253,12 @@ int main()
     t += 500;
     if (!director.tick(t)) fail("replacement should promote once sensitivity elapsed");
     if (!check_directed(1301)) fail("did not promote the vetted replacement");
+    promotion = director.snapshot(t).last_promotion;
+    if (promotion.reason != SpeakerPromotionReason::ForcedVacancy ||
+        promotion.effective_sensitivity_ms != 500 ||
+        promotion.effective_hold_ms != 0 ||
+        promotion.incumbent_held_ms != 800)
+        fail("rate-limited forced-vacancy attribution is wrong");
 
     // --- The replacement chosen after a rate-limited forced vacancy has to be
     //     STABLE: half a second of cross-talk or a cough must never reach the

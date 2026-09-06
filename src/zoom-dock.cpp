@@ -910,8 +910,8 @@ void ZoomDock::apply_speaker_director_settings()
 
 void ZoomDock::log_speaker_director_promotion()
 {
-    const auto snapshot = SpeakerDirector::instance().snapshot(
-        os_gettime_ns() / 1000000ULL);
+    const uint64_t flushed_at_ms = os_gettime_ns() / 1000000ULL;
+    const auto snapshot = SpeakerDirector::instance().snapshot(flushed_at_ms);
     for (const auto &promotion : snapshot.recent_promotions) {
         if (promotion.session_id < m_director_log_session_id ||
             (promotion.session_id == m_director_log_session_id &&
@@ -926,11 +926,14 @@ void ZoomDock::log_speaker_director_promotion()
         blog(LOG_INFO,
              "[obs-zoom-plugin] speaker_director_promotion "
              "session=%llu sequence=%llu reason=%s from_id=%u to_id=%u "
+             "promoted_at_ms=%llu flushed_at_ms=%llu "
              "effective_sensitivity_ms=%u effective_hold_ms=%u "
              "candidate_age_ms=%llu incumbent_held_ms=%llu",
              static_cast<unsigned long long>(promotion.session_id),
              static_cast<unsigned long long>(promotion.sequence), reason,
              promotion.previous_speaker_id, promotion.promoted_speaker_id,
+             static_cast<unsigned long long>(promotion.promoted_at_ms),
+             static_cast<unsigned long long>(flushed_at_ms),
              promotion.effective_sensitivity_ms, promotion.effective_hold_ms,
              static_cast<unsigned long long>(promotion.candidate_age_ms),
              static_cast<unsigned long long>(promotion.incumbent_held_ms));

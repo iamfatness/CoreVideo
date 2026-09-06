@@ -241,11 +241,15 @@ bool SpeakerDirector::fill_vacancy_locked(uint32_t candidate, uint64_t now_ms)
 
     const uint64_t candidate_age = now_ms >= m_candidate_since_ms
         ? now_ms - m_candidate_since_ms : 0;
+    const uint64_t incumbent_held_ms = forced_vacancy &&
+                                       now_ms >= m_last_switch_ms
+        ? now_ms - m_last_switch_ms : 0;
     return promote_locked(candidate, now_ms,
                           forced_vacancy
                               ? SpeakerPromotionReason::ForcedVacancy
                               : SpeakerPromotionReason::Automatic,
-                          effective_sensitivity_ms, 0, candidate_age, 0);
+                          effective_sensitivity_ms, 0, candidate_age,
+                          incumbent_held_ms);
 }
 
 bool SpeakerDirector::set_manual_speaker(uint32_t participant_id, uint64_t now_ms)

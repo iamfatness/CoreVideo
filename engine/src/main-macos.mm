@@ -1204,16 +1204,8 @@ static void video_subscribe(uint32_t participant_id, const std::string &source_u
                     std::to_string(requested) + "}");
                 return static_cast<int>(result);
             });
-        // All targets share the accepted request, including on SDK refusal.
-        // Publishing it per target also updates outputs attached before this one.
-        for (const auto &target : pending.targets) {
-            EngineIpc::write(
-                R"({"cmd":"debug","stage":"video_source_bound","source_uuid":")" +
-                target.first + R"(","participant_id":)" +
-                std::to_string(participant_id) + R"(,"requested":)" +
-                std::to_string(target.second.requested_resolution) + R"(,"actual":)" +
-                std::to_string(pending.resolution) + "}");
-        }
+        shared_video_accept_resolution(pending, pending.resolution,
+            [](const std::string &event) { EngineIpc::write(event); });
         return;
     }
     if (!g_raw_media_active) {
@@ -1280,9 +1272,10 @@ static void video_subscribe(uint32_t participant_id, const std::string &source_u
             std::to_string(candidate) + "}");
 
         if (sub_err == ZoomSDKError_Success) {
-            pending.resolution = static_cast<uint32_t>(candidate);
             pending.renderer = renderer;
             pending.delegate = delegate;
+            shared_video_accept_resolution(pending, static_cast<uint32_t>(candidate),
+                [](const std::string &event) { EngineIpc::write(event); });
             if (static_cast<uint32_t>(candidate) != resolution) {
                 EngineIpc::write(
                     R"({"cmd":"debug","stage":"video_resolution_downgraded","source_uuid":")" +

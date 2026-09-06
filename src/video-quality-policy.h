@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <string>
 
 // Shared renderer quality is a request, not the dimensions Zoom delivers.
 template<class Targets>
@@ -34,4 +35,23 @@ inline uint64_t quality_upgrade_cooldown_ns(uint32_t attempts)
 inline bool quality_upgrade_retry_allowed(uint32_t attempts, bool force)
 {
     return force || attempts < kQualityUpgradeMaxAttempts;
+}
+
+// Commit a newly accepted renderer request. Caller owns subscription locking.
+template<class Subscription, class Publish>
+void shared_video_accept_resolution(Subscription &subscription,
+                                    uint32_t accepted, Publish publish)
+{
+    subscription.resolution = accepted;
+    // Every source filters diagnostics by its own UUID. Recovery only calls
+    // subscribe once per participant, so the selected source cannot stand in
+    // for the other retained outputs, including after a lower fallback.
+    for (const auto &target : subscription.targets) {
+        publish(
+            R"({"cmd":"debug","stage":"video_source_bound","source_uuid":")" +
+            target.first + R"(","participant_id":)" +
+            std::to_string(subscription.participant_id) + R"(,"requested":)" +
+            std::to_string(target.second.requested_resolution) + R"(,"actual":)" +
+            std::to_string(subscription.resolution) + "}");
+    }
 }

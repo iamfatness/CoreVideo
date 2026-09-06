@@ -707,6 +707,9 @@ void ZoomEngineClient::stop_for_reconnect()
     // both costs nothing and covers every trigger.
     {
         std::lock_guard<std::mutex> lk(m_mtx);
+        m_raw_media_error.clear();
+        m_privilege_notice.clear();
+        m_media_failures.reset();
         talkback_nomination_reset(m_talkback_nomination_status);
         m_talkback_nomination_pending = TalkbackNominationPending{};
         talkback_presence_reset(m_talkback_channel_presence);
@@ -898,6 +901,10 @@ bool ZoomEngineClient::join(const std::string &meeting_id,
         m_last_jwt, meeting_id, passcode, display_name, kind, tokens);
     {
         std::lock_guard<std::mutex> lk(m_mtx);
+        // An explicit join replaces the session; room-level joined reports do not.
+        m_raw_media_error.clear();
+        m_privilege_notice.clear();
+        m_media_failures.reset();
         m_join_pending = true;
         m_pending_meeting_id = meeting_id;
         m_pending_passcode = passcode;
@@ -1649,9 +1656,11 @@ void ZoomEngineClient::handle_event(const std::string &line)
     if (cmd == "joined") {
         m_awaiting_admission.store(false, std::memory_order_release);
         m_state.store(MeetingState::InMeeting, std::memory_order_release);
-        // A successful join supersedes whatever failed before it; without
+        // A successful join supersedes connection errors; without
         // this the dock keeps showing "Connection failed" from a previous
-        // attempt over a perfectly healthy meeting.
+        // attempt over a perfectly healthy meeting. Breakout return also
+        // emits joined: preserve source assignments and unresolved media
+        // failures while the engine restores subscriptions itself.
         clear_last_error();
         ZoomReconnectManager::instance().on_join_success();
         return;
@@ -2041,8 +2050,6 @@ void ZoomEngineClient::clear_last_error()
     {
         std::lock_guard<std::mutex> lk(m_mtx);
         m_last_error.clear();
-        m_raw_media_error.clear();
-        m_media_failures.reset();
         for (const auto &entry : m_error_callbacks)
             if (entry.second) callbacks.push_back(entry.second);
     }

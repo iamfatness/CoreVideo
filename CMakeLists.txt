@@ -1481,6 +1481,21 @@ if(BUILD_TESTING)
         add_test(NAME CoreVideoOscWire
                  COMMAND CoreVideoOscWireTest)
 
+        # Offline production-client boundary test uses POSIX IPC and host stubs.
+        # Windows client integration remains covered by the full plugin build.
+        if(TARGET OBS::libobs AND NOT WIN32)
+            add_executable(CoreVideoEngineClientMediaSessionTest
+                tests/engine-client-media-session-test.cpp
+                src/zoom-engine-client.cpp
+                src/speaker-director.cpp)
+            target_include_directories(CoreVideoEngineClientMediaSessionTest PRIVATE
+                "${CMAKE_CURRENT_SOURCE_DIR}/src"
+                $<TARGET_PROPERTY:OBS::libobs,INTERFACE_INCLUDE_DIRECTORIES>)
+            target_link_libraries(CoreVideoEngineClientMediaSessionTest PRIVATE Qt6::Core)
+            add_test(NAME CoreVideoEngineClientMediaSession
+                COMMAND CoreVideoEngineClientMediaSessionTest)
+        endif()
+
         add_executable(CoreVideoControlParseTest
             tests/zoom-control-parse-test.cpp
         )

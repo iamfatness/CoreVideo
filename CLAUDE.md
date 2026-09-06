@@ -1603,3 +1603,10 @@ Manual tile retry also covers retained displayed pixels when a current media
 failure exists or the last successful SHM read is at least ten seconds old.
 Fresh healthy tiles are skipped; mapping release preserves the decoded image.
 This freshness override is manual-only, never a new automatic speaker-tick loop.
+
+Room-level `joined` (including breakout return and duplicate readiness) clears
+connection errors only. It retains media assignments, unresolved video and
+persistent source failures, and session raw-media errors; source recovery still
+requires acknowledged delivery/removal. Explicit `join`, `left`, and engine
+`stop` reset media session state. The Qt-backed CoreVideoEngineClientMediaSession
+regression drives the production JSON handler with offline host boundaries.

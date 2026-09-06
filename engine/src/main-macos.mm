@@ -59,6 +59,7 @@
 #include "../../src/engine-ipc.h"
 #include "../../src/shm-generation.h"
 #include "../../src/raw-media-lifecycle.h"
+#include "../../src/meeting-callback-epoch.h"
 #include "engine-writer.h"
 #include "tile-clock-log.h"
 
@@ -512,8 +513,15 @@ static void send_roster()
 // use are stubbed rather than omitted — same shape as the Windows engine's block
 // of empty overrides. An omitted @required method is an unrecognized-selector
 // crash the moment the SDK calls it.
+static MeetingCallbackEpoch g_meeting_callbacks;
+@class CVMeetingDelegate;
+static CVMeetingDelegate *g_meeting_delegate = nil;
+
 @interface CVMeetingDelegate : NSObject <ZoomSDKMeetingServiceDelegate,
                                          ZoomSDKMeetingActionControllerDelegate>
+- (void)handleCurrentMeetingStatus:(ZoomSDKMeetingStatus)state
+                     meetingError:(ZoomSDKMeetingError)error
+                        EndReason:(EndMeetingReason)reason;
 @end
 
 @implementation CVMeetingDelegate
@@ -522,12 +530,23 @@ static void send_roster()
                  meetingError:(ZoomSDKMeetingError)error
                     EndReason:(EndMeetingReason)reason
 {
-    if (![NSThread isMainThread]) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self onMeetingStatusChange:state meetingError:error EndReason:reason];
+    const auto ticket = g_meeting_callbacks.capture();
+    void (^deliver)(void) = ^{
+        const bool terminal = state == ZoomSDKMeetingStatus_Disconnecting ||
+            state == ZoomSDKMeetingStatus_Ended || state == ZoomSDKMeetingStatus_Failed;
+        g_meeting_callbacks.deliver(ticket, terminal, [&] {
+            if (g_meeting_delegate != self) return;
+            [self handleCurrentMeetingStatus:state meetingError:error EndReason:reason];
         });
-        return;
-    }
+    };
+    if (![NSThread isMainThread]) dispatch_async(dispatch_get_main_queue(), deliver);
+    else deliver();
+}
+
+- (void)handleCurrentMeetingStatus:(ZoomSDKMeetingStatus)state
+                     meetingError:(ZoomSDKMeetingError)error
+                        EndReason:(EndMeetingReason)reason
+{
     EngineIpc::write(R"({"cmd":"debug","stage":"meeting_status","status":)" +
                      std::to_string(static_cast<int>(state)) +
                      R"(,"result":)" + std::to_string(static_cast<int>(error)) + "}");
@@ -676,8 +695,6 @@ static void send_roster()
 
 @end
 
-static CVMeetingDelegate *g_meeting_delegate = nil;
-
 // The join context is deliberately a never-released global. main.cpp keeps its
 // JoinParam strings alive for the same reason: Join/joinMeeting: is asynchronous
 // and this file is built without ARC, so releasing the context on return would
@@ -719,9 +736,6 @@ static void handle_join(const std::string &line)
         return;
     }
 
-    if (!g_meeting_delegate) g_meeting_delegate = [[CVMeetingDelegate alloc] init];
-    svc.delegate = g_meeting_delegate;
-
     long long meeting_number = 0;
     try {
         meeting_number = std::stoll(meeting_id);
@@ -730,6 +744,15 @@ static void handle_join(const std::string &line)
         return;
     }
 
+    // Invalidate queued status work before retiring the old delegate. A copied
+    // dispatch block retains self, so its identity cannot be recycled underneath it.
+    g_meeting_callbacks.begin();
+    auto *actions = action_controller();
+    if (actions && actions.delegate == g_meeting_delegate) actions.delegate = nil;
+    svc.delegate = nil;
+    [g_meeting_delegate release];
+    g_meeting_delegate = [[CVMeetingDelegate alloc] init];
+    svc.delegate = g_meeting_delegate;
     handle_stop_media("replacement_meeting");
     g_join_ctx = [[ZoomSDKJoinMeetingElements alloc] init];
     g_join_ctx.userType          = ZoomSDKUserType_WithoutLogin;
@@ -779,6 +802,9 @@ static void handle_join(const std::string &line)
 
 static void handle_leave()
 {
+    // Cancel statuses queued before Leave and reject subsequent nonterminal
+    // statuses, but keep the delegate for the SDK's leave-completion notification.
+    g_meeting_callbacks.leave();
     handle_stop_media("meeting_leave_requested");
     ZoomSDKMeetingService *svc = meeting_service();
     if (svc) [svc leaveMeetingWithCmd:LeaveMeetingCmd_Leave];

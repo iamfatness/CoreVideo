@@ -2,6 +2,7 @@
 // Verifies the decision state machine and the error catalog without touching
 // Qt, OBS, the Zoom SDK, or any real secret.
 #include "zoom-join-decision.h"
+#include "zoom-engine-error-dispatch.h"
 
 #include <iostream>
 #include <set>
@@ -243,6 +244,40 @@ int main()
         check(block.find("zak=fetch_via_oauth") != std::string::npos, "log: zak plan present");
         check(block.find("blocking_error=none") != std::string::npos,
               "log: blocking error present");
+    }
+
+    // Exercise the same media/meeting callback boundary used by handle_event.
+    // A reconnect callback consuming its budget is the forbidden side effect.
+    for (bool recovering : {false, true}) {
+        bool in_meeting = true;
+        int reconnect_attempts = recovering ? 2 : 0;
+        const int before = reconnect_attempts;
+        int media_failures = 0;
+        dispatch_zoom_engine_failure("error", "raw_media_start_failed", false,
+            [&](bool) { ++media_failures; },
+            [&] { in_meeting = false; ++reconnect_attempts; });
+        check(in_meeting && reconnect_attempts == before && media_failures == 1,
+              "terminal raw-media failure stays joined and preserves reconnect budget");
+    }
+    for (const std::string command : {"error", "auth_fail"}) {
+        int meeting_failures = 0;
+        dispatch_zoom_engine_failure(command, "meeting_failed", false,
+            [&](bool) { check(false, "real meeting failures cannot enter media handler"); },
+            [&] { ++meeting_failures; });
+        check(meeting_failures == 1, "actual meeting/auth failure still classified by meeting handler");
+    }
+
+    {
+        int pending_notices = 0, meeting_failures = 0;
+        dispatch_zoom_engine_failure("error", "raw_media_start_failed", true,
+            [&](bool pending) { if (pending) ++pending_notices; },
+            [&] { ++meeting_failures; });
+        check(pending_notices == 1 && meeting_failures == 0,
+              "pending permission still reaches only the media notice callback");
+        dispatch_zoom_engine_failure("auth_fail", "raw_media_start_failed", false,
+            [&](bool) { check(false, "auth command cannot be hidden by a media-shaped message"); },
+            [&] { ++meeting_failures; });
+        check(meeting_failures == 1, "auth command retains meeting failure authority");
     }
 
     // ── Redaction helper edge cases ──────────────────────────────────────────

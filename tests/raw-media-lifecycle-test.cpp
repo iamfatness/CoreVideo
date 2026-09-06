@@ -1,4 +1,5 @@
 #include "raw-media-lifecycle.h"
+#include "meeting-callback-epoch.h"
 #include <cstdio>
 #include <cstdlib>
 #include <set>
@@ -94,6 +95,31 @@ int main() {
               "non-permission check failure reports a terminal error without asking host");
         check(lifecycle.on(RawMediaEvent::Grant) == RawMediaAction::None,
               "unsolicited grant cannot retry a permanent check failure");
+    }
+    {
+        MeetingCallbackEpoch epoch;
+        Harness h; h.join(); h.permission = true; h.send(RawMediaEvent::Start);
+        const auto old = epoch.capture();
+        epoch.leave(); // explicit leave invalidates already-queued statuses
+        h.send(RawMediaEvent::Reset);
+        int announced_joined = 0;
+        epoch.deliver(old, false, [&] { ++announced_joined; h.join(); });
+        check(announced_joined == 0, "queued pre-leave InMeeting cannot announce joined");
+        epoch.deliver(epoch.capture(), false, [&] { ++announced_joined; h.join(); });
+        check(announced_joined == 0, "InMeeting received after Leave cannot announce joined while awaiting Ended");
+        int left_acknowledgements = 0;
+        epoch.deliver(epoch.capture(), true, [&] { ++left_acknowledgements; });
+        check(left_acknowledgements == 1, "current post-Leave terminal status can acknowledge departure");
+        epoch.begin(); // accepted replacement join
+        h.join(); h.send(RawMediaEvent::Start);
+        int old_terminal_effects = 0;
+        for (int i = 0; i < 3; ++i) // old Disconnecting, Ended, Failed
+            epoch.deliver(old, true, [&] { ++old_terminal_effects; h.send(RawMediaEvent::Reset); });
+        check(old_terminal_effects == 0 && std::string(h.lifecycle.state()) == "active",
+              "queued old terminal statuses cannot stop the replacement meeting");
+        int current_effects = 0;
+        epoch.deliver(epoch.capture(), false, [&] { ++current_effects; });
+        check(current_effects == 1, "current SDK status still reaches the main-queue handler");
     }
     return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

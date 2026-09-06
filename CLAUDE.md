@@ -1414,7 +1414,16 @@ recovery; shared-renderer quality arbitration is a separate follow-up.
 `raw_media_ready` still means raw recording started, **not** that every source is
 healthy. Additive `raw_media_state` invalidates client session readiness during
 permission loss/recovery/failure; per-source subscribe errors and first-frame
-logs remain independent evidence. Offline CoreVideoRawMediaLifecycle sequences
+logs remain independent evidence. All `raw_media_start_failed` reports cross the media-only callback boundary in
+`zoom-engine-error-dispatch.h`, including terminal failures without a pending
+privilege flag. They cannot invoke meeting/reconnect effects. Terminal media
+text is kept in `m_raw_media_error` and exposed by `last_error()` as a fallback
+for the control API; internal `m_last_error` stays reserved for meeting failure,
+so a later `left` cannot mistake a media failure for a failed meeting. Meeting
+status callbacks capture `MeetingCallbackEpoch` at receipt and validate it on
+the main queue. Leave rejects queued older work AND subsequent nonterminal
+statuses while allowing its terminal SDK acknowledgement; replacement uses a
+fresh epoch and delegate identity. Offline CoreVideoRawMediaLifecycle sequences
 and a real SDK build cover these code defects; repeated live delayed-grant and
 breakout resource-lifetime/recovery-time acceptance remains outstanding.
 

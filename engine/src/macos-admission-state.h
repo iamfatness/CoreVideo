@@ -13,3 +13,14 @@ macos_awaiting_admission_event(ZoomSDKMeetingStatus status)
     return std::string(R"({"cmd":"awaiting_admission","active":)") +
         (awaiting ? "true" : "false") + "}";
 }
+
+// The actual callback uses this seam so emission cannot silently disappear or
+// move behind joined/terminal handling without breaking the SDK-backed test.
+template<typename Writer, typename StatusHandler>
+inline void macos_dispatch_meeting_status(ZoomSDKMeetingStatus status,
+                                          Writer &&write,
+                                          StatusHandler &&handle_status)
+{
+    write(macos_awaiting_admission_event(status));
+    handle_status();
+}

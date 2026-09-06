@@ -537,7 +537,14 @@ static CVMeetingDelegate *g_meeting_delegate = nil;
             state == ZoomSDKMeetingStatus_Ended || state == ZoomSDKMeetingStatus_Failed;
         g_meeting_callbacks.deliver(ticket, terminal, [&] {
             if (g_meeting_delegate != self) return;
-            [self handleCurrentMeetingStatus:state meetingError:error EndReason:reason];
+            macos_dispatch_meeting_status(
+                state,
+                [](const std::string &event) { EngineIpc::write(event); },
+                [&] {
+                    [self handleCurrentMeetingStatus:state
+                                       meetingError:error
+                                          EndReason:reason];
+                });
         });
     };
     if (![NSThread isMainThread]) dispatch_async(dispatch_get_main_queue(), deliver);
@@ -551,11 +558,6 @@ static CVMeetingDelegate *g_meeting_delegate = nil;
     EngineIpc::write(R"({"cmd":"debug","stage":"meeting_status","status":)" +
                      std::to_string(static_cast<int>(state)) +
                      R"(,"result":)" + std::to_string(static_cast<int>(error)) + "}");
-
-    // Waiting for the host and sitting in a waiting room are open-ended waits
-    // on a person, not stalled joins. Send this on every status change so the
-    // plugin clears the flag as soon as Zoom advances or exits the attempt.
-    EngineIpc::write(macos_awaiting_admission_event(state));
 
     switch (state) {
     case ZoomSDKMeetingStatus_InMeeting: {

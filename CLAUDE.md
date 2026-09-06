@@ -47,7 +47,9 @@ maps to `active:false`. The dock holds its existing 120-second join watchdog
 while that flag is true and starts a fresh full window after Zoom advances.
 Keep the symbolic mapping in `engine/src/macos-admission-state.h`, where the
 SDK-backed `CoreVideoMacosAdmissionState` test compiles it against the installed
-framework and exercises the emitted wire event through the watchdog policy.
+framework. The real callback calls that header's dispatch seam inside the
+fresh-callback/epoch gate; the regression records the seam's outgoing event,
+asserts it precedes normal status handling, and drives the watchdog with it.
 
 **Talkback does not exist on macOS**, and the dock says so rather than failing
 quietly. `engine-talkback.cpp` is in `ENGINE_SOURCES`, which only the Windows

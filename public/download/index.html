@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Download CoreVideo - Free Zoom Plugin for OBS Studio</title>
-  <meta name="description" content="Download CoreVideo v0.1.44, the free open-source OBS Studio plugin for Zoom. Windows installer, checksums, requirements, and install steps.">
+  <meta name="description" content="Download CoreVideo v0.1.44, the free open-source OBS Studio plugin for Zoom. Windows and macOS installers, checksums, and setup.">
   <meta name="theme-color" content="#0a0b0c">
   <link rel="icon" href="/favicon.svg">
   <link rel="preload" href="/assets/fonts/SpaceGrotesk-var.woff2" as="font" type="font/woff2" crossorigin>
@@ -13,7 +13,7 @@
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="CoreVideo">
   <meta property="og:title" content="Download CoreVideo - Free Zoom Plugin for OBS Studio">
-  <meta property="og:description" content="Download CoreVideo v0.1.44, the free open-source OBS Studio plugin for Zoom. Windows installer, checksums, requirements, and install steps.">
+  <meta property="og:description" content="Download CoreVideo v0.1.44, the free open-source OBS Studio plugin for Zoom. Windows and macOS installers, checksums, and setup.">
   <meta property="og:image" content="https://corevideo.io/assets/corevideo-share.jpg">
   <meta property="og:image:alt" content="CoreVideo - Zoom participant video and audio as native OBS Studio sources">
   <meta property="og:image:width" content="1200">
@@ -22,7 +22,7 @@
   <meta property="og:url" content="https://corevideo.io/download/">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Download CoreVideo - Free Zoom Plugin for OBS Studio">
-  <meta name="twitter:description" content="Download CoreVideo v0.1.44, the free open-source OBS Studio plugin for Zoom. Windows installer, checksums, requirements, and install steps.">
+  <meta name="twitter:description" content="Download CoreVideo v0.1.44, the free open-source OBS Studio plugin for Zoom. Windows and macOS installers, checksums, and setup.">
   <meta name="twitter:image" content="https://corevideo.io/assets/corevideo-share.jpg">
   <meta name="twitter:image:alt" content="CoreVideo - Zoom participant video and audio as native OBS Studio sources">
   <link rel="stylesheet" href="/assets/site.css">
@@ -81,7 +81,7 @@
     <p class="lede">Latest release <strong>v0.1.44</strong> &mdash; Windows installer for OBS Studio 30 and newer. Free and open source under the MIT license.</p>
     <div class="hero-actions">
       <a class="button primary" href="https://github.com/iamfatness/CoreVideo/releases/download/v0.1.44/CoreVideo-Setup-v0.1.44.exe">Download for Windows &mdash; v0.1.44</a>
-      <a class="button" href="https://github.com/iamfatness/CoreVideo/releases/latest">All releases &amp; release notes</a>
+      <a class="button" href="https://github.com/iamfatness/CoreVideo/releases/latest">Windows release notes</a>
     </div>
   </div>
 </section>
@@ -92,21 +92,42 @@
   <a href="https://github.com/iamfatness/CoreVideo/releases/download/v0.1.44/CoreVideo-Windows-x64-v0.1.44.zip.sha256"><strong>ZIP checksum</strong><span>SHA-256 for the portable archive.</span></a>
   <a href="https://github.com/iamfatness/CoreVideo/releases/latest"><strong>Companion module</strong><span>The Bitfocus Companion module (<code>corevideo-obs</code>) ships with each release. Requires Companion v5 or newer.</span></a>
 </section>
-<h2>Requirements</h2>
+<p>Windows v0.1.44 remains the recommended release. The <a href="https://github.com/iamfatness/CoreVideo/releases/tag/v0.1.45-beta.1">v0.1.45-beta.1 pre-release</a> also has Windows assets with the newer Zoom Talkback dock; treat those as beta builds.</p>
+<section id="macos">
+<h2>macOS &mdash; Apple Silicon beta v0.1.45-beta.1</h2>
+<p>Developer ID signed, notarized by Apple, and stapled. The replacement installer has passed installation on two Macs and an OBS runtime test on the build Mac.</p>
+<div class="hero-actions">
+<a class="button primary" href="https://github.com/iamfatness/CoreVideo/releases/download/v0.1.45-beta.1/CoreVideo-Setup-v0.1.45-beta.1.pkg">Download macOS installer (.pkg)</a>
+<a class="button" href="https://github.com/iamfatness/CoreVideo/releases/download/v0.1.45-beta.1/CoreVideo-Setup-v0.1.45-beta.1.pkg.sha256">SHA-256 checksum</a>
+<a class="button" href="https://github.com/iamfatness/CoreVideo/releases/tag/v0.1.45-beta.1">macOS release notes</a>
+</div>
+<p>If you downloaded this beta before September 6, 2026, download it again. The original macOS package and ZIP were withdrawn after signature errors.</p>
+<p>Requires an Apple Silicon Mac (M1 or later). The replacement package was built against OBS Studio 32.2.1; use that version or newer for this beta. Intel Macs are not supported by this package.</p>
+<ol>
+<li>Close OBS, then open the downloaded <code>.pkg</code>.</li>
+<li>Install for your user account. No administrator password is needed.</li>
+<li>Reopen OBS, sign in to Zoom through CoreVideo, and join a meeting. Allow the requested permissions; the host must grant recording permission for media capture.</li>
+</ol>
+<p>For ISO recording, set a working FFmpeg executable in <strong>Zoom ISO Recorder</strong> and test it before recording. The macOS package does not bundle FFmpeg.</p>
+<p>Talkback is Windows-only. For your own screen, use OBS's macOS Screen Capture source; CoreVideo receives other participants' shares.</p>
+<p>To verify the download, save the installer and checksum in the same folder and run:</p>
+<pre><code>shasum -a 256 -c CoreVideo-Setup-v0.1.45-beta.1.pkg.sha256</code></pre>
+</section>
+<h2>Windows requirements</h2>
 <ul>
 <li><strong>OBS Studio 30 or newer</strong>, 64-bit.</li>
-<li><strong>Windows 10 or Windows 11</strong> (x64). This is the only platform the project packages, tests, and runs in production. macOS and Linux configure and build from source but ship no official package &mdash; a one-off Apple Silicon preview was published against v0.1.32-beta.1 and has not been maintained since.</li>
+<li><strong>Windows 10 or Windows 11</strong> (x64). For macOS, use the <a href="#macos">Apple Silicon beta installer above</a>. Linux requires a source build.</li>
 <li><strong>A Zoom account you can sign in with.</strong> CoreVideo joins meetings through the Zoom Meeting SDK, so the video quality and number of simultaneous feeds you get follow your Zoom account entitlements.</li>
 <li><strong>Downstream bandwidth</strong> for the feeds you subscribe to &mdash; roughly 4-6 Mbps per 1080p participant. Standard accounts are typically capped around 30 Mbps incoming; Enhanced Media / HBM raises that to roughly 100 Mbps.</li>
 </ul>
-<h2>Install</h2>
+<h2>Install on Windows</h2>
 <ol>
 <li>Close OBS Studio.</li>
 <li>Run the installer and point it at your OBS installation directory if it is not detected automatically.</li>
-<li>Start OBS and open <strong>Docks -&gt; CoreVideo</strong> to sign in and join a meeting.</li>
-<li>Add a <strong>CoreVideo</strong> source to any scene, then assign it to a participant, the active speaker, a spotlight slot, or the screen share.</li>
+<li>Start OBS and open <strong>Tools -&gt; Zoom Plugin Settings</strong> to sign in, then <strong>Docks -&gt; Zoom Control</strong> to join a meeting.</li>
+<li>Add a <strong>CoreVideo Participant</strong> source to any scene, then assign it to a participant, the active speaker, a spotlight slot, or the screen share.</li>
 </ol>
-<p>The installer is <strong>not code-signed yet</strong>, so Windows SmartScreen warns the first time you run it &mdash; &quot;More info&quot;, then &quot;Run anyway&quot;. Verify the SHA-256 below if you would rather check the file than trust the dialog.</p>
+<p>The Windows installer is <strong>not code-signed yet</strong>, so Windows SmartScreen warns the first time you run it &mdash; &quot;More info&quot;, then &quot;Run anyway&quot;. Verify the SHA-256 below if you would rather check the file than trust the dialog.</p>
 <p>CoreVideo is in public beta. The <a href="/core-plugin/">Core Plugin Guide</a> walks through participant routing, isolated audio, and ISO recording in detail, and <a href="/support/">Support</a> covers log collection and reporting a bug.</p>
 <h2>Verify your download</h2>
 <p>Each release ships a SHA-256 file alongside the binary. On Windows, compare the hashes with PowerShell:</p>

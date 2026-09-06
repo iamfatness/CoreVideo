@@ -1431,7 +1431,18 @@ and restores current eligible placeholders once; missing room-scoped participant
 ids stay pending for plugin roster rebinding. Failed video subscriptions retain
 placeholders, so recovery or an ordinary retry cannot lose bindings; removals and
 rebinding update the same current table. Target `requested_resolution` survives
-recovery; shared-renderer quality arbitration is a separate follow-up.
+recovery. Shared macOS participant renderers select the maximum current target
+request, including deferred/recovered targets, and raise a warm renderer in
+place. A rejected SDK upgrade retains the working accepted request, targets,
+and SHM generations; attachment/removal never downgrades a warm renderer.
+A new renderer walks down only through SDK-accepted resolution candidates.
+The diagnostic negotiated field describes an SDK-accepted request, not received
+pixels: only success codes update it. Actual frame dimensions determine health.
+Automatic low-quality retries stop after three attempts (20-second stable-feed
+gate, then existing 120/240-second spacing). Manual retries remain available;
+meeting the requested frame size or clearing subscription state resets the
+budget. Exhaustion has no countdown and never marks a fresh 360p feed stale.
+Controlled HD-sender delivery/entitlement and live soak remain unvalidated.
 `raw_media_ready` still means raw recording started, **not** that every source is
 healthy. Additive `raw_media_state` invalidates client session readiness during
 permission loss/recovery/failure; per-source subscribe errors and first-frame

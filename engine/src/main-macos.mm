@@ -59,6 +59,7 @@
 #include "../../src/engine-ipc.h"
 #include "../../src/shm-generation.h"
 #include "../../src/raw-media-lifecycle.h"
+#include "../../src/video-quality-policy.h"
 #include "../../src/meeting-callback-epoch.h"
 #include "engine-writer.h"
 #include "macos-admission-state.h"
@@ -1189,8 +1190,32 @@ static void video_subscribe(uint32_t participant_id, const std::string &source_u
     auto &pending = g_video[participant_id];
     pending.participant_id = participant_id;
     pending.targets[source_uuid].requested_resolution = resolution;
-    if (pending.renderer) return; // one live renderer serves this participant
-    pending.resolution = resolution;
+    resolution = shared_video_requested_resolution(pending.targets, resolution);
+    if (pending.renderer) {
+        shared_video_upgrade_resolution(pending.resolution, resolution,
+            [&](uint32_t requested) {
+                const ZoomSDKError result =
+                    [pending.renderer setResolution:sdk_resolution(requested)];
+                EngineIpc::write(
+                    R"({"cmd":"debug","stage":"set_resolution","source_uuid":")" +
+                    source_uuid + R"(","participant_id":)" +
+                    std::to_string(participant_id) + R"(,"code":)" +
+                    std::to_string(static_cast<int>(result)) + R"(,"resolution":)" +
+                    std::to_string(requested) + "}");
+                return static_cast<int>(result);
+            });
+        // All targets share the accepted request, including on SDK refusal.
+        // Publishing it per target also updates outputs attached before this one.
+        for (const auto &target : pending.targets) {
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"video_source_bound","source_uuid":")" +
+                target.first + R"(","participant_id":)" +
+                std::to_string(participant_id) + R"(,"requested":)" +
+                std::to_string(target.second.requested_resolution) + R"(,"actual":)" +
+                std::to_string(pending.resolution) + "}");
+        }
+        return;
+    }
     if (!g_raw_media_active) {
         EngineIpc::write(
             R"({"cmd":"debug","stage":"video_subscribe_deferred","source_uuid":")" +
@@ -1235,6 +1260,15 @@ static void video_subscribe(uint32_t participant_id, const std::string &source_u
             std::to_string(participant_id) + R"(,"code":)" +
             std::to_string(static_cast<int>(res_err)) + R"(,"resolution":)" +
             std::to_string(candidate) + "}");
+
+        if (res_err != ZoomSDKError_Success) {
+            // An unaccepted request is not negotiated quality. Try the next
+            // candidate before subscribing this new (not yet warm) renderer.
+            renderer.delegate = nil;
+            [delegate release];
+            [rdc destroyRender:renderer];
+            continue;
+        }
 
         const ZoomSDKError sub_err =
             [renderer subscribe:participant_id rawDataType:ZoomSDKRawDataType_Video];

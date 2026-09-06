@@ -1075,6 +1075,24 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoJoinWatchdog
              COMMAND CoreVideoJoinWatchdogTest)
 
+    # Compile the macOS callback translation against the installed SDK's real
+    # symbolic meeting-status enum, then carry its production wire event into
+    # the portable watchdog policy.
+    if(APPLE AND BUILD_ZOOM_ENGINE)
+        add_executable(CoreVideoMacosAdmissionStateTest
+            tests/macos-admission-state-test.mm
+        )
+        target_include_directories(CoreVideoMacosAdmissionStateTest PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${CMAKE_CURRENT_SOURCE_DIR}/engine/src"
+        )
+        target_compile_options(CoreVideoMacosAdmissionStateTest PRIVATE
+            "-F${ZOOM_SDK_ACTIVE_DIR}"
+        )
+        add_test(NAME CoreVideoMacosAdmissionState
+                 COMMAND CoreVideoMacosAdmissionStateTest)
+    endif()
+
     # The talkback probe's test tone. Phase must carry across buffers: a restart
     # every buffer is an audible click that would be misread as a transport
     # fault. See src/talkback-tone.h.

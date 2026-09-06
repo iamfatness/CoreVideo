@@ -40,6 +40,15 @@ DIFFERENT clocks on macOS (see the struct comment) — `audio_latency_us` is
 untrustworthy there until that is reconciled. Kill a mid-meeting engine only
 after checking `{"cmd":"status"}` — it IS the meeting session.
 
+The macOS meeting-status callback must emit `awaiting_admission` on every SDK
+status change. `ZoomSDKMeetingStatus_WaitingForHost` and
+`ZoomSDKMeetingStatus_InWaitingRoom` map to `active:true`; every other status
+maps to `active:false`. The dock holds its existing 120-second join watchdog
+while that flag is true and starts a fresh full window after Zoom advances.
+Keep the symbolic mapping in `engine/src/macos-admission-state.h`, where the
+SDK-backed `CoreVideoMacosAdmissionState` test compiles it against the installed
+framework and exercises the emitted wire event through the watchdog policy.
+
 **Talkback does not exist on macOS**, and the dock says so rather than failing
 quietly. `engine-talkback.cpp` is in `ENGINE_SOURCES`, which only the Windows
 engine target uses; the macOS engine is `main-macos.mm` and never compiles it.

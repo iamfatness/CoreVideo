@@ -61,6 +61,7 @@
 #include "../../src/raw-media-lifecycle.h"
 #include "../../src/meeting-callback-epoch.h"
 #include "engine-writer.h"
+#include "macos-admission-state.h"
 #include "tile-clock-log.h"
 
 #include <sys/socket.h>
@@ -550,6 +551,11 @@ static CVMeetingDelegate *g_meeting_delegate = nil;
     EngineIpc::write(R"({"cmd":"debug","stage":"meeting_status","status":)" +
                      std::to_string(static_cast<int>(state)) +
                      R"(,"result":)" + std::to_string(static_cast<int>(error)) + "}");
+
+    // Waiting for the host and sitting in a waiting room are open-ended waits
+    // on a person, not stalled joins. Send this on every status change so the
+    // plugin clears the flag as soon as Zoom advances or exits the attempt.
+    EngineIpc::write(macos_awaiting_admission_event(state));
 
     switch (state) {
     case ZoomSDKMeetingStatus_InMeeting: {

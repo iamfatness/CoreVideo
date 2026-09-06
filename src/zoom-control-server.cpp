@@ -861,7 +861,7 @@ void ZoomControlServer::handle_line(QPointer<QTcpSocket> socket, const QByteArra
             });
             return;
         }
-        ZoomEngineClient::instance().start_media();
+        ZoomOutputManager::instance().retry_media();
         write_response(socket, {{"ok", true}});
         return;
     }

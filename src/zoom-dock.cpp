@@ -1863,8 +1863,7 @@ void ZoomDock::on_start_engine_clicked()
             "Join the Zoom meeting before starting the broadcast engine.");
         return;
     }
-    ZoomEngineClient::instance().start_media();
-    ZoomOutputManager::instance().resubscribe_all();
+    ZoomOutputManager::instance().retry_media();
     update_state_indicator();
 }
 

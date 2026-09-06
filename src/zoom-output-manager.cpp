@@ -1,3 +1,4 @@
+#include "zoom-supersource.h"
 #include "zoom-output-manager.h"
 #include "zoom-engine-client.h"
 #include "zoom-output-health.h"
@@ -226,6 +227,13 @@ bool ZoomOutputManager::configure_output_ex(const std::string &source_name,
                                 audience_audio, audio_delay_ms);
     ZoomIsoRecorder::instance().on_output_updated(source->output_info());
     return true;
+}
+
+void ZoomOutputManager::retry_media()
+{
+    ZoomEngineClient::instance().start_media();
+    resubscribe_all();
+    zoom_supersource_retry_media();
 }
 
 void ZoomOutputManager::resubscribe_all()

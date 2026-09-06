@@ -63,6 +63,7 @@ public:
     }
     void reset() { stop(); assignments.clear(); ++epoch; }
     size_t size() const { return failures.size(); }
+    bool failed(const std::string &uuid) const { return failures.count(uuid) || persistent.count(uuid); }
     bool terminal(uint64_t now) const {
         if (!persistent.empty()) return true;
         for (const auto &entry : failures)

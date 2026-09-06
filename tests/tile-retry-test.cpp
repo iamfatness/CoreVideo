@@ -7,6 +7,7 @@
 // dispatches frames for every source in the plugin.
 
 #include "zoom-tile-retry.h"
+#include "media-failure-state.h"
 
 #include <iostream>
 
@@ -103,6 +104,42 @@ int main()
         check(issued == static_cast<int>(kTileRetryMaxAttempts),
               "an hour of events at 10/s yields exactly kTileRetryMaxAttempts retries");
     }
+
+    // Active media Start is a no-op, so an explicit action must reopen the
+    // independent tile budget. Ordinary roster/speaker ticks cannot do this.
+    {
+        uint64_t last = 100 * kSec;
+        uint32_t attempts = kTileRetryMaxAttempts;
+        MediaFailureState health;
+        health.assign("tile", 42);
+        health.fail("tile", 42, "video_subscribe_failed", 1, true);
+        int subscriptions = 0;
+        auto retry = [&](TileRetryTrigger trigger, uint64_t now) {
+            if (tile_retry_claim(now, last, attempts, trigger)) {
+                ++subscriptions;
+                health.assign("tile", 42); // production subscribe preserves health
+            }
+        };
+        for (int i = 0; i < 100; ++i) retry(TileRetryTrigger::Automatic, (1000+i)*kSec);
+        check(subscriptions == 0, "exhausted automatic ticks never reset budget");
+        const auto ticket = health.ticket("tile", 42);
+        retry(TileRetryTrigger::Manual, 1100*kSec);
+        check(subscriptions == 1 && attempts == 1, "manual action issues one retry from exhausted budget");
+        check(health.size() == 1 && ticket == health.ticket("tile",42), "manual retry preserves assignment and actual failure");
+        retry(TileRetryTrigger::Automatic, 1100*kSec+1);
+        check(subscriptions == 1, "automatic tick after manual retry observes cooldown");
+        for (int i = 1; i <= 100; ++i) retry(TileRetryTrigger::Automatic, (1100+i*200)*kSec);
+        check(subscriptions == static_cast<int>(kTileRetryMaxAttempts), "manual action grants one bounded budget");
+        health.delivered("tile",42,ticket);
+        check(health.size() == 0, "only delivery clears recovered tile failure");
+    }
+
+    check(tile_retry_needed(true, true, TileRetryTrigger::Manual), "manual retry revives failed tile retaining displayed frame");
+    check(!tile_retry_needed(true, false, TileRetryTrigger::Manual), "manual retry skips healthy displayed tile");
+    check(!tile_retry_needed(true, true, TileRetryTrigger::Automatic), "ordinary ticks do not reopen displayed-tile retry budget");
+
+    check(tile_retry_needed(true, false, TileRetryTrigger::Manual, 30*kSec, 10*kSec), "manual retry revives stale displayed frame without an SDK error");
+    check(!tile_retry_needed(true, false, TileRetryTrigger::Manual, 15*kSec, 10*kSec), "fresh displayed frame is not needlessly retried");
 
     if (g_failures > 0) {
         std::cerr << "tile-retry: " << g_failures << " failure(s)\n";

@@ -311,6 +311,7 @@ public:
     void unregister_source(const std::string &source_uuid);
     // Capture before the shared-memory read, acknowledge only a successful
     // read. Reassignment during the read invalidates the ticket.
+    bool source_media_failed(const std::string &uuid) const;
     uint64_t media_delivery_ticket(const std::string &uuid, uint32_t participant) const;
     void acknowledge_media_delivery(const std::string &uuid, uint32_t participant, uint64_t ticket);
 

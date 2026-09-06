@@ -1167,6 +1167,12 @@ void ZoomEngineClient::unregister_source(const std::string &source_uuid)
     m_media_failures.remove(source_uuid);
 }
 
+bool ZoomEngineClient::source_media_failed(const std::string &uuid) const
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    return m_media_failures.failed(uuid);
+}
+
 uint64_t ZoomEngineClient::media_delivery_ticket(const std::string &uuid, uint32_t participant) const
 {
     std::lock_guard<std::mutex> lk(m_mtx);

@@ -1557,3 +1557,17 @@ recovery path. `shm_create_failed`, `subscribe_rejected`, and
 nonmodal notice per episode), clearable by removal, explicit stop, or meeting
 reset. Their wire reports do not reliably identify a media lane, so neither
 a successful video read nor `raw_media_ready` may clear them.
+
+Retry Media is an explicit operator path shared by dock and control
+`start_engine`: `ZoomOutputManager::retry_media()` also visits Tiles sources.
+Tiles own a separate retry budget; `start_media()` alone is a no-op when raw
+media is active and cannot revive an exhausted tile. Only the manual trigger
+reopens that budget; ordinary roster/speaker sweeps retain their interval and
+attempt caps. Manual retry preserves assignment and failure state, releases the
+old SHM mapping, then subscribes. Tile enumeration runs on the OBS UI task queue
+with strong source refs and the existing callback gate, skipping collection load.
+
+Manual tile retry also covers retained displayed pixels when a current media
+failure exists or the last successful SHM read is at least ten seconds old.
+Fresh healthy tiles are skipped; mapping release preserves the decoded image.
+This freshness override is manual-only, never a new automatic speaker-tick loop.

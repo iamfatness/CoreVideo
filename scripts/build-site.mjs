@@ -53,6 +53,10 @@ function latestReleaseVersion() {
 }
 
 const RELEASE_VERSION = latestReleaseVersion();
+// macOS betas are signed locally and published separately from Windows releases.
+const MAC_VERSION = "0.1.45-beta.1";
+const MAC_RELEASE = `https://github.com/iamfatness/CoreVideo/releases/tag/v${MAC_VERSION}`;
+const MAC_INSTALLER = `https://github.com/iamfatness/CoreVideo/releases/download/v${MAC_VERSION}/CoreVideo-Setup-v${MAC_VERSION}.pkg`;
 const RELEASES_LATEST = "https://github.com/iamfatness/CoreVideo/releases/latest";
 
 // ZComms ships from its own repository, so this site cannot read its version
@@ -219,6 +223,7 @@ function homeContent() {
     <p class="lede">CoreVideo joins the meeting through the Zoom Meeting SDK and hands OBS each participant's own video and audio as a real source &mdash; no NDI, no virtual camera, no screen capture, and no second machine. Follow the active speaker, pin spotlight slots, take the screen share, and record every guest to an isolated file.</p>
     <div class="hero-actions">
       <a class="button primary" href="/download/">Download${RELEASE_VERSION ? ` v${RELEASE_VERSION}` : ""} for Windows</a>
+      <a class="button" href="/download/#macos">Download for macOS &mdash; Apple Silicon beta</a>
       <a class="button" href="/core-plugin/">How it works</a>
       <a class="button" href="https://github.com/iamfatness/CoreVideo">View source</a>
     </div>
@@ -226,9 +231,10 @@ function homeContent() {
 </section>
 <section class="link-grid" aria-label="What the plugin does">
   <div><strong>One source per participant</strong><span>Each Zoom participant becomes a separate OBS source at up to 1080p, with their audio on its own track &mdash; not a crop out of a gallery screenshot.</span></div>
+  <div><strong>CoreVideo Tiles</strong><span>Arrange participant feeds in a styled gallery within one OBS source, with rounded corners, borders, and flexible layouts.</span></div>
   <div><strong>Active speaker &amp; spotlight</strong><span>Point a source at whoever is talking, at Zoom spotlight slot 1&hellip;N, or at a fixed guest with an automatic failover if they drop.</span></div>
   <div><strong>Screen share &amp; interpretation</strong><span>Subscribe to the live screen share, and pull existing Zoom interpretation audio channels in as dedicated sources.</span></div>
-  <div><strong>ISO recording</strong><span>Record every assigned participant to their own muxed MP4 with matching PCM audio, alongside the main program recording.</span></div>
+  <div><strong>ISO recording</strong><span>Record every assigned participant to an MP4 video file and a matching PCM WAV audio file, alongside the main program recording.</span></div>
   <div><strong>Active Speaker Director</strong><span>An automatic take with a hold time, a sensitivity threshold, an exclusion list, and a &ldquo;require video&rdquo; rule &mdash; so the cut follows the conversation without chattering.</span></div>
   <div><strong>Output profiles</strong><span>The Output Manager saves and reloads a whole assignment set, so last week&rsquo;s routing comes back on the next show instead of being rebuilt by hand.</span></div>
   <div><strong>Stream Deck &amp; Companion</strong><span>A Bitfocus Companion module (v5 or newer) picks the output and the participant <em>by name</em> from the live roster, so a button keeps working after somebody rejoins.</span></div>
@@ -241,7 +247,7 @@ function homeContent() {
 <section>
   <h2>Talkback, without leaving the meeting</h2>
   <p>Every show that runs on Zoom eventually needs a way to speak to one person without speaking to the room. The Zoom Meeting SDK carries a private talkback path alongside the meeting floor &mdash; 16 channels, up to 10 people each, and members duck under your voice rather than being muted &mdash; and both products here are built on it.</p>
-  <p><a href="/zcomms/">ZComms</a> is the standalone answer: a full intercom desk with named talk keys, ALL CALL, latch, extern feeds from a multichannel interface, and breakout-aware routing. It ships today. Inside the OBS plugin, an intercom dock that puts the same keys next to your video routing is <strong>in development on <code>main</code> and is not part of any release yet</strong> &mdash; when it lands it will be in a tagged build and in these notes, not before.</p>
+  <p><a href="/zcomms/">ZComms</a> is the standalone answer: a full intercom desk with named talk keys, ALL CALL, latch, extern feeds from a multichannel interface, and breakout-aware routing. It ships today. The OBS plugin also has a <a href="/core-plugin/">Zoom Talkback dock</a> in the Windows v0.1.45-beta.1 build. It is absent from the recommended Windows v0.1.44 release and unavailable on macOS. Use the <a href="/download/">download page</a> to choose the appropriate release.</p>
 </section>
 <section class="link-grid products" aria-label="CoreVideo products">
   <a href="/download/"><span class="tier">Free &middot; OBS plugin</span><strong>CoreVideo for OBS</strong><span>The plugin on this page: Zoom participant video, audio, screen share, interpretation, and ISO recording as native sources in the OBS you already run. MIT licensed.</span></a>
@@ -522,7 +528,7 @@ function zcommsPageContent() {
 <section>
   <h2>Where it fits</h2>
   <p>ZComms and CoreVideo are separate products that came out of the same problem &mdash; running a real show inside somebody else&apos;s Zoom meeting &mdash; and they share the Zoom Meeting SDK and the same sign-in broker. ZComms is the standalone desk: it is what you run when the intercom is the job, on its own machine or beside a switcher that has nothing to do with Zoom.</p>
-  <p>The <a href="/core-plugin/">CoreVideo plugin</a> is growing an intercom dock of its own so an operator already cutting a show in OBS can key talent without leaving it &mdash; that work is on <code>main</code> and has not shipped in a release yet. ZComms is the answer when talkback wants its own operator, its own position, or a feed from a bigger comms system, and it is the only one of the two you can download today.</p>
+  <p>The <a href="/core-plugin/">CoreVideo plugin</a> includes a Zoom Talkback dock in its Windows v0.1.45-beta.1 build, for operators keying talent from OBS. The recommended Windows v0.1.44 release has no talkback, and macOS talkback is unavailable. ZComms provides a separate operator position and feeds from a larger comms system.</p>
   <table>
     <thead><tr><th>Product</th><th>Form factor</th><th>Talkback</th></tr></thead>
     <tbody>
@@ -773,26 +779,47 @@ function downloadPageContent() {
     ${versionNote}
     <div class="hero-actions">
       <a class="button primary" href="${primaryHref}">${primaryLabel}</a>
-      <a class="button" href="${RELEASES_LATEST}">All releases &amp; release notes</a>
+      <a class="button" href="${RELEASES_LATEST}">Windows release notes</a>
     </div>
   </div>
 </section>
 ${fileRows}
-<h2>Requirements</h2>
+<p>Windows v0.1.44 remains the recommended release. The <a href="${MAC_RELEASE}">v0.1.45-beta.1 pre-release</a> also has Windows assets with the newer Zoom Talkback dock; treat those as beta builds.</p>
+<section id="macos">
+<h2>macOS &mdash; Apple Silicon beta v${MAC_VERSION}</h2>
+<p>Developer ID signed, notarized by Apple, and stapled. The replacement installer has passed installation on two Macs and an OBS runtime test on the build Mac.</p>
+<div class="hero-actions">
+<a class="button primary" href="${MAC_INSTALLER}">Download macOS installer (.pkg)</a>
+<a class="button" href="${MAC_INSTALLER}.sha256">SHA-256 checksum</a>
+<a class="button" href="${MAC_RELEASE}">macOS release notes</a>
+</div>
+<p>If you downloaded this beta before September 6, 2026, download it again. The original macOS package and ZIP were withdrawn after signature errors.</p>
+<p>Requires an Apple Silicon Mac (M1 or later). The replacement package was built against OBS Studio 32.2.1; use that version or newer for this beta. Intel Macs are not supported by this package.</p>
+<ol>
+<li>Close OBS, then open the downloaded <code>.pkg</code>.</li>
+<li>Install for your user account. No administrator password is needed.</li>
+<li>Reopen OBS, sign in to Zoom through CoreVideo, and join a meeting. Allow the requested permissions; the host must grant recording permission for media capture.</li>
+</ol>
+<p>For ISO recording, set a working FFmpeg executable in <strong>Zoom ISO Recorder</strong> and test it before recording. The macOS package does not bundle FFmpeg.</p>
+<p>Talkback is Windows-only. For your own screen, use OBS's macOS Screen Capture source; CoreVideo receives other participants' shares.</p>
+<p>To verify the download, save the installer and checksum in the same folder and run:</p>
+<pre><code>shasum -a 256 -c CoreVideo-Setup-v${MAC_VERSION}.pkg.sha256</code></pre>
+</section>
+<h2>Windows requirements</h2>
 <ul>
 <li><strong>OBS Studio 30 or newer</strong>, 64-bit.</li>
-<li><strong>Windows 10 or Windows 11</strong> (x64). This is the only platform the project packages, tests, and runs in production. macOS and Linux configure and build from source but ship no official package &mdash; a one-off Apple Silicon preview was published against v0.1.32-beta.1 and has not been maintained since.</li>
+<li><strong>Windows 10 or Windows 11</strong> (x64). For macOS, use the <a href="#macos">Apple Silicon beta installer above</a>. Linux requires a source build.</li>
 <li><strong>A Zoom account you can sign in with.</strong> CoreVideo joins meetings through the Zoom Meeting SDK, so the video quality and number of simultaneous feeds you get follow your Zoom account entitlements.</li>
 <li><strong>Downstream bandwidth</strong> for the feeds you subscribe to &mdash; roughly 4-6 Mbps per 1080p participant. Standard accounts are typically capped around 30 Mbps incoming; Enhanced Media / HBM raises that to roughly 100 Mbps.</li>
 </ul>
-<h2>Install</h2>
+<h2>Install on Windows</h2>
 <ol>
 <li>Close OBS Studio.</li>
 <li>Run the installer and point it at your OBS installation directory if it is not detected automatically.</li>
-<li>Start OBS and open <strong>Docks -&gt; CoreVideo</strong> to sign in and join a meeting.</li>
-<li>Add a <strong>CoreVideo</strong> source to any scene, then assign it to a participant, the active speaker, a spotlight slot, or the screen share.</li>
+<li>Start OBS and open <strong>Tools -&gt; Zoom Plugin Settings</strong> to sign in, then <strong>Docks -&gt; Zoom Control</strong> to join a meeting.</li>
+<li>Add a <strong>CoreVideo Participant</strong> source to any scene, then assign it to a participant, the active speaker, a spotlight slot, or the screen share.</li>
 </ol>
-<p>The installer is <strong>not code-signed yet</strong>, so Windows SmartScreen warns the first time you run it &mdash; &quot;More info&quot;, then &quot;Run anyway&quot;. Verify the SHA-256 below if you would rather check the file than trust the dialog.</p>
+<p>The Windows installer is <strong>not code-signed yet</strong>, so Windows SmartScreen warns the first time you run it &mdash; &quot;More info&quot;, then &quot;Run anyway&quot;. Verify the SHA-256 below if you would rather check the file than trust the dialog.</p>
 <p>CoreVideo is in public beta. The <a href="/core-plugin/">Core Plugin Guide</a> walks through participant routing, isolated audio, and ISO recording in detail, and <a href="/support/">Support</a> covers log collection and reporting a bug.</p>
 <h2>Verify your download</h2>
 <p>Each release ships a SHA-256 file alongside the binary. On Windows, compare the hashes with PowerShell:</p>
@@ -970,8 +997,8 @@ writeText(
       title: "Download",
       seoTitle: "Download CoreVideo - Free Zoom Plugin for OBS Studio",
       description: RELEASE_VERSION
-        ? `Download CoreVideo v${RELEASE_VERSION}, the free open-source OBS Studio plugin for Zoom. Windows installer, checksums, requirements, and install steps.`
-        : "Download CoreVideo, the free open-source OBS Studio plugin for Zoom. Windows installer, checksums, requirements, and install steps.",
+        ? `Download CoreVideo v${RELEASE_VERSION}, the free open-source OBS Studio plugin for Zoom. Windows and macOS installers, checksums, and setup.`
+        : "Download CoreVideo, the free open-source OBS Studio plugin for Zoom. Windows and macOS installers, checksums, and setup.",
     },
     downloadPageContent(),
     {

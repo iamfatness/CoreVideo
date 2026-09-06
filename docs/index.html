@@ -234,9 +234,9 @@
     </p>
     <div class="callout warning" style="margin-top:18px;">
       <div class="callout-title">🧪 Beta status</div>
-      CoreVideo is in <strong>public beta</strong>. The supported platform is
-      <strong>Windows x64</strong> (installer or ZIP); macOS and Linux build from
-      source and ship no package
+      CoreVideo is in <strong>public beta</strong>. Packaged builds are available for
+      <strong>Windows x64</strong> (installer or ZIP) and
+      <strong>macOS Apple Silicon</strong> (signed beta installer). Linux requires a source build
       (<a href="#mac-beta">details</a>) — see
       <a href="ROADMAP.md">the Roadmap</a> for known limitations and what's
       planned next. To report a problem, use
@@ -263,7 +263,7 @@
     </div>
     <div style="margin-top:18px;">
       <a href="https://corevideo.io/download" style="display:inline-block;background:var(--accent);color:#06170d;font-weight:700;padding:11px 20px;border-radius:8px;text-decoration:none;">Download for Windows</a>
-      &nbsp;<a href="#mac-beta" style="display:inline-block;padding:11px 18px;border:1px solid var(--border);border-radius:8px;text-decoration:none;">macOS: build from source</a>
+      &nbsp;<a href="#mac-beta" style="display:inline-block;padding:11px 18px;border:1px solid var(--border);border-radius:8px;text-decoration:none;">macOS beta installer</a>
       &nbsp;<a href="#adding" style="display:inline-block;padding:11px 18px;border:1px solid var(--border);border-radius:8px;text-decoration:none;">How to install</a>
     </div>
   </div>
@@ -360,7 +360,7 @@
       <div class="card"><div class="card-icon">ISO</div><h4>Auto ISO Recording</h4>
         <p>Record assigned participant video/audio tracks to separate files while optionally recording the main OBS program output.</p></div>
       <div class="card"><div class="card-icon">💻</div><h4>Multi-Platform</h4>
-        <p>Windows is the release channel. macOS and Linux build from source and ship no package (<a href="#mac-beta">details</a>), subject to local SDK and dependency setup.</p></div>
+        <p>Windows has a release installer; macOS has a signed <a href="#mac-beta">Apple Silicon beta installer</a>. Linux requires a source build.</p></div>
     </div>
   </section>
 
@@ -446,25 +446,21 @@
 
   <!-- ── macOS status ─────────────────────────────────── -->
   <section id="mac-beta">
-    <h2>macOS: build from source</h2>
-    <p>
-      <strong>There is no macOS package to download.</strong> Windows is the release channel;
-      macOS configures and builds from source, subject to local SDK and dependency setup.
-    </p>
-    <div class="callout warning">
-      <div class="callout-title">Why this page changed</div>
-      A one-off Apple Silicon preview was published against
-      <code>v0.1.32-beta.1</code> and has not been maintained since — every release after it
-      is Windows-only. This page previously told you to download the latest
-      <code>macOS-arm64.zip</code> from Releases; there isn't one, and the old preview is
-      many releases behind. If you are running it, treat it as unsupported.
-    </div>
-    <p>
-      To build on macOS, follow the source build in the
-      <a href="https://github.com/iamfatness/CoreVideo">repository README</a>. The engine is
-      portable and the mac port is developed on a branch, but nothing is packaged, signed, or
-      notarized, and there is no published date for when that changes.
-    </p>
+    <h2>macOS: Apple Silicon beta</h2>
+    <p><strong>CoreVideo v0.1.45-beta.1 is available as a signed and notarized installer.</strong>
+      Requires an Apple Silicon Mac (M1 or later). Use OBS Studio 32.2.1 or newer for this beta; the replacement package was built against OBS 32.2.1.</p>
+    <p><a href="/download/#macos">Download the macOS installer and SHA-256 checksum</a>.</p>
+    <ol>
+      <li>Close OBS and open the downloaded <code>.pkg</code>.</li>
+      <li>Install for your user account; no administrator password is needed.</li>
+      <li>Reopen OBS, sign in to Zoom, and join a meeting. Allow the requested permissions.
+        The meeting host must grant recording permission before raw video and audio can start.</li>
+    </ol>
+    <p>The original macOS downloads were replaced on September 6, 2026 after signature errors.
+      Download the replacement installer if you previously downloaded this beta. The old ZIP was removed.</p>
+    <p>ISO recording requires a working FFmpeg executable configured in Zoom ISO Recorder; the macOS installer does not bundle it.</p>
+    <p>Talkback remains Windows-only. For your own screen, use OBS's native macOS Screen Capture source.
+      Intel Macs are not supported by this package.</p>
   </section>
 
   <!-- ── Sign in with Zoom ──────────────────────────────────────── -->
@@ -501,7 +497,7 @@
     <h2>Requirements</h2>
     <table>
       <tr><th>Requirement</th><th>Notes</th></tr>
-      <tr><td>Windows 10 / 11 (64-bit)</td><td>Windows is the release channel (installer or ZIP). There is no macOS or Linux package — both build from source; see <a href="#mac-beta">macOS: build from source</a>.</td></tr>
+      <tr><td>Windows 10 / 11 (64-bit)</td><td>Windows is the release channel (installer or ZIP). A signed <a href="#mac-beta">macOS Apple Silicon beta installer</a> is also available. Linux requires a source build.</td></tr>
       <tr><td>OBS Studio 30+</td><td>Install OBS first; CoreVideo loads as a plugin.</td></tr>
       <tr><td>A Zoom account</td><td>Any account you can sign in with. No developer account, SDK key, or client secret required.</td></tr>
       <tr><td>Network bandwidth</td><td>Plan roughly 4-6 Mbps per 1080p participant feed. Your Zoom account and app entitlements affect maximum quality and stream count (standard accounts are commonly limited to ~30 Mbps incoming video; Enhanced Media / HBM can raise that to ~100 Mbps).</td></tr>

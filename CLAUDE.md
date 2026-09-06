@@ -1488,3 +1488,10 @@ defect history that motivates their invariants, in the pattern you see in
 `src/audio-timeline.h`. Follow it: when a change is motivated by a live
 failure, say what happened, with numbers. Tests pin invariants, not
 implementations.
+
+## macOS website downloads (2026-09-06)
+
+The site builder keeps `MAC_VERSION` separate from the stable Windows version.
+The macOS download is the locally signed/notarized `.pkg` on v0.1.45-beta.1;
+its GitHub filename includes `v`. Do not restore the withdrawn macOS ZIP link.
+Home, download, and plugin docs point to `/download/#macos`.

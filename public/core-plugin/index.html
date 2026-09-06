@@ -35,7 +35,7 @@
   <main class="content">
     <h1>Core Plugin Functionality</h1>
 <p>This guide covers the main CoreVideo OBS plugin workflows. It intentionally focuses on the OBS plugin, <code>ZoomObsEngine</code>, Zoom source assignment, control APIs, audio routing, talkback, and ISO recording.</p>
-<p>Current release: <strong>v0.1.44</strong>. Where a section describes something newer than that, it says so.</p>
+<p>Recommended Windows release: <strong>v0.1.44</strong>. macOS Apple Silicon beta: <strong>v0.1.45-beta.1</strong>, available as a signed and notarized installer on the <a href="https://corevideo.io/download/#macos">download page</a>. The beta also has Windows assets; features newer than v0.1.44 are identified below. Talkback is unavailable on macOS. The Mac package was built against OBS 32.2.1; use that version or newer.</p>
 <p>One naming quirk to get out of the way: the OBS <strong>sources</strong> this plugin registers are called <code>CoreVideo ...</code>, but its <strong>docks and Tools menu entries</strong> are still called <code>Zoom ...</code>. Both are this plugin.</p>
 <h2>Media Architecture</h2>
 <figure class="doc-image"><img src="images/core-plugin-pipeline.svg" alt="CoreVideo plugin media pipeline"></figure>
@@ -44,7 +44,7 @@
 <p><strong>Current limitation (high feed counts):</strong> All video frames travel as CPU I420 through shared memory. At 8+ concurrent 1080p sources this creates substantial memory bandwidth pressure due to multiple per-subscription copies. See <a href="ROADMAP.md">ROADMAP.md</a> (Large-meeting capacity guidance) for exploration of GPU texture sharing (Spout on Windows, Syphon on macOS) as a lower-CPU alternative transport in the future.</p>
 <h2>What It Looks Like in OBS</h2>
 <p>The CoreVideo plugin is operated from inside OBS. These diagrams mirror the current core plugin controls: the Zoom Control dock, regular OBS scenes/sources, the Active Speaker Director controls, the dockable profile-oriented Zoom Output Manager, and the CoreVideo Participant source properties. Exact styling can vary by OBS theme and platform, but the controls and labels should match the current plugin. This guide intentionally describes the OBS plugin path; optional Sidecar control-surface features are tracked separately in the roadmap.</p>
-<p>The plugin registers five docks, each with a matching <strong>Tools</strong> menu entry that focuses it: <strong>Zoom Control</strong>, <strong>Zoom Output Manager</strong>, <strong>Zoom Diagnostics</strong>, <strong>Zoom ISO Recorder</strong>, and <strong>Zoom Talkback</strong>. <strong>Tools &gt; Zoom Plugin Settings</strong> opens the settings dialog, which is where Zoom sign-in lives.</p>
+<p>The plugin docks each have a matching <strong>Tools</strong> menu entry that focuses them: <strong>Zoom Control</strong>, <strong>Zoom Output Manager</strong>, <strong>Zoom Diagnostics</strong>, <strong>Zoom ISO Recorder</strong>, and (in builds newer than v0.1.44) <strong>Zoom Talkback</strong>. The Talkback dock is unavailable on macOS. <strong>Tools &gt; Zoom Plugin Settings</strong> opens the settings dialog, which is where Zoom sign-in lives.</p>
 <figure class="doc-image"><img src="images/corevideo-obs-workspace.svg" alt="CoreVideo OBS workspace with Zoom Control dock"></figure>
 <p>The Zoom Control dock joins and leaves meetings, starts and stops raw media, shows meeting state, lists participants, exposes Active Speaker Director controls, and opens the Output Manager for source assignment without leaving OBS.</p>
 <figure class="doc-image"><img src="images/corevideo-output-manager.svg" alt="CoreVideo Output Manager"></figure>
@@ -127,7 +127,7 @@
 <h3>Silence is a Zoom property, not a dropout</h3>
 <p>Zoom only calls audio back for a participant who is currently making sound, so a silent stretch produces no buffers at all rather than buffers of silence. Two consequences CoreVideo handles and one it cannot: the master clock resyncs rather than letting a quiet participant walk steadily into the past; the first buffer after a run of true digital silence is ramped in over a few milliseconds so the resumption does not click; and speech the far end never sent stays missing.</p>
 <h2>Talkback (Intercom)</h2>
-<p><strong>Newer than v0.1.44.</strong> The Talkback dock is on <code>main</code> and ships in the next release; it is not in the v0.1.44 installer.</p>
+<p><strong>Windows only, newer than v0.1.44.</strong> The Talkback dock is included in the Windows v0.1.45-beta.1 build. It is not in the recommended v0.1.44 installer, and macOS does not implement talkback.</p>
 <p>Talkback is private director-to-talent audio carried over Zoom's own talkback channels - the operator can talk to one person, or to everyone, without the meeting or the program mix hearing it. Open it from <strong>Tools &gt; Zoom Talkback</strong>, or as the <strong>Zoom Talkback</strong> dock.</p>
 <p>The dock is modelled on a Clear-Com/RTS intercom panel rather than on a list of settings: one grid, <strong>All talent</strong> across the top, then one compact cell per person. A cell is the talk key and the status display at the same time.</p>
 <h3>Assigning channels first</h3>
@@ -160,7 +160,8 @@
 <p>There are no Companion actions for talkback yet.</p>
 <h2>Auto ISO Recording</h2>
 <figure class="doc-image"><img src="images/iso-recording-flow.svg" alt="CoreVideo ISO recording flow"></figure>
-<p>ISO recording is controlled by the OBS plugin, not the engine. When enabled, CoreVideo records one video file and one PCM WAV audio file per active source segment. A new segment starts when the resolved participant or source resolution changes.</p>
+<p>ISO recording is controlled by the OBS plugin, not the engine. When enabled, On macOS, configure and test a working FFmpeg executable in <strong>Zoom ISO Recorder</strong> first; the package does not bundle FFmpeg.</p>
+<p>CoreVideo records one video file and one PCM WAV audio file per active source segment. A new segment starts when the resolved participant or source resolution changes.</p>
 <p>Requirements:</p>
 <ul><li><code>ffmpeg</code> must be available on <code>PATH</code>, or pass an explicit <code>ffmpeg_path</code>.</li><li>Raw media must be active.</li><li>Sources must be assigned to participant, active speaker, or spotlight modes.</li></ul>
 <h3>OBS ISO Recorder Panel</h3>

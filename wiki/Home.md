@@ -2,8 +2,8 @@
 
 CoreVideo is an OBS Studio plugin that pulls Zoom meeting video, audio, screen
 share, and Zoom interpretation audio into OBS as native sources - no NDI, no
-virtual camera, no screen capture of a Zoom window. Latest release: **v0.1.44**
-(2026-08-22).
+virtual camera, no screen capture of a Zoom window. Recommended Windows release: **v0.1.44**; macOS Apple Silicon beta: **v0.1.45-beta.1**
+(replacement installer published September 6, 2026).
 
 This wiki holds the policy and support pages. Everything operational - install,
 configuration, architecture, the control APIs - lives on the documentation site,
@@ -43,20 +43,15 @@ the two.
 
 ## Platform status
 
-**Windows 10/11 x64 is the only supported, packaged platform.** It is the only
-configuration with a release pipeline, and the only one the maintainers build,
-test, and run in production.
+**Windows 10/11 x64 and macOS Apple Silicon have packaged builds.** Windows
+uses the stable release channel; macOS v0.1.45-beta.1 is a public beta with a
+Developer ID signed, notarized installer. [Download and install](https://corevideo.io/download/#macos).
+The original macOS package was replaced on September 6, 2026 after signature
+errors; download the replacement if you already have an earlier copy. Intel
+Macs are not supported by this package, and Linux requires a source build.
 
-The CMake project configures on macOS, Linux, and Windows arm64, and CI compiles
-the cross-platform sources on macOS and Linux to catch portability regressions -
-but none of those produce an installable build. The one macOS bundle ever
-published was `v0.1.32-beta.1`, which is many releases behind and should not be
-used for a show. See
-[Platform Support](https://github.com/iamfatness/CoreVideo/blob/main/README.md#platform-support)
-for what a source build on those platforms does and does not get you.
-
-CoreVideo is in public beta and the installer is not code-signed yet, so Windows
-SmartScreen flags it on first run.
+CoreVideo is in public beta. The Windows installer is not code-signed yet,
+so Windows SmartScreen flags it on first run.
 
 ---
 

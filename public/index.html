@@ -81,6 +81,7 @@
     <p class="lede">CoreVideo joins the meeting through the Zoom Meeting SDK and hands OBS each participant's own video and audio as a real source &mdash; no NDI, no virtual camera, no screen capture, and no second machine. Follow the active speaker, pin spotlight slots, take the screen share, and record every guest to an isolated file.</p>
     <div class="hero-actions">
       <a class="button primary" href="/download/">Download v0.1.44 for Windows</a>
+      <a class="button" href="/download/#macos">Download for macOS &mdash; Apple Silicon beta</a>
       <a class="button" href="/core-plugin/">How it works</a>
       <a class="button" href="https://github.com/iamfatness/CoreVideo">View source</a>
     </div>
@@ -88,9 +89,10 @@
 </section>
 <section class="link-grid" aria-label="What the plugin does">
   <div><strong>One source per participant</strong><span>Each Zoom participant becomes a separate OBS source at up to 1080p, with their audio on its own track &mdash; not a crop out of a gallery screenshot.</span></div>
+  <div><strong>CoreVideo Tiles</strong><span>Arrange participant feeds in a styled gallery within one OBS source, with rounded corners, borders, and flexible layouts.</span></div>
   <div><strong>Active speaker &amp; spotlight</strong><span>Point a source at whoever is talking, at Zoom spotlight slot 1&hellip;N, or at a fixed guest with an automatic failover if they drop.</span></div>
   <div><strong>Screen share &amp; interpretation</strong><span>Subscribe to the live screen share, and pull existing Zoom interpretation audio channels in as dedicated sources.</span></div>
-  <div><strong>ISO recording</strong><span>Record every assigned participant to their own muxed MP4 with matching PCM audio, alongside the main program recording.</span></div>
+  <div><strong>ISO recording</strong><span>Record every assigned participant to an MP4 video file and a matching PCM WAV audio file, alongside the main program recording.</span></div>
   <div><strong>Active Speaker Director</strong><span>An automatic take with a hold time, a sensitivity threshold, an exclusion list, and a &ldquo;require video&rdquo; rule &mdash; so the cut follows the conversation without chattering.</span></div>
   <div><strong>Output profiles</strong><span>The Output Manager saves and reloads a whole assignment set, so last week&rsquo;s routing comes back on the next show instead of being rebuilt by hand.</span></div>
   <div><strong>Stream Deck &amp; Companion</strong><span>A Bitfocus Companion module (v5 or newer) picks the output and the participant <em>by name</em> from the live roster, so a button keeps working after somebody rejoins.</span></div>
@@ -103,7 +105,7 @@
 <section>
   <h2>Talkback, without leaving the meeting</h2>
   <p>Every show that runs on Zoom eventually needs a way to speak to one person without speaking to the room. The Zoom Meeting SDK carries a private talkback path alongside the meeting floor &mdash; 16 channels, up to 10 people each, and members duck under your voice rather than being muted &mdash; and both products here are built on it.</p>
-  <p><a href="/zcomms/">ZComms</a> is the standalone answer: a full intercom desk with named talk keys, ALL CALL, latch, extern feeds from a multichannel interface, and breakout-aware routing. It ships today. Inside the OBS plugin, an intercom dock that puts the same keys next to your video routing is <strong>in development on <code>main</code> and is not part of any release yet</strong> &mdash; when it lands it will be in a tagged build and in these notes, not before.</p>
+  <p><a href="/zcomms/">ZComms</a> is the standalone answer: a full intercom desk with named talk keys, ALL CALL, latch, extern feeds from a multichannel interface, and breakout-aware routing. It ships today. The OBS plugin also has a <a href="/core-plugin/">Zoom Talkback dock</a> in the Windows v0.1.45-beta.1 build. It is absent from the recommended Windows v0.1.44 release and unavailable on macOS. Use the <a href="/download/">download page</a> to choose the appropriate release.</p>
 </section>
 <section class="link-grid products" aria-label="CoreVideo products">
   <a href="/download/"><span class="tier">Free &middot; OBS plugin</span><strong>CoreVideo for OBS</strong><span>The plugin on this page: Zoom participant video, audio, screen share, interpretation, and ISO recording as native sources in the OBS you already run. MIT licensed.</span></a>

@@ -1,8 +1,9 @@
 # Support
 
-Current release: **v0.1.44**. Windows 10/11 x64 is the only supported, packaged
-platform - see [Platform Support](https://github.com/iamfatness/CoreVideo/blob/main/README.md#platform-support)
-before filing a bug against a source build on anything else.
+Recommended Windows release: **v0.1.44**. macOS Apple Silicon beta:
+**v0.1.45-beta.1**, signed and notarized. See [Downloads](https://corevideo.io/download/)
+for the correct package. Include your operating system, OBS version, and
+CoreVideo version with a bug report.
 
 ## Documentation
 
@@ -47,6 +48,19 @@ the Tools menu for "CoreVideo" finds nothing.
 
 ---
 
+## macOS installation and recording
+
+Use the [signed macOS installer](https://corevideo.io/download/#macos), close OBS
+before installing, then reopen it. The replacement beta was built against
+OBS 32.2.1; use that version or newer. If an earlier copy reports a signature
+error, download the replacement package rather than disabling Gatekeeper.
+The plugin installs under `~/Library/Application Support/obs-studio/plugins/`.
+
+For ISO recording, select and test a working FFmpeg executable in
+**Zoom ISO Recorder**; FFmpeg is not included in the macOS package. If the engine
+requests recording permission, wait for the host to grant it and start raw
+media again. For your own screen, use OBS's macOS Screen Capture source.
+
 ## Collecting logs
 
 ### The support bundle - do this first
@@ -60,6 +74,9 @@ The bundle is written to:
 ```
 %APPDATA%\obs-studio\plugin_config\obs-zoom-plugin\support-bundles\CoreVideo-support-<yyyyMMdd-HHmmss>\
 ```
+
+On macOS, support bundles are under
+`~/Library/Application Support/obs-studio/plugin_config/obs-zoom-plugin/support-bundles/`.
 
 On Windows a `.zip` of that folder is created beside it, using PowerShell. The
 dialog tells you both paths when it finishes. If PowerShell is unavailable, or
@@ -92,7 +109,8 @@ goes into the OBS log, prefixed `[obs-zoom-plugin]`. Engine lines arrive as
 `[obs-zoom-plugin] Zoom engine debug: ...`.
 
 In OBS: **Help -> Log Files -> Upload Current Log File**, then paste the link.
-The files themselves are under `%APPDATA%\obs-studio\logs`.
+On Windows, logs are under `%APPDATA%\obs-studio\logs`. On macOS, use
+`~/Library/Application Support/obs-studio/logs`.
 
 The version is logged once at load, so check that first - a stale DLL is a
 common cause of "the fix didn't work":
@@ -318,8 +336,9 @@ glitches that source.
 
 ### Talkback: the key says live but nobody hears me
 
-The Zoom Talkback dock is new, and the failure modes are all silent in Zoom's
-own API.
+This section applies to Windows builds with the Zoom Talkback dock, including
+v0.1.45-beta.1. Talkback is unavailable on macOS and absent from Windows v0.1.44.
+The failure modes can be silent in Zoom's own API.
 
 - **The banner reads "ON AIR - BOT MUTED".** Zoom refused to unmute CoreVideo's
   microphone, and sends are accepted while delivering nothing. Ask the host to
@@ -415,17 +434,19 @@ bandwidth tier, not as a hard prerequisite for raw data.
 
 - **v0.1.43 was built and verified but never published.** Anyone tracking
   releases goes from v0.1.42 straight to v0.1.44, which contains both.
-- **The installer is not code-signed**, so Windows SmartScreen flags it on first
+- **The Windows installer is not code-signed**, so Windows SmartScreen flags it on first
   run.
 - **The embedded audio track** on a video source has no loss accounting and is
   stamped at arrival. Use the dedicated CoreVideo Audio sources for critical
   audio.
-- **The intercom / talkback dock is newer than v0.1.44** and is not in a tagged
-  release yet. It is on `main` and ships next. Talkback has no OSC addresses,
+- **The intercom / talkback dock is in the Windows v0.1.45-beta.1 build.**
+  It is absent from Windows v0.1.44 and unavailable on macOS. Talkback has no OSC addresses,
   no Companion actions, and no OBS hotkey yet - the dock and the TCP control API
   are the only keying surfaces.
-- **macOS and Linux are source-build only.** There are no official packages, no
-  QA, and no supported upgrade path.
+- **macOS Apple Silicon has a signed and notarized beta installer.** Use the
+  [replacement package](https://corevideo.io/download/#macos) published September 6,
+  2026 if an earlier download reports a signature error. Talkback remains
+  Windows-only. Intel Macs have no package; Linux requires a source build.
 - **`COREVIDEO_TALKBACK_LAYOUT_TEST`** is a developer instrument that fills the
   Talkback dock with a fake cast and refuses every engine call. Never set it on a
   show machine.

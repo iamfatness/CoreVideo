@@ -42,17 +42,22 @@ static constexpr uint32_t kMeterLoudArgb    = 0xFFE04B4Bu;
 static constexpr uint32_t kMeterQuietArgb   = 0xFFE0A03Cu;
 static constexpr uint32_t kMeterIdleArgb    = 0xFF3A424Eu;
 
-// Shared with the Tiles wall only by FILE PATH, not by handle -- and that is
-// not the free dedupe it sounds like. gs_effect_create_from_file() allocates
-// a brand-new gs_effect_t on every call; libobs does NOT cache or dedupe
-// effects compiled from the same file. This second tiles_effect_load() call
-// (the Tiles wall makes its own, separate one) compiles a second, independent
-// copy of corevideo-tiles.effect. Harmless as written -- two handles, each
-// destroyed exactly once by its own owner (this file's unload vs. the Tiles
-// source's) -- but do NOT "deduplicate" the two loads into one shared
-// gs_effect_t* on the strength of a caching story that isn't true: sharing a
-// handle between two owners that each call gs_effect_destroy() on it once is
-// a double-free at unload.
+// Shared with the Tiles wall by FILE PATH, and libobs really does dedupe that
+// for us -- verified in libobs source, because this comment has now been
+// wrong in both directions and the guesswork should stop here:
+//
+//   graphics.c, gs_effect_create_from_file(): calls find_cached_effect(file)
+//   first and returns that effect if one matches, so the second load compiles
+//   nothing. gs_effect_create() sets effect->cached = true for any effect
+//   created with a filename.
+//   effect.c, gs_effect_destroy(): `if (!effect->cached) actually_destroy()`
+//   -- destroying a cached effect is a no-op until obs_free_graphics().
+//
+// So s_meter_effect.effect and the Tiles wall's s_tiles_effect.effect are the
+// SAME pointer, each tiles_effect_destroy() is a no-op, and the effect is
+// reclaimed at graphics shutdown. No double compile, no double-free, no leak.
+// Loading our own handle rather than reaching into zoom-supersource.cpp is a
+// coupling choice, not a memory-safety one.
 static TilesEffect s_meter_effect;
 static bool s_meter_pass_failed_logged = false;
 

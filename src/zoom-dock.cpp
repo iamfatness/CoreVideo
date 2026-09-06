@@ -800,6 +800,7 @@ ZoomDock::ZoomDock(QWidget *parent)
     m_refresh_timer->setInterval(100);
     connect(m_refresh_timer, &QTimer::timeout, this, [this]() {
         SpeakerDirector::instance().tick(os_gettime_ns() / 1000000ULL);
+        log_speaker_director_promotion();
         update_state_indicator();
     });
     m_refresh_timer->start();
@@ -905,6 +906,37 @@ void ZoomDock::apply_speaker_director_settings()
 
     SpeakerDirector::instance().configure(
         sensitivity_ms, hold_ms, settings.speaker_require_video, excluded);
+}
+
+void ZoomDock::log_speaker_director_promotion()
+{
+    const auto snapshot = SpeakerDirector::instance().snapshot(
+        os_gettime_ns() / 1000000ULL);
+    for (const auto &promotion : snapshot.recent_promotions) {
+        if (promotion.session_id < m_director_log_session_id ||
+            (promotion.session_id == m_director_log_session_id &&
+             promotion.sequence <= m_director_log_sequence)) {
+            continue;
+        }
+        const char *reason = "automatic";
+        if (promotion.reason == SpeakerPromotionReason::ManualTake)
+            reason = "manual_take";
+        else if (promotion.reason == SpeakerPromotionReason::ForcedVacancy)
+            reason = "forced_vacancy";
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] speaker_director_promotion "
+             "session=%llu sequence=%llu reason=%s from_id=%u to_id=%u "
+             "effective_sensitivity_ms=%u effective_hold_ms=%u "
+             "candidate_age_ms=%llu incumbent_held_ms=%llu",
+             static_cast<unsigned long long>(promotion.session_id),
+             static_cast<unsigned long long>(promotion.sequence), reason,
+             promotion.previous_speaker_id, promotion.promoted_speaker_id,
+             promotion.effective_sensitivity_ms, promotion.effective_hold_ms,
+             static_cast<unsigned long long>(promotion.candidate_age_ms),
+             static_cast<unsigned long long>(promotion.incumbent_held_ms));
+        m_director_log_session_id = promotion.session_id;
+        m_director_log_sequence = promotion.sequence;
+    }
 }
 
 // -- Internal helpers ----------------------------------------------------------

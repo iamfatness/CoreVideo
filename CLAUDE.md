@@ -260,6 +260,16 @@ Every one of these is documented at length where it lives; the list is the map.
   12-90s for a whole show). The manual speaker Take/Release buttons still
   call it deliberately — that's a rare, operator-initiated action, not
   the automatic path.
+- **Speaker-director time is monotonic under its mutex**
+  (`src/speaker-director.cpp`): callers sample `os_gettime_ns()` before taking
+  the director lock, so a contending callback can arrive with an older sample.
+  Every time-mutating entry point clamps that sample to the newest accepted
+  director time before changing candidate, hold, vacancy, or manual-take
+  clocks. Never subtract an unguarded caller timestamp from those clocks;
+  unsigned wrap can otherwise satisfy both sensitivity and hold immediately.
+  Actual promotions retain a bounded, ID-only attribution history and the dock
+  logs it outside the director mutex; keep names and callbacks out of that
+  locked path.
 - **ISO encoder demotion chain must actually chain**
   (`src/zoom-iso-recorder.cpp`'s `record_video_frame`): never gate a
   fresh demotion attempt on "has this uuid ever been demoted before" —

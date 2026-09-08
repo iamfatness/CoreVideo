@@ -54,7 +54,7 @@ function latestReleaseVersion() {
 
 const RELEASE_VERSION = latestReleaseVersion();
 // macOS betas are signed locally and published separately from Windows releases.
-const MAC_VERSION = "0.1.45-beta.1";
+const MAC_VERSION = "0.1.45-beta.3";
 const MAC_RELEASE = `https://github.com/iamfatness/CoreVideo/releases/tag/v${MAC_VERSION}`;
 const MAC_INSTALLER = `https://github.com/iamfatness/CoreVideo/releases/download/v${MAC_VERSION}/CoreVideo-Setup-v${MAC_VERSION}.pkg`;
 const RELEASES_LATEST = "https://github.com/iamfatness/CoreVideo/releases/latest";
@@ -247,7 +247,7 @@ function homeContent() {
 <section>
   <h2>Talkback, without leaving the meeting</h2>
   <p>Every show that runs on Zoom eventually needs a way to speak to one person without speaking to the room. The Zoom Meeting SDK carries a private talkback path alongside the meeting floor &mdash; 16 channels, up to 10 people each, and members duck under your voice rather than being muted &mdash; and both products here are built on it.</p>
-  <p><a href="/zcomms/">ZComms</a> is the standalone answer: a full intercom desk with named talk keys, ALL CALL, latch, extern feeds from a multichannel interface, and breakout-aware routing. It ships today. The OBS plugin also has a <a href="/core-plugin/">Zoom Talkback dock</a> in the Windows v0.1.45-beta.1 build. It is absent from the recommended Windows v0.1.44 release and unavailable on macOS. Use the <a href="/download/">download page</a> to choose the appropriate release.</p>
+  <p><a href="/zcomms/">ZComms</a> is the standalone answer: a full intercom desk with named talk keys, ALL CALL, latch, extern feeds from a multichannel interface, and breakout-aware routing. It ships today. The OBS plugin also has a <a href="/core-plugin/">Zoom Talkback dock</a> in the Windows v0.1.45-beta.3 build. It is absent from the recommended Windows v0.1.44 release and unavailable on macOS. Use the <a href="/download/">download page</a> to choose the appropriate release.</p>
 </section>
 <section class="link-grid products" aria-label="CoreVideo products">
   <a href="/download/"><span class="tier">Free &middot; OBS plugin</span><strong>CoreVideo for OBS</strong><span>The plugin on this page: Zoom participant video, audio, screen share, interpretation, and ISO recording as native sources in the OBS you already run. MIT licensed.</span></a>
@@ -528,7 +528,7 @@ function zcommsPageContent() {
 <section>
   <h2>Where it fits</h2>
   <p>ZComms and CoreVideo are separate products that came out of the same problem &mdash; running a real show inside somebody else&apos;s Zoom meeting &mdash; and they share the Zoom Meeting SDK and the same sign-in broker. ZComms is the standalone desk: it is what you run when the intercom is the job, on its own machine or beside a switcher that has nothing to do with Zoom.</p>
-  <p>The <a href="/core-plugin/">CoreVideo plugin</a> includes a Zoom Talkback dock in its Windows v0.1.45-beta.1 build, for operators keying talent from OBS. The recommended Windows v0.1.44 release has no talkback, and macOS talkback is unavailable. ZComms provides a separate operator position and feeds from a larger comms system.</p>
+  <p>The <a href="/core-plugin/">CoreVideo plugin</a> includes a Zoom Talkback dock in its Windows v0.1.45-beta.3 build, for operators keying talent from OBS. The recommended Windows v0.1.44 release has no talkback, and macOS talkback is unavailable. ZComms provides a separate operator position and feeds from a larger comms system.</p>
   <table>
     <thead><tr><th>Product</th><th>Form factor</th><th>Talkback</th></tr></thead>
     <tbody>
@@ -784,17 +784,16 @@ function downloadPageContent() {
   </div>
 </section>
 ${fileRows}
-<p>Windows v0.1.44 remains the recommended release. The <a href="${MAC_RELEASE}">v0.1.45-beta.1 pre-release</a> also has Windows assets with the newer Zoom Talkback dock; treat those as beta builds.</p>
+<p>Windows v0.1.44 remains the recommended release. The <a href="${MAC_RELEASE}">v0.1.45-beta.3 pre-release</a> also has Windows assets with the newer Zoom Talkback dock and the panelist loudness readiness board; treat those as beta builds.</p>
 <section id="macos">
 <h2>macOS &mdash; Apple Silicon beta v${MAC_VERSION}</h2>
-<p>Developer ID signed, notarized by Apple, and stapled. The replacement installer has passed installation on two Macs and an OBS runtime test on the build Mac.</p>
+<p>Developer ID signed, notarized by Apple, and stapled. This build carries the raw-media recovery, waiting-room and video-quality fixes from beta.2 plus the panelist loudness readiness board.</p>
 <div class="hero-actions">
 <a class="button primary" href="${MAC_INSTALLER}">Download macOS installer (.pkg)</a>
 <a class="button" href="${MAC_INSTALLER}.sha256">SHA-256 checksum</a>
 <a class="button" href="${MAC_RELEASE}">macOS release notes</a>
 </div>
-<p>If you downloaded this beta before September 6, 2026, download it again. The original macOS package and ZIP were withdrawn after signature errors.</p>
-<p>Requires an Apple Silicon Mac (M1 or later). The replacement package was built against OBS Studio 32.2.1; use that version or newer for this beta. Intel Macs are not supported by this package.</p>
+<p>Requires an Apple Silicon Mac (M1 or later). The package is built against OBS Studio 32.2.1; use that version or newer for this beta. Intel Macs are not supported by this package.</p>
 <ol>
 <li>Close OBS, then open the downloaded <code>.pkg</code>.</li>
 <li>Install for your user account. No administrator password is needed.</li>

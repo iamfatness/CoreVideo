@@ -35,7 +35,7 @@
   <main class="content">
     <h1>Core Plugin Functionality</h1>
 <p>This guide covers the main CoreVideo OBS plugin workflows. It intentionally focuses on the OBS plugin, <code>ZoomObsEngine</code>, Zoom source assignment, control APIs, audio routing, talkback, and ISO recording.</p>
-<p>Recommended Windows release: <strong>v0.1.44</strong>. macOS Apple Silicon beta: <strong>v0.1.45-beta.1</strong>, available as a signed and notarized installer on the <a href="https://corevideo.io/download/#macos">download page</a>. The beta also has Windows assets; features newer than v0.1.44 are identified below. Talkback is unavailable on macOS. The Mac package was built against OBS 32.2.1; use that version or newer.</p>
+<p>Recommended Windows release: <strong>v0.1.44</strong>. macOS Apple Silicon beta: <strong>v0.1.45-beta.3</strong>, available as a signed and notarized installer on the <a href="https://corevideo.io/download/#macos">download page</a>. The beta also has Windows assets; features newer than v0.1.44 are identified below. Talkback is unavailable on macOS. The Mac package was built against OBS 32.2.1; use that version or newer.</p>
 <p>One naming quirk to get out of the way: the OBS <strong>sources</strong> this plugin registers are called <code>CoreVideo ...</code>, but its <strong>docks and Tools menu entries</strong> are still called <code>Zoom ...</code>. Both are this plugin.</p>
 <h2>Media Architecture</h2>
 <figure class="doc-image"><img src="images/core-plugin-pipeline.svg" alt="CoreVideo plugin media pipeline"></figure>
@@ -127,7 +127,7 @@
 <h3>Silence is a Zoom property, not a dropout</h3>
 <p>Zoom only calls audio back for a participant who is currently making sound, so a silent stretch produces no buffers at all rather than buffers of silence. Two consequences CoreVideo handles and one it cannot: the master clock resyncs rather than letting a quiet participant walk steadily into the past; the first buffer after a run of true digital silence is ramped in over a few milliseconds so the resumption does not click; and speech the far end never sent stays missing.</p>
 <h2>Talkback (Intercom)</h2>
-<p><strong>Windows only, newer than v0.1.44.</strong> The Talkback dock is included in the Windows v0.1.45-beta.1 build. It is not in the recommended v0.1.44 installer, and macOS does not implement talkback.</p>
+<p><strong>Windows only, newer than v0.1.44.</strong> The Talkback dock is included in the Windows v0.1.45-beta.3 build. It is not in the recommended v0.1.44 installer, and macOS does not implement talkback.</p>
 <p>Talkback is private director-to-talent audio carried over Zoom's own talkback channels - the operator can talk to one person, or to everyone, without the meeting or the program mix hearing it. Open it from <strong>Tools &gt; Zoom Talkback</strong>, or as the <strong>Zoom Talkback</strong> dock.</p>
 <p>The dock is modelled on a Clear-Com/RTS intercom panel rather than on a list of settings: one grid, <strong>All talent</strong> across the top, then one compact cell per person. A cell is the talk key and the status display at the same time.</p>
 <h3>Assigning channels first</h3>

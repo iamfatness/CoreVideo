@@ -92,17 +92,16 @@
   <a href="https://github.com/iamfatness/CoreVideo/releases/download/v0.1.44/CoreVideo-Windows-x64-v0.1.44.zip.sha256"><strong>ZIP checksum</strong><span>SHA-256 for the portable archive.</span></a>
   <a href="https://github.com/iamfatness/CoreVideo/releases/latest"><strong>Companion module</strong><span>The Bitfocus Companion module (<code>corevideo-obs</code>) ships with each release. Requires Companion v5 or newer.</span></a>
 </section>
-<p>Windows v0.1.44 remains the recommended release. The <a href="https://github.com/iamfatness/CoreVideo/releases/tag/v0.1.45-beta.1">v0.1.45-beta.1 pre-release</a> also has Windows assets with the newer Zoom Talkback dock; treat those as beta builds.</p>
+<p>Windows v0.1.44 remains the recommended release. The <a href="https://github.com/iamfatness/CoreVideo/releases/tag/v0.1.45-beta.3">v0.1.45-beta.3 pre-release</a> also has Windows assets with the newer Zoom Talkback dock and the panelist loudness readiness board; treat those as beta builds.</p>
 <section id="macos">
-<h2>macOS &mdash; Apple Silicon beta v0.1.45-beta.1</h2>
-<p>Developer ID signed, notarized by Apple, and stapled. The replacement installer has passed installation on two Macs and an OBS runtime test on the build Mac.</p>
+<h2>macOS &mdash; Apple Silicon beta v0.1.45-beta.3</h2>
+<p>Developer ID signed, notarized by Apple, and stapled. This build carries the raw-media recovery, waiting-room and video-quality fixes from beta.2 plus the panelist loudness readiness board.</p>
 <div class="hero-actions">
-<a class="button primary" href="https://github.com/iamfatness/CoreVideo/releases/download/v0.1.45-beta.1/CoreVideo-Setup-v0.1.45-beta.1.pkg">Download macOS installer (.pkg)</a>
-<a class="button" href="https://github.com/iamfatness/CoreVideo/releases/download/v0.1.45-beta.1/CoreVideo-Setup-v0.1.45-beta.1.pkg.sha256">SHA-256 checksum</a>
-<a class="button" href="https://github.com/iamfatness/CoreVideo/releases/tag/v0.1.45-beta.1">macOS release notes</a>
+<a class="button primary" href="https://github.com/iamfatness/CoreVideo/releases/download/v0.1.45-beta.3/CoreVideo-Setup-v0.1.45-beta.3.pkg">Download macOS installer (.pkg)</a>
+<a class="button" href="https://github.com/iamfatness/CoreVideo/releases/download/v0.1.45-beta.3/CoreVideo-Setup-v0.1.45-beta.3.pkg.sha256">SHA-256 checksum</a>
+<a class="button" href="https://github.com/iamfatness/CoreVideo/releases/tag/v0.1.45-beta.3">macOS release notes</a>
 </div>
-<p>If you downloaded this beta before September 6, 2026, download it again. The original macOS package and ZIP were withdrawn after signature errors.</p>
-<p>Requires an Apple Silicon Mac (M1 or later). The replacement package was built against OBS Studio 32.2.1; use that version or newer for this beta. Intel Macs are not supported by this package.</p>
+<p>Requires an Apple Silicon Mac (M1 or later). The package is built against OBS Studio 32.2.1; use that version or newer for this beta. Intel Macs are not supported by this package.</p>
 <ol>
 <li>Close OBS, then open the downloaded <code>.pkg</code>.</li>
 <li>Install for your user account. No administrator password is needed.</li>
@@ -111,7 +110,7 @@
 <p>For ISO recording, set a working FFmpeg executable in <strong>Zoom ISO Recorder</strong> and test it before recording. The macOS package does not bundle FFmpeg.</p>
 <p>Talkback is Windows-only. For your own screen, use OBS's macOS Screen Capture source; CoreVideo receives other participants' shares.</p>
 <p>To verify the download, save the installer and checksum in the same folder and run:</p>
-<pre><code>shasum -a 256 -c CoreVideo-Setup-v0.1.45-beta.1.pkg.sha256</code></pre>
+<pre><code>shasum -a 256 -c CoreVideo-Setup-v0.1.45-beta.3.pkg.sha256</code></pre>
 </section>
 <h2>Windows requirements</h2>
 <ul>

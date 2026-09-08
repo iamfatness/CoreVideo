@@ -444,8 +444,8 @@ bandwidth tier, not as a hard prerequisite for raw data.
   no Companion actions, and no OBS hotkey yet - the dock and the TCP control API
   are the only keying surfaces.
 - **macOS Apple Silicon has a signed and notarized beta installer.** Use the
-  [replacement package](https://corevideo.io/download/#macos) published September 6,
-  2026 if an earlier download reports a signature error. Talkback remains
+  [current package](https://corevideo.io/download/#macos); if an earlier
+  download reports a signature error, install the current one. Talkback remains
   Windows-only. Intel Macs have no package; Linux requires a source build.
 - **`COREVIDEO_TALKBACK_LAYOUT_TEST`** is a developer instrument that fills the
   Talkback dock with a fake cast and refuses every engine call. Never set it on a

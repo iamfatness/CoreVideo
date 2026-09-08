@@ -40,6 +40,17 @@ DIFFERENT clocks on macOS (see the struct comment) — `audio_latency_us` is
 untrustworthy there until that is reconciled. Kill a mid-meeting engine only
 after checking `{"cmd":"status"}` — it IS the meeting session.
 
+The macOS meeting-status callback must emit `awaiting_admission` on every SDK
+status change. `ZoomSDKMeetingStatus_WaitingForHost` and
+`ZoomSDKMeetingStatus_InWaitingRoom` map to `active:true`; every other status
+maps to `active:false`. The dock holds its existing 120-second join watchdog
+while that flag is true and starts a fresh full window after Zoom advances.
+Keep the symbolic mapping in `engine/src/macos-admission-state.h`, where the
+SDK-backed `CoreVideoMacosAdmissionState` test compiles it against the installed
+framework. The real callback calls that header's dispatch seam inside the
+fresh-callback/epoch gate; the regression records the seam's outgoing event,
+asserts it precedes normal status handling, and drives the watchdog with it.
+
 **Talkback does not exist on macOS**, and the dock says so rather than failing
 quietly. `engine-talkback.cpp` is in `ENGINE_SOURCES`, which only the Windows
 engine target uses; the macOS engine is `main-macos.mm` and never compiles it.
@@ -249,6 +260,16 @@ Every one of these is documented at length where it lives; the list is the map.
   12-90s for a whole show). The manual speaker Take/Release buttons still
   call it deliberately — that's a rare, operator-initiated action, not
   the automatic path.
+- **Speaker-director time is monotonic under its mutex**
+  (`src/speaker-director.cpp`): callers sample `os_gettime_ns()` before taking
+  the director lock, so a contending callback can arrive with an older sample.
+  Every time-mutating entry point clamps that sample to the newest accepted
+  director time before changing candidate, hold, vacancy, or manual-take
+  clocks. Never subtract an unguarded caller timestamp from those clocks;
+  unsigned wrap can otherwise satisfy both sensitivity and hold immediately.
+  Actual promotions retain a bounded, ID-only attribution history and the dock
+  logs it outside the director mutex; keep names and callbacks out of that
+  locked path.
 - **ISO encoder demotion chain must actually chain**
   (`src/zoom-iso-recorder.cpp`'s `record_video_frame`): never gate a
   fresh demotion attempt on "has this uuid ever been demoted before" —
@@ -1391,6 +1412,53 @@ Every one of these is documented at length where it lives; the list is the map.
   (`unsubscribe_audio()`, `forget_subscription_for_new_engine()`, the roster
   callback) moved to `name_mtx` alongside the reader.
 
+## macOS raw-media lifecycle (2026-09-06 soak remediation candidate)
+
+`src/raw-media-lifecycle.h` owns Start intent separately from permission and room
+readiness; `engine/src/main-macos.mm` applies its effects on the SDK main queue.
+The two grant callbacks cannot issue duplicate starts, and callbacks retained
+from a retired record delegate cannot resurrect Stop/leave/replacement intent.
+Only `ZoomSDKError_NoPermission` triggers the once-per-meeting host request.
+SDK request status 2 is **Timeout**, not Denied; SDK error 21 is **NoLicense**,
+not evidence of a temporary permission failure. No new timed session retry loop
+is justified by those codes; terminal start failures stay joined and permit an
+explicit Start retry or a fresh room readiness transition.
+
+Breakout entry/exit invalidates SDK video/share renderers and the one global
+audio subscription while preserving desired source bindings and SHM generations.
+Delegates detach before `destroyRender:`. A fresh InMeeting checks raw readiness
+and restores current eligible placeholders once; missing room-scoped participant
+ids stay pending for plugin roster rebinding. Failed video subscriptions retain
+placeholders, so recovery or an ordinary retry cannot lose bindings; removals and
+rebinding update the same current table. Target `requested_resolution` survives
+recovery. Shared macOS participant renderers select the maximum current target
+request, including deferred/recovered targets, and raise a warm renderer in
+place. A rejected SDK upgrade retains the working accepted request, targets,
+and SHM generations; attachment/removal never downgrades a warm renderer.
+A new renderer walks down only through SDK-accepted resolution candidates.
+The diagnostic negotiated field describes an SDK-accepted request, not received
+pixels: only success codes update it. Actual frame dimensions determine health.
+Automatic low-quality retries stop after three attempts (20-second stable-feed
+gate, then existing 120/240-second spacing). Manual retries remain available;
+meeting the requested frame size or clearing subscription state resets the
+budget. Exhaustion has no countdown and never marks a fresh 360p feed stale.
+Controlled HD-sender delivery/entitlement and live soak remain unvalidated.
+`raw_media_ready` still means raw recording started, **not** that every source is
+healthy. Additive `raw_media_state` invalidates client session readiness during
+permission loss/recovery/failure; per-source subscribe errors and first-frame
+logs remain independent evidence. All `raw_media_start_failed` reports cross the media-only callback boundary in
+`zoom-engine-error-dispatch.h`, including terminal failures without a pending
+privilege flag. They cannot invoke meeting/reconnect effects. Terminal media
+text is kept in `m_raw_media_error` and exposed by `last_error()` as a fallback
+for the control API; internal `m_last_error` stays reserved for meeting failure,
+so a later `left` cannot mistake a media failure for a failed meeting. Meeting
+status callbacks capture `MeetingCallbackEpoch` at receipt and validate it on
+the main queue. Leave rejects queued older work AND subsequent nonterminal
+statuses while allowing its terminal SDK acknowledgement; replacement uses a
+fresh epoch and delegate identity. Offline CoreVideoRawMediaLifecycle sequences
+and a real SDK build cover these code defects; repeated live delayed-grant and
+breakout resource-lifetime/recovery-time acceptance remains outstanding.
+
 ## Live testing against a real meeting
 
 The control API (TCP line-JSON, `127.0.0.1:19870`, no HTTP) drives a full
@@ -1495,3 +1563,56 @@ The site builder keeps `MAC_VERSION` separate from the stable Windows version.
 The macOS download is the locally signed/notarized `.pkg` on v0.1.45-beta.1;
 its GitHub filename includes `v`. Do not restore the withdrawn macOS ZIP link.
 Home, download, and plugin docs point to `/download/#macos`.
+
+## Media failure presentation (2026-09-06 soak)
+
+`MediaFailureState` tracks current source media failures, bounded
+by live source assignments. Eight tiles × three failed attempts retain all
+24 raw error diagnostics but emit one nonmodal episode notice. Dock polling
+updates the affected count and escalates after three attempts or ten seconds
+to Retry Media; it must show media errors while the meeting remains joined.
+Connection errors still own `m_last_error` and the fatal callback path;
+media failures must never vote in meeting leave/reconnect classification.
+
+Only a successful shared-memory read (both standalone and supersource paths)
+may acknowledge video recovery. Capture an assignment ticket before reading,
+then validate ticket and participant; do not clear source failures at session
+`raw_media_ready` or at a retry subscribe. Removal/reassignment retires only
+that source's membership. Never dispatch UI/source callbacks from the frame
+acknowledgement while a source lock is held. Permission notices are deduped;
+Mac grants start automatically. Denial and timeout are distinct
+`raw_media_state` debug events, not necessarily `raw_media_start_failed`.
+
+`raw_data_controller_unavailable` follows the same per-participant video
+recovery path. `shm_create_failed`, `subscribe_rejected`, and
+`shm_name_collision` stay as persistent per-source media diagnostics (one
+nonmodal notice per episode), clearable by removal, explicit stop, or meeting
+reset. Their wire reports do not reliably identify a media lane, so neither
+a successful video read nor `raw_media_ready` may clear them.
+
+Retry Media is an explicit operator path shared by dock and control
+`start_engine`: `ZoomOutputManager::retry_media()` also visits Tiles sources.
+Tiles own a separate retry budget; `start_media()` alone is a no-op when raw
+media is active and cannot revive an exhausted tile. Only the manual trigger
+reopens that budget; ordinary roster/speaker sweeps retain their interval and
+attempt caps. Manual retry preserves assignment and failure state, releases the
+old SHM mapping, then subscribes. Tile enumeration runs on the OBS UI task queue
+with strong source refs and the existing callback gate, skipping collection load.
+
+Manual tile retry also covers retained displayed pixels when a current media
+failure exists or the last successful SHM read is at least ten seconds old.
+Fresh healthy tiles are skipped; mapping release preserves the decoded image.
+This freshness override is manual-only, never a new automatic speaker-tick loop.
+
+Room-level `joined` (including breakout return and duplicate readiness) clears
+connection errors only. It retains media assignments, unresolved video and
+persistent source failures, and session raw-media errors; source recovery still
+requires acknowledged delivery/removal. Explicit `join`, `left`, and engine
+`stop` reset media session state. The Qt-backed CoreVideoEngineClientMediaSession
+regression drives the production JSON handler with offline host boundaries.
+
+Successful renderer creation publishes each retained target's own quality request.
+A trailing fallback diagnostic must use the selected target's own request too,
+never the shared maximum: a 360 tile sharing a 1080 source at accepted 720 is
+healthy while the 1080 source is downgraded. The complete creation publication
+sequence lives in `shared_video_publish_created_resolution` and its regression.

@@ -94,6 +94,15 @@ int main()
                        ZoomOutputHealthReason::ZoomDeliveredLowerResolution))
         return 1;
 
+    low.negotiated_resolution = static_cast<int>(VideoResolution::P1080);
+    low.last_set_resolution_code = 0;
+    low.last_video_subscribe_code = 0;
+    low.quality_upgrade_attempts = 3;
+    if (!expect_reason("accepted HD request still delivering fresh 360p", low,
+                       {participant(1)}, true,
+                       ZoomOutputHealthReason::ZoomDeliveredLowerResolution))
+        return 1;
+
     ZoomOutputInfo exact_1080 = output();
     exact_1080.video_resolution = VideoResolution::P1080;
     exact_1080.observed_width = 1920;

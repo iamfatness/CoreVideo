@@ -215,6 +215,8 @@ public:
 
     // Re-send subscribe commands for all active sources after engine recovery.
     void resubscribe_all();
+    // Shared dock/control manual action; automatic roster callbacks never call it.
+    void retry_media();
     uint32_t recover_stale_sources(bool force = false);
     uint32_t upgrade_low_quality_sources(bool force = false);
 

@@ -181,6 +181,7 @@ struct TileFeed {
     // by mtx, which the sweep's scan already holds. `retry_epoch` records the
     // assignment these attempts were spent under, so repointing the slot hands
     // it a fresh budget instead of inheriting an exhausted one.
+    uint64_t last_frame_ns = 0; // successful SHM delivery; guarded by mtx
     uint64_t retry_epoch = 0;
     uint64_t last_retry_ns = 0;
     uint32_t retry_attempts = 0;
@@ -422,6 +423,7 @@ static void tile_feed_on_frame(const TileFeedPtr &feed, uint32_t event_width,
     uint64_t epoch = 0;
     if (!feed->slot.begin_frame(event_participant_id, epoch)) return;
 
+    const uint64_t delivery_ticket = ZoomEngineClient::instance().media_delivery_ticket(feed->uuid, event_participant_id);
     std::lock_guard<std::mutex> lock(feed->mtx);
     if (!feed->alive) return;
 
@@ -436,6 +438,8 @@ static void tile_feed_on_frame(const TileFeedPtr &feed, uint32_t event_width,
     // Odd dimensions have no valid I420 chroma layout to sample.
     if ((w & 1u) || (h & 1u)) return;
 
+    ZoomEngineClient::instance().acknowledge_media_delivery(feed->uuid, event_participant_id, delivery_ticket);
+    feed->last_frame_ns = os_gettime_ns();
     feed->width = w;
     feed->height = h;
     feed->frame_epoch = epoch;
@@ -642,18 +646,25 @@ static void execute_feed_plan(const FeedPlan &plan)
 // Rate-limited across the source and attempt-bounded per slot — see
 // zoom-tile-retry.h for why both are needed, and for why the sweep is left on
 // every roster event rather than filtered to roster-only ones.
-static void resubscribe_silent_feeds(tiles_source *ctx)
+static void resubscribe_silent_feeds(tiles_source *ctx,
+                                      TileRetryTrigger trigger = TileRetryTrigger::Automatic)
 {
     // Claim the sweep before taking any lock. The whole point of the interval
     // is that a burst of roster events must not each acquire engine_mutex,
     // ctx->mutex and every feed->mtx on the engine reader thread.
     const uint64_t now_ns = os_gettime_ns();
     uint64_t last_sweep = ctx->last_sweep_ns.load(std::memory_order_acquire);
-    if (!tile_sweep_due(now_ns, last_sweep)) return;
-    if (!ctx->last_sweep_ns.compare_exchange_strong(last_sweep, now_ns,
-                                                    std::memory_order_acq_rel,
-                                                    std::memory_order_acquire))
-        return;  // another sweep claimed this interval
+    if (trigger == TileRetryTrigger::Automatic) {
+        if (!tile_sweep_due(now_ns, last_sweep)) return;
+        if (!ctx->last_sweep_ns.compare_exchange_strong(last_sweep, now_ns,
+                                                        std::memory_order_acq_rel,
+                                                        std::memory_order_acquire))
+            return;  // another sweep claimed this interval
+    } else {
+        // The operator explicitly requested a new budget; roster/speaker
+        // callbacks never bypass either pacing bound.
+        ctx->last_sweep_ns.store(now_ns, std::memory_order_release);
+    }
 
     std::lock_guard<std::mutex> engine_lock(ctx->engine_mutex);
 
@@ -669,7 +680,10 @@ static void resubscribe_silent_feeds(tiles_source *ctx)
             // cleared when the draw path takes the pixels, so this stays true
             // for a healthy tile and flips back to "silent" on every repoint.
             const uint64_t epoch = feed->slot.epoch();
-            if (feed->slot.frame_is_current_at(feed->frame_epoch, epoch)) {
+            const bool failed = trigger == TileRetryTrigger::Manual &&
+                ZoomEngineClient::instance().source_media_failed(feed->uuid);
+            if (!tile_retry_needed(feed->slot.frame_is_current_at(feed->frame_epoch, epoch),
+                                   failed, trigger, now_ns, feed->last_frame_ns)) {
                 // Healthy: a later silence gets a full budget again.
                 feed->retry_epoch = epoch;
                 feed->last_retry_ns = 0;
@@ -686,8 +700,8 @@ static void resubscribe_silent_feeds(tiles_source *ctx)
                 feed->retry_attempts = 0;
                 feed->retry_exhausted_logged = false;
             }
-            if (!tile_retry_due(now_ns, feed->last_retry_ns,
-                                feed->retry_attempts)) {
+            if (!tile_retry_claim(now_ns, feed->last_retry_ns,
+                                  feed->retry_attempts, trigger)) {
                 if (feed->retry_attempts >= kTileRetryMaxAttempts &&
                     !feed->retry_exhausted_logged) {
                     feed->retry_exhausted_logged = true;
@@ -695,17 +709,16 @@ static void resubscribe_silent_feeds(tiles_source *ctx)
                 }
                 continue;
             }
-            feed->last_retry_ns = now_ns;
-            ++feed->retry_attempts;
+            feed->retry_exhausted_logged = false;
             retry.push_back(feed);
         }
     }
     // Issued outside ctx->mutex. The engine no-ops a subscribe that is already
     // active at this resolution, so this only revives dead slots.
     //
-    // The mapping is released first here too. A retried slot has, by definition,
-    // no frame accepted under its current assignment, so there is nothing to
-    // lose — but it may still hold a mapping (a frame that opened the region and
+    // The mapping is released first here too. Manual retry may retain an old
+    // displayed frame: release only unmaps SHM and preserves those pixels and
+    // assignment. A silent feed may also hold a mapping (a frame that opened the region and
     // then failed the header or size check leaves one behind). If the engine
     // finds this uuid's subscription dead it destroys and rebuilds the
     // SourceTarget, restarting at the legacy region name, and a mapping we still
@@ -3500,6 +3513,33 @@ void zoom_supersource_set_collection_loading(bool loading)
          "[obs-zoom-plugin] Tiles audio: collection-load gate cleared, swept %d "
          "Tiles source(s)",
          static_cast<int>(tiles_sources.size()));
+}
+
+void zoom_supersource_retry_media()
+{
+    // Enumerate on the UI thread, just like collection reconciliation. Strong
+    // OBS references keep ctx alive; the gate serializes with roster callbacks
+    // and destroy. No source/collection mutation occurs on an IPC worker.
+    obs_queue_task(OBS_TASK_UI, [](void *) {
+        if (s_collection_loading.load(std::memory_order_acquire)) return;
+        std::vector<obs_source_t *> sources;
+        obs_enum_sources([](void *param, obs_source_t *src) {
+            const char *id = obs_source_get_id(src);
+            if (id && std::strcmp(id, kTilesSourceId) == 0 && !obs_source_removed(src)) {
+                if (auto *ref = obs_source_get_ref(src))
+                    static_cast<std::vector<obs_source_t *> *>(param)->push_back(ref);
+            }
+            return true;
+        }, &sources);
+        for (auto *src : sources) {
+            if (auto *ctx = static_cast<tiles_source *>(obs_obj_get_data(src))) {
+                std::lock_guard<std::mutex> callback_lock(ctx->gate->mtx);
+                if (ctx->gate->alive && !obs_source_removed(src))
+                    resubscribe_silent_feeds(ctx, TileRetryTrigger::Manual);
+            }
+            obs_source_release(src);
+        }
+    }, nullptr, false);
 }
 
 void zoom_supersource_register()

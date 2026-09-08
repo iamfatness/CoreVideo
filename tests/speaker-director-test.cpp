@@ -87,6 +87,42 @@ int main()
     director.tick(t);
     if (!check_directed(302)) fail("did not switch after hold expired");
 
+    // --- A timestamp sampled before another caller acquired the director
+    //     mutex must not wrap the unsigned elapsed clocks forward. Production
+    //     callers sample before locking, so an older tick can arrive after a
+    //     newer roster update under contention. ---
+    director.reset();
+    director.configure(250, 1200, true, {});
+    director.update_roster(roster({p(321, true, true), p(322, true, true)}),
+                           321, 1000);
+    director.update_roster(roster({p(321, true, true), p(322, true, true)}),
+                           322, 1001);
+    if (director.tick(999))
+        fail("stale tick bypassed sensitivity and hold");
+    if (!check_directed(321))
+        fail("stale tick promoted the pending candidate");
+    auto promotion = director.snapshot(999).last_promotion;
+    if (promotion.reason != SpeakerPromotionReason::Automatic ||
+        promotion.promoted_speaker_id != 321 || promotion.session_id == 0 ||
+        promotion.sequence != 1)
+        fail("initial automatic promotion attribution is incomplete");
+
+    // A stale roster callback still applies its fresh roster payload, but its
+    // old sample cannot start a new candidate clock in the past.
+    director.update_roster(roster({p(321, true, true), p(323, true, true)}),
+                           323, 900);
+    if (director.tick(1249))
+        fail("stale roster update moved the candidate clock backwards");
+    if (!director.tick(2200) || !check_directed(323))
+        fail("candidate did not promote after sensitivity and hold");
+    promotion = director.snapshot(2200).last_promotion;
+    if (promotion.reason != SpeakerPromotionReason::Automatic ||
+        promotion.effective_sensitivity_ms != 250 ||
+        promotion.effective_hold_ms != 1200 ||
+        promotion.candidate_age_ms != 1199 ||
+        promotion.incumbent_held_ms != 1200)
+        fail("automatic promotion timing attribution is wrong");
+
     // --- Manual take supersedes everything ---
     director.reset();
     director.configure(100, 50, true, {});   // short hold
@@ -95,9 +131,15 @@ int main()
     if (!check_directed(401)) fail("initial");
 
     t += 50;
-    bool took = director.set_manual_speaker(402, t);
+    bool took = director.set_manual_speaker(402, 39999);
     if (!took) fail("manual take should succeed");
     if (!check_directed(402)) fail("manual take did not promote 402");
+    promotion = director.snapshot(t).last_promotion;
+    if (promotion.reason != SpeakerPromotionReason::ManualTake ||
+        promotion.promoted_at_ms != 40000 ||
+        promotion.effective_sensitivity_ms != 0 ||
+        promotion.effective_hold_ms != 0)
+        fail("manual promotion attribution is wrong");
 
     // Even if raw speaker changes, manual should stick
     t += 100;
@@ -188,6 +230,12 @@ int main()
     director.configure(500, 2000, true, {1301});
     director.update_roster(flap_roster, 1301, t);
     if (!check_directed(1302)) fail("first exclusion should still cut away immediately");
+    promotion = director.snapshot(t).last_promotion;
+    if (promotion.reason != SpeakerPromotionReason::ForcedVacancy ||
+        promotion.effective_sensitivity_ms != 0 ||
+        promotion.effective_hold_ms != 0 ||
+        promotion.incumbent_held_ms != 10)
+        fail("immediate forced-vacancy attribution is wrong");
 
     // The flap: 0.3 s later the exclusion set swings onto the NEW on-air
     // speaker. Leaving 1302 is still immediate, but the replacement has not
@@ -205,6 +253,12 @@ int main()
     t += 500;
     if (!director.tick(t)) fail("replacement should promote once sensitivity elapsed");
     if (!check_directed(1301)) fail("did not promote the vetted replacement");
+    promotion = director.snapshot(t).last_promotion;
+    if (promotion.reason != SpeakerPromotionReason::ForcedVacancy ||
+        promotion.effective_sensitivity_ms != 500 ||
+        promotion.effective_hold_ms != 0 ||
+        promotion.incumbent_held_ms != 800)
+        fail("rate-limited forced-vacancy attribution is wrong");
 
     // --- The replacement chosen after a rate-limited forced vacancy has to be
     //     STABLE: half a second of cross-talk or a cough must never reach the

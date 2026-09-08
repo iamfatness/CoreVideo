@@ -804,6 +804,10 @@ if(BUILD_TESTING)
 
     # Record-privilege handshake notice copy/classification (2026-09-05 live
     # defect fix). Header-only logic; no Qt/OBS/SDK dependencies.
+    add_executable(CoreVideoMediaFailureStateTest tests/media-failure-state-test.cpp)
+    target_include_directories(CoreVideoMediaFailureStateTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    add_test(NAME CoreVideoMediaFailureState COMMAND CoreVideoMediaFailureStateTest)
+
     add_executable(CoreVideoPrivilegeNoticeTest
         tests/zoom-privilege-notice-test.cpp
     )
@@ -1070,6 +1074,24 @@ if(BUILD_TESTING)
     )
     add_test(NAME CoreVideoJoinWatchdog
              COMMAND CoreVideoJoinWatchdogTest)
+
+    # Compile the macOS callback translation against the installed SDK's real
+    # symbolic meeting-status enum, then carry its production wire event into
+    # the portable watchdog policy.
+    if(APPLE AND BUILD_ZOOM_ENGINE)
+        add_executable(CoreVideoMacosAdmissionStateTest
+            tests/macos-admission-state-test.mm
+        )
+        target_include_directories(CoreVideoMacosAdmissionStateTest PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${CMAKE_CURRENT_SOURCE_DIR}/engine/src"
+        )
+        target_compile_options(CoreVideoMacosAdmissionStateTest PRIVATE
+            "-F${ZOOM_SDK_ACTIVE_DIR}"
+        )
+        add_test(NAME CoreVideoMacosAdmissionState
+                 COMMAND CoreVideoMacosAdmissionStateTest)
+    endif()
 
     # The talkback probe's test tone. Phase must carry across buffers: a restart
     # every buffer is an audible click that would be misread as a transport
@@ -1426,6 +1448,14 @@ if(BUILD_TESTING)
     # Retry pacing for the tiles silent-slot sweep: the sweep interval and the
     # per-slot exponential backoff / attempt cap that stop an unbounded
     # renderer create-destroy loop in the engine.
+    add_executable(CoreVideoVideoQualityPolicyTest tests/video-quality-policy-test.cpp)
+    target_include_directories(CoreVideoVideoQualityPolicyTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    add_test(NAME CoreVideoVideoQualityPolicy COMMAND CoreVideoVideoQualityPolicyTest)
+
+    add_executable(CoreVideoRawMediaLifecycleTest tests/raw-media-lifecycle-test.cpp)
+    target_include_directories(CoreVideoRawMediaLifecycleTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    add_test(NAME CoreVideoRawMediaLifecycle COMMAND CoreVideoRawMediaLifecycleTest)
+
     add_executable(CoreVideoTileRetryTest
         tests/tile-retry-test.cpp
     )
@@ -1450,6 +1480,21 @@ if(BUILD_TESTING)
         target_link_libraries(CoreVideoOscWireTest PRIVATE Qt6::Core)
         add_test(NAME CoreVideoOscWire
                  COMMAND CoreVideoOscWireTest)
+
+        # Offline production-client boundary test uses POSIX IPC and host stubs.
+        # Windows client integration remains covered by the full plugin build.
+        if(TARGET OBS::libobs AND NOT WIN32)
+            add_executable(CoreVideoEngineClientMediaSessionTest
+                tests/engine-client-media-session-test.cpp
+                src/zoom-engine-client.cpp
+                src/speaker-director.cpp)
+            target_include_directories(CoreVideoEngineClientMediaSessionTest PRIVATE
+                "${CMAKE_CURRENT_SOURCE_DIR}/src"
+                $<TARGET_PROPERTY:OBS::libobs,INTERFACE_INCLUDE_DIRECTORIES>)
+            target_link_libraries(CoreVideoEngineClientMediaSessionTest PRIVATE Qt6::Core)
+            add_test(NAME CoreVideoEngineClientMediaSession
+                COMMAND CoreVideoEngineClientMediaSessionTest)
+        endif()
 
         add_executable(CoreVideoControlParseTest
             tests/zoom-control-parse-test.cpp

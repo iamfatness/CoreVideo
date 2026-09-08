@@ -7,6 +7,71 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.45-beta.3] - 2026-09-08
+
+Pre-release for **Windows and macOS (Apple Silicon)**. Everything on `main`
+since v0.1.44, including the macOS work that shipped as v0.1.45-beta.2, plus
+the first Windows build of the panelist loudness board. Windows v0.1.44 stays
+the recommended release until this line goes final.
+
+### Added
+- **Panelist loudness meter and readiness board** (`CoreVideo Loudness
+  Meter` source). Measures every panelist to ITU-R BS.1770-4 (K-weighting,
+  momentary / short-term, two-pass gated integrated loudness) and draws an
+  operator-facing board so a producer can see before air whether everyone is
+  arriving at a comparable level. The headline figure per row is deviation
+  from the **panel median**, so one hot mic cannot drag the reference; EBU
+  R128, ATSC A/85 and streaming targets are selectable presets. Only
+  participant sources vote — Active Speaker and Audience are excluded.
+  Filter coefficients are derived at the runtime sample rate (Zoom commonly
+  sends 32 kHz; the published 48 kHz table would read 1.3 LU off).
+- **macOS per-user `.pkg` installer** (`scripts/make-macos-installer.sh`).
+  Installs into `~/Library/Application Support/obs-studio/plugins` without
+  an administrator password; Developer ID Installer signed, notarized and
+  stapled. Replaces the hand-copied ZIP.
+
+### Fixed
+- **macOS: raw media recovers across recording-permission grants and
+  breakout transfers** while preserving source assignments; a late grant
+  respects an explicit stop. Repeated per-source subscribe errors are
+  consolidated into one actionable media status, and **Retry Media** now
+  reaches exhausted tile feeds. Unresolved failures persist until delivery
+  resumes, and permission denial is distinguished from timeout.
+- **Waiting-room and waiting-for-host states no longer trip the admission
+  watchdog**, which could auto-leave after two minutes while the host was
+  still admitting the plugin.
+- **Automatic speaker decisions clamp stale timestamps** and every cut is
+  attributed in the log.
+- **Shared participant video quality** requests the highest resolution any
+  source needs, upgrades the warm renderer in place, keeps the existing video
+  when Zoom refuses the upgrade, and bounds automatic quality retries to
+  three.
+- **macOS installer build refuses an ad-hoc-signed bundle.** A Developer ID
+  Installer-signed package could previously wrap ad-hoc-signed plugin code,
+  which Gatekeeper still rejects; the script now verifies the certificate
+  chain of both the bundle and the final `.pkg`.
+- Restored the accurate libobs effect-caching comments (no behaviour change).
+
+### Changed
+- `release-macos.yml` no longer runs on tag push. The ad-hoc-signed ZIP it
+  produced was withdrawn in beta.1 and must not reappear beside the notarized
+  installer; macOS builds are signed on the maintainer's Mac and attached by
+  hand. The workflow remains available via `workflow_dispatch` for unsigned
+  test bundles.
+
+### Known limitations
+- Talkback is Windows-only. The macOS Talkback dock is present but inert.
+- Loudness board live verification (row-order stability, no-audio →
+  measuring → verdict transitions, Reset) is still outstanding in a real
+  meeting.
+- The Windows installer is not code-signed; SmartScreen warns on first run.
+
+## [0.1.45-beta.2] - 2026-09-06
+
+macOS-only pre-release, built and notarized locally from the
+`fix/macos-soak-recovery` branch (PR #253) ahead of its merge. Its changes
+are listed under 0.1.45-beta.3 above; no Windows asset shipped.
+
 ## [0.1.45-beta.1] - 2026-09-05
 
 macOS-only pre-release. Windows users should stay on v0.1.44 — nothing here
@@ -950,7 +1015,10 @@ sign-in, per-participant and screen-share sources, the Active Speaker
 Director, auto-reconnect, TCP/OSC control APIs, ISO recording, the Output
 Manager, and the initial Windows release packaging and CI pipeline.
 
-[Unreleased]: https://github.com/iamfatness/CoreVideo/compare/v0.1.44...HEAD
+[Unreleased]: https://github.com/iamfatness/CoreVideo/compare/v0.1.45-beta.3...HEAD
+[0.1.45-beta.3]: https://github.com/iamfatness/CoreVideo/compare/v0.1.45-beta.2...v0.1.45-beta.3
+[0.1.45-beta.2]: https://github.com/iamfatness/CoreVideo/compare/v0.1.45-beta.1...v0.1.45-beta.2
+[0.1.45-beta.1]: https://github.com/iamfatness/CoreVideo/compare/v0.1.44...v0.1.45-beta.1
 [0.1.44]: https://github.com/iamfatness/CoreVideo/compare/v0.1.43...v0.1.44
 [0.1.43]: https://github.com/iamfatness/CoreVideo/compare/v0.1.42...v0.1.43
 [0.1.42]: https://github.com/iamfatness/CoreVideo/compare/v0.1.41...v0.1.42

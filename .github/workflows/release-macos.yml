@@ -9,10 +9,13 @@ name: Release (macOS)
 # unzipping (instructions ship inside the zip). Tags containing '-' (e.g.
 # v0.1.32-beta.1) are marked as pre-releases.
 
+# NOT run on tag push: the distributable macOS installer is Developer ID
+# signed and notarized on the maintainer's Mac (scripts/make-macos-bundle.sh
+# --sign/--notarize + scripts/make-macos-installer.sh) and attached to the
+# release by hand. The ad-hoc ZIP this job builds was withdrawn in
+# v0.1.45-beta.1 after Gatekeeper rejected it and must not be re-attached
+# beside the notarized .pkg. Dispatch manually for an unsigned test bundle.
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       version:

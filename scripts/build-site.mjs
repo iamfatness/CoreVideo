@@ -247,7 +247,7 @@ function homeContent() {
 <section>
   <h2>Talkback, without leaving the meeting</h2>
   <p>Every show that runs on Zoom eventually needs a way to speak to one person without speaking to the room. The Zoom Meeting SDK carries a private talkback path alongside the meeting floor &mdash; 16 channels, up to 10 people each, and members duck under your voice rather than being muted &mdash; and both products here are built on it.</p>
-  <p><a href="/zcomms/">ZComms</a> is the standalone answer: a full intercom desk with named talk keys, ALL CALL, latch, extern feeds from a multichannel interface, and breakout-aware routing. It ships today. The OBS plugin also has a <a href="/core-plugin/">Zoom Talkback dock</a> in the Windows v0.1.45-beta.3 build. It is absent from the recommended Windows v0.1.44 release and unavailable on macOS. Use the <a href="/download/">download page</a> to choose the appropriate release.</p>
+  <p><a href="/zcomms/">ZComms</a> is the standalone answer: a full intercom desk with named talk keys, ALL CALL, latch, extern feeds from a multichannel interface, and breakout-aware routing. It ships today. The OBS plugin also has a <a href="/core-plugin/">Zoom Talkback dock</a> on Windows (v0.1.45 and later); it is unavailable on macOS.</p>
 </section>
 <section class="link-grid products" aria-label="CoreVideo products">
   <a href="/download/"><span class="tier">Free &middot; OBS plugin</span><strong>CoreVideo for OBS</strong><span>The plugin on this page: Zoom participant video, audio, screen share, interpretation, and ISO recording as native sources in the OBS you already run. MIT licensed.</span></a>
@@ -528,7 +528,7 @@ function zcommsPageContent() {
 <section>
   <h2>Where it fits</h2>
   <p>ZComms and CoreVideo are separate products that came out of the same problem &mdash; running a real show inside somebody else&apos;s Zoom meeting &mdash; and they share the Zoom Meeting SDK and the same sign-in broker. ZComms is the standalone desk: it is what you run when the intercom is the job, on its own machine or beside a switcher that has nothing to do with Zoom.</p>
-  <p>The <a href="/core-plugin/">CoreVideo plugin</a> includes a Zoom Talkback dock in its Windows v0.1.45-beta.3 build, for operators keying talent from OBS. The recommended Windows v0.1.44 release has no talkback, and macOS talkback is unavailable. ZComms provides a separate operator position and feeds from a larger comms system.</p>
+  <p>The <a href="/core-plugin/">CoreVideo plugin</a> includes a Zoom Talkback dock on Windows (v0.1.45 and later), for operators keying talent from OBS. macOS talkback is unavailable. ZComms provides a separate operator position and feeds from a larger comms system.</p>
   <table>
     <thead><tr><th>Product</th><th>Form factor</th><th>Talkback</th></tr></thead>
     <tbody>
@@ -784,10 +784,10 @@ function downloadPageContent() {
   </div>
 </section>
 ${fileRows}
-<p>Windows v0.1.44 remains the recommended release. The <a href="${MAC_RELEASE}">v0.1.45-beta.3 pre-release</a> also has Windows assets with the newer Zoom Talkback dock and the panelist loudness readiness board; treat those as beta builds.</p>
+<p>v0.1.45 is the current Windows release and adds the Zoom Talkback dock and the panelist loudness readiness board over v0.1.44. Existing installs are offered it by the in-plugin update check.</p>
 <section id="macos">
 <h2>macOS &mdash; Apple Silicon beta v${MAC_VERSION}</h2>
-<p>Developer ID signed, notarized by Apple, and stapled. This build carries the raw-media recovery, waiting-room and video-quality fixes from beta.2 plus the panelist loudness readiness board.</p>
+<p>Developer ID signed, notarized by Apple, and stapled. The macOS installer is built and notarized separately from the Windows release, so its version can trail Windows; it carries the same raw-media recovery, waiting-room and video-quality fixes and the panelist loudness readiness board.</p>
 <div class="hero-actions">
 <a class="button primary" href="${MAC_INSTALLER}">Download macOS installer (.pkg)</a>
 <a class="button" href="${MAC_INSTALLER}.sha256">SHA-256 checksum</a>
@@ -819,7 +819,7 @@ ${fileRows}
 <li>Add a <strong>CoreVideo Participant</strong> source to any scene, then assign it to a participant, the active speaker, a spotlight slot, or the screen share.</li>
 </ol>
 <p>The Windows installer is <strong>not code-signed yet</strong>, so Windows SmartScreen warns the first time you run it &mdash; &quot;More info&quot;, then &quot;Run anyway&quot;. Verify the SHA-256 below if you would rather check the file than trust the dialog.</p>
-<p>CoreVideo is in public beta. The <a href="/core-plugin/">Core Plugin Guide</a> walks through participant routing, isolated audio, and ISO recording in detail, and <a href="/support/">Support</a> covers log collection and reporting a bug.</p>
+<p>The <a href="/core-plugin/">Core Plugin Guide</a> walks through participant routing, isolated audio, and ISO recording in detail, and <a href="/support/">Support</a> covers log collection and reporting a bug.</p>
 <h2>Verify your download</h2>
 <p>Each release ships a SHA-256 file alongside the binary. On Windows, compare the hashes with PowerShell:</p>
 <pre><code class="language-powershell">Get-FileHash .\\CoreVideo-Setup-${v ? `v${v}` : "vX.Y.Z"}.exe -Algorithm SHA256</code></pre>

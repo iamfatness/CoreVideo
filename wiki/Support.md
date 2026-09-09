@@ -1,6 +1,6 @@
 # Support
 
-Recommended Windows release: **v0.1.44**. macOS Apple Silicon beta:
+Current Windows release: **v0.1.45**. macOS Apple Silicon beta:
 **v0.1.45-beta.3**, signed and notarized. See [Downloads](https://corevideo.io/download/)
 for the correct package. Include your operating system, OBS version, and
 CoreVideo version with a bug report.
@@ -336,8 +336,8 @@ glitches that source.
 
 ### Talkback: the key says live but nobody hears me
 
-This section applies to Windows builds with the Zoom Talkback dock, including
-v0.1.45-beta.3. Talkback is unavailable on macOS and absent from Windows v0.1.44.
+This section applies to Windows builds with the Zoom Talkback dock (v0.1.45 and
+later). Talkback is unavailable on macOS.
 The failure modes can be silent in Zoom's own API.
 
 - **The banner reads "ON AIR - BOT MUTED".** Zoom refused to unmute CoreVideo's
@@ -439,8 +439,8 @@ bandwidth tier, not as a hard prerequisite for raw data.
 - **The embedded audio track** on a video source has no loss accounting and is
   stamped at arrival. Use the dedicated CoreVideo Audio sources for critical
   audio.
-- **The intercom / talkback dock is in the Windows v0.1.45-beta.3 build.**
-  It is absent from Windows v0.1.44 and unavailable on macOS. Talkback has no OSC addresses,
+- **The intercom / talkback dock is Windows-only (v0.1.45 and later).**
+  It is unavailable on macOS. Talkback has no OSC addresses,
   no Companion actions, and no OBS hotkey yet - the dock and the TCP control API
   are the only keying surfaces.
 - **macOS Apple Silicon has a signed and notarized beta installer.** Use the

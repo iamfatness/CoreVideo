@@ -109,11 +109,11 @@ disconnects.
 
 The CMake project genuinely supports configuring on all of the above (see `buildspec/macos.cmake`, the Unix-socket IPC path in `engine-ipc.h`, and `oauth-callback-helper-macos.mm`), so a source build is *possible* on macOS/Linux/Windows-arm64 - it is just not something the project packages, tests, or supports today. If you get one working, bug reports and PRs are welcome, but expect to do your own SDK/Qt/OBS wiring.
 
-## Beta Status
+## Release Status
 
-CoreVideo is in **public beta**. Packaged release targets are **Windows x64**
-(installer or ZIP) and **macOS on Apple Silicon** (plugin bundle ZIP) - see
-[Platform Support](#platform-support) above. The Windows beta installer is not
+Packaged release targets are **Windows x64**
+(installer or ZIP) and **macOS on Apple Silicon** (signed .pkg installer, beta) - see
+[Platform Support](#platform-support) above. The Windows installer is not
 yet code-signed, so Windows SmartScreen will flag it on first run (see
 [Troubleshooting](https://corevideo.io/documentation/#troubleshooting)); the
 macOS beta bundle is not yet notarized, so a one-time quarantine-clear step is

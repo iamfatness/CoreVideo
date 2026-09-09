@@ -4,10 +4,9 @@ This guide covers the main CoreVideo OBS plugin workflows. It intentionally
 focuses on the OBS plugin, `ZoomObsEngine`, Zoom source assignment, control APIs,
 audio routing, talkback, and ISO recording.
 
-Recommended Windows release: **v0.1.44**. macOS Apple Silicon beta:
+Current Windows release: **v0.1.45**. macOS Apple Silicon beta:
 **v0.1.45-beta.3**, available as a signed and notarized installer on the
-[download page](https://corevideo.io/download/#macos). The beta also has Windows
-assets; features newer than v0.1.44 are identified below. Talkback is unavailable
+[download page](https://corevideo.io/download/#macos). Talkback is unavailable
 on macOS. The Mac package was built against OBS 32.2.1; use that version or newer.
 
 One naming quirk to get out of the way: the OBS **sources** this plugin
@@ -48,7 +47,7 @@ Sidecar control-surface features are tracked separately in the roadmap.
 
 The plugin docks each have a matching **Tools** menu entry that
 focuses them: **Zoom Control**, **Zoom Output Manager**, **Zoom Diagnostics**,
-**Zoom ISO Recorder**, and (in builds newer than v0.1.44) **Zoom Talkback**.
+**Zoom ISO Recorder**, and (v0.1.45 and later) **Zoom Talkback**.
 The Talkback dock is unavailable on macOS. **Tools > Zoom Plugin Settings**
 opens the settings dialog, which is where Zoom sign-in lives.
 
@@ -418,9 +417,7 @@ resumption does not click; and speech the far end never sent stays missing.
 
 ## Talkback (Intercom)
 
-**Windows only, newer than v0.1.44.** The Talkback dock is included in the
-Windows v0.1.45-beta.3 build. It is not in the recommended v0.1.44 installer,
-and macOS does not implement talkback.
+**Windows only, v0.1.45 and later.** macOS does not implement talkback.
 
 Talkback is private director-to-talent audio carried over Zoom's own talkback
 channels - the operator can talk to one person, or to everyone, without the

@@ -221,6 +221,10 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
+          # Version-stamped names: the website's download page links
+          # CoreVideo-Windows-x64-vX.Y.Z.zip (+ .sha256), matching what
+          # scripts/release-local.ps1 has always produced.
+          $version = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ github.event.inputs.version }}" } else { "${{ github.ref_name }}" }
           cmake --install build --config Release --prefix install
           if ($env:COREVIDEO_HAS_ZOOM_RUNTIME -eq "true") {
             .\scripts\Test-CoreVideoPackage.ps1 `
@@ -228,16 +232,16 @@ jobs:
               -FullRuntime `
               -ExpectedOAuthClientId y6sIWSwiTZe1JygMx4C9EQ `
               -ExpectedMeetingSdkPublicAppKey y6sIWSwiTZe1JygMx4C9EQ `
-              -ManifestPath CoreVideo-Windows-x64.manifest.json
+              -ManifestPath "CoreVideo-Windows-x64-$version.manifest.json"
           } else {
             .\scripts\Test-CoreVideoPackage.ps1 `
               -PackageRoot install `
               -ExpectedOAuthClientId y6sIWSwiTZe1JygMx4C9EQ `
               -ExpectedMeetingSdkPublicAppKey y6sIWSwiTZe1JygMx4C9EQ `
-              -ManifestPath CoreVideo-Windows-x64.manifest.json
+              -ManifestPath "CoreVideo-Windows-x64-$version.manifest.json"
             Write-Warning "Package does not include ZoomObsEngine or sdk.dll because ZOOM_SDK_WINDOWS_URL is not configured."
           }
-          Compress-Archive -Path install\* -DestinationPath CoreVideo-Windows-x64.zip -Force
+          Compress-Archive -Path install\* -DestinationPath "CoreVideo-Windows-x64-$version.zip" -Force
 
       - name: Install NSIS
         if: env.COREVIDEO_HAS_ZOOM_RUNTIME == 'true'
@@ -285,7 +289,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
-          $files = @(Get-Item CoreVideo-Windows-x64.zip)
+          $files = @(Get-ChildItem CoreVideo-Windows-x64-*.zip)
           $files += @(Get-ChildItem CoreVideo-Setup-*.exe -ErrorAction SilentlyContinue)
           foreach ($file in $files) {
             $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
@@ -299,9 +303,9 @@ jobs:
         with:
           name: CoreVideo-Windows-x64
           path: |
-            CoreVideo-Windows-x64.zip
-            CoreVideo-Windows-x64.zip.sha256
-            CoreVideo-Windows-x64.manifest.json
+            CoreVideo-Windows-x64-*.zip
+            CoreVideo-Windows-x64-*.zip.sha256
+            CoreVideo-Windows-x64-*.manifest.json
             CoreVideo-Setup-*.exe
             CoreVideo-Setup-*.exe.sha256
 
@@ -332,9 +336,9 @@ jobs:
           prerelease: ${{ steps.release.outputs.prerelease }}
           generate_release_notes: true
           files: |
-            CoreVideo-Windows-x64.zip
-            CoreVideo-Windows-x64.zip.sha256
-            CoreVideo-Windows-x64.manifest.json
+            CoreVideo-Windows-x64-*.zip
+            CoreVideo-Windows-x64-*.zip.sha256
+            CoreVideo-Windows-x64-*.manifest.json
             CoreVideo-Setup-*.exe
             CoreVideo-Setup-*.exe.sha256
 

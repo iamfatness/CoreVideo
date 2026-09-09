@@ -7,12 +7,18 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
-## [0.1.45-beta.3] - 2026-09-08
+## [0.1.45] - 2026-09-09
 
-Pre-release for **Windows and macOS (Apple Silicon)**. Everything on `main`
-since v0.1.44, including the macOS work that shipped as v0.1.45-beta.2, plus
-the first Windows build of the panelist loudness board. Windows v0.1.44 stays
-the recommended release until this line goes final.
+First full release of the 0.1.45 line, promoted from v0.1.45-beta.3 with no
+plugin code changes (only CI and Companion dev-dependency bumps landed in
+between). Everything since v0.1.44 is listed here: the panelist loudness
+board, the Zoom Talkback dock (first shipped in the beta.1 Windows build), the
+notarized macOS installer and the macOS soak-recovery fixes.
+
+**Windows:** this release replaces v0.1.44 as the recommended download and is
+what the in-plugin update check now offers. **macOS:** the signed installer
+is built on the maintainer's Mac and attached separately; until it is, the
+v0.1.45-beta.3 / beta.2 installers carry the same macOS fixes.
 
 ### Added
 - **Panelist loudness meter and readiness board** (`CoreVideo Loudness
@@ -65,6 +71,10 @@ the recommended release until this line goes final.
   measuring → verdict transitions, Reset) is still outstanding in a real
   meeting.
 - The Windows installer is not code-signed; SmartScreen warns on first run.
+
+## [0.1.45-beta.3] - 2026-09-08
+
+Pre-release for Windows and macOS with the same content as 0.1.45 above.
 
 ## [0.1.45-beta.2] - 2026-09-06
 
@@ -1015,7 +1025,8 @@ sign-in, per-participant and screen-share sources, the Active Speaker
 Director, auto-reconnect, TCP/OSC control APIs, ISO recording, the Output
 Manager, and the initial Windows release packaging and CI pipeline.
 
-[Unreleased]: https://github.com/iamfatness/CoreVideo/compare/v0.1.45-beta.3...HEAD
+[Unreleased]: https://github.com/iamfatness/CoreVideo/compare/v0.1.45...HEAD
+[0.1.45]: https://github.com/iamfatness/CoreVideo/compare/v0.1.45-beta.3...v0.1.45
 [0.1.45-beta.3]: https://github.com/iamfatness/CoreVideo/compare/v0.1.45-beta.2...v0.1.45-beta.3
 [0.1.45-beta.2]: https://github.com/iamfatness/CoreVideo/compare/v0.1.45-beta.1...v0.1.45-beta.2
 [0.1.45-beta.1]: https://github.com/iamfatness/CoreVideo/compare/v0.1.44...v0.1.45-beta.1

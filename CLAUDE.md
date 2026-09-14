@@ -227,21 +227,16 @@ Every one of these is documented at length where it lives; the list is the map.
   interval rather than zeroing on fire -- zeroing discards the remainder
   that pushed a tick over threshold, which at 60 fps lands every 7 frames
   (~117 ms, ~8.6 Hz) instead of the documented 10 Hz.
-- **ISO recording timing** (`src/iso-video-pacer.h`, `src/iso-audio-gap-fill.h`):
-  raw video has no per-frame timestamps and ffmpeg cannot be trusted to
-  invent correct ones from a byte stream — `-use_wallclock_as_timestamps`
-  is confirmed (via `ffprobe -show_frames`, 2026-08-21) to have **no
-  effect** on this project's ffmpeg build's rawvideo demuxer, despite
-  looking like the textbook fix. `record_video_frame()` is called 1:1 with
-  Zoom's real, fluctuating (10-60fps) per-source delivery, so it must pace
-  itself to a fixed cadence (duplicate to backfill a stall, drop to shed a
-  burst) BEFORE the pipe — see `iso_video_frames_due()`. Audio has the
-  mirror-image problem for a different reason: Zoom only calls back audio
-  for someone currently talking, so `record_audio_frame()` must backfill
-  silence across every gap (`iso_audio_silence_frames()`) or the WAV
-  shrinks by every silent stretch. Both anchor to the same
-  `os_gettime_ns()` clock so video and audio stay in sync with each other,
-  not just individually correct.
+- **ISO participant A/V recording** (`src/iso-track-writer.cpp`,
+  `src/iso-av-mux.h`): one writer per Zoom participant ID owns a continuous
+  1920x1080/30 H.264 + 48 kHz stereo AAC MP4 until Stop. Source UUIDs and input
+  dimensions MUST NOT key writer lifetime. Workers scale/letterbox and resample,
+  hold video/fill silence against the same monotonic clock, and mux timestamped
+  raw media to one FFmpeg pipe. The input is full-range BT.709; preserve its
+  colour metadata. B-frames are disabled to avoid fragmented-MP4 startup A/V
+  offset. Keep startup video history while workers catch up: shrinking the
+  input queue on the first tick loses early frames. Validate decoded flash/tone
+  timing with `tests/verify-iso-av.py`, not only frame counts or process success.
 - **Colour range is normalised, never re-declared** (`src/i420-range-expand.h`,
   applied in `engine/src/engine-video.cpp`'s `onRawDataFrameReceived`): the
   engine requests `VideoRawdataColorspace_BT709_F` and the plugin declares

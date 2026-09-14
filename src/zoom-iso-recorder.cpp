@@ -1,7 +1,6 @@
 #include "zoom-iso-recorder.h"
-#include "iso-audio-gap-fill.h"
 #include "iso-encoder-plan.h"
-#include "iso-video-pacer.h"
+#include "iso-provider-policy.h"
 #include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
@@ -11,23 +10,20 @@
 #include <QStandardPaths>
 #include <QStorageInfo>
 #include <QStringList>
-#include <obs-frontend-api.h>
-#include <obs-module.h>
-#include <util/platform.h>
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <obs-frontend-api.h>
+#include <obs-module.h>
 #include <set>
+#include <util/platform.h>
 
 static constexpr qint64 kIsoMinimumFreeBytes = 2ll * 1024ll * 1024ll * 1024ll;
 static constexpr qint64 kIsoWarningFreeBytes = 10ll * 1024ll * 1024ll * 1024ll;
-static constexpr int kFfmpegOutputTailChars = 2048;
-static constexpr size_t kMaxCompletedIsoSessions = 24;
 
 static QString default_iso_dir()
 {
-    const QString docs = QStandardPaths::writableLocation(
-        QStandardPaths::DocumentsLocation);
+    const QString docs = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
     const QString base = docs.isEmpty() ? QDir::homePath() : docs;
     return QDir(base).absoluteFilePath("CoreVideo ISOs");
 }
@@ -35,24 +31,15 @@ static QString default_iso_dir()
 static QString sanitized(const std::string &value, const QString &fallback)
 {
     QString out = QString::fromStdString(value).trimmed();
-    if (out.isEmpty()) out = fallback;
+    if (out.isEmpty())
+        out = fallback;
     for (QChar &ch : out) {
         if (!ch.isLetterOrNumber() && ch != '-' && ch != '_' && ch != '.')
             ch = '_';
     }
-    while (out.contains("__")) out.replace("__", "_");
+    while (out.contains("__"))
+        out.replace("__", "_");
     return out.left(80);
-}
-
-static const char *assignment_label(AssignmentMode mode)
-{
-    switch (mode) {
-    case AssignmentMode::ActiveSpeaker: return "active_speaker";
-    case AssignmentMode::SpotlightIndex: return "spotlight";
-    case AssignmentMode::ScreenShare: return "screen_share";
-    case AssignmentMode::Participant:
-    default: return "participant";
-    }
 }
 
 static QString bytes_text(qint64 bytes)
@@ -67,10 +54,8 @@ static QString bytes_text(qint64 bytes)
 static std::string normalized_video_encoder(const std::string &encoder);
 static int count_obs_nvenc_encoders();
 static bool is_hardware_encoder(const std::string &encoder);
-static bool ffmpeg_encoder_available(const QString &ffmpeg_path,
-                                     const std::string &encoder,
+static bool ffmpeg_encoder_available(const QString &ffmpeg_path, const std::string &encoder,
                                      std::string *error);
-static QStringList ffmpeg_video_encoder_args(const std::string &encoder);
 
 ZoomIsoRecorder &ZoomIsoRecorder::instance()
 {
@@ -78,100 +63,25 @@ ZoomIsoRecorder &ZoomIsoRecorder::instance()
     return inst;
 }
 
-ZoomIsoRecorder::~ZoomIsoRecorder()
+ZoomIsoRecorder::~ZoomIsoRecorder() { stop(); }
+
+bool ZoomIsoRecorder::start(const ZoomIsoRecordConfig &config, std::string *error)
 {
-    stop();
-}
-
-bool ZoomIsoRecorder::WavFile::open(const QString &path,
-                                    uint32_t rate,
-                                    uint16_t channel_count)
-{
-    close();
-#if defined(_WIN32)
-    file = _wfopen(reinterpret_cast<const wchar_t *>(path.utf16()), L"wb");
-#else
-    file = fopen(path.toUtf8().constData(), "wb");
-#endif
-    if (!file) return false;
-    sample_rate = rate;
-    channels = std::max<uint16_t>(channel_count, 1);
-    data_bytes = 0;
-
-    const uint16_t audio_format = 1;
-    const uint16_t bits_per_sample = 16;
-    const uint32_t byte_rate = sample_rate * channels * bits_per_sample / 8;
-    const uint16_t block_align = channels * bits_per_sample / 8;
-    const uint32_t riff_size = 36;
-    const uint32_t data_size = 0;
-
-    fwrite("RIFF", 1, 4, file);
-    fwrite(&riff_size, 4, 1, file);
-    fwrite("WAVEfmt ", 1, 8, file);
-    const uint32_t fmt_size = 16;
-    fwrite(&fmt_size, 4, 1, file);
-    fwrite(&audio_format, 2, 1, file);
-    fwrite(&channels, 2, 1, file);
-    fwrite(&sample_rate, 4, 1, file);
-    fwrite(&byte_rate, 4, 1, file);
-    fwrite(&block_align, 2, 1, file);
-    fwrite(&bits_per_sample, 2, 1, file);
-    fwrite("data", 1, 4, file);
-    fwrite(&data_size, 4, 1, file);
-    return true;
-}
-
-bool ZoomIsoRecorder::WavFile::write(const uint8_t *pcm, uint32_t byte_len,
-                                     bool *out_disk_full)
-{
-    if (out_disk_full) *out_disk_full = false;
-    if (!file || !pcm || byte_len == 0) return true;
-    errno = 0;
-    const size_t written = fwrite(pcm, 1, byte_len, file);
-    data_bytes += static_cast<uint32_t>(written);
-    if (written < byte_len) {
-        write_failed = true;
-        if (out_disk_full && (errno == ENOSPC || ferror(file)))
-            *out_disk_full = (errno == ENOSPC);
+    if (m_active.load() || m_stopping.load()) {
+        if (error)
+            *error = "ISO recording is already active or finishing.";
         return false;
     }
-    return true;
-}
-
-void ZoomIsoRecorder::WavFile::close()
-{
-    if (!file) return;
-    // Finalize the RIFF/data size fields on every close path (including
-    // when a write failed mid-stream) so the file stays valid and playable.
-    // data_bytes reflects the bytes actually written, so a truncated file
-    // still describes its real payload size.
-    const uint32_t riff_size = 36 + data_bytes;
-    if (fseek(file, 4, SEEK_SET) == 0)
-        fwrite(&riff_size, 4, 1, file);
-    if (fseek(file, 40, SEEK_SET) == 0)
-        fwrite(&data_bytes, 4, 1, file);
-    fclose(file);
-    file = nullptr;
-    data_bytes = 0;
-    write_failed = false;
-}
-
-bool ZoomIsoRecorder::start(const ZoomIsoRecordConfig &config,
-                            std::string *error)
-{
     ZoomIsoRecordConfig normalized = config;
     if (normalized.output_dir.empty())
         normalized.output_dir = default_iso_dir().toStdString();
     if (normalized.ffmpeg_path.empty())
         normalized.ffmpeg_path = "ffmpeg";
-    const std::string requested_encoder =
-        normalized_video_encoder(normalized.video_encoder);
-    normalized.video_encoder =
-        requested_encoder;
+    const std::string requested_encoder = normalized_video_encoder(normalized.video_encoder);
+    normalized.video_encoder = requested_encoder;
     const QString ffmpegProgram = QString::fromStdString(normalized.ffmpeg_path);
     const QFileInfo ffmpegInfo(ffmpegProgram);
-    if ((ffmpegInfo.isRelative() &&
-         QStandardPaths::findExecutable(ffmpegProgram).isEmpty()) ||
+    if ((ffmpegInfo.isRelative() && QStandardPaths::findExecutable(ffmpegProgram).isEmpty()) ||
         (!ffmpegInfo.isRelative() && !ffmpegInfo.exists())) {
         if (error) {
             *error = "FFmpeg was not found on PATH. Set ffmpeg_path to a "
@@ -193,19 +103,16 @@ bool ZoomIsoRecorder::start(const ZoomIsoRecordConfig &config,
              "[obs-zoom-plugin] ISO encoder placement: automatic "
              "(nvenc=%d qsv=%d amf=%d, NVENC session limit %d, "
              "OBS NVENC encoders active %d)",
-             avail.nvenc, avail.qsv, avail.amf,
-             iso_nvenc_default_session_limit(), count_obs_nvenc_encoders());
-    } else if (!ffmpeg_encoder_available(ffmpegProgram,
-                                         normalized.video_encoder,
-                                         &encoder_error)) {
+             avail.nvenc, avail.qsv, avail.amf, iso_nvenc_default_session_limit(),
+             count_obs_nvenc_encoders());
+    } else if (!ffmpeg_encoder_available(ffmpegProgram, normalized.video_encoder, &encoder_error)) {
         if (is_hardware_encoder(normalized.video_encoder) &&
             ffmpeg_encoder_available(ffmpegProgram, "libx264", nullptr)) {
             status_warning = QString("Requested hardware encoder '%1' was not "
                                      "available in FFmpeg; falling back to CPU "
                                      "libx264 for this ISO run.")
                                  .arg(QString::fromStdString(normalized.video_encoder));
-            blog(LOG_WARNING, "[obs-zoom-plugin] %s",
-                 status_warning.toUtf8().constData());
+            blog(LOG_WARNING, "[obs-zoom-plugin] %s", status_warning.toUtf8().constData());
             normalized.video_encoder = "libx264";
         } else {
             if (error)
@@ -216,7 +123,8 @@ bool ZoomIsoRecorder::start(const ZoomIsoRecordConfig &config,
 
     QDir dir(QString::fromStdString(normalized.output_dir));
     if (!dir.exists() && !dir.mkpath(".")) {
-        if (error) *error = "Could not create ISO recording directory.";
+        if (error)
+            *error = "Could not create ISO recording directory.";
         return false;
     }
     const QStorageInfo storage(dir.absolutePath());
@@ -226,17 +134,16 @@ bool ZoomIsoRecorder::start(const ZoomIsoRecordConfig &config,
             if (error) {
                 *error = QString("Only %1 is free in the ISO output folder. "
                                  "Free at least %2 before starting ISO recording.")
-                             .arg(bytes_text(available),
-                                  bytes_text(kIsoMinimumFreeBytes))
+                             .arg(bytes_text(available), bytes_text(kIsoMinimumFreeBytes))
                              .toStdString();
             }
             return false;
         }
         if (available < kIsoWarningFreeBytes) {
-            blog(LOG_WARNING,
-                 "[obs-zoom-plugin] ISO recording starting with low disk space: available=%s dir=%s",
-                 bytes_text(available).toUtf8().constData(),
-                 normalized.output_dir.c_str());
+            blog(
+                LOG_WARNING,
+                "[obs-zoom-plugin] ISO recording starting with low disk space: available=%s dir=%s",
+                bytes_text(available).toUtf8().constData(), normalized.output_dir.c_str());
         }
     } else {
         blog(LOG_WARNING,
@@ -246,20 +153,22 @@ bool ZoomIsoRecorder::start(const ZoomIsoRecordConfig &config,
 
     {
         std::lock_guard<std::mutex> lock(m_mtx);
-        for (auto &entry : m_sessions)
-            begin_finishing_locked(std::move(entry.second));
         m_sessions.clear();
-        reap_finishing_locked();
         m_config = normalized;
         m_requested_video_encoder = requested_encoder;
         m_encoder_avail = avail;
         m_nvenc_session_limit = iso_nvenc_default_session_limit();
-        m_encoder_demotions.clear();
-        m_stopped_sources.clear();
         m_status_warning = status_warning;
         m_started_program_recording = false;
         m_completed_sessions.clear();
+        m_epoch_ns = os_gettime_ns();
         m_active.store(true, std::memory_order_release);
+        for (const auto &entry : m_outputs) {
+            const auto &info = entry.second;
+            if (info.assignment == AssignmentMode::Participant && info.participant_id &&
+                !info.audience_audio)
+                ensure_session_locked(info, info.participant_id, m_epoch_ns);
+        }
     }
 
     if (normalized.record_program && !obs_frontend_recording_active()) {
@@ -268,8 +177,7 @@ bool ZoomIsoRecorder::start(const ZoomIsoRecordConfig &config,
         m_started_program_recording = true;
     }
 
-    blog(LOG_INFO,
-         "[obs-zoom-plugin] ISO recording started: dir=%s ffmpeg=%s encoder=%s",
+    blog(LOG_INFO, "[obs-zoom-plugin] ISO recording started: dir=%s ffmpeg=%s encoder=%s",
          normalized.output_dir.c_str(), normalized.ffmpeg_path.c_str(),
          normalized.video_encoder.c_str());
     return true;
@@ -277,829 +185,232 @@ bool ZoomIsoRecorder::start(const ZoomIsoRecordConfig &config,
 
 void ZoomIsoRecorder::stop()
 {
-    if (!m_active.exchange(false, std::memory_order_acq_rel)) return;
-
-    // Take the sessions out and finish them WITHOUT holding m_mtx. The old
-    // close-in-place loop waited up to 5 s per session under the lock; with
-    // 8 sessions the engine-IPC dispatch thread (which needs m_mtx to write
-    // frames) blocked for ~40 s, the engine's pipe backed up until its
-    // heartbeat write stalled, and the plugin declared the engine dead and
-    // tore the meeting down (2026-08-08 incident).
-    std::vector<Session> finishing;
+    if (m_stopping.exchange(true))
+        return;
+    if (!m_active.exchange(false)) {
+        m_stopping = false;
+        return;
+    }
+    const uint64_t end_ns = os_gettime_ns();
+    std::unordered_map<uint32_t, Session> sessions;
     bool stop_program = false;
     {
         std::lock_guard<std::mutex> lock(m_mtx);
-        finishing.reserve(m_sessions.size() + m_finishing.size());
-        for (auto &entry : m_sessions)
-            finishing.push_back(std::move(entry.second));
-        m_sessions.clear();
-        for (auto &pending : m_finishing)
-            finishing.push_back(std::move(pending));
-        m_finishing.clear();
-        stop_program = m_started_program_recording &&
-                       obs_frontend_recording_active();
+        sessions.swap(m_sessions);
+        stop_program = m_started_program_recording && obs_frontend_recording_active();
         m_started_program_recording = false;
     }
     if (stop_program)
         obs_frontend_recording_stop();
-
-    // Phase 1: signal EOF to every encoder at once so they all finalize
-    // their MP4s in parallel instead of serially.
-    for (Session &session : finishing) {
-        session.wav.close();
-        if (session.ffmpeg) {
-            refresh_ffmpeg_status_locked(session);
-            session.ffmpeg->close_stdin();
-        }
-    }
-
-    // Phase 2: wait against one shared deadline; anything still running at
-    // the end gets terminated with an honest status (a killed FFmpeg leaves
-    // the MP4 without its final index).
+    for (auto &entry : sessions)
+        entry.second.writer->close(end_ns);
     QElapsedTimer deadline;
     deadline.start();
-    constexpr qint64 kShutdownBudgetMs = 15000;
-    for (Session &session : finishing) {
-        if (!session.ffmpeg)
-            continue;
-        qint64 remaining = kShutdownBudgetMs - deadline.elapsed();
-        if (remaining < 100)
-            remaining = 100;
-        if (!session.ffmpeg->wait_finished(static_cast<int>(remaining))) {
-            mark_ffmpeg_failure_locked(
-                session,
-                QString("FFmpeg did not exit within the %1s shutdown budget "
-                        "and was terminated — the recording may be missing "
-                        "its final index (moov).")
-                    .arg(kShutdownBudgetMs / 1000));
-            session.ffmpeg->kill();
-            if (!session.ffmpeg->wait_finished(2000) &&
-                session.ffmpeg->running()) {
-                blog(LOG_WARNING,
-                     "[obs-zoom-plugin] ISO ffmpeg for %s did not exit after "
-                     "kill(); process may not be reaped (pid=%lld)",
-                     session.source_name.c_str(), session.ffmpeg->pid());
-            }
+    for (auto &entry : sessions) {
+        auto &session = entry.second;
+        session.writer->wait_finished(int(std::max<qint64>(0, 15000 - deadline.elapsed())));
+        QJsonObject completed = session_status_locked(session, true, end_ns);
+        if (!session.writer->status().done) {
+            completed["ffmpeg_error"] = "ISO finalization exceeded the shared shutdown deadline";
+            completed["session_health"] = "encoder_error";
         }
-        refresh_ffmpeg_status_locked(session);
-        blog(LOG_INFO,
-             "[obs-zoom-plugin] ISO session closed: source=%s participant=%u frames=%u audio_chunks=%u",
-             session.source_name.c_str(), session.resolved_participant_id,
-             session.video_frames, session.audio_chunks);
-    }
-
-    {
+        // Destruction cancels any hung worker/process outside the recorder lock.
+        session.writer.reset();
         std::lock_guard<std::mutex> lock(m_mtx);
-        for (Session &session : finishing) {
-            QJsonObject completed =
-                session_status_json_locked(session, true);
-            completed["completed_at"] =
-                QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
-            m_completed_sessions.insert(m_completed_sessions.begin(),
-                                        completed);
-        }
-        if (m_completed_sessions.size() > kMaxCompletedIsoSessions)
-            m_completed_sessions.resize(kMaxCompletedIsoSessions);
+        m_completed_sessions.push_back(completed);
     }
-    blog(LOG_INFO, "[obs-zoom-plugin] ISO recording stopped");
+    m_stopping = false;
+    blog(LOG_INFO,
+         "[obs-zoom-plugin] ISO recording stopped (one muxed 1080p file per participant)");
 }
 
-QJsonArray ZoomIsoRecorder::status_json()
+bool ZoomIsoRecorder::should_record(const ZoomOutputInfo &info, uint32_t participant) const
 {
-    QJsonArray arr;
-    std::lock_guard<std::mutex> lock(m_mtx);
-    reap_finishing_locked();
-    sweep_unresolved_locked();
-    for (auto &entry : m_sessions) {
-        arr.append(session_status_json_locked(entry.second, false));
-    }
-    for (auto &finishing : m_finishing)
-        arr.append(session_status_json_locked(finishing, false));
-    for (const QJsonObject &completed : m_completed_sessions)
-        arr.append(completed);
-    return arr;
+    return m_active.load() && participant && !info.source_uuid.empty() && !info.audience_audio &&
+           info.assignment != AssignmentMode::ScreenShare;
 }
 
-QJsonObject ZoomIsoRecorder::status_overview()
+ZoomIsoRecorder::Session &ZoomIsoRecorder::ensure_session_locked(const ZoomOutputInfo &info,
+                                                                 uint32_t participant, uint64_t ns)
 {
-    QJsonObject obj;
-    std::lock_guard<std::mutex> lock(m_mtx);
-    obj["active"] = m_active.load(std::memory_order_acquire);
-    obj["output_dir"] = QString::fromStdString(m_config.output_dir);
-    obj["ffmpeg_path"] = QString::fromStdString(m_config.ffmpeg_path);
-    obj["requested_video_encoder"] =
-        QString::fromStdString(m_requested_video_encoder.empty()
-            ? m_config.video_encoder
-            : m_requested_video_encoder);
-    obj["video_encoder"] = QString::fromStdString(m_config.video_encoder);
-    obj["encoder_fallback"] =
-        !m_requested_video_encoder.empty() &&
-        m_requested_video_encoder != m_config.video_encoder;
-    obj["hardware_encoder"] = is_hardware_encoder(m_config.video_encoder);
-    obj["record_program"] = m_config.record_program;
-    obj["program_recording_started_by_corevideo"] = m_started_program_recording;
-    obj["session_count"] = static_cast<int>(m_sessions.size());
-    obj["completed_session_count"] = static_cast<int>(m_completed_sessions.size());
-    obj["warning"] = m_status_warning;
-
-    const QDir dir(QString::fromStdString(m_config.output_dir));
-    const QStorageInfo storage(dir.absolutePath());
-    if (storage.isValid() && storage.isReady()) {
-        obj["disk_available_bytes"] = static_cast<double>(storage.bytesAvailable());
-        obj["disk_warning"] = storage.bytesAvailable() < kIsoWarningFreeBytes;
-    } else {
-        obj["disk_available_bytes"] = -1.0;
-        obj["disk_warning"] = true;
-    }
-    return obj;
+    auto existing = m_sessions.find(participant);
+    if (existing != m_sessions.end())
+        return existing->second;
+    Session session;
+    session.info = info;
+    session.participant = participant;
+    // Known participants begin at Record. Late arrivals have an explicit offset
+    // rather than generating minutes of blank frames in a catch-up burst.
+    session.epoch_ns = ns - m_epoch_ns < 500000000ULL ? m_epoch_ns : ns;
+    const QString stamp = QDateTime::currentDateTimeUtc().toString("yyyyMMdd-HHmmss-zzz");
+    session.path = QDir(QString::fromStdString(m_config.output_dir))
+                       .absoluteFilePath(
+                           QString("%1_%2_participant_%3.mp4")
+                               .arg(stamp, sanitized(info.display_name.empty() ? info.source_name
+                                                                               : info.display_name,
+                                                     "participant"))
+                               .arg(participant));
+    int in_use = 0;
+    for (const auto &entry : m_sessions)
+        if (entry.second.encoder == "h264_nvenc")
+            ++in_use;
+    const int reserve = m_config.record_program && !obs_frontend_recording_active() ? 1 : 0;
+    session.encoder = iso_choose_session_encoder(
+        m_config.video_encoder,
+        m_nvenc_session_limit - count_obs_nvenc_encoders() - in_use - reserve, m_encoder_avail);
+    IsoTrackWriter::Config config;
+    config.ffmpeg = m_config.ffmpeg_path;
+    config.encoder = session.encoder;
+    config.path = session.path.toStdString();
+    config.log_path = config.path + ".ffmpeg.log";
+    config.epoch_ns = session.epoch_ns;
+    config.now = [] { return os_gettime_ns(); };
+    session.writer = std::make_unique<IsoTrackWriter>(std::move(config));
+    blog(LOG_INFO,
+         "[obs-zoom-plugin] ISO participant recording opened: participant=%u encoder=%s "
+         "output=1920x1080 audio=AAC file=%s",
+         participant, session.encoder.c_str(), session.path.toUtf8().constData());
+    return m_sessions.emplace(participant, std::move(session)).first->second;
 }
 
+void ZoomIsoRecorder::record_video_frame(const ZoomOutputInfo &info, uint32_t participant,
+                                         uint32_t w, uint32_t h, const uint8_t *y, const uint8_t *u,
+                                         const uint8_t *v, uint32_t sy, uint32_t suv, uint64_t ns)
+{
+    std::lock_guard<std::mutex> lock(m_mtx);
+    if (!should_record(info, participant))
+        return;
+    auto &session = ensure_session_locked(info, participant, ns);
+    if (iso_take_provider(session.video_owner, session.video_ns, info.source_uuid, ns))
+        session.writer->video(w, h, y, u, v, sy, suv, ns);
+}
+void ZoomIsoRecorder::record_audio_frame(const ZoomOutputInfo &info, uint32_t participant,
+                                         const uint8_t *pcm, uint32_t bytes, uint32_t rate,
+                                         uint16_t channels, uint64_t ns)
+{
+    std::lock_guard<std::mutex> lock(m_mtx);
+    if (!should_record(info, participant))
+        return;
+    auto &session = ensure_session_locked(info, participant, ns);
+    if (iso_take_provider(session.audio_owner, session.audio_ns, info.source_uuid, ns))
+        session.writer->audio(pcm, bytes, rate, channels, ns);
+}
 void ZoomIsoRecorder::on_output_updated(const ZoomOutputInfo &info)
 {
     std::lock_guard<std::mutex> lock(m_mtx);
-    if (info.source_uuid.empty()) return;
     m_outputs[info.source_uuid] = info;
-    auto it = m_sessions.find(info.source_uuid);
-    if (it == m_sessions.end())
-        return;
-    if (should_record(info, info.participant_id)) {
-        it->second.unresolved_since_ns = 0;
-        return;
-    }
-    if (info.assignment == AssignmentMode::ScreenShare) {
-        // Assignment changed away from a recordable mode — final.
-        close_session_locked(info.source_uuid);
-        return;
-    }
-    // Unresolved participant: often transient (engine reconnect, camera
-    // toggle). Start the grace clock instead of finalizing the file;
-    // sweep_unresolved_locked() closes it if this persists.
-    if (it->second.unresolved_since_ns == 0)
-        it->second.unresolved_since_ns = os_gettime_ns();
 }
-
-void ZoomIsoRecorder::on_output_removed(const std::string &source_uuid)
+void ZoomIsoRecorder::on_output_removed(const std::string &source)
 {
     std::lock_guard<std::mutex> lock(m_mtx);
-    close_session_locked(source_uuid);
-    m_outputs.erase(source_uuid);
-}
-
-bool ZoomIsoRecorder::should_record(const ZoomOutputInfo &info,
-                                    uint32_t resolved_participant_id) const
-{
-    if (!m_active.load(std::memory_order_acquire)) return false;
-    if (info.source_uuid.empty()) return false;
-    if (info.assignment == AssignmentMode::ScreenShare) return false;
-    if (resolved_participant_id == 0 &&
-        info.assignment != AssignmentMode::ActiveSpeaker &&
-        info.assignment != AssignmentMode::SpotlightIndex)
-        return false;
-    return true;
-}
-
-ZoomIsoRecorder::Session &
-ZoomIsoRecorder::ensure_session_locked(const ZoomOutputInfo &info,
-                                       uint32_t resolved_participant_id,
-                                       uint32_t width,
-                                       uint32_t height,
-                                       uint64_t timestamp_ns)
-{
-    auto it = m_sessions.find(info.source_uuid);
-    const bool needs_new = it == m_sessions.end() ||
-        it->second.resolved_participant_id != resolved_participant_id ||
-        it->second.width != width ||
-        it->second.height != height;
-    if (!needs_new) return it->second;
-
-    if (it != m_sessions.end()) {
-        // Resolution or participant change: finalize the old segment
-        // without blocking (we are on the frame-dispatch thread).
-        begin_finishing_locked(std::move(it->second));
-        m_sessions.erase(it);
-    }
-
-    Session session;
-    session.source_uuid = info.source_uuid;
-    session.source_name = info.source_name;
-    session.display_name = info.display_name.empty()
-        ? info.source_name : info.display_name;
-    session.assignment = info.assignment;
-    session.configured_participant_id = info.participant_id;
-    session.resolved_participant_id = resolved_participant_id;
-    session.width = width;
-    session.height = height;
-    session.started_ns = timestamp_ns;
-    // Seeds the video pacer's schedule at the session's own start, the same
-    // instant started_ns records — see src/iso-video-pacer.h.
-    session.video_next_due_ns = timestamp_ns;
-
-    QDir root(QString::fromStdString(m_config.output_dir));
-    const QString stamp = QDateTime::currentDateTimeUtc()
-        .toString("yyyyMMdd-HHmmss-zzz");
-    const QString name = sanitized(session.display_name,
-        QStringLiteral("source"));
-    const QString participant =
-        resolved_participant_id == 0
-            ? QStringLiteral("unresolved")
-            : QString::number(resolved_participant_id);
-    const QString base = QString("%1_%2_%3_%4")
-        .arg(stamp, name, QString::fromLatin1(assignment_label(info.assignment)),
-             participant);
-    session.base_path = root.absoluteFilePath(base);
-    session.video_path = session.base_path + ".mp4";
-    session.audio_path = session.base_path + ".wav";
-    session.requested_video_encoder = m_requested_video_encoder.empty()
-        ? normalized_video_encoder(m_config.video_encoder)
-        : m_requested_video_encoder;
-    // Encoder placement: hardware sessions are a shared, finite budget
-    // (OBS's own outputs included), so each ISO session is placed
-    // individually — NVENC while the budget lasts, then QSV/AMF/x264.
-    // A session that already failed once on a hardware encoder was demoted
-    // and stays demoted for this run.
-    const auto demoted = m_encoder_demotions.find(session.source_uuid);
-    if (demoted != m_encoder_demotions.end()) {
-        session.video_encoder = demoted->second;
-    } else {
-        int nvenc_in_use_iso = 0;
-        for (const auto &other : m_sessions) {
-            if (other.second.video_encoder == "h264_nvenc" &&
-                other.second.ffmpeg && other.second.ffmpeg->running())
-                ++nvenc_in_use_iso;
-        }
-        const int remaining = m_nvenc_session_limit -
-                              count_obs_nvenc_encoders() - nvenc_in_use_iso;
-        session.video_encoder = iso_choose_session_encoder(
-            normalized_video_encoder(m_config.video_encoder), remaining,
-            m_encoder_avail);
-    }
-    session.encoder_fallback =
-        session.requested_video_encoder != session.video_encoder;
-
-    session.ffmpeg = std::make_unique<IsoFfmpegPipe>();
-    std::vector<std::string> args = {
-        "-hide_banner", "-loglevel", "warning", "-y",
-        "-f", "rawvideo",
-        "-pix_fmt", "yuv420p",
-        "-s", std::to_string(width) + "x" + std::to_string(height),
-        // record_video_frame() paces every call to kIsoVideoTargetFps
-        // BEFORE it reaches this pipe (see the call site below and
-        // src/iso-video-pacer.h) -- what ffmpeg receives is genuinely CFR,
-        // so a plain declared -r here is correct and sufficient. It was
-        // NOT always sufficient: an earlier version of this fix tried
-        // -use_wallclock_as_timestamps to let ffmpeg itself derive PTS from
-        // real per-frame arrival time, on the theory that Zoom's actual
-        // delivery rate fluctuates 10-60fps with network/encoder conditions
-        // outside our control (CLAUDE.md's "media events are prompts, not
-        // payloads" applies to video here too) and record_video_frame() was
-        // called 1:1 with that, never padded, so a declared-CFR -r 30 was
-        // silently wrong whenever the source's real average differed from
-        // 30 (measured live 2026-08-19: observed_fps 16-18 on every
-        // participant, meaning every ISO file from that verification
-        // session played back at roughly 1.7-1.9x speed and finished in
-        // ~55-60% of the real meeting's duration). That was a correct
-        // diagnosis but the wrong mechanism: probed directly against this
-        // exact ffmpeg build (8.1.1) with ffprobe -show_frames, the
-        // rawvideo demuxer does not honor -use_wallclock_as_timestamps at
-        // all -- every frame's pts_time came back as a pure
-        // frame_index/30, identical to the unpatched behavior, even when
-        // fed a deliberate 1.5s real-time gap. Pacing before the pipe
-        // avoids depending on that (undocumented, apparently silently
-        // ignored) demuxer behavior entirely: duplicate the held frame to
-        // fill a stall, drop excess frames on a burst, so ffmpeg is never
-        // asked to infer timing it cannot actually derive from a raw byte
-        // stream.
-        "-r", std::to_string(kIsoVideoTargetFps),
-        "-i", "pipe:0",
-        "-an",
-    };
-    for (const QString &a : ffmpeg_video_encoder_args(session.video_encoder))
-        args.push_back(a.toStdString());
-    // Fragmented MP4: the file is playable up to the last written
-    // fragment even if FFmpeg is killed or the machine loses power
-    // (+faststart wrote the index only during finalize — and rewrote
-    // the whole file, which made shutdown slow on synced folders and
-    // left killed recordings unplayable).
-    args.push_back("-movflags");
-    args.push_back("+frag_keyframe+empty_moov");
-    args.push_back(session.video_path.toStdString());
-
-    // Allow codec startup and normal delivery jitter without unbounded RAM.
-    // Repeated catch-up pictures share storage, but consume logical slots.
-    // 96 frames at 1080p = 285 MiB; larger formats hit the 288 MiB byte cap.
-    session.ffmpeg->configure_frame_limits(IsoFfmpegPipe::kSteadyFrames,
-                                           IsoFfmpegPipe::kStartupFrames);
-    const size_t frame_cap =
-        std::min<size_t>(static_cast<size_t>(width) * height * 3 / 2 *
-                            IsoFfmpegPipe::kStartupFrames,
-                         IsoFfmpegPipe::kMaximumPixelBytes);
-    std::string start_error;
-    if (!session.ffmpeg->start(
-            m_config.ffmpeg_path, args,
-            (session.base_path + ".ffmpeg.log").toStdString(),
-            frame_cap, &start_error)) {
-        session.ffmpeg_error = QString::fromStdString(start_error);
-        session.ffmpeg_error_logged = true;
-        blog(LOG_WARNING,
-             "[obs-zoom-plugin] ISO ffmpeg failed to start for %s: %s",
-             session.source_name.c_str(), start_error.c_str());
-    } else {
-        session.ffmpeg_started_ns = os_gettime_ns();
-    }
-
-    blog(LOG_INFO,
-         "[obs-zoom-plugin] ISO session started: source=%s participant=%u encoder=%s video=%s audio=%s",
-         session.source_name.c_str(), session.resolved_participant_id,
-         session.video_encoder.c_str(),
-         session.video_path.toUtf8().constData(),
-         session.audio_path.toUtf8().constData());
-
-    auto inserted = m_sessions.emplace(info.source_uuid, std::move(session));
-    return inserted.first->second;
-}
-
-void ZoomIsoRecorder::close_session_locked(const std::string &source_uuid)
-{
-    auto it = m_sessions.find(source_uuid);
-    if (it == m_sessions.end()) return;
-    begin_finishing_locked(std::move(it->second));
-    m_sessions.erase(it);
-}
-
-// Mid-recording closes must never wait on an encoder: they run on the
-// frame-dispatch thread, and a blocked dispatch thread starves the engine's
-// IPC pipe (the 2026-08-08 engine-"death" incidents). Signal EOF, park the
-// session, and let reap_finishing_locked() finalize it from status polls.
-void ZoomIsoRecorder::begin_finishing_locked(Session &&session)
-{
-    session.wav.close();
-    if (session.ffmpeg) {
-        refresh_ffmpeg_status_locked(session);
-        session.ffmpeg->close_stdin();
-    }
-    session.finishing_since_ns = os_gettime_ns();
-    m_finishing.push_back(std::move(session));
-}
-
-void ZoomIsoRecorder::reap_finishing_locked()
-{
-    constexpr uint64_t kFinishingKillNs = 15000000000ULL;
-    const uint64_t now_ns = os_gettime_ns();
-    for (auto it = m_finishing.begin(); it != m_finishing.end();) {
-        Session &session = *it;
-        bool done = true;
-        if (session.ffmpeg && session.ffmpeg->running()) {
-            const uint64_t age_ns =
-                now_ns >= session.finishing_since_ns
-                    ? now_ns - session.finishing_since_ns
-                    : 0;
-            if (age_ns > kFinishingKillNs) {
-                mark_ffmpeg_failure_locked(
-                    session,
-                    QStringLiteral(
-                        "FFmpeg did not exit within the shutdown budget "
-                        "and was terminated — the recording may be missing "
-                        "its final index (moov)."));
-                session.ffmpeg->kill();
-                session.ffmpeg->wait_finished(100);
-            }
-            done = !session.ffmpeg->running();
-        }
-        if (!done) {
-            ++it;
-            continue;
-        }
-        refresh_ffmpeg_status_locked(session);
-        blog(LOG_INFO,
-             "[obs-zoom-plugin] ISO session closed: source=%s participant=%u frames=%u audio_chunks=%u",
-             session.source_name.c_str(), session.resolved_participant_id,
-             session.video_frames, session.audio_chunks);
-        QJsonObject completed = session_status_json_locked(session, true);
-        completed["completed_at"] =
-            QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
-        m_completed_sessions.insert(m_completed_sessions.begin(), completed);
-        if (m_completed_sessions.size() > kMaxCompletedIsoSessions)
-            m_completed_sessions.resize(kMaxCompletedIsoSessions);
-        it = m_finishing.erase(it);
-    }
-}
-
-// Closes sessions whose participant has stayed unresolved past the grace
-// window. Transient unresolves (engine reconnect, camera toggles) must NOT
-// finalize the file — that was fragmenting recordings into segments.
-void ZoomIsoRecorder::sweep_unresolved_locked()
-{
-    constexpr uint64_t kUnresolvedGraceNs = 60000000000ULL;
-    const uint64_t now_ns = os_gettime_ns();
-    std::vector<std::string> to_close;
+    m_outputs.erase(source);
     for (auto &entry : m_sessions) {
-        Session &session = entry.second;
-        if (session.unresolved_since_ns == 0 ||
-            now_ns < session.unresolved_since_ns)
-            continue;
-        if (now_ns - session.unresolved_since_ns > kUnresolvedGraceNs)
-            to_close.push_back(entry.first);
+        if (entry.second.video_owner == source)
+            entry.second.video_owner.clear();
+        if (entry.second.audio_owner == source)
+            entry.second.audio_owner.clear();
     }
-    for (const std::string &uuid : to_close) {
-        blog(LOG_INFO,
-             "[obs-zoom-plugin] ISO session %s unresolved for over 60s; "
-             "finalizing its recording",
-             uuid.c_str());
-        close_session_locked(uuid);
-    }
+    // Keep the participant's file and clock alive until Record/Stop ends.
 }
-
-
-QJsonObject ZoomIsoRecorder::session_status_json_locked(Session &s,
-                                                        bool completed)
+QJsonObject ZoomIsoRecorder::session_status_locked(Session &session, bool completed,
+                                                   uint64_t end_ns)
 {
-    // Finalize an overload-stopped WAV from the status lane, not video dispatch.
-    if (s.media_stopped) s.wav.close();
-    refresh_ffmpeg_status_locked(s);
+    const auto status = session.writer->status();
+    if (!status.error.empty() && !session.error_logged) {
+        blog(LOG_ERROR, "[obs-zoom-plugin] ISO participant %u failed: %s", session.participant,
+             status.error.c_str());
+        session.error_logged = true;
+    }
+    const uint64_t now = end_ns ? end_ns : os_gettime_ns();
     QJsonObject obj;
+    obj["source_uuid"] = QString("participant_%1").arg(session.participant);
+    obj["source"] = QString::fromStdString(session.info.source_name);
+    obj["display_name"] = QString::fromStdString(
+        session.info.display_name.empty() ? session.info.source_name : session.info.display_name);
+    obj["resolved_participant_id"] = double(session.participant);
+    obj["configured_participant_id"] = double(session.participant);
+    obj["assignment"] = "participant";
+    obj["width"] = 1920;
+    obj["height"] = 1080;
+    obj["input_width"] = int(status.input_width);
+    obj["input_height"] = int(status.input_height);
+    obj["start_offset_ms"] = double((session.epoch_ns - m_epoch_ns) / 1000000);
+    obj["elapsed_ms"] = double((now - session.epoch_ns) / 1000000);
+    obj["last_video_age_ms"] = session.video_ns ? double((now - session.video_ns) / 1000000) : -1;
+    obj["last_audio_age_ms"] = session.audio_ns ? double((now - session.audio_ns) / 1000000) : -1;
+    obj["video_frames"] = double(status.frames);
+    obj["written_frames"] = double(status.written_frames);
+    obj["audio_chunks"] = double(status.audio_packets);
+    obj["coalesced_video_frames"] = double(status.coalesced_video);
+    obj["late_audio_frames"] = double(status.late_audio_frames);
+    obj["video_frames_dropped"] = 0;
+    obj["queued_frames"] = double(status.queued_frames);
+    obj["queue_duration_ms"] = double(status.queued_frames) * 1000 / 30;
+    obj["peak_queued_frames"] = double(status.peak_frames);
+    obj["startup_buffering"] = status.startup;
+    obj["media_stopped"] = !status.error.empty();
+    obj["ffmpeg_error"] = QString::fromStdString(status.error);
+    obj["ffmpeg_running"] = !status.done;
     obj["completed"] = completed;
-    obj["source_uuid"] = QString::fromStdString(s.source_uuid);
-    obj["source"] = QString::fromStdString(s.source_name);
-    obj["display_name"] = QString::fromStdString(s.display_name);
-    obj["assignment"] = assignment_label(s.assignment);
-    obj["configured_participant_id"] =
-        static_cast<double>(s.configured_participant_id);
-    obj["resolved_participant_id"] =
-        static_cast<double>(s.resolved_participant_id);
-    obj["width"] = static_cast<int>(s.width);
-    obj["height"] = static_cast<int>(s.height);
-    obj["video_frames"] = static_cast<int>(s.video_frames);
-    obj["video_frames_dropped"] =
-        static_cast<double>(s.video_frames_dropped);
-    if (s.ffmpeg) {
-        const auto queue = s.ffmpeg->queue_status();
-        obj["queued_frames"] = static_cast<double>(queue.frames);
-        obj["queued_bytes"] = static_cast<double>(queue.bytes);
-        obj["queue_duration_ms"] = static_cast<double>(queue.frames) * 1000 / kIsoVideoTargetFps;
-        obj["peak_queued_frames"] = static_cast<double>(queue.peak_frames);
-        obj["written_frames"] = static_cast<double>(queue.written_frames);
-        obj["startup_buffering"] = queue.startup;
-    }
-    obj["media_stopped"] = s.media_stopped;
-    obj["audio_chunks"] = static_cast<int>(s.audio_chunks);
-    const uint64_t now_ns = os_gettime_ns();
-    obj["elapsed_ms"] = s.started_ns > 0 && now_ns >= s.started_ns
-        ? static_cast<double>((now_ns - s.started_ns) / 1000000ULL)
-        : 0.0;
-    obj["last_video_age_ms"] = s.last_video_ns > 0 && now_ns >= s.last_video_ns
-        ? static_cast<double>((now_ns - s.last_video_ns) / 1000000ULL)
-        : -1.0;
-    obj["last_audio_age_ms"] = s.last_audio_ns > 0 && now_ns >= s.last_audio_ns
-        ? static_cast<double>((now_ns - s.last_audio_ns) / 1000000ULL)
-        : -1.0;
-    const bool ffmpeg_running =
-        !completed && s.ffmpeg && s.ffmpeg->running();
-    obj["ffmpeg_running"] = ffmpeg_running;
-    obj["ffmpeg_error"] = s.ffmpeg_error;
-    obj["disk_full"] = s.disk_full;
-    obj["ffmpeg_exit_code"] = s.ffmpeg_exit_code;
-    obj["ffmpeg_exit_status"] = s.ffmpeg_exit_status;
-    obj["ffmpeg_output_tail"] = s.ffmpeg_output_tail;
-    obj["requested_video_encoder"] =
-        QString::fromStdString(s.requested_video_encoder);
-    obj["video_encoder"] = QString::fromStdString(s.video_encoder);
-    obj["encoder_fallback"] = s.encoder_fallback;
-    const uint64_t health_now_ns = os_gettime_ns();
-    const bool dropping_recently = s.last_drop_ns > 0 &&
-        health_now_ns >= s.last_drop_ns &&
-        health_now_ns - s.last_drop_ns < 5000000000ULL;
-    QString session_health = QStringLiteral("recording");
-    if (s.disk_full) {
-        session_health = QStringLiteral("disk_full");
-    } else if (!s.ffmpeg_error.isEmpty()) {
-        session_health = QStringLiteral("encoder_error");
-    } else if (completed) {
-        session_health = QStringLiteral("completed");
-    } else if (!ffmpeg_running) {
-        session_health = QStringLiteral("encoder_stopped");
-    } else if (dropping_recently) {
-        session_health = QStringLiteral("encoder_behind");
-    } else if (s.video_frames == 0) {
-        session_health = QStringLiteral("waiting_for_video");
-    } else if (s.audio_chunks == 0) {
-        session_health = QStringLiteral("no_audio_yet");
-    }
-    obj["session_health"] = session_health;
-    obj["video_bytes"] = QFileInfo(s.video_path).exists()
-        ? static_cast<double>(QFileInfo(s.video_path).size())
-        : 0.0;
-    obj["audio_bytes"] = QFileInfo(s.audio_path).exists()
-        ? static_cast<double>(QFileInfo(s.audio_path).size())
-        : 0.0;
-    obj["video_path"] = s.video_path;
-    obj["audio_path"] = s.audio_path;
+    obj["video_encoder"] = QString::fromStdString(session.encoder);
+    obj["requested_video_encoder"] = QString::fromStdString(m_requested_video_encoder);
+    obj["encoder_fallback"] =
+        m_requested_video_encoder != "auto" && session.encoder != m_requested_video_encoder;
+    obj["session_health"] = !status.error.empty() ? "encoder_error"
+                            : completed           ? "completed"
+                                                  : "recording";
+    obj["video_path"] = session.path;
+    obj["audio_path"] = "";
+    obj["audio_muxed"] = true;
+    obj["video_bytes"] = double(QFileInfo(session.path).size());
+    obj["audio_bytes"] = 0;
     return obj;
 }
-
-void ZoomIsoRecorder::refresh_ffmpeg_status_locked(Session &session)
+QJsonArray ZoomIsoRecorder::status_json()
 {
-    if (!session.ffmpeg)
-        return;
-
-    // The child's stdout+stderr live in its sidecar log file; the tail is
-    // re-read whole rather than accumulated, so it stays available after
-    // any kind of exit (the merged-pipe readAll() was empty once the
-    // process was gone).
-    const std::string tail =
-        session.ffmpeg->log_tail(kFfmpegOutputTailChars);
-    if (!tail.empty())
-        session.ffmpeg_output_tail =
-            QString::fromUtf8(tail.data(),
-                              static_cast<int>(tail.size())).trimmed();
-
-    if (session.ffmpeg->running())
-        return;
-
-    session.ffmpeg_exit_code = session.ffmpeg->exit_code();
-    session.ffmpeg_exit_status = session.ffmpeg->crashed()
-        ? QStringLiteral("crashed")
-        : QStringLiteral("normal");
-
-    if (!session.ffmpeg_error.isEmpty())
-        return;
-
-    if (session.ffmpeg->crashed()) {
-        mark_ffmpeg_failure_locked(session, QStringLiteral("FFmpeg crashed."));
-    } else if (session.ffmpeg->exit_code() != 0) {
-        mark_ffmpeg_failure_locked(
-            session,
-            QString("FFmpeg exited with code %1.")
-                .arg(session.ffmpeg->exit_code()));
-    }
-}
-
-void ZoomIsoRecorder::mark_ffmpeg_failure_locked(Session &session,
-                                                const QString &message)
-{
-    if (session.ffmpeg_error.isEmpty())
-        session.ffmpeg_error = message;
-    if (!session.ffmpeg || session.ffmpeg_error_logged)
-        return;
-
-    blog(LOG_WARNING,
-         "[obs-zoom-plugin] ISO ffmpeg failure for %s: %s%s%s",
-         session.source_name.c_str(),
-         session.ffmpeg_error.toUtf8().constData(),
-         session.ffmpeg_output_tail.isEmpty() ? "" : " output=",
-         session.ffmpeg_output_tail.toUtf8().constData());
-    session.ffmpeg_error_logged = true;
-}
-
-void ZoomIsoRecorder::mark_disk_full_locked(Session &session)
-{
-    session.disk_full = true;
-    mark_ffmpeg_failure_locked(
-        session,
-        QStringLiteral("No space left on device - free disk space."));
-}
-
-void ZoomIsoRecorder::close_session_on_disk_full_locked(
-    const std::string &source_uuid)
-{
-    auto it = m_sessions.find(source_uuid);
-    if (it == m_sessions.end() || !it->second.disk_full)
-        return;
-    // Disk is full: stop this session cleanly so the partial files are
-    // finalized rather than left growing against a full volume.
-    close_session_locked(source_uuid);
-}
-
-
-void ZoomIsoRecorder::record_video_frame(const ZoomOutputInfo &info,
-                                         uint32_t resolved_participant_id,
-                                         uint32_t width,
-                                         uint32_t height,
-                                         const uint8_t *y,
-                                         const uint8_t *u,
-                                         const uint8_t *v,
-                                         uint32_t stride_y,
-                                         uint32_t stride_uv,
-                                         uint64_t timestamp_ns)
-{
-    if (!y || !u || !v || width == 0 || height == 0) return;
     std::lock_guard<std::mutex> lock(m_mtx);
-    if (!should_record(info, resolved_participant_id)) return;
-    if (m_stopped_sources.count(info.source_uuid)) return;
-    Session &session = ensure_session_locked(info, resolved_participant_id,
-                                             width, height, timestamp_ns);
-    session.unresolved_since_ns = 0; // frames flowing == resolved
-    if (!session.ffmpeg || !session.ffmpeg->running()) {
-        refresh_ffmpeg_status_locked(session);
-        // Startup-time death of a hardware encoder usually means the
-        // session-budget estimate was wrong for this GPU (driver caps
-        // vary). Demote this source one tier and recreate on the next
-        // frame instead of surfacing a dead "Encoder error" row.
-        //
-        // Deliberately NOT gated on "has this uuid ever been demoted
-        // before": that was the bug. iso_demote_encoder() is a CHAIN
-        // (nvenc -> qsv -> amf -> libx264), but the old guard let a uuid
-        // take exactly one hop for the rest of the run -- on a box with a
-        // real GPU but no working QSV or AMF runtime (live 2026-08-19:
-        // "Error creating a MFX session" / "DLL amfrt64.dll failed to
-        // open"), a source demoted nvenc->qsv failed qsv too, could not
-        // demote again, and sat at video_frames=2 permanently instead of
-        // ever reaching libx264 (CPU, no hardware dependency, the one
-        // tier guaranteed to work). `session.video_encoder != "libx264"`
-        // is the only guard the chain needs: it is what iso_demote_encoder
-        // eventually returns for every input, so re-arming this on every
-        // startup failure still terminates, in at most 3 hops.
-        const uint64_t now_ns = os_gettime_ns();
-        if (session.video_encoder != "libx264" &&
-            session.ffmpeg_started_ns != 0 &&
-            now_ns - session.ffmpeg_started_ns < 10000000000ULL) {
-            const std::string next =
-                iso_demote_encoder(session.video_encoder, m_encoder_avail);
-            blog(LOG_WARNING,
-                 "[obs-zoom-plugin] ISO encoder %s failed at startup for "
-                 "%s; retrying with %s",
-                 session.video_encoder.c_str(),
-                 session.source_name.c_str(), next.c_str());
-            const std::string uuid = session.source_uuid;
-            m_encoder_demotions[uuid] = next;
-            close_session_locked(uuid);
-            return;
-        }
-        if (session.ffmpeg_error.isEmpty())
-            mark_ffmpeg_failure_locked(
-                session, QStringLiteral("FFmpeg is not running."));
-        return;
-    }
-
-    // One contiguous I420 frame, then a single bounded queue attempt.
-    // Whole-frame granularity is load-bearing: a partially written frame
-    // would shift every following frame's bytes and shear the video. The
-    // pipe's writer thread does the blocking writes; a stalled encoder
-    // shows up here as try_queue() == false (drop), never as RAM growth or
-    // a wedge (the QProcess feed stalled after ~5 frames — see
-    // iso-ffmpeg-pipe.h).
-    const size_t frame_bytes =
-        static_cast<size_t>(width) * height * 3 / 2;
-    std::vector<uint8_t> frame(frame_bytes);
-    uint8_t *dst = frame.data();
-    for (uint32_t row = 0; row < height; ++row) {
-        std::memcpy(dst, y + row * stride_y, width);
-        dst += width;
-    }
-    for (uint32_t row = 0; row < height / 2; ++row) {
-        std::memcpy(dst, u + row * stride_uv, width / 2);
-        dst += width / 2;
-    }
-    for (uint32_t row = 0; row < height / 2; ++row) {
-        std::memcpy(dst, v + row * stride_uv, width / 2);
-        dst += width / 2;
-    }
-
-    // Commit the schedule only after the entire CFR batch is accepted.
-    // A rejected batch ends this track instead of compressing its timeline.
-    const auto submission = iso_video_submit(session.video_next_due_ns, timestamp_ns,
-        [&](uint32_t due) { return session.ffmpeg->try_queue(std::move(frame), due); });
-    if (!submission.frames) return;
-    if (!submission.accepted) {
-        session.video_frames_dropped += submission.frames;
-        session.last_drop_ns = timestamp_ns;
-        session.media_stopped = true;
-        m_stopped_sources.insert(info.source_uuid);
-        const QString warning = QStringLiteral("One or more ISO tracks stopped accepting media. Recording is incomplete; inspect the track errors before restarting.");
-        if (!m_status_warning.contains(warning)) {
-            if (!m_status_warning.isEmpty()) m_status_warning += " ";
-            m_status_warning += warning;
-        }
-        const auto queue = session.ffmpeg->queue_status();
-        mark_ffmpeg_failure_locked(session,
-            queue.broken
-                ? QStringLiteral("ISO input pipe failed; this track stopped accepting media.")
-                : QStringLiteral("ISO buffering limit exceeded; this track stopped accepting media to preserve timing. Reduce ISO load and restart recording."));
-        session.ffmpeg->close_stdin();
-        return;
-    }
-    session.video_frames += submission.frames;
-    session.last_video_ns = timestamp_ns;
+    QJsonArray result;
+    for (auto &entry : m_sessions)
+        result.append(session_status_locked(entry.second, false));
+    for (const auto &entry : m_completed_sessions)
+        result.append(entry);
+    return result;
 }
-
-void ZoomIsoRecorder::record_audio_frame(const ZoomOutputInfo &info,
-                                         uint32_t resolved_participant_id,
-                                         const uint8_t *pcm,
-                                         uint32_t byte_len,
-                                         uint32_t sample_rate,
-                                         uint16_t channels,
-                                         uint64_t timestamp_ns)
+QJsonObject ZoomIsoRecorder::status_overview()
 {
-    if (!pcm || byte_len == 0 || sample_rate == 0) return;
     std::lock_guard<std::mutex> lock(m_mtx);
-    if (!should_record(info, resolved_participant_id)) return;
-    auto it = m_sessions.find(info.source_uuid);
-    if (it == m_sessions.end() ||
-        it->second.resolved_participant_id != resolved_participant_id) {
-        return;
-    }
-    Session &session = it->second;
-    if (session.media_stopped) return;
-    if (!session.wav.file &&
-        !session.wav.open(session.audio_path, sample_rate, channels)) {
-        blog(LOG_WARNING,
-             "[obs-zoom-plugin] ISO WAV open failed: %s",
-             session.audio_path.toUtf8().constData());
-        return;
-    }
-    if (session.wav.sample_rate == sample_rate &&
-        session.wav.channels == std::max<uint16_t>(channels, 1)) {
-        // Zoom only calls back audio for a participant currently producing
-        // sound, so gaps here are ordinary and expected -- not lost data.
-        // Backfill silence for the gap BEFORE the real buffer, so the WAV's
-        // byte position keeps tracking wall-clock position instead of
-        // shrinking by every silent stretch (see src/iso-audio-gap-fill.h).
-        // `session.last_audio_ns == 0` means nothing has been written yet;
-        // session.started_ns (stamped from the first VIDEO frame in
-        // ensure_session_locked) is the right reference then, so a
-        // participant who stays quiet after their video starts gets that
-        // lead time as real silence instead of the file starting misaligned.
-        //
-        // session.last_audio_ns is a CONTENT-DRIVEN PLAYHEAD, not "the last
-        // call's arrival time" -- it advances by exactly how much audio was
-        // WRITTEN (silence + real), never snapped to timestamp_ns. Live
-        // bug (2026-08-21): an earlier version set it to timestamp_ns after
-        // every write, so ordinary per-call dispatch/IPC latency jitter --
-        // a 10ms buffer's callback landing, say, ~20ms after the previous
-        // one's arrival stamp even with zero real silence between them --
-        // read as a genuine 10ms gap on nearly every single buffer. Over a
-        // whole session that inserted almost as much bogus silence as real
-        // audio: measured live, a 152s video paired a 305s WAV, almost
-        // exactly 2x. Advancing by content duration instead (the same
-        // "never consult arrival except to anchor" doctrine
-        // src/audio-timeline.h already uses for the live OBS path) makes
-        // ordinary arrival jitter invisible: the playhead only falls behind
-        // real arrival time -- triggering a real backfill -- when audio
-        // actually stopped arriving, not merely when this call happened to
-        // land a few ms later than the last one.
-        const uint64_t audio_reference_ns =
-            session.last_audio_ns != 0 ? session.last_audio_ns
-                                       : session.started_ns;
-        const uint64_t silence_frames = iso_audio_silence_frames(
-            audio_reference_ns, timestamp_ns, sample_rate);
-        uint64_t playhead_ns = audio_reference_ns +
-            (silence_frames * 1'000'000'000ULL) / sample_rate;
-        if (silence_frames > 0) {
-            const uint16_t effective_channels =
-                std::max<uint16_t>(channels, 1);
-            const std::vector<uint8_t> silence(
-                static_cast<size_t>(silence_frames) * effective_channels *
-                    sizeof(int16_t),
-                0);
-            bool disk_full = false;
-            if (!session.wav.write(silence.data(),
-                                   static_cast<uint32_t>(silence.size()),
-                                   &disk_full)) {
-                if (disk_full) {
-                    mark_disk_full_locked(session);
-                } else if (session.ffmpeg_error.isEmpty()) {
-                    mark_ffmpeg_failure_locked(
-                        session, QStringLiteral("WAV write failed."));
-                }
-                const std::string source_uuid = session.source_uuid;
-                close_session_locked(source_uuid);
-                return;
-            }
+    QJsonObject obj;
+    obj["active"] = m_active.load();
+    obj["finishing"] = m_stopping.load();
+    obj["output_dir"] = QString::fromStdString(m_config.output_dir);
+    obj["session_count"] = int(m_sessions.size());
+    obj["completed_session_count"] = int(m_completed_sessions.size());
+    QString warning = m_status_warning;
+    for (const auto &entry : m_sessions)
+        if (!entry.second.writer->status().error.empty()) {
+            warning = "One or more participant recordings failed. Inspect the track errors.";
+            break;
         }
-        const uint32_t real_frames =
-            byte_len / (sizeof(int16_t) * std::max<uint16_t>(channels, 1));
-        playhead_ns += (static_cast<uint64_t>(real_frames) *
-                        1'000'000'000ULL) / sample_rate;
-
-        bool disk_full = false;
-        if (!session.wav.write(pcm, byte_len, &disk_full)) {
-            if (disk_full) {
-                mark_disk_full_locked(session);
-            } else if (session.ffmpeg_error.isEmpty()) {
-                mark_ffmpeg_failure_locked(
-                    session,
-                    QStringLiteral("WAV write failed."));
-            }
-            // Finalize and close the WAV so it stays valid/playable, and
-            // stop the rest of this session cleanly. Copy the key first:
-            // close_session_locked erases the Session (and its source_uuid).
-            const std::string source_uuid = session.source_uuid;
-            close_session_locked(source_uuid);
-            return;
+    for (const auto &entry : m_completed_sessions)
+        if (!entry.value("ffmpeg_error").toString().isEmpty()) {
+            warning = "One or more participant recordings failed. Inspect the track errors.";
+            break;
         }
-        ++session.audio_chunks;
-        // Content-driven playhead (see the comment above) -- NOT
-        // timestamp_ns. session.last_video_ns and last_drop_ns stay
-        // arrival-stamped on purpose; only this field is a virtual position
-        // rather than a clock reading.
-        session.last_audio_ns = playhead_ns;
-    }
+    obj["warning"] = warning;
+    obj["record_program"] = m_config.record_program;
+    obj["video_encoder"] = QString::fromStdString(m_config.video_encoder);
+    obj["requested_video_encoder"] = QString::fromStdString(m_requested_video_encoder);
+    obj["ffmpeg_path"] = QString::fromStdString(m_config.ffmpeg_path);
+    const QStorageInfo storage(QString::fromStdString(m_config.output_dir));
+    obj["disk_available_bytes"] = double(storage.bytesAvailable());
+    obj["disk_warning"] = storage.bytesAvailable() < kIsoWarningFreeBytes;
+    return obj;
 }
 
 static std::string normalized_video_encoder(const std::string &encoder)
 {
-    if (encoder == "auto" || encoder == "h264_nvenc" ||
-        encoder == "h264_qsv" || encoder == "h264_amf" ||
-        encoder == "libx264") {
+    if (encoder == "auto" || encoder == "h264_nvenc" || encoder == "h264_qsv" ||
+        encoder == "h264_amf" || encoder == "libx264") {
         return encoder;
     }
     return "auto";
@@ -1119,8 +430,7 @@ static int count_obs_nvenc_encoders()
             if (!obs_output_active(output))
                 return true;
             for (size_t i = 0; i < MAX_OUTPUT_VIDEO_ENCODERS; ++i) {
-                obs_encoder_t *enc =
-                    obs_output_get_video_encoder2(output, i);
+                obs_encoder_t *enc = obs_output_get_video_encoder2(output, i);
                 if (!enc)
                     continue;
                 const char *id = obs_encoder_get_id(enc);
@@ -1135,17 +445,17 @@ static int count_obs_nvenc_encoders()
 
 static bool is_hardware_encoder(const std::string &encoder)
 {
-    return encoder == "h264_nvenc" || encoder == "h264_qsv" ||
-        encoder == "h264_amf";
+    return encoder == "h264_nvenc" || encoder == "h264_qsv" || encoder == "h264_amf";
 }
 
-static bool ffmpeg_encoder_available(const QString &ffmpeg_path,
-                                     const std::string &encoder,
+static bool ffmpeg_encoder_available(const QString &ffmpeg_path, const std::string &encoder,
                                      std::string *error)
 {
     QProcess probe;
     probe.setProgram(ffmpeg_path);
-    probe.setArguments({"-hide_banner", "-encoders"});
+    probe.setArguments({"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                        "color=size=1920x1080:rate=30", "-frames:v", "1", "-an", "-c:v",
+                        QString::fromStdString(encoder), "-f", "null", "-"});
     probe.setProcessChannelMode(QProcess::MergedChannels);
     probe.start(QIODevice::ReadOnly);
     if (!probe.waitForStarted(2000)) {
@@ -1155,34 +465,19 @@ static bool ffmpeg_encoder_available(const QString &ffmpeg_path,
         }
         return false;
     }
-    if (!probe.waitForFinished(5000))
+    if (!probe.waitForFinished(10000)) {
         probe.kill();
+        probe.waitForFinished(2000);
+        if (error)
+            *error = "Encoder startup probe timed out: " + encoder;
+        return false;
+    }
 
-    const QString encoders = QString::fromUtf8(probe.readAll());
-    if (encoders.contains(QString::fromStdString(encoder)))
+    if (probe.exitStatus() == QProcess::NormalExit && probe.exitCode() == 0)
         return true;
 
     if (error) {
-        *error = "FFmpeg encoder '" + encoder +
-                 "' is not available in the selected ffmpeg build.";
+        *error = "FFmpeg encoder '" + encoder + "' is not available in the selected ffmpeg build.";
     }
     return false;
-}
-
-static QStringList ffmpeg_video_encoder_args(const std::string &encoder)
-{
-    if (encoder == "libx264") {
-        return {
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "18",
-        };
-    }
-
-    return {
-        "-c:v", QString::fromStdString(encoder),
-        "-b:v", "12M",
-        "-maxrate", "20M",
-        "-bufsize", "24M",
-    };
 }

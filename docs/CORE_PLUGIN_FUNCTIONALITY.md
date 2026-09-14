@@ -580,15 +580,16 @@ There are no Companion actions for talkback yet.
 
 ## Auto ISO Recording
 
-![CoreVideo ISO recording flow](images/iso-recording-flow.svg)
-
-ISO recording is controlled by the OBS plugin, not the engine. When enabled,
+ISO recording is controlled by the OBS plugin.
 On macOS, configure and test a working FFmpeg executable in **Zoom ISO Recorder**
 first; the package does not bundle FFmpeg.
 
-CoreVideo records one video file and one PCM WAV audio file per active source
-segment. A new segment starts when the resolved participant or source resolution
-changes.
+CoreVideo records one continuous MP4 per Zoom participant ID during Record/Stop.
+Each file contains H.264 video at 1920x1080, 30 fps and AAC stereo audio at 48 kHz.
+Incoming video is scaled to fit with black bars when needed. Zoom resolution
+changes, duplicate OBS sources, camera gaps, and source reassignment do not
+restart that participant's encoder or create another file. A new Zoom ID after
+a rejoin is treated as a new participant; display names are not identity keys.
 
 Requirements:
 
@@ -614,9 +615,9 @@ dock. The panel provides:
 - **Start ISO Recording** and **Stop ISO Recording** buttons.
 - Live status showing idle/recording and active session count.
 - Active session table with source, participant, resolution, video frame count,
-  audio chunk count, current video/audio file paths, and FFmpeg error details.
+  audio chunk count, combined file path, and FFmpeg error details.
 - Recently completed sessions remain in the table after stop so operators can
-  confirm completed MP4/WAV outputs before opening the folder.
+  confirm completed MP4 outputs before opening the folder.
 
 The panel uses the same `ZoomIsoRecorder` backend as the TCP and OSC APIs. It
 persists the output folder, FFmpeg path, and program-recording toggle in OBS
@@ -651,33 +652,25 @@ OSC equivalents:
 
 Output files are written as:
 
-- `*.mp4` for encoded I420 video through FFmpeg using the selected H.264
-  encoder
-- `*.wav` for matching PCM audio
-- `*.ffmpeg.log` beside them, holding FFmpeg's own account of the session. Read
-  this first when a file is missing or truncated.
+- `*.mp4` containing H.264 video and AAC audio for one participant.
+- `*.mp4.ffmpeg.log` containing encoder diagnostics.
 
 ### Timing
 
-Both files are paced to real elapsed time against the same clock, so each is
-individually accurate and the two stay in sync with each other.
+A worker per participant uses a monotonic clock to emit 30 video frames and
+48,000 audio samples per second. It holds the last picture during video gaps
+(or black before the first frame) and inserts silence during audio gaps. Input
+resolution and audio format changes are conformed on the worker without
+restarting the output. Known fixed participants start at Record; participants
+first encountered later have a `start_offset_ms` in status.
 
-That is not free, and it is worth knowing why. Raw video carries no per-frame
-timestamps, and Zoom's per-source delivery fluctuates between roughly 10 and
-60 fps with conditions outside CoreVideo's control - so frames are paced to a
-fixed cadence before they reach FFmpeg, duplicating the held frame to backfill a
-stall and dropping excess from a burst. Audio has the mirror-image problem for a
-different reason: Zoom only calls audio back for someone currently making sound,
-so silence is backfilled across every gap or the WAV shrinks by the total silent
-duration. Both were wrong before v0.1.42/v0.1.43 - a source averaging 15 fps
-recorded under a declared 30 fps finished in about half the real duration, and an
-over-eager first gap-fill briefly doubled every WAV. If you see either symptom,
-check your version first.
-
-The hardware encoder fallback chain is NVENC -> QSV -> AMF -> libx264, and it
-walks the whole chain: a source demoted off NVENC on a machine with no working
-QSV or AMF runtime now reaches libx264, the tier with no hardware dependency to
-fail on.
+Timestamped video and PCM audio travel over one internal Matroska pipe to
+FFmpeg, which writes a single fragmented MP4. There are no separate temporary
+media files and no merge step at Stop. Producer buffers and encoder queues are
+bounded. An encoder failure is reported on that participant; it does not start
+an automatic replacement file. Hardware availability is tested by encoding an
+actual frame before recording starts. Automatic placement uses working NVENC,
+QSV, AMF, then libx264, accounting for OBS's NVENC sessions.
 
 When `record_program` is true, CoreVideo also starts the normal OBS program
 recording and stops it when ISO recording stops, but only if CoreVideo started

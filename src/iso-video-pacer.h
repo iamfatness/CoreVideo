@@ -78,3 +78,22 @@ inline uint32_t iso_video_frames_due(uint64_t &next_due_ns, uint64_t now_ns)
     }
     return due;
 }
+
+struct IsoVideoSubmission {
+    uint32_t frames;
+    bool accepted;
+};
+
+// The rawvideo clock advances only for an atomically accepted batch. The
+// recorder stops the track on rejection; it must not resume across that gap.
+template<typename Enqueue>
+inline IsoVideoSubmission iso_video_submit(uint64_t &next_due_ns,
+                                            uint64_t now_ns, Enqueue enqueue)
+{
+    auto candidate = next_due_ns;
+    const auto due = iso_video_frames_due(candidate, now_ns);
+    if (due == 0) return {0, true};
+    if (!enqueue(due)) return {due, false};
+    next_due_ns = candidate;
+    return {due, true};
+}

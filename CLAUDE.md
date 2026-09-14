@@ -82,6 +82,14 @@ the gate turns the feature off on Windows.
 
 ## Build, test, install
 
+ISO buffering/timing repair (2026-09-14): the raw FFmpeg pipe holds compact repeat
+batches, with 96 startup / 64 steady outstanding pictures and a per-track byte cap.
+Acceptance alone advances the CFR clock. Overload stops the affected track for the
+run and retains an incomplete-recording warning; it must not resume a shortened
+timeline. See `docs/iso-buffering-validation-2026-09-14.md` for bounds, reproducible
+real-codec tests, and remaining live validation. `CoreVideoIsoRecordingTest` is a
+manual harness requiring an empty output folder and an FFmpeg path.
+
 Full toolchain setup is in `README.md` (§Building). Day-to-day, an existing
 configured worktree is just:
 

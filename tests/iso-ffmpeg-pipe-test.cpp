@@ -14,6 +14,7 @@
 // The test is its own child (argv[1] selects a role) so it needs no
 // external binaries.
 #include "iso-ffmpeg-pipe.h"
+#include "iso-video-pacer.h"
 
 #include <chrono>
 #include <cstdio>
@@ -214,6 +215,73 @@ int main(int argc, char **argv)
                 std::chrono::steady_clock::now() - t0)
                 .count();
         check(elapsed < 10000, "whole wedged-child cycle stays fast");
+    }
+
+    {
+        IsoFfmpegPipe pipe;
+        pipe.configure_frame_limits(2, 3);
+        std::string err;
+        constexpr size_t bytes = 1024 * 1024;
+        check(pipe.start(self, {"--pipe-child-sleep"},
+                         "pipe-test-inflight.log", bytes, &err), "in-flight child starts");
+        check(pipe.try_queue(std::vector<uint8_t>(bytes), 3), "compact in-flight batch accepted");
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        check(pipe.queue_status().frames == 3 && pipe.queued_bytes() == bytes,
+              "blocked writer remains charged against both bounds");
+        check(!pipe.try_queue(std::vector<uint8_t>(1), 1), "in-flight work cannot bypass capacity");
+        pipe.kill();
+        check(pipe.wait_finished(3000), "kill cancels a blocked repeated frame");
+    }
+
+    // Catch-up is one atomic queue entry; its repeated pictures share RAM.
+    // EOF must drain every logical picture, not just one stored pixel buffer.
+    {
+        IsoFfmpegPipe pipe;
+        pipe.configure_frame_limits(64, 96);
+        std::string err;
+        constexpr size_t bytes = 1024 * 1024;
+        check(pipe.start(self, {"--pipe-child-fast"},
+                         "pipe-test-repeats.log", bytes * 2, &err),
+              "repeat child starts");
+        uint64_t next = kIsoVideoFramePeriodNs;
+        const auto due = iso_video_frames_due(next, 1000000000ULL);
+        check(due == 30, "one second gap needs 30 CFR pictures");
+        check(pipe.try_queue(std::vector<uint8_t>(bytes, 128), due),
+              "whole catch-up burst fits without copying 30 pixel buffers");
+        check(pipe.queued_bytes() <= bytes, "repeat payload stored only once");
+        pipe.close_stdin();
+        check(pipe.wait_finished(15000), "repeated tail drains at EOF");
+        check(pipe.queue_status().written_frames == due, "all repeated frames written");
+        check(pipe.log_tail(4096).find("consumed " + std::to_string(bytes * due)) != std::string::npos,
+              "child received complete repeated frame byte stream");
+    }
+    // The startup window survives until accepted startup work drains into the
+    // steady budget. Oversized batches are rejected atomically, even if compact.
+    {
+        IsoFfmpegPipe pipe;
+        pipe.configure_frame_limits(64, 96);
+        std::string err;
+        check(pipe.start(self, {"--pipe-child-fast"},
+                         "pipe-test-startup.log", 1024 * 1024, &err),
+              "startup child starts");
+        check(!pipe.try_queue(std::vector<uint8_t>(16384), 97),
+              "startup logical bound rejects entire oversize batch");
+        check(pipe.queue_status().frames == 0, "rejection does not partially enqueue");
+        check(!pipe.try_queue(std::vector<uint8_t>(2 * 1024 * 1024), 1),
+              "byte bound applies independently of frame count");
+        check(pipe.try_queue(std::vector<uint8_t>(16384), 96),
+              "startup allowance retains 96 pictures");
+        for (int i = 0; i < 2500 && pipe.queue_status().frames; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        check(!pipe.queue_status().startup, "drained startup transitions to steady");
+        check(!pipe.try_queue(std::vector<uint8_t>(16384), 65),
+              "steady bound rejects 65 pictures after startup");
+        check(pipe.try_queue(std::vector<uint8_t>(16384), 64),
+              "steady allowance accepts 64 pictures");
+        pipe.close_stdin();
+        check(pipe.wait_finished(15000), "startup and steady tail finalize");
+        check(pipe.queue_status().written_frames == 160, "no rejected batch reaches child");
+        check(pipe.queue_status().peak_frames == 96, "peak occupancy survives drain");
     }
 
     if (g_failures == 0)

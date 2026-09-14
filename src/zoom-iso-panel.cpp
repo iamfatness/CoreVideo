@@ -670,7 +670,13 @@ void ZoomIsoPanel::refresh_status()
             ? QStringLiteral("Completed")
             : (ffmpeg_running ? QStringLiteral("Recording") : QStringLiteral("Encoder stopped"));
         if (!ffmpeg_error.isEmpty())
-            status = QStringLiteral("Encoder error");
+            status = s.value("media_stopped").toBool()
+                ? QStringLiteral("Track stopped — recording incomplete")
+                : QStringLiteral("Encoder error");
+        else if (!completed && s.value("queued_frames").toDouble() > 4)
+            status = s.value("startup_buffering").toBool()
+                ? QStringLiteral("Buffering encoder startup")
+                : QStringLiteral("Buffering video");
         else if (session_health == QLatin1String("encoder_behind"))
             status = QString("Encoder falling behind (%1 dropped)")
                 .arg(static_cast<qint64>(frames_dropped));
@@ -703,6 +709,11 @@ void ZoomIsoPanel::refresh_status()
                     : session_health,
                  age_text(last_video_age_ms),
                  age_text(last_audio_age_ms));
+        tooltip += QString("\nBuffered video: %1 ms (%2 frames)\nPeak buffered frames: %3\nFrames written to FFmpeg: %4")
+            .arg(s.value("queue_duration_ms").toDouble(), 0, 'f', 0)
+            .arg(s.value("queued_frames").toDouble(), 0, 'f', 0)
+            .arg(s.value("peak_queued_frames").toDouble(), 0, 'f', 0)
+            .arg(s.value("written_frames").toDouble(), 0, 'f', 0);
         if (!ffmpeg_error.isEmpty()) {
             tooltip += QString("\n\nFFmpeg error:\n%1").arg(ffmpeg_error);
             if (!ffmpeg_output.isEmpty())

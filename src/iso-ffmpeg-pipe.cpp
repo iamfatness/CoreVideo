@@ -390,13 +390,40 @@ IsoFfmpegPipe::~IsoFfmpegPipe()
 
 bool IsoFfmpegPipe::try_queue(std::vector<uint8_t> &&buf)
 {
+    return try_queue(std::move(buf), 1);
+}
+
+void IsoFfmpegPipe::configure_frame_limits(size_t steady, size_t startup)
+{
+    if (m_started.load(std::memory_order_acquire)) return;
+    m_steady_frames = steady ? steady : 1;
+    m_startup_frames = startup < m_steady_frames ? m_steady_frames : startup;
+}
+
+IsoFfmpegPipe::QueueStatus IsoFfmpegPipe::queue_status() const
+{
     std::lock_guard<std::mutex> lk(m_mtx);
-    if (m_broken || m_stop || m_eof_requested)
+    auto status = m_queue_status;
+    status.bytes = m_queued_bytes;
+    status.broken = m_broken;
+    if (m_stop) status.frames = 0;
+    return status;
+}
+
+bool IsoFfmpegPipe::try_queue(std::vector<uint8_t> &&buf, uint32_t repetitions)
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    if (buf.empty() || !repetitions || m_broken || m_stop || m_eof_requested)
         return false;
-    if (m_queued_bytes + buf.size() > m_max_queued_bytes)
+    const auto limit = m_queue_status.startup ? m_startup_frames : m_steady_frames;
+    if (repetitions > limit - m_queue_status.frames ||
+        buf.size() > m_max_queued_bytes - m_queued_bytes)
         return false;
     m_queued_bytes += buf.size();
-    m_queue.push_back(std::move(buf));
+    m_queue_status.frames += repetitions;
+    if (m_queue_status.frames > m_queue_status.peak_frames)
+        m_queue_status.peak_frames = m_queue_status.frames;
+    m_queue.push_back({std::move(buf), repetitions});
     m_cv.notify_one();
     return true;
 }
@@ -419,7 +446,7 @@ void IsoFfmpegPipe::close_stdin()
 void IsoFfmpegPipe::writer_loop()
 {
     for (;;) {
-        std::vector<uint8_t> buf;
+        PendingFrame frame;
         {
             std::unique_lock<std::mutex> lk(m_mtx);
             m_cv.wait(lk, [this] {
@@ -431,19 +458,37 @@ void IsoFfmpegPipe::writer_loop()
                 // EOF requested and the queue is drained.
                 break;
             }
-            buf = std::move(m_queue.front());
+            frame = std::move(m_queue.front());
             m_queue.pop_front();
-            m_queued_bytes -= buf.size();
         }
         // Blocking write, deliberately outside the lock: a stalled child
         // parks THIS thread only; callers keep getting instant
         // try_queue() == false once the byte bound is hit.
-        if (!m_broken && m_stdin_write &&
-            !write_all(m_stdin_write, buf.data(), buf.size())) {
+        for (uint32_t i = 0; i < frame.repetitions; ++i) {
+            {
+                std::lock_guard<std::mutex> lk(m_mtx);
+                if (m_stop || m_broken) break;
+            }
+            const bool ok = m_stdin_write &&
+                write_all(m_stdin_write, frame.pixels.data(), frame.pixels.size());
             std::lock_guard<std::mutex> lk(m_mtx);
-            m_broken = true;
-            m_queue.clear();
-            m_queued_bytes = 0;
+            if (m_stop) break;
+            if (!ok) {
+                m_broken = true;
+                m_queue.clear();
+                m_queued_bytes = 0;
+                m_queue_status.frames = 0;
+                break;
+            }
+            ++m_queue_status.written_frames;
+            --m_queue_status.frames;
+            if (m_queue_status.frames <= m_steady_frames)
+                m_queue_status.startup = false;
+        }
+        {
+            std::lock_guard<std::mutex> lk(m_mtx);
+            if (m_stop || m_broken) break;
+            m_queued_bytes -= frame.pixels.size();
         }
     }
     // Owned exclusively by this thread from here: closing stdin is what

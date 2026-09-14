@@ -644,6 +644,13 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoIsoFfmpegPipe
              COMMAND CoreVideoIsoFfmpegPipeTest)
 
+    # Manual integration harness: external FFmpeg, optional GPU and output files.
+    # Deliberately not registered with CTest; see the source for invocation.
+    add_executable(CoreVideoIsoRecordingTest
+        tests/iso-ffmpeg-recording-test.cpp src/iso-ffmpeg-pipe.cpp)
+    target_include_directories(CoreVideoIsoRecordingTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
     add_executable(CoreVideoIsoEncoderPlanTest
         tests/iso-encoder-plan-test.cpp
     )

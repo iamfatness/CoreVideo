@@ -55,10 +55,24 @@ public:
     // True while the child process is running.
     bool running() const;
 
-    // Queues one buffer for the writer thread. Returns false — WITHOUT
-    // queuing — when the queue is at its byte bound or the pipe is broken;
-    // the caller counts that as one dropped frame. Never blocks.
+    // Queues one buffer for the writer thread. Returns false without partial
+    // acceptance when either bound is reached or the pipe is broken. Callers
+    // must handle the missing media explicitly. Never waits on the child.
     bool try_queue(std::vector<uint8_t> &&buf);
+
+    static constexpr size_t kSteadyFrames = 64;
+    static constexpr size_t kStartupFrames = 96;
+    static constexpr size_t kMaximumPixelBytes = 288ULL * 1024 * 1024;
+    // Configure before start. Limits include the buffer being written.
+    // Repetitions share one pixel buffer, but each consumes a frame slot.
+    void configure_frame_limits(size_t steady, size_t startup);
+    bool try_queue(std::vector<uint8_t> &&buf, uint32_t repetitions);
+    struct QueueStatus {
+        size_t bytes = 0, frames = 0, peak_frames = 0;
+        uint64_t written_frames = 0;
+        bool startup = true, broken = false;
+    };
+    QueueStatus queue_status() const;
 
     size_t queued_bytes() const;
 
@@ -97,8 +111,14 @@ private:
 
     mutable std::mutex m_mtx;
     std::condition_variable m_cv;
-    std::deque<std::vector<uint8_t>> m_queue;
+    struct PendingFrame {
+        std::vector<uint8_t> pixels;
+        uint32_t repetitions = 1;
+    };
+    std::deque<PendingFrame> m_queue;
     size_t m_queued_bytes = 0;
+    size_t m_steady_frames = kSteadyFrames, m_startup_frames = kStartupFrames;
+    QueueStatus m_queue_status;
     bool m_eof_requested = false;
     bool m_stop = false;
     bool m_broken = false;

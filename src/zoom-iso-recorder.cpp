@@ -255,6 +255,7 @@ bool ZoomIsoRecorder::start(const ZoomIsoRecordConfig &config,
         m_encoder_avail = avail;
         m_nvenc_session_limit = iso_nvenc_default_session_limit();
         m_encoder_demotions.clear();
+        m_stopped_sources.clear();
         m_status_warning = status_warning;
         m_started_program_recording = false;
         m_completed_sessions.clear();
@@ -583,12 +584,15 @@ ZoomIsoRecorder::ensure_session_locked(const ZoomOutputInfo &info,
     args.push_back("+frag_keyframe+empty_moov");
     args.push_back(session.video_path.toStdString());
 
-    // Queue bound = 4 whole frames, the same realtime backpressure budget
-    // the drop path enforces; the writer thread does blocking pipe writes
-    // beneath it. FFmpeg's stdout+stderr go to a sidecar log so nothing has
-    // to drain them and the tail survives any exit.
+    // Allow codec startup and normal delivery jitter without unbounded RAM.
+    // Repeated catch-up pictures share storage, but consume logical slots.
+    // 96 frames at 1080p = 285 MiB; larger formats hit the 288 MiB byte cap.
+    session.ffmpeg->configure_frame_limits(IsoFfmpegPipe::kSteadyFrames,
+                                           IsoFfmpegPipe::kStartupFrames);
     const size_t frame_cap =
-        static_cast<size_t>(width) * height * 3 / 2 * 4;
+        std::min<size_t>(static_cast<size_t>(width) * height * 3 / 2 *
+                            IsoFfmpegPipe::kStartupFrames,
+                         IsoFfmpegPipe::kMaximumPixelBytes);
     std::string start_error;
     if (!session.ffmpeg->start(
             m_config.ffmpeg_path, args,
@@ -709,6 +713,8 @@ void ZoomIsoRecorder::sweep_unresolved_locked()
 QJsonObject ZoomIsoRecorder::session_status_json_locked(Session &s,
                                                         bool completed)
 {
+    // Finalize an overload-stopped WAV from the status lane, not video dispatch.
+    if (s.media_stopped) s.wav.close();
     refresh_ffmpeg_status_locked(s);
     QJsonObject obj;
     obj["completed"] = completed;
@@ -725,6 +731,16 @@ QJsonObject ZoomIsoRecorder::session_status_json_locked(Session &s,
     obj["video_frames"] = static_cast<int>(s.video_frames);
     obj["video_frames_dropped"] =
         static_cast<double>(s.video_frames_dropped);
+    if (s.ffmpeg) {
+        const auto queue = s.ffmpeg->queue_status();
+        obj["queued_frames"] = static_cast<double>(queue.frames);
+        obj["queued_bytes"] = static_cast<double>(queue.bytes);
+        obj["queue_duration_ms"] = static_cast<double>(queue.frames) * 1000 / kIsoVideoTargetFps;
+        obj["peak_queued_frames"] = static_cast<double>(queue.peak_frames);
+        obj["written_frames"] = static_cast<double>(queue.written_frames);
+        obj["startup_buffering"] = queue.startup;
+    }
+    obj["media_stopped"] = s.media_stopped;
     obj["audio_chunks"] = static_cast<int>(s.audio_chunks);
     const uint64_t now_ns = os_gettime_ns();
     obj["elapsed_ms"] = s.started_ns > 0 && now_ns >= s.started_ns
@@ -755,10 +771,10 @@ QJsonObject ZoomIsoRecorder::session_status_json_locked(Session &s,
     QString session_health = QStringLiteral("recording");
     if (s.disk_full) {
         session_health = QStringLiteral("disk_full");
-    } else if (completed) {
-        session_health = QStringLiteral("completed");
     } else if (!s.ffmpeg_error.isEmpty()) {
         session_health = QStringLiteral("encoder_error");
+    } else if (completed) {
+        session_health = QStringLiteral("completed");
     } else if (!ffmpeg_running) {
         session_health = QStringLiteral("encoder_stopped");
     } else if (dropping_recently) {
@@ -868,11 +884,12 @@ void ZoomIsoRecorder::record_video_frame(const ZoomOutputInfo &info,
     if (!y || !u || !v || width == 0 || height == 0) return;
     std::lock_guard<std::mutex> lock(m_mtx);
     if (!should_record(info, resolved_participant_id)) return;
+    if (m_stopped_sources.count(info.source_uuid)) return;
     Session &session = ensure_session_locked(info, resolved_participant_id,
                                              width, height, timestamp_ns);
     session.unresolved_since_ns = 0; // frames flowing == resolved
-    refresh_ffmpeg_status_locked(session);
     if (!session.ffmpeg || !session.ffmpeg->running()) {
+        refresh_ffmpeg_status_locked(session);
         // Startup-time death of a hardware encoder usually means the
         // session-budget estimate was wrong for this GPU (driver caps
         // vary). Demote this source one tier and recreate on the next
@@ -937,51 +954,31 @@ void ZoomIsoRecorder::record_video_frame(const ZoomOutputInfo &info,
         dst += width / 2;
     }
 
-    // Pace to a fixed cadence before this reaches ffmpeg's raw pipe — see
-    // src/iso-video-pacer.h for why (ffmpeg cannot derive real timing from
-    // a raw byte stream on its own; a plain declared -r silently assumed
-    // every frame was exactly 1/30s apart while real Zoom delivery
-    // fluctuates 10-60fps, so a recording's duration tracked frame COUNT,
-    // not real elapsed time). due==0 means this frame arrived faster than
-    // the target rate (a 60fps source against a 30fps target, say): drop
-    // it, not toward video_frames_dropped -- that counter means "the
-    // encoder can't keep up", and downsampling a fast source is normal,
-    // not a problem to surface. due>1 backfills a stall by duplicating
-    // this frame; each duplicate still goes through the same backlog check
-    // as an ordinary frame.
-    const uint32_t due =
-        iso_video_frames_due(session.video_next_due_ns, timestamp_ns);
-    for (uint32_t i = 0; i < due; ++i) {
-        const bool queued = (i + 1 < due)
-            ? session.ffmpeg->try_queue(std::vector<uint8_t>(frame))
-            : session.ffmpeg->try_queue(std::move(frame));
-        if (!queued) {
-            ++session.video_frames_dropped;
-            session.last_drop_ns = timestamp_ns;
-            if (!session.backlog_reported) {
-                session.backlog_reported = true;
-                blog(LOG_WARNING,
-                     "[obs-zoom-plugin] ISO encoder for %s is falling "
-                     "behind (queue %zu bytes) — dropping frames to "
-                     "protect memory and the meeting. Hardware encoder "
-                     "session limit?",
-                     session.source_name.c_str(),
-                     session.ffmpeg->queued_bytes());
-            }
-            continue;
+    // Commit the schedule only after the entire CFR batch is accepted.
+    // A rejected batch ends this track instead of compressing its timeline.
+    const auto submission = iso_video_submit(session.video_next_due_ns, timestamp_ns,
+        [&](uint32_t due) { return session.ffmpeg->try_queue(std::move(frame), due); });
+    if (!submission.frames) return;
+    if (!submission.accepted) {
+        session.video_frames_dropped += submission.frames;
+        session.last_drop_ns = timestamp_ns;
+        session.media_stopped = true;
+        m_stopped_sources.insert(info.source_uuid);
+        const QString warning = QStringLiteral("One or more ISO tracks stopped accepting media. Recording is incomplete; inspect the track errors before restarting.");
+        if (!m_status_warning.contains(warning)) {
+            if (!m_status_warning.isEmpty()) m_status_warning += " ";
+            m_status_warning += warning;
         }
-        if (session.backlog_reported) {
-            session.backlog_reported = false;
-            blog(LOG_INFO,
-                 "[obs-zoom-plugin] ISO encoder for %s caught up after "
-                 "dropping %llu frames",
-                 session.source_name.c_str(),
-                 static_cast<unsigned long long>(
-                     session.video_frames_dropped));
-        }
-        ++session.video_frames;
-        session.last_video_ns = timestamp_ns;
+        const auto queue = session.ffmpeg->queue_status();
+        mark_ffmpeg_failure_locked(session,
+            queue.broken
+                ? QStringLiteral("ISO input pipe failed; this track stopped accepting media.")
+                : QStringLiteral("ISO buffering limit exceeded; this track stopped accepting media to preserve timing. Reduce ISO load and restart recording."));
+        session.ffmpeg->close_stdin();
+        return;
     }
+    session.video_frames += submission.frames;
+    session.last_video_ns = timestamp_ns;
 }
 
 void ZoomIsoRecorder::record_audio_frame(const ZoomOutputInfo &info,
@@ -1001,6 +998,7 @@ void ZoomIsoRecorder::record_audio_frame(const ZoomOutputInfo &info,
         return;
     }
     Session &session = it->second;
+    if (session.media_stopped) return;
     if (!session.wav.file &&
         !session.wav.open(session.audio_path, sample_rate, channels)) {
         blog(LOG_WARNING,

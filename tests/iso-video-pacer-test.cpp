@@ -133,6 +133,27 @@ int main()
               "clock");
     }
 
+    {
+        uint64_t next = kIsoVideoFramePeriodNs;
+        const auto original = next;
+        auto rejected = iso_video_submit(next, 1000000000ULL,
+            [](uint32_t due) { return due != 30; });
+        check(!rejected.accepted && rejected.frames == 30,
+              "queue rejects the entire catch-up batch");
+        check(next == original, "rejection must not advance the recording clock");
+        auto accepted = iso_video_submit(next, 1000000000ULL,
+            [](uint32_t due) { return due == 30; });
+        check(accepted.accepted && accepted.frames == 30,
+              "all missing slots remain due after rejection");
+        check(next == original + 30 * kIsoVideoFramePeriodNs,
+              "accepted batch advances by exactly its written duration");
+        bool called = false;
+        auto early = iso_video_submit(next, 1000000000ULL,
+            [&](uint32_t) { called = true; return false; });
+        check(early.frames == 0 && early.accepted && !called,
+              "early frames never consume queue slots");
+    }
+
     if (failures == 0)
         std::cout << "iso-video-pacer: all tests passed\n";
     return failures == 0 ? 0 : 1;

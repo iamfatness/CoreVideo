@@ -14,6 +14,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 struct ZoomIsoRecordConfig {
@@ -83,7 +84,7 @@ private:
         uint32_t video_frames = 0;
         uint64_t video_frames_dropped = 0;
         uint64_t last_drop_ns = 0;
-        bool backlog_reported = false;
+        bool media_stopped = false;
         uint64_t ffmpeg_started_ns = 0;
         uint64_t finishing_since_ns = 0;
         uint64_t unresolved_since_ns = 0;
@@ -142,6 +143,7 @@ private:
     int m_nvenc_session_limit = 8;
     // source_uuid -> encoder to use after a startup failure demoted it.
     std::unordered_map<std::string, std::string> m_encoder_demotions;
+    std::unordered_set<std::string> m_stopped_sources;
 
     mutable std::mutex m_mtx;
     std::atomic<bool> m_active{false};

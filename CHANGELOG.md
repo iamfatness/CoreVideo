@@ -7,6 +7,25 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.46] - 2026-09-14
+
+### Fixed
+- ISO recording now absorbs encoder startup and normal delivery jitter with
+  bounded buffering. Catch-up pictures share memory instead of duplicating buffers.
+- Rejected video batches no longer advance the recording clock and silently
+  shorten continuing video. An overloaded track stops explicitly, drains accepted
+  video and retains an incomplete-recording warning until the next run.
+- ISO status now reports queue duration, occupancy and peak backlog, distinguishes
+  buffering from failed tracks, and retains errors after finalization.
+- Normal ISO video callbacks no longer read FFmpeg log files on every frame.
+
+### Validation
+- Windows plugin build and all 66 native tests pass. Sixteen real NVENC MP4s
+  retained 300 frames and exactly ten seconds through injected source gaps.
+- The operator confirmed live-soak and lip-sync checks passed before release.
+- Windows installer and ZIP are published for this release. The signed macOS
+  installer requires a separate build on the maintainer's Mac.
+
 ## [0.1.45] - 2026-09-09
 
 First full release of the 0.1.45 line, promoted from v0.1.45-beta.3 with no

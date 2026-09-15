@@ -578,6 +578,7 @@ void ZoomOscServer::dispatch(const QString &address,
         cfg.ffmpeg_path = settings.iso_ffmpeg_path;
         cfg.video_encoder = settings.iso_video_encoder;
         cfg.record_program = settings.iso_record_program;
+        cfg.selected_source_uuids = settings.iso_selected_source_uuids;
         if (!args.empty() && args[0].type == OscArg::String)
             cfg.output_dir = args[0].s;
         if (args.size() >= 2 && args[1].type == OscArg::String)

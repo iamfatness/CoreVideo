@@ -1996,7 +1996,8 @@ int main()
                 line.find(R"("audience_audio":true)") != std::string::npos;
             if (is_valid_source_uuid(uuid)) {
                 EngineAudio::instance().init(e2p, uuid, pid,
-                                             isolate_audio, audience_audio);
+                                             isolate_audio, audience_audio,
+                    line.find(R"("recording_only":true)") != std::string::npos);
             }
 
         } else if (command == IpcCommand::Subscribe) {

@@ -285,6 +285,9 @@ if(COREVIDEO_BUILD_PLUGIN)
         src/zoom-diagnostics-dialog.cpp
         src/zoom-output-profile.cpp
         src/zoom-iso-recorder.cpp
+        src/iso-track-writer.cpp
+        src/iso-audio-tap.cpp
+        src/iso-audio-reader.cpp
         src/iso-ffmpeg-pipe.cpp
         src/zoom-iso-panel.cpp
         src/zoom-dock.cpp
@@ -317,7 +320,7 @@ if(COREVIDEO_BUILD_PLUGIN)
     if(WIN32)
         # winmm: talkback-cue.cpp's PlaySound(SND_MEMORY | SND_ASYNC) call --
         # see that file's header comment for why it was chosen over WASAPI.
-        target_link_libraries(obs-zoom-plugin PRIVATE crypt32 winmm)
+        target_link_libraries(obs-zoom-plugin PRIVATE crypt32 winmm d3d11 d3dcompiler)
         add_executable(CoreVideoOAuthCallback src/oauth-callback-helper.cpp)
         target_link_libraries(CoreVideoOAuthCallback PRIVATE ws2_32 shell32 ole32)
         install(TARGETS CoreVideoOAuthCallback
@@ -651,9 +654,37 @@ if(BUILD_TESTING)
     target_include_directories(CoreVideoIsoRecordingTest PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
+    if(COREVIDEO_BUILD_PLUGIN AND WIN32)
+        add_executable(CoreVideoIsoTrackWriterTest tests/iso-track-writer-test.cpp
+            src/iso-track-writer.cpp src/iso-ffmpeg-pipe.cpp)
+        target_include_directories(CoreVideoIsoTrackWriterTest PRIVATE src)
+        target_link_libraries(CoreVideoIsoTrackWriterTest PRIVATE OBS::libobs)
+        add_executable(CoreVideoIsoIsolatedRecordingTest tests/iso-isolated-recording-test.cpp
+            src/iso-track-writer.cpp src/iso-ffmpeg-pipe.cpp src/iso-audio-reader.cpp)
+        target_include_directories(CoreVideoIsoIsolatedRecordingTest PRIVATE src)
+        target_link_libraries(CoreVideoIsoIsolatedRecordingTest PRIVATE OBS::libobs d3d11 d3dcompiler)
+        target_compile_definitions(CoreVideoIsoIsolatedRecordingTest PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        if(WIN32)
+            target_compile_definitions(CoreVideoIsoTrackWriterTest PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+            target_link_libraries(CoreVideoIsoTrackWriterTest PRIVATE d3d11 d3dcompiler)
+        endif()
+    endif()
+
     add_executable(CoreVideoIsoEncoderPlanTest
         tests/iso-encoder-plan-test.cpp
     )
+    add_executable(CoreVideoIsoProviderPolicyTest tests/iso-provider-policy-test.cpp)
+    add_executable(CoreVideoIsoFeedSelectionTest tests/iso-feed-selection-test.cpp)
+    add_executable(CoreVideoIsoAudioRoutingTest tests/iso-audio-routing-test.cpp)
+    add_executable(CoreVideoIsoAudioReaderTest tests/iso-audio-reader-test.cpp src/iso-audio-reader.cpp)
+    target_include_directories(CoreVideoIsoAudioReaderTest PRIVATE src)
+    add_test(NAME CoreVideoIsoAudioReader COMMAND CoreVideoIsoAudioReaderTest)
+    target_include_directories(CoreVideoIsoAudioRoutingTest PRIVATE src)
+    add_test(NAME CoreVideoIsoAudioRouting COMMAND CoreVideoIsoAudioRoutingTest)
+    target_include_directories(CoreVideoIsoFeedSelectionTest PRIVATE src)
+    add_test(NAME CoreVideoIsoFeedSelection COMMAND CoreVideoIsoFeedSelectionTest)
+    target_include_directories(CoreVideoIsoProviderPolicyTest PRIVATE src)
+    add_test(NAME CoreVideoIsoProviderPolicy COMMAND CoreVideoIsoProviderPolicyTest)
     target_include_directories(CoreVideoIsoEncoderPlanTest PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
     )
@@ -915,6 +946,9 @@ if(BUILD_TESTING)
     add_executable(CoreVideoTileTextureTest
         tests/tile-texture-test.cpp
     )
+    add_executable(CoreVideoTileFrameReadTest tests/tile-frame-read-test.cpp)
+    target_include_directories(CoreVideoTileFrameReadTest PRIVATE src)
+    add_test(NAME CoreVideoTileFrameRead COMMAND CoreVideoTileFrameReadTest)
     target_include_directories(CoreVideoTileTextureTest PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
     )

@@ -1,3 +1,4 @@
+#include <set>
 #include "zoom-iso-panel.h"
 #include "cv-style.h"
 #include "zoom-iso-recorder.h"
@@ -19,6 +20,7 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMessageBox>
 #include <QProcess>
 #include <QPushButton>
@@ -256,7 +258,7 @@ static bool is_hardware_encoder(const QString &encoder)
 
 static bool is_iso_eligible_output(const ZoomOutputInfo &output)
 {
-    if (output.assignment == AssignmentMode::ScreenShare)
+    if (output.audience_audio || output.assignment == AssignmentMode::ScreenShare)
         return false;
     if (output.assignment == AssignmentMode::ActiveSpeaker ||
         output.assignment == AssignmentMode::SpotlightIndex)
@@ -264,35 +266,25 @@ static bool is_iso_eligible_output(const ZoomOutputInfo &output)
     return output.participant_id != 0;
 }
 
-static qint64 estimated_output_bytes_per_second(const ZoomOutputInfo &output)
+static int iso_participant_count(const std::vector<ZoomOutputInfo> &outputs)
 {
-    const int requested_height = video_resolution_height(output.video_resolution);
-    const uint32_t observed_height = output.observed_height;
-    const int height = static_cast<int>(observed_height > 0
-        ? observed_height
-        : static_cast<uint32_t>(requested_height));
-    if (height >= 1000)
-        return 1100ll * 1024ll;
-    if (height >= 700)
-        return 700ll * 1024ll;
-    return 350ll * 1024ll;
+    std::set<uint32_t> participants;
+    int dynamic_outputs = 0;
+    for (const auto &output : outputs) {
+        if (!is_iso_eligible_output(output)) continue;
+        if (output.assignment == AssignmentMode::Participant)
+            participants.insert(output.participant_id);
+        else
+            ++dynamic_outputs;
+    }
+    return int(participants.size()) + dynamic_outputs;
 }
 
 static qint64 estimated_iso_bytes_per_second(
     const std::vector<ZoomOutputInfo> &outputs, bool record_program)
 {
-    qint64 bytes_per_second = 0;
-    // Accumulation is conditional (filtered by is_iso_eligible_output), so
-    // std::accumulate would need an equivalent-or-more-convoluted lambda
-    // here with no readability gain over the plain loop.
-    for (const auto &output : outputs) {
-        if (is_iso_eligible_output(output))
-            // cppcheck-suppress useStlAlgorithm
-            bytes_per_second += estimated_output_bytes_per_second(output);
-    }
-    if (record_program)
-        bytes_per_second += 1100ll * 1024ll;
-    return bytes_per_second;
+    // Every file is 1080p regardless of Zoom's current delivery resolution.
+    return (iso_participant_count(outputs) + (record_program ? 1 : 0)) * 1600ll * 1024ll;
 }
 
 ZoomIsoPanel::ZoomIsoPanel(QWidget *parent)
@@ -301,6 +293,8 @@ ZoomIsoPanel::ZoomIsoPanel(QWidget *parent)
     setMinimumWidth(560);
 
     const ZoomPluginSettings settings = ZoomPluginSettings::load();
+    for (const auto &uuid : settings.iso_selected_source_uuids)
+        m_selected_feeds.insert(QString::fromStdString(uuid));
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(8, 8, 8, 8);
@@ -375,6 +369,24 @@ ZoomIsoPanel::ZoomIsoPanel(QWidget *parent)
     });
     config_layout->addWidget(m_record_program);
 
+    config_layout->addWidget(new QLabel("Feeds to record:", config_group));
+    m_feeds = new QListWidget(config_group);
+    m_feeds->setMaximumHeight(145);
+    m_feeds->setAccessibleName("ISO feeds to record");
+    config_layout->addWidget(m_feeds);
+    auto *feed_hint = new QLabel("Choose routed feeds. Files start when media arrives. "
+        "Two feeds showing the same participant share one MP4.", config_group);
+    feed_hint->setWordWrap(true);
+    config_layout->addWidget(feed_hint);
+    connect(m_feeds, &QListWidget::itemChanged, this, [this](QListWidgetItem *item) {
+        const auto uuid = item->data(Qt::UserRole).toString();
+        if (item->checkState() == Qt::Checked) m_selected_feeds.insert(uuid);
+        else m_selected_feeds.remove(uuid);
+        persist_settings();
+        refresh_capacity_guidance();
+        refresh_status();
+    });
+
     auto *button_row = new QHBoxLayout;
     button_row->setSpacing(6);
     m_start_btn = new QPushButton("Start ISO Recording", config_group);
@@ -417,7 +429,7 @@ ZoomIsoPanel::ZoomIsoPanel(QWidget *parent)
     m_sessions->setColumnCount(11);
     m_sessions->setHorizontalHeaderLabels({
         "Source", "Participant", "Status", "Encoder", "Duration", "Resolution",
-        "Video Frames", "Audio Chunks", "Video Size", "Audio Size", "Files"
+        "Video Frames", "Audio Chunks", "File Size", "Audio", "File"
     });
     m_sessions->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     m_sessions->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
@@ -509,6 +521,10 @@ void ZoomIsoPanel::test_ffmpeg()
 
 void ZoomIsoPanel::start_recording()
 {
+    if (selected_outputs().empty()) {
+        set_error("Select at least one routed feed to record.");
+        return;
+    }
     persist_settings();
     set_error(QString());
 
@@ -532,7 +548,7 @@ void ZoomIsoPanel::start_recording()
             if (choice != QMessageBox::Yes)
                 return;
         }
-        const auto outputs = ZoomOutputManager::instance().outputs();
+        const auto outputs = selected_outputs();
         const qint64 estimated_bytes_per_second =
             estimated_iso_bytes_per_second(outputs, m_record_program->isChecked());
         if (estimated_bytes_per_second > 0 &&
@@ -551,9 +567,8 @@ void ZoomIsoPanel::start_recording()
     }
 
     const QString encoder = m_video_encoder->currentData().toString();
-    const auto outputs = ZoomOutputManager::instance().outputs();
-    const int eligible_outputs = static_cast<int>(std::count_if(
-        outputs.begin(), outputs.end(), is_iso_eligible_output));
+    const auto outputs = selected_outputs();
+    const int eligible_outputs = iso_participant_count(outputs);
     const int encode_paths = eligible_outputs + (m_record_program->isChecked() ? 1 : 0);
     if (is_hardware_encoder(encoder) && encode_paths > 3) {
         const int choice = QMessageBox::warning(
@@ -576,6 +591,8 @@ void ZoomIsoPanel::start_recording()
     config.video_encoder =
         m_video_encoder->currentData().toString().toStdString();
     config.record_program = m_record_program->isChecked();
+    for (const auto &output : selected_outputs())
+        config.selected_source_uuids.push_back(output.source_uuid);
 
     std::string error;
     if (!ZoomIsoRecorder::instance().start(config, &error)) {
@@ -595,13 +612,61 @@ void ZoomIsoPanel::stop_recording()
     refresh_status();
 }
 
+std::vector<ZoomOutputInfo> ZoomIsoPanel::selected_outputs() const
+{
+    auto outputs = ZoomOutputManager::instance().outputs();
+    outputs.erase(std::remove_if(outputs.begin(), outputs.end(), [this](const auto &output) {
+        return !is_iso_eligible_output(output) ||
+            !m_selected_feeds.contains(QString::fromStdString(output.source_uuid));
+    }), outputs.end());
+    return outputs;
+}
+
+void ZoomIsoPanel::refresh_feeds()
+{
+    const auto outputs = ZoomOutputManager::instance().outputs();
+    const QSignalBlocker blocker(m_feeds);
+    const int scroll = m_feeds->verticalScrollBar()->value();
+    m_feeds->setUpdatesEnabled(false);
+    QSet<QString> present;
+    for (const auto &output : outputs) {
+        const auto uuid = QString::fromStdString(output.source_uuid);
+        present.insert(uuid);
+        QListWidgetItem *item = nullptr;
+        for (int row = 0; row < m_feeds->count(); ++row)
+            if (m_feeds->item(row)->data(Qt::UserRole).toString() == uuid)
+                item = m_feeds->item(row);
+        if (!item) {
+            item = new QListWidgetItem(m_feeds);
+            item->setData(Qt::UserRole, uuid);
+        }
+        const bool eligible = is_iso_eligible_output(output);
+        QString route = output.assignment == AssignmentMode::ActiveSpeaker ? "active speaker" :
+            output.assignment == AssignmentMode::SpotlightIndex ? "spotlight" :
+            QString("participant %1").arg(output.participant_id);
+        if (!eligible) route = "unrouted or unsupported";
+        const auto label = QString::fromStdString(output.display_name.empty() ? output.source_name : output.display_name);
+        item->setText(QString("%1 — %2").arg(label, route));
+        item->setFlags(Qt::ItemIsUserCheckable | Qt::ItemIsSelectable |
+                       (eligible ? Qt::ItemIsEnabled : Qt::NoItemFlags));
+        item->setCheckState(m_selected_feeds.contains(uuid) ? Qt::Checked : Qt::Unchecked);
+    }
+    for (int row = m_feeds->count()-1; row >= 0; --row)
+        if (!present.contains(m_feeds->item(row)->data(Qt::UserRole).toString()))
+            delete m_feeds->takeItem(row);
+    m_feeds->verticalScrollBar()->setValue(scroll);
+    m_feeds->setUpdatesEnabled(true);
+}
+
 void ZoomIsoPanel::refresh_status()
 {
+    refresh_feeds();
     const bool active = ZoomIsoRecorder::instance().active();
     const QJsonObject recorder = ZoomIsoRecorder::instance().status_overview();
     const QJsonArray sessions = ZoomIsoRecorder::instance().status_json();
 
-    m_start_btn->setEnabled(!active);
+    m_start_btn->setEnabled(!active && !recorder.value("finishing").toBool() && !selected_outputs().empty());
+    m_feeds->setEnabled(!active && !recorder.value("finishing").toBool());
     m_stop_btn->setEnabled(active);
     m_output_dir->setEnabled(!active);
     m_ffmpeg_path->setEnabled(!active);
@@ -614,6 +679,8 @@ void ZoomIsoPanel::refresh_status()
               .arg(recorder.value("session_count").toInt())
               .arg(recorder.value("session_count").toInt() == 1 ? "" : "s")
         : QStringLiteral("Idle");
+    if (active && sessions.isEmpty())
+        status_text = "Armed - waiting for media from selected feeds";
     const int completed_count = recorder.value("completed_session_count").toInt();
     if (completed_count > 0) {
         status_text += QString(" - %1 completed session%2 retained")
@@ -684,7 +751,7 @@ void ZoomIsoPanel::refresh_status()
             status = QString("Waiting for video (%1)")
                 .arg(age_text(static_cast<double>(elapsed_ms)));
         else if (!completed && audio_chunks == 0)
-            status += QString(" / no audio (%1)")
+            status += QString(" / silence: no audio received (%1)")
                 .arg(age_text(static_cast<double>(elapsed_ms)));
         if (frames_dropped > 0 &&
             session_health != QLatin1String("encoder_behind"))
@@ -722,7 +789,9 @@ void ZoomIsoPanel::refresh_status()
             tooltip += QString("\n\nFFmpeg output:\n%1").arg(ffmpeg_output);
         }
         status_item->setToolTip(tooltip);
-        if (completed)
+        if (!ffmpeg_error.isEmpty())
+            status_item->setForeground(QColor("#ef6b73"));
+        else if (completed)
             status_item->setForeground(QColor("#66d989"));
         else if (!ffmpeg_running || video_frames == 0)
             status_item->setForeground(QColor("#f0b429"));
@@ -739,11 +808,10 @@ void ZoomIsoPanel::refresh_status()
         m_sessions->setItem(row, 7, item(QString::number(audio_chunks)));
         m_sessions->setItem(row, 8, item(bytes_text(
             static_cast<qint64>(s.value("video_bytes").toDouble()))));
-        m_sessions->setItem(row, 9, item(bytes_text(
-            static_cast<qint64>(s.value("audio_bytes").toDouble()))));
-        auto *files = item(QString("%1\n%2")
-            .arg(s.value("video_path").toString(),
-                 s.value("audio_path").toString()));
+        m_sessions->setItem(row, 9, item(s.value("audio_muxed").toBool()
+            ? QStringLiteral("AAC in MP4")
+            : bytes_text(static_cast<qint64>(s.value("audio_bytes").toDouble()))));
+        auto *files = item(s.value("video_path").toString());
         files->setToolTip(files->text());
         m_sessions->setItem(row, 10, files);
     }
@@ -769,9 +837,8 @@ void ZoomIsoPanel::refresh_capacity_guidance()
         return;
 
     const QString encoder = m_video_encoder->currentData().toString();
-    const auto outputs = ZoomOutputManager::instance().outputs();
-    const int eligible_outputs = static_cast<int>(std::count_if(
-        outputs.begin(), outputs.end(), is_iso_eligible_output));
+    const auto outputs = selected_outputs();
+    const int eligible_outputs = iso_participant_count(outputs);
     const int encode_paths = eligible_outputs + (m_record_program->isChecked() ? 1 : 0);
     const qint64 estimated_bytes_per_second =
         estimated_iso_bytes_per_second(outputs, m_record_program->isChecked());
@@ -829,6 +896,9 @@ void ZoomIsoPanel::persist_settings() const
     settings.iso_video_encoder =
         m_video_encoder->currentData().toString().toStdString();
     settings.iso_record_program = m_record_program->isChecked();
+    settings.iso_selected_source_uuids.clear();
+    for (const auto &uuid : m_selected_feeds)
+        settings.iso_selected_source_uuids.push_back(uuid.toStdString());
     settings.save();
 }
 

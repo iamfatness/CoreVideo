@@ -3,6 +3,7 @@
 #include "zoom-reconnect.h"
 #include <cstdint>
 #include <string>
+#include <vector>
 
 struct ZoomPluginSettings {
     std::string         sdk_key, sdk_secret, jwt_token;
@@ -46,6 +47,7 @@ struct ZoomPluginSettings {
     std::string         iso_ffmpeg_path = "ffmpeg";
     std::string         iso_video_encoder = "auto";
     bool                iso_record_program = true;
+    std::vector<std::string> iso_selected_source_uuids;
 
     // Talkback dock (Milestone 7). The OBS audio source the director talks
     // through, stored BY NAME because that is what TalkbackTap::open() and

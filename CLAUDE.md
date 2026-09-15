@@ -227,21 +227,27 @@ Every one of these is documented at length where it lives; the list is the map.
   interval rather than zeroing on fire -- zeroing discards the remainder
   that pushed a tick over threshold, which at 60 fps lands every 7 frames
   (~117 ms, ~8.6 Hz) instead of the documented 10 Hz.
-- **ISO recording timing** (`src/iso-video-pacer.h`, `src/iso-audio-gap-fill.h`):
-  raw video has no per-frame timestamps and ffmpeg cannot be trusted to
-  invent correct ones from a byte stream — `-use_wallclock_as_timestamps`
-  is confirmed (via `ffprobe -show_frames`, 2026-08-21) to have **no
-  effect** on this project's ffmpeg build's rawvideo demuxer, despite
-  looking like the textbook fix. `record_video_frame()` is called 1:1 with
-  Zoom's real, fluctuating (10-60fps) per-source delivery, so it must pace
-  itself to a fixed cadence (duplicate to backfill a stall, drop to shed a
-  burst) BEFORE the pipe — see `iso_video_frames_due()`. Audio has the
-  mirror-image problem for a different reason: Zoom only calls back audio
-  for someone currently talking, so `record_audio_frame()` must backfill
-  silence across every gap (`iso_audio_silence_frames()`) or the WAV
-  shrinks by every silent stretch. Both anchor to the same
-  `os_gettime_ns()` clock so video and audio stay in sync with each other,
-  not just individually correct.
+- **ISO participant A/V recording** (`src/iso-track-writer.cpp`,
+  `src/iso-av-mux.h`): one writer per Zoom participant ID owns a continuous
+  1920x1080/30 H.264 + 48 kHz stereo AAC MP4 until Stop. Source UUIDs and input
+  dimensions MUST NOT key writer lifetime. Workers scale/letterbox and resample,
+  hold video/fill silence against the same monotonic clock, and mux timestamped
+  raw media to one FFmpeg pipe. The input is full-range BT.709; preserve its
+  colour metadata. B-frames are disabled to avoid fragmented-MP4 startup A/V
+  offset. Keep startup video history while workers catch up: shrinking the
+  input queue on the first tick loses early frames. Validate decoded flash/tone
+  timing with `tests/verify-iso-av.py`, not only frame counts or process success.
+  ISO capture is explicitly selected by output source UUID (`source_uuids` in
+  TCP, saved panel choices for OSC). No default-all fallback. Do not pre-open
+  writers from configured participant IDs: selected routes open on first real
+  media delivery, so offline/unrouted sources produce no blank files. The feed
+  checklist updates rows by UUID and retains operator selections across refresh.
+  Audio MUST come from `IsoAudioTap`, not ZoomSource's embedded PCM (which may
+  be the meeting mix labelled with the route's participant ID). Audio-only IPC
+  subscriptions carry `recording_only=true`: receive one-way audio but never
+  claim a participant out of Audience routing. Install plugin AND engine for
+  this change. Each tap owns a fresh SHM reader, checks per-slot attribution,
+  preserves first buffers, and uses the recording epoch to reject stale callbacks.
 - **Colour range is normalised, never re-declared** (`src/i420-range-expand.h`,
   applied in `engine/src/engine-video.cpp`'s `onRawDataFrameReceived`): the
   engine requests `VideoRawdataColorspace_BT709_F` and the plugin declares
@@ -1573,6 +1579,16 @@ its GitHub filename includes `v`. Do not restore the withdrawn macOS ZIP link.
 Home, download, and plugin docs point to `/download/#macos`.
 
 ## Media failure presentation (2026-09-06 soak)
+
+Tiles SHM reads must use `read_candidate`, never the pending `frame` directly.
+`shm_read_i420_frame` copies before validating its final sequence and can return
+Invalid with a modified destination. If `has_frame` was already true, reading
+into that frame published rejected pixels with the previous size/generation,
+causing a possible one-frame color flash during resolution changes. Commit only
+successful even-sized reads by swapping buffers (`zoom-tile-frame-read.h`).
+`CoreVideoTileFrameRead` injects rejected resized reads; it fails with the old
+direct-write behavior. Live diagnostics log `Tiles kept last valid frame` on
+the first rejected read and every 300 thereafter.
 
 `MediaFailureState` tracks current source media failures, bounded
 by live source assignments. Eight tiles × three failed attempts retain all

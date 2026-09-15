@@ -6,6 +6,12 @@
 #include "engine-audio.h"
 #include "engine-json.h"
 #include "engine-talkback.h"
+#include "engine-silent-mic.h"
+#if __has_include(<rawdata/zoom_rawdata_api.h>)
+#include <rawdata/zoom_rawdata_api.h>
+#else
+#include <zoom_rawdata_api.h>
+#endif
 #include <zoom_sdk.h>
 #include <auth_service_interface.h>
 #include <setting_service_interface.h>
@@ -699,7 +705,10 @@ class EngineAuthEvent : public ZOOMSDK::IAuthServiceEvent {
 public:
     explicit EngineAuthEvent(IpcFd e2p) : m_e2p(e2p) {}
 
+    bool microphone_ready() const { return m_silent_mic.ready(); }
+    void reset_microphone() { m_silent_mic.reset(); }
     void onAuthenticationReturn(ZOOMSDK::AuthResult ret) override {
+        reset_microphone();
         if (ret == ZOOMSDK::AUTHRET_SUCCESS) {
             // Opt into HD video so the meeting negotiates Group HD / 1080p
             // streams when the account is entitled. Defaults to off on
@@ -717,110 +726,30 @@ public:
                         std::string(vs->IsHDVideoEnabled() ? "true" : "false") +
                         "}");
                 }
-                // TALKBACK DELIVERY LAW 1's INSURANCE (2026-08-29). Talkback
-                // only delivers while this client's meeting audio is OPEN
-                // (see EngineTalkback::ensure_mic_open()), so a key press now
-                // UNMUTES this client. Read the code before deciding that is
-                // safe: main.cpp's Join sets isAudioOff = false and
-                // isMyVoiceInMix = true, and nothing in this repository calls
-                // IZoomSDKAudioRawDataHelper::setExternalAudioSource() -- the
-                // only raw-audio-helper use anywhere is engine-audio.cpp's
-                // subscribe()/unSubscribe(), which is the RECEIVE path. So the
-                // SDK would open the DEFAULT SYSTEM CAPTURE DEVICE of the
-                // machine running OBS, live into the meeting. In a control
-                // room that is a hot mic on air.
-                //
-                // So the mic is made dead BEFORE any join, once, here: point
-                // the SDK at a device id that matches nothing (its own
-                // fallback is "the default mic if there is no mic selected via
-                // SelectMic()", which is precisely what must not happen) and
-                // set the mic volume to zero as the second, independent half
-                // -- SetMicVol() is documented to act on the selected mic and
-                // covers the case where SelectMic() is refused.
-                //
-                // Reported with both codes, never silently: this is the guard
-                // between a talkback key and the control room's own
-                // microphone, and a guard that fails quietly is worse than no
-                // guard, because the unmute happens either way.
-                //
-                // WEAKER THAN ZCOMMS'S, stated rather than glossed: theirs is
-                // a never-fed SDK virtual mic (setExternalAudioSource), silent
-                // by construction rather than by Zoom honouring a setting.
-                // Deliberately not taken here -- it installs a virtual mic
-                // into the same helper this engine's show-critical receive
-                // subscribe uses, an interaction nothing has tested. If a live
-                // gate ever hears the room through this, that is the
-                // escalation.
-                {
-                    if (auto *as = settings->GetAudioSettings()) {
-#if defined(WIN32)
-                        const zchar_t *dead_id   = L"corevideo-no-microphone";
-                        const zchar_t *dead_name = L"CoreVideo (no microphone)";
-#else
-                        const zchar_t *dead_id   = "corevideo-no-microphone";
-                        const zchar_t *dead_name = "CoreVideo (no microphone)";
-#endif
-                        const ZOOMSDK::SDKError m_err =
-                            as->SelectMic(dead_id, dead_name);
-                        FLOAT silent = 0.0f;
-                        const ZOOMSDK::SDKError v_err = as->SetMicVol(silent);
-                        // REVIEW ROUND 1, m6: BOTH HALVES REFUSED IS A HOT MIC,
-                        // and it used to be reported as a "debug" line with two
-                        // numbers in it -- filtered by stage, read by nobody.
-                        // These two calls are the only thing standing between a
-                        // talkback key and the control room's own microphone
-                        // going live into the meeting, so a failure has to be
-                        // loud on the channel the operator actually sees, and
-                        // has to say what to DO about it. Either half alone
-                        // still silences the device, which is why this is an
-                        // AND: SelectMic sends the SDK at a device that does not
-                        // exist, SetMicVol zeroes whatever it settles on.
-                        const bool insured = (m_err == ZOOMSDK::SDKERR_SUCCESS) ||
-                                             (v_err == ZOOMSDK::SDKERR_SUCCESS);
-                        EngineIpc::write(
-                            std::string(R"({"cmd":"debug","stage":"mic_insurance","ok":)") +
-                            (insured ? "true" : "false") +
-                            R"(,"select_code":)" +
-                            std::to_string(static_cast<int>(m_err)) +
-                            R"(,"volume_code":)" +
-                            std::to_string(static_cast<int>(v_err)) + "}");
-                        if (!insured) {
-                            EngineIpc::write(
-                                R"({"cmd":"error","msg":"mic_insurance_failed",)"
-                                R"("reason":"hot_mic_risk","select_code":)" +
-                                std::to_string(static_cast<int>(m_err)) +
-                                R"(,"volume_code":)" +
-                                std::to_string(static_cast<int>(v_err)) +
-                                R"(,"action":"Zoom refused both attempts to )"
-                                R"(silence this machine's microphone. A talkback )"
-                                R"(key will unmute CoreVideo in the meeting, so )"
-                                R"(the default capture device may be heard. Set )"
-                                R"(Zoom's microphone to a disconnected device, )"
-                                R"(or mute it at the OS, before keying."})");
-                        }
-                    } else {
-                        // Same severity, one door earlier: with no audio
-                        // settings there is no insurance at all, and the unmute
-                        // still happens on the first key.
-                        EngineIpc::write(
-                            R"({"cmd":"debug","stage":"mic_insurance","ok":false,)"
-                            R"("reason":"no_audio_settings"})");
-                        EngineIpc::write(
-                            R"({"cmd":"error","msg":"mic_insurance_failed",)"
-                            R"("reason":"no_audio_settings",)"
-                            R"("action":"Zoom exposed no audio settings, so )"
-                            R"(CoreVideo could not silence this machine's )"
-                            R"(microphone. A talkback key will unmute CoreVideo )"
-                            R"(in the meeting. Set Zoom's microphone to a )"
-                            R"(disconnected device, or mute it at the OS, before )"
-                            R"(keying."})");
-                    }
+                // The SDK must never adjust the operator's physical input level.
+                if (auto *as = settings->GetAudioSettings()) {
+                    const auto err = as->EnableAutoAdjustMic(false);
+                    EngineIpc::write(
+                        R"({"cmd":"debug","stage":"disable_mic_auto_adjust","code":)" +
+                        std::to_string(static_cast<int>(err)) + "}");
                 }
                 ZOOMSDK::DestroySettingService(settings);
             } else {
                 EngineIpc::write(
                     R"({"cmd":"debug","stage":"create_setting_service_failed","code":)" +
                     std::to_string(static_cast<int>(s_err)) + "}");
+            }
+            // Supply a silent SDK microphone instead of selecting a fake device or
+            // setting Windows input volume to zero. Fail closed before any join.
+            const auto mic_error = m_silent_mic.install(ZOOMSDK::GetAudioRawdataHelper());
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"mic_insurance","mode":"virtual_silent","code":)" +
+                std::to_string(static_cast<int>(mic_error)) + "}");
+            if (!microphone_ready()) {
+                EngineIpc::write(
+                    R"({"cmd":"auth_fail","stage":"silent_microphone","code":)" +
+                    std::to_string(static_cast<int>(mic_error)) + "}");
+                return;
             }
             EngineIpc::write( R"({"cmd":"auth_ok"})");
         } else
@@ -844,6 +773,7 @@ public:
 #endif
 private:
     IpcFd m_e2p;
+    EngineSilentMic m_silent_mic;
 };
 
 // ── Meeting event handler ─────────────────────────────────────────────────────
@@ -1606,6 +1536,7 @@ int main()
                     std::to_string(static_cast<int>(err)) + "}");
                 continue;
             }
+            auth_event.reset_microphone();
             auth_svc->SetEvent(&auth_event);
             ZOOMSDK::AuthContext ctx{};
             if (!public_app_key.empty()) {
@@ -1640,6 +1571,12 @@ int main()
             }
 
         } else if (command == IpcCommand::Join) {
+            if (!auth_event.microphone_ready()) {
+                EngineIpc::write(
+                    R"({"cmd":"error","msg":"silent_microphone_unavailable",)"
+                    R"("action":"Reconnect CoreVideo before joining. The silent meeting microphone could not be initialized."})");
+                continue;
+            }
             std::string meeting_id   = json_str(line, "meeting_id");
             std::string passcode     = json_str(line, "passcode");
             std::string display_name = json_str(line, "display_name");
@@ -1671,6 +1608,7 @@ int main()
                 if (meeting_svc) {
                     auto *cfg = meeting_svc->GetMeetingConfiguration();
                     if (cfg) {
+                        cfg->EnableAutoAdjustMicVolumeWhenJoinAudio(false);
                         cfg->SetEvent(&meeting_event);
                     } else {
                         EngineIpc::write(

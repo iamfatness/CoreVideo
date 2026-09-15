@@ -3608,33 +3608,12 @@ void EngineTalkback::debug_expire_pending_create_for_test()
 // client's mic put the ENGINE MACHINE'S microphone into the meeting? YES, it
 // could, and the insurance is therefore real rather than theoretical:
 //   * engine/src/main.cpp's Join sets JoinParam4WithoutLogin::isAudioOff =
-//     false and isMyVoiceInMix = true, so the SDK connects VoIP audio on join
-//     with whatever capture device it picks.
-//   * NOTHING in this engine installs a virtual mic. The only
-//     IZoomSDKAudioRawDataHelper use in the whole repository is
-//     engine/src/engine-audio.cpp's subscribe()/unSubscribe(), which is the
-//     RECEIVE path; setExternalAudioSource() -- ZComms's never-fed virtual
-//     mic, and the airtight version of this insurance -- is called nowhere in
-//     engine/ or src/.
-//   * So a bare UnMuteAudio() would open the DEFAULT SYSTEM CAPTURE DEVICE of
-//     the machine running OBS, into a live meeting. That is a hot mic in a
-//     control room.
-// The insurance is applied ONCE, at authentication, in main.cpp's existing
-// CreateSettingService block (see "mic_insurance" there): the SDK's audio
-// settings are pointed at a device that does not exist and the mic volume is
-// set to zero, before any join. It lives there and not here for a hard
-// reason as well as a tidy one -- CreateSettingService() is an SDK EXPORT, and
-// engine-talkback.cpp is compiled into a test target that links no SDK library
-// at all (tests/engine-talkback-select-test.cpp fakes pure-virtual interfaces
-// only). Everything in THIS function goes through IMeetingService's virtual
-// interfaces, which is exactly why the ordering below can be pinned.
-// WEAKER THAN ZCOMMS'S, and stated rather than glossed: a never-fed virtual
-// mic is silent by construction, while a dead device selection is silent
-// because Zoom honours it. If a live gate ever hears the room, the escalation
-// is setExternalAudioSource() with a never-fed source -- deliberately not
-// taken here, because it would install a virtual mic into the same helper the
-// engine's show-critical RECEIVE subscribe uses, and that interaction is
-// untested.
+//     false and isMyVoiceInMix = true. Authentication installs EngineSilentMic
+//     as the SDK's external capture source before auth_ok. This never-fed
+//     virtual microphone cannot capture the physical input and never changes
+//     Windows endpoint volume. Join fails closed if registration fails.
+// The microphone object outlives CleanUPSDK. Raw audio receive subscriptions
+// remain owned by EngineAudio; talkback PCM uses its own channel sender.
 bool EngineTalkback::ensure_mic_open(const char *when)
 {
     const std::string when_field = R"(,"when":")" + std::string(when) + "\"";

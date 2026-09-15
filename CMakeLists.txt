@@ -1335,6 +1335,11 @@ if(BUILD_TESTING)
     # tree does not, so the SDK-present check alone let this target register
     # there and fail at #include (PR #231 CI, 2026-08-27).
     if(WIN32 AND EXISTS "${ZOOM_SDK_INCLUDE_DIR}/meeting_service_components/meeting_talkback_ctrl_interface.h")
+        add_executable(CoreVideoEngineSilentMicTest tests/engine-silent-mic-test.cpp)
+        target_include_directories(CoreVideoEngineSilentMicTest PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/engine/src" "${ZOOM_SDK_INCLUDE_DIR}")
+        target_compile_definitions(CoreVideoEngineSilentMicTest PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        add_test(NAME CoreVideoEngineSilentMic COMMAND CoreVideoEngineSilentMicTest)
         add_executable(CoreVideoEngineTalkbackSelectTest
             tests/engine-talkback-select-test.cpp
             engine/src/engine-talkback.cpp

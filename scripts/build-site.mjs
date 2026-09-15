@@ -784,7 +784,7 @@ function downloadPageContent() {
   </div>
 </section>
 ${fileRows}
-<p>v0.1.45 is the current Windows release and adds the Zoom Talkback dock and the panelist loudness readiness board over v0.1.44. Existing installs are offered it by the in-plugin update check.</p>
+<p>See the <a href="${RELEASES_LATEST}">Windows release notes</a> for the latest changes. Existing installs are offered new stable releases by the in-plugin update check.</p>
 <section id="macos">
 <h2>macOS &mdash; Apple Silicon beta v${MAC_VERSION}</h2>
 <p>Developer ID signed, notarized by Apple, and stapled. The macOS installer is built and notarized separately from the Windows release, so its version can trail Windows; it carries the same raw-media recovery, waiting-room and video-quality fixes and the panelist loudness readiness board.</p>

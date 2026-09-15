@@ -22,6 +22,7 @@ struct ZoomIsoRecordConfig {
     std::string ffmpeg_path = "ffmpeg";
     std::string video_encoder = "libx264";
     bool record_program = true;
+    std::vector<std::string> selected_source_uuids;
 };
 
 class ZoomIsoRecorder

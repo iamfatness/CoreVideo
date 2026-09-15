@@ -586,6 +586,10 @@ first; the package does not bundle FFmpeg.
 
 CoreVideo records one continuous MP4 per Zoom participant ID during Record/Stop.
 Each file contains H.264 video at 1920x1080, 30 fps and AAC stereo audio at 48 kHz.
+Choose feeds in the ISO Recorder before starting. Choices are remembered by
+source UUID; no feeds are selected by default. Unrouted and unselected feeds do
+not start recordings. A selected feed opens its file only when its first actual
+audio or video arrives, so an offline route does not produce an empty recording.
 Incoming video is scaled to fit with black bars when needed. Zoom resolution
 changes, duplicate OBS sources, camera gaps, and source reassignment do not
 restart that participant's encoder or create another file. A new Zoom ID after
@@ -613,6 +617,8 @@ dock. The panel provides:
   requested encoder, actual encoder, and fallback state.
 - **Also start/stop OBS program recording** toggle.
 - **Start ISO Recording** and **Stop ISO Recording** buttons.
+- **Feeds to record** checkboxes, preserved through routing refreshes and OBS
+  restarts. Selection is fixed for the recording run; stop to change it.
 - Live status showing idle/recording and active session count.
 - Active session table with source, participant, resolution, video frame count,
   audio chunk count, combined file path, and FFmpeg error details.
@@ -627,8 +633,13 @@ less than 2 GB free and warns below 10 GB free.
 TCP start example:
 
 ```json
-{"cmd":"iso_recording_start","output_dir":"C:/Recordings/CoreVideo","ffmpeg_path":"ffmpeg","record_program":true}
+{"cmd":"iso_recording_start","output_dir":"C:/Recordings/CoreVideo","ffmpeg_path":"ffmpeg","record_program":true,"source_uuids":["OUTPUT_SOURCE_UUID"]}
 ```
+
+`source_uuids` selects routed CoreVideo output sources. Omitting it uses the
+feed choices saved in the ISO panel; an empty selection is an error. OSC start
+also uses those saved choices. Multiple selected feeds for one participant
+share a single participant MP4.
 
 TCP status example:
 
@@ -661,8 +672,8 @@ A worker per participant uses a monotonic clock to emit 30 video frames and
 48,000 audio samples per second. It holds the last picture during video gaps
 (or black before the first frame) and inserts silence during audio gaps. Input
 resolution and audio format changes are conformed on the worker without
-restarting the output. Known fixed participants start at Record; participants
-first encountered later have a `start_offset_ms` in status.
+restarting the output. Files start on first media delivery. Participants first
+encountered later have a `start_offset_ms` in status.
 
 Timestamped video and PCM audio travel over one internal Matroska pipe to
 FFmpeg, which writes a single fragmented MP4. There are no separate temporary

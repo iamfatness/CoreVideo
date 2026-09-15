@@ -667,6 +667,9 @@ if(BUILD_TESTING)
         tests/iso-encoder-plan-test.cpp
     )
     add_executable(CoreVideoIsoProviderPolicyTest tests/iso-provider-policy-test.cpp)
+    add_executable(CoreVideoIsoFeedSelectionTest tests/iso-feed-selection-test.cpp)
+    target_include_directories(CoreVideoIsoFeedSelectionTest PRIVATE src)
+    add_test(NAME CoreVideoIsoFeedSelection COMMAND CoreVideoIsoFeedSelectionTest)
     target_include_directories(CoreVideoIsoProviderPolicyTest PRIVATE src)
     add_test(NAME CoreVideoIsoProviderPolicy COMMAND CoreVideoIsoProviderPolicyTest)
     target_include_directories(CoreVideoIsoEncoderPlanTest PRIVATE

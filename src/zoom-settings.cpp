@@ -4,6 +4,7 @@
 #include <QByteArray>
 #include <QDateTime>
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QMessageAuthenticationCode>
 #include <obs-frontend-api.h>
@@ -398,6 +399,10 @@ ZoomPluginSettings ZoomPluginSettings::load()
     const char *iso_ffmpeg_path = config_get_string(cfg, SECTION, "IsoFfmpegPath");
     const char *iso_video_encoder = config_get_string(cfg, SECTION, "IsoVideoEncoder");
     s.iso_output_dir = iso_output_dir ? iso_output_dir : "";
+    const char *iso_sources = config_get_string(cfg, SECTION, "IsoSelectedSources");
+    for (const auto &value : QJsonDocument::fromJson(iso_sources ? QByteArray(iso_sources) : QByteArray()).array())
+        if (value.isString() && !value.toString().isEmpty())
+            s.iso_selected_source_uuids.push_back(value.toString().toStdString());
     if (iso_ffmpeg_path && *iso_ffmpeg_path)
         s.iso_ffmpeg_path = iso_ffmpeg_path;
     if (iso_video_encoder && *iso_video_encoder)
@@ -563,6 +568,11 @@ void ZoomPluginSettings::save() const
     config_set_string(cfg, SECTION, "IsoFfmpegPath",          iso_ffmpeg_path.c_str());
     config_set_string(cfg, SECTION, "IsoVideoEncoder",        iso_video_encoder.c_str());
     config_set_int   (cfg, SECTION, "IsoRecordProgram",       iso_record_program ? 1 : 0);
+    QJsonArray iso_sources;
+    for (const auto &uuid : iso_selected_source_uuids)
+        iso_sources.append(QString::fromStdString(uuid));
+    config_set_string(cfg, SECTION, "IsoSelectedSources",
+                      QJsonDocument(iso_sources).toJson(QJsonDocument::Compact).constData());
     config_set_string(cfg, SECTION, "TalkbackSource",        talkback_source.c_str());
     config_set_int   (cfg, SECTION, "TalkbackLatch",         talkback_latch ? 1 : 0);
     config_set_int   (cfg, SECTION, "TalkbackProbeExpanded", talkback_probe_expanded ? 1 : 0);

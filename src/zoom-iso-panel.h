@@ -1,6 +1,12 @@
 #pragma once
 
 #include <QWidget>
+#include <QSet>
+#include <QString>
+#include <vector>
+
+struct ZoomOutputInfo;
+class QListWidget;
 
 class QCheckBox;
 class QComboBox;
@@ -25,6 +31,8 @@ private:
     void start_recording();
     void stop_recording();
     void refresh_status();
+    void refresh_feeds();
+    std::vector<ZoomOutputInfo> selected_outputs() const;
     void refresh_encoder_guidance();
     void refresh_capacity_guidance();
     void persist_settings() const;
@@ -34,6 +42,8 @@ private:
     QLineEdit *m_ffmpeg_path = nullptr;
     QComboBox *m_video_encoder = nullptr;
     QCheckBox *m_record_program = nullptr;
+    QListWidget *m_feeds = nullptr;
+    QSet<QString> m_selected_feeds;
     QPushButton *m_start_btn = nullptr;
     QPushButton *m_stop_btn = nullptr;
     QPushButton *m_test_btn = nullptr;

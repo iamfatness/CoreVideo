@@ -237,6 +237,11 @@ Every one of these is documented at length where it lives; the list is the map.
   offset. Keep startup video history while workers catch up: shrinking the
   input queue on the first tick loses early frames. Validate decoded flash/tone
   timing with `tests/verify-iso-av.py`, not only frame counts or process success.
+  ISO capture is explicitly selected by output source UUID (`source_uuids` in
+  TCP, saved panel choices for OSC). No default-all fallback. Do not pre-open
+  writers from configured participant IDs: selected routes open on first real
+  media delivery, so offline/unrouted sources produce no blank files. The feed
+  checklist updates rows by UUID and retains operator selections across refresh.
 - **Colour range is normalised, never re-declared** (`src/i420-range-expand.h`,
   applied in `engine/src/engine-video.cpp`'s `onRawDataFrameReceived`): the
   engine requests `VideoRawdataColorspace_BT709_F` and the plugin declares

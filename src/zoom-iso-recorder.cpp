@@ -1,6 +1,7 @@
 #include "zoom-iso-recorder.h"
 #include "iso-encoder-plan.h"
 #include "iso-provider-policy.h"
+#include "iso-feed-selection.h"
 #include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
@@ -73,8 +74,23 @@ bool ZoomIsoRecorder::start(const ZoomIsoRecordConfig &config, std::string *erro
         return false;
     }
     ZoomIsoRecordConfig normalized = config;
+    if (normalized.selected_source_uuids.empty()) {
+        if (error) *error = "Select at least one feed in the ISO Recorder before starting.";
+        return false;
+    }
     if (normalized.output_dir.empty())
+    {
         normalized.output_dir = default_iso_dir().toStdString();
+    }
+    const auto outputs = ZoomOutputManager::instance().outputs();
+    if (!std::any_of(outputs.begin(), outputs.end(), [&](const auto &info) {
+        return iso_feed_selected(normalized.selected_source_uuids, info.source_uuid,
+            info.assignment != AssignmentMode::Participant || info.participant_id != 0,
+            info.audience_audio || info.assignment == AssignmentMode::ScreenShare);
+    })) {
+        if (error) *error = "None of the selected ISO feeds is currently routed. Assign a participant first.";
+        return false;
+    }
     if (normalized.ffmpeg_path.empty())
         normalized.ffmpeg_path = "ffmpeg";
     const std::string requested_encoder = normalized_video_encoder(normalized.video_encoder);
@@ -163,12 +179,8 @@ bool ZoomIsoRecorder::start(const ZoomIsoRecordConfig &config, std::string *erro
         m_completed_sessions.clear();
         m_epoch_ns = os_gettime_ns();
         m_active.store(true, std::memory_order_release);
-        for (const auto &entry : m_outputs) {
-            const auto &info = entry.second;
-            if (info.assignment == AssignmentMode::Participant && info.participant_id &&
-                !info.audience_audio)
-                ensure_session_locked(info, info.participant_id, m_epoch_ns);
-        }
+        // Arm selected feeds only. A writer is opened on their first actual
+        // media callback, never merely because an OBS source exists.
     }
 
     if (normalized.record_program && !obs_frontend_recording_active()) {
@@ -226,8 +238,10 @@ void ZoomIsoRecorder::stop()
 
 bool ZoomIsoRecorder::should_record(const ZoomOutputInfo &info, uint32_t participant) const
 {
-    return m_active.load() && participant && !info.source_uuid.empty() && !info.audience_audio &&
-           info.assignment != AssignmentMode::ScreenShare;
+    return m_active.load() && participant && iso_feed_selected(
+        m_config.selected_source_uuids, info.source_uuid,
+        info.assignment != AssignmentMode::Participant || info.participant_id != 0,
+        info.audience_audio || info.assignment == AssignmentMode::ScreenShare);
 }
 
 ZoomIsoRecorder::Session &ZoomIsoRecorder::ensure_session_locked(const ZoomOutputInfo &info,
@@ -382,6 +396,10 @@ QJsonObject ZoomIsoRecorder::status_overview()
     QJsonObject obj;
     obj["active"] = m_active.load();
     obj["finishing"] = m_stopping.load();
+    QJsonArray selected_sources;
+    for (const auto &uuid : m_config.selected_source_uuids)
+        selected_sources.append(QString::fromStdString(uuid));
+    obj["selected_source_uuids"] = selected_sources;
     obj["output_dir"] = QString::fromStdString(m_config.output_dir);
     obj["session_count"] = int(m_sessions.size());
     obj["completed_session_count"] = int(m_completed_sessions.size());

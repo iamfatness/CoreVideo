@@ -678,6 +678,21 @@ void ZoomControlServer::handle_line(QPointer<QTcpSocket> socket, const QByteArra
         cfg.video_encoder =
             req.value("video_encoder").toString("libx264").toStdString();
         cfg.record_program = req.value("record_program").toBool(true);
+        cfg.selected_source_uuids = ZoomPluginSettings::load().iso_selected_source_uuids;
+        if (req.contains("source_uuids")) {
+            if (!req.value("source_uuids").isArray()) {
+                write_response(socket, {{"ok", false}, {"error", "source_uuids must be an array"}});
+                return;
+            }
+            cfg.selected_source_uuids.clear();
+            for (const auto &value : req.value("source_uuids").toArray()) {
+                if (!value.isString() || value.toString().isEmpty()) {
+                    write_response(socket, {{"ok", false}, {"error", "source_uuids must contain nonempty strings"}});
+                    return;
+                }
+                cfg.selected_source_uuids.push_back(value.toString().toStdString());
+            }
+        }
         std::string error;
         const bool ok = ZoomIsoRecorder::instance().start(cfg, &error);
         for (const auto &o : ZoomOutputManager::instance().outputs())

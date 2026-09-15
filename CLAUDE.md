@@ -1569,6 +1569,16 @@ Home, download, and plugin docs point to `/download/#macos`.
 
 ## Media failure presentation (2026-09-06 soak)
 
+Tiles SHM reads must use `read_candidate`, never the pending `frame` directly.
+`shm_read_i420_frame` copies before validating its final sequence and can return
+Invalid with a modified destination. If `has_frame` was already true, reading
+into that frame published rejected pixels with the previous size/generation,
+causing a possible one-frame color flash during resolution changes. Commit only
+successful even-sized reads by swapping buffers (`zoom-tile-frame-read.h`).
+`CoreVideoTileFrameRead` injects rejected resized reads; it fails with the old
+direct-write behavior. Live diagnostics log `Tiles kept last valid frame` on
+the first rejected read and every 300 thereafter.
+
 `MediaFailureState` tracks current source media failures, bounded
 by live source assignments. Eight tiles × three failed attempts retain all
 24 raw error diagnostics but emit one nonmodal episode notice. Dock polling

@@ -12,6 +12,7 @@
 #include "zoom-tile-shape.h"
 #include "zoom-tile-slot.h"
 #include "zoom-tile-texture.h"
+#include "zoom-tile-frame-read.h"
 #include "zoom-tiles-audio.h"
 #include "zoom-tiles-background.h"
 #include "zoom-tiles-effect.h"
@@ -171,6 +172,8 @@ struct TileFeed {
     // keeps a frozen frame forever (see shm_read_i420_frame in engine-ipc.h).
     uint32_t shm_gen = 0;
     std::vector<uint8_t> frame;  // I420: y_len, then U and V of y_len/4 each
+    std::vector<uint8_t> read_candidate; // uncommitted SHM copy; may be torn on failure
+    uint64_t rejected_reads = 0;
     uint32_t width = 0;
     uint32_t height = 0;
     uint64_t frame_epoch = 0;
@@ -430,13 +433,23 @@ static void tile_feed_on_frame(const TileFeedPtr &feed, uint32_t event_width,
     uint32_t w = 0;
     uint32_t h = 0;
     uint32_t y_len = 0;
-    const ShmFrameRead status =
-        shm_read_i420_frame(feed->shm, IPC_SHM_PREFIX + feed->uuid,
-                            event_width, event_height, event_shm_gen,
-                            feed->shm_gen, feed->frame, w, h, y_len);
-    if (status != ShmFrameRead::Ok) return;
-    // Odd dimensions have no valid I420 chroma layout to sample.
-    if ((w & 1u) || (h & 1u)) return;
+    ShmFrameRead status = ShmFrameRead::Invalid;
+    // A rejected seqlock read may already have overwritten its destination.
+    // Never use the pending draw frame as that destination: its ready flag,
+    // dimensions and generation would still describe the previous good pixels.
+    // This is particularly visible as a color flash during a resolution change.
+    if (!tile_read_frame(feed->frame, feed->read_candidate, [&](auto &candidate) {
+        status = shm_read_i420_frame(feed->shm, IPC_SHM_PREFIX + feed->uuid,
+                                    event_width, event_height, event_shm_gen,
+                                    feed->shm_gen, candidate, w, h, y_len);
+        return status == ShmFrameRead::Ok && !(w & 1u) && !(h & 1u);
+    })) {
+        if (++feed->rejected_reads == 1 || feed->rejected_reads % 300 == 0)
+            blog(LOG_INFO, "[obs-zoom-plugin] Tiles kept last valid frame: uuid=%s rejected=%llu read_status=%d event=%ux%u generation=%u",
+                 feed->uuid.c_str(), static_cast<unsigned long long>(feed->rejected_reads),
+                 static_cast<int>(status), event_width, event_height, event_shm_gen);
+        return;
+    }
 
     ZoomEngineClient::instance().acknowledge_media_delivery(feed->uuid, event_participant_id, delivery_ticket);
     feed->last_frame_ns = os_gettime_ns();

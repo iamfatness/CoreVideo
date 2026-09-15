@@ -930,6 +930,9 @@ if(BUILD_TESTING)
     add_executable(CoreVideoTileTextureTest
         tests/tile-texture-test.cpp
     )
+    add_executable(CoreVideoTileFrameReadTest tests/tile-frame-read-test.cpp)
+    target_include_directories(CoreVideoTileFrameReadTest PRIVATE src)
+    add_test(NAME CoreVideoTileFrameRead COMMAND CoreVideoTileFrameReadTest)
     target_include_directories(CoreVideoTileTextureTest PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
     )

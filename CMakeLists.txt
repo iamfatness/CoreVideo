@@ -286,6 +286,8 @@ if(COREVIDEO_BUILD_PLUGIN)
         src/zoom-output-profile.cpp
         src/zoom-iso-recorder.cpp
         src/iso-track-writer.cpp
+        src/iso-audio-tap.cpp
+        src/iso-audio-reader.cpp
         src/iso-ffmpeg-pipe.cpp
         src/zoom-iso-panel.cpp
         src/zoom-dock.cpp
@@ -657,6 +659,11 @@ if(BUILD_TESTING)
             src/iso-track-writer.cpp src/iso-ffmpeg-pipe.cpp)
         target_include_directories(CoreVideoIsoTrackWriterTest PRIVATE src)
         target_link_libraries(CoreVideoIsoTrackWriterTest PRIVATE OBS::libobs)
+        add_executable(CoreVideoIsoIsolatedRecordingTest tests/iso-isolated-recording-test.cpp
+            src/iso-track-writer.cpp src/iso-ffmpeg-pipe.cpp src/iso-audio-reader.cpp)
+        target_include_directories(CoreVideoIsoIsolatedRecordingTest PRIVATE src)
+        target_link_libraries(CoreVideoIsoIsolatedRecordingTest PRIVATE OBS::libobs d3d11 d3dcompiler)
+        target_compile_definitions(CoreVideoIsoIsolatedRecordingTest PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
         if(WIN32)
             target_compile_definitions(CoreVideoIsoTrackWriterTest PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
             target_link_libraries(CoreVideoIsoTrackWriterTest PRIVATE d3d11 d3dcompiler)
@@ -668,6 +675,12 @@ if(BUILD_TESTING)
     )
     add_executable(CoreVideoIsoProviderPolicyTest tests/iso-provider-policy-test.cpp)
     add_executable(CoreVideoIsoFeedSelectionTest tests/iso-feed-selection-test.cpp)
+    add_executable(CoreVideoIsoAudioRoutingTest tests/iso-audio-routing-test.cpp)
+    add_executable(CoreVideoIsoAudioReaderTest tests/iso-audio-reader-test.cpp src/iso-audio-reader.cpp)
+    target_include_directories(CoreVideoIsoAudioReaderTest PRIVATE src)
+    add_test(NAME CoreVideoIsoAudioReader COMMAND CoreVideoIsoAudioReaderTest)
+    target_include_directories(CoreVideoIsoAudioRoutingTest PRIVATE src)
+    add_test(NAME CoreVideoIsoAudioRouting COMMAND CoreVideoIsoAudioRoutingTest)
     target_include_directories(CoreVideoIsoFeedSelectionTest PRIVATE src)
     add_test(NAME CoreVideoIsoFeedSelection COMMAND CoreVideoIsoFeedSelectionTest)
     target_include_directories(CoreVideoIsoProviderPolicyTest PRIVATE src)

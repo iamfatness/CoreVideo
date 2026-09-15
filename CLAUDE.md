@@ -242,6 +242,12 @@ Every one of these is documented at length where it lives; the list is the map.
   writers from configured participant IDs: selected routes open on first real
   media delivery, so offline/unrouted sources produce no blank files. The feed
   checklist updates rows by UUID and retains operator selections across refresh.
+  Audio MUST come from `IsoAudioTap`, not ZoomSource's embedded PCM (which may
+  be the meeting mix labelled with the route's participant ID). Audio-only IPC
+  subscriptions carry `recording_only=true`: receive one-way audio but never
+  claim a participant out of Audience routing. Install plugin AND engine for
+  this change. Each tap owns a fresh SHM reader, checks per-slot attribution,
+  preserves first buffers, and uses the recording epoch to reject stale callbacks.
 - **Colour range is normalised, never re-declared** (`src/i420-range-expand.h`,
   applied in `engine/src/engine-video.cpp`'s `onRawDataFrameReceived`): the
   engine requests `VideoRawdataColorspace_BT709_F` and the plugin declares

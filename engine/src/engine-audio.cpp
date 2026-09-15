@@ -1,6 +1,7 @@
 #include "engine-audio.h"
 #include "engine-writer.h"
 #include "tile-clock-log.h"
+#include "../../src/iso-audio-routing.h"
 #if __has_include(<rawdata/zoom_rawdata_api.h>)
 #include <rawdata/zoom_rawdata_api.h>
 #else
@@ -15,9 +16,10 @@ bool EngineAudio::init(IpcFd e2p_fd,
                        const std::string &source_uuid,
                        uint32_t participant_id,
                        bool isolate_audio,
-                       bool audience_audio)
+                       bool audience_audio, bool recording_only)
 {
     // isolate wins if both are set — defensive, the plugin UI prevents this.
+    if (recording_only) isolate_audio = true;
     if (isolate_audio) audience_audio = false;
 
     m_e2p_fd = e2p_fd;
@@ -47,6 +49,7 @@ bool EngineAudio::init(IpcFd e2p_fd,
             it->second->isolate_audio = isolate_audio;
             it->second->audience_audio = audience_audio;
         }
+        m_targets.at(source_uuid)->recording_only = recording_only;
     }
 
     if (!m_raw_media_active) {
@@ -380,7 +383,8 @@ void EngineAudio::onMixedAudioRawDataReceived(AudioRawData *data)
     for (auto &entry : m_targets) {
         if (!entry.second) continue;
         // Skip isolate AND audience targets — both receive only one-way audio.
-        if (entry.second->isolate_audio || entry.second->audience_audio) continue;
+        if (!audio_receives_mix(entry.second->isolate_audio, entry.second->audience_audio,
+                                entry.second->recording_only)) continue;
         output_audio_frame(*entry.second, entry.first, data,
                            "audio_frame_received");
     }
@@ -397,9 +401,10 @@ void EngineAudio::onOneWayAudioRawDataReceived(AudioRawData *data, uint32_t user
     // determine whether this user is "claimed" by any isolate target.
     bool claimed_by_isolate = false;
     for (auto &entry : m_targets) {
-        if (!entry.second || !entry.second->isolate_audio) continue;
-        if (entry.second->participant_id != user_id) continue;
-        claimed_by_isolate = true;
+        if (!entry.second || !audio_receives_participant(entry.second->participant_id,user_id,
+                entry.second->isolate_audio,entry.second->recording_only)) continue;
+        if (audio_claims_audience(entry.second->isolate_audio,entry.second->recording_only))
+            claimed_by_isolate = true;
         output_audio_frame(*entry.second, entry.first, data,
                            "audio_one_way_frame_received");
     }

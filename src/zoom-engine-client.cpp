@@ -1139,7 +1139,7 @@ void ZoomEngineClient::subscribe(const std::string &source_uuid,
 bool ZoomEngineClient::subscribe_audio(const std::string &source_uuid,
                                        uint32_t participant_id,
                                        bool isolate_audio,
-                                       bool audience_audio)
+                                       bool audience_audio, bool recording_only)
 {
     if (!m_running.load(std::memory_order_acquire) || source_uuid.empty())
         return false;
@@ -1147,6 +1147,7 @@ bool ZoomEngineClient::subscribe_audio(const std::string &source_uuid,
         R"(","participant_id":)" + std::to_string(participant_id) +
         R"(,"isolate_audio":)" + std::string(isolate_audio ? "true" : "false") +
         R"(,"audience_audio":)" + std::string(audience_audio ? "true" : "false") +
+        R"(,"recording_only":)" + std::string(recording_only ? "true" : "false") +
         "}");
 }
 

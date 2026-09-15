@@ -2,6 +2,7 @@
 
 #include "iso-encoder-plan.h"
 #include "iso-track-writer.h"
+#include "iso-audio-tap.h"
 #include "zoom-output-manager.h"
 #include "zoom-types.h"
 #include <QJsonArray>
@@ -61,6 +62,9 @@ class ZoomIsoRecorder
         std::unique_ptr<IsoTrackWriter> writer;
     };
     Session &ensure_session_locked(const ZoomOutputInfo &info, uint32_t participant, uint64_t ns);
+    void ensure_audio_locked(const ZoomOutputInfo &info, uint32_t participant);
+    void receive_isolated_audio(const ZoomOutputInfo &info, uint32_t participant,
+        uint64_t epoch, const uint8_t *pcm, uint32_t bytes, uint32_t rate, uint16_t channels, uint64_t ns);
     QJsonObject session_status_locked(Session &session, bool completed, uint64_t end_ns = 0);
     bool should_record(const ZoomOutputInfo &info, uint32_t participant) const;
     IsoEncoderAvailability m_encoder_avail;
@@ -74,5 +78,6 @@ class ZoomIsoRecorder
     QString m_status_warning;
     std::unordered_map<std::string, ZoomOutputInfo> m_outputs;
     std::unordered_map<uint32_t, Session> m_sessions;
+    std::unordered_map<uint32_t, std::shared_ptr<IsoAudioTap>> m_audio_taps;
     std::vector<QJsonObject> m_completed_sessions;
 };

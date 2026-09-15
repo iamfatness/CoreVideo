@@ -257,7 +257,7 @@ public:
     bool subscribe_audio(const std::string &source_uuid,
                          uint32_t participant_id,
                          bool isolate_audio,
-                         bool audience_audio);
+                         bool audience_audio, bool recording_only = false);
     void unsubscribe(const std::string &source_uuid);
 
     MeetingState state() const { return m_state.load(std::memory_order_acquire); }

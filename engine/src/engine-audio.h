@@ -34,7 +34,7 @@ public:
               const std::string &source_uuid,
               uint32_t participant_id,
               bool isolate_audio,
-              bool audience_audio);
+              bool audience_audio, bool recording_only = false);
     bool retry_subscribe(const std::string &reason);
     void set_raw_media_active(bool active);
     void reset_subscription(const std::string &reason);
@@ -60,6 +60,7 @@ private:
         uint32_t participant_id = 0;
         bool isolate_audio = false;
         bool audience_audio = false;
+        bool recording_only = false;
         ShmRegion shm;
         // The generation the CURRENT region was created under; part of the name
         // from gen 2 and published with every audio event. A record of what was

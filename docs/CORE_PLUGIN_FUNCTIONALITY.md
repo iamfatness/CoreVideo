@@ -586,6 +586,10 @@ first; the package does not bundle FFmpeg.
 
 CoreVideo records one continuous MP4 per Zoom participant ID during Record/Stop.
 Each file contains H.264 video at 1920x1080, 30 fps and AAC stereo audio at 48 kHz.
+ISO audio comes from a dedicated one-way subscription for that participant,
+independent of the OBS source's Mix/Isolated setting. Recording subscriptions
+do not remove participants from the Audience mix. A muted/silent participant
+has silence in their MP4; other speakers are never substituted.
 Choose feeds in the ISO Recorder before starting. Choices are remembered by
 source UUID; no feeds are selected by default. Unrouted and unselected feeds do
 not start recordings. A selected feed opens its file only when its first actual

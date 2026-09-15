@@ -179,8 +179,12 @@ bool ZoomIsoRecorder::start(const ZoomIsoRecordConfig &config, std::string *erro
         m_completed_sessions.clear();
         m_epoch_ns = os_gettime_ns();
         m_active.store(true, std::memory_order_release);
+        for (const auto &info : outputs) m_outputs[info.source_uuid] = info;
         // Arm selected feeds only. A writer is opened on their first actual
         // media callback, never merely because an OBS source exists.
+        for (const auto &info : outputs)
+            if (should_record(info, info.participant_id))
+                ensure_audio_locked(info, info.participant_id);
     }
 
     if (normalized.record_program && !obs_frontend_recording_active()) {
@@ -205,15 +209,18 @@ void ZoomIsoRecorder::stop()
     }
     const uint64_t end_ns = os_gettime_ns();
     std::unordered_map<uint32_t, Session> sessions;
+    std::unordered_map<uint32_t, std::shared_ptr<IsoAudioTap>> audio_taps;
     bool stop_program = false;
     {
         std::lock_guard<std::mutex> lock(m_mtx);
         sessions.swap(m_sessions);
+        audio_taps.swap(m_audio_taps);
         stop_program = m_started_program_recording && obs_frontend_recording_active();
         m_started_program_recording = false;
     }
     if (stop_program)
         obs_frontend_recording_stop();
+    for (auto &entry : audio_taps) entry.second->stop();
     for (auto &entry : sessions)
         entry.second.writer->close(end_ns);
     QElapsedTimer deadline;
@@ -222,6 +229,11 @@ void ZoomIsoRecorder::stop()
         auto &session = entry.second;
         session.writer->wait_finished(int(std::max<qint64>(0, 15000 - deadline.elapsed())));
         QJsonObject completed = session_status_locked(session, true, end_ns);
+        const auto tap = audio_taps.find(entry.first);
+        if (tap != audio_taps.end() && !tap->second->error().empty()) {
+            completed["ffmpeg_error"] = QString::fromStdString(tap->second->error());
+            completed["session_health"] = "audio_error";
+        }
         if (!session.writer->status().done) {
             completed["ffmpeg_error"] = "ISO finalization exceeded the shared shutdown deadline";
             completed["session_health"] = "encoder_error";
@@ -294,6 +306,7 @@ void ZoomIsoRecorder::record_video_frame(const ZoomOutputInfo &info, uint32_t pa
     std::lock_guard<std::mutex> lock(m_mtx);
     if (!should_record(info, participant))
         return;
+    ensure_audio_locked(info, participant);
     auto &session = ensure_session_locked(info, participant, ns);
     if (iso_take_provider(session.video_owner, session.video_ns, info.source_uuid, ns))
         session.writer->video(w, h, y, u, v, sy, suv, ns);
@@ -305,14 +318,43 @@ void ZoomIsoRecorder::record_audio_frame(const ZoomOutputInfo &info, uint32_t pa
     std::lock_guard<std::mutex> lock(m_mtx);
     if (!should_record(info, participant))
         return;
-    auto &session = ensure_session_locked(info, participant, ns);
-    if (iso_take_provider(session.audio_owner, session.audio_ns, info.source_uuid, ns))
-        session.writer->audio(pcm, bytes, rate, channels, ns);
+    // OBS source PCM may be the meeting mix. It can discover a route, but must
+    // never be written to a participant recording, even if labelled with its ID.
+    (void)pcm; (void)bytes; (void)rate; (void)channels; (void)ns;
+    ensure_audio_locked(info, participant);
+}
+void ZoomIsoRecorder::ensure_audio_locked(const ZoomOutputInfo &info, uint32_t participant)
+{
+    if (m_audio_taps.count(participant)) return;
+    const auto uuid = "iso_audio_" + std::to_string(m_epoch_ns) + "_" + std::to_string(participant);
+    const auto epoch = m_epoch_ns;
+    auto tap = std::make_shared<IsoAudioTap>(uuid,participant,
+        [this,info,participant,epoch](const uint8_t *pcm,uint32_t bytes,uint32_t rate,uint16_t channels,uint64_t ns) {
+            receive_isolated_audio(info,participant,epoch,pcm,bytes,rate,channels,ns);
+        }, [] { return os_gettime_ns(); });
+    m_audio_taps.emplace(participant,tap);
+    tap->start();
+}
+void ZoomIsoRecorder::receive_isolated_audio(const ZoomOutputInfo &info,uint32_t participant,
+    uint64_t epoch,const uint8_t *pcm,uint32_t bytes,uint32_t rate,uint16_t channels,uint64_t ns)
+{
+    std::lock_guard<std::mutex> lock(m_mtx);
+    if (!m_active.load() || epoch != m_epoch_ns || !m_audio_taps.count(participant)) return;
+    if (!m_sessions.count(participant)) {
+        const auto route = m_outputs.find(info.source_uuid);
+        if (route == m_outputs.end() || !should_record(route->second,participant) ||
+            (route->second.assignment == AssignmentMode::Participant &&
+             route->second.participant_id != participant)) return;
+    }
+    auto &session=ensure_session_locked(info,participant,ns);
+    session.audio_ns=ns;
+    session.writer->audio(pcm,bytes,rate,channels,ns);
 }
 void ZoomIsoRecorder::on_output_updated(const ZoomOutputInfo &info)
 {
     std::lock_guard<std::mutex> lock(m_mtx);
     m_outputs[info.source_uuid] = info;
+    if (should_record(info, info.participant_id)) ensure_audio_locked(info, info.participant_id);
 }
 void ZoomIsoRecorder::on_output_removed(const std::string &source)
 {
@@ -355,6 +397,7 @@ QJsonObject ZoomIsoRecorder::session_status_locked(Session &session, bool comple
     obj["video_frames"] = double(status.frames);
     obj["written_frames"] = double(status.written_frames);
     obj["audio_chunks"] = double(status.audio_packets);
+    obj["audio_isolated"] = true;
     obj["coalesced_video_frames"] = double(status.coalesced_video);
     obj["late_audio_frames"] = double(status.late_audio_frames);
     obj["video_frames_dropped"] = 0;
@@ -364,6 +407,9 @@ QJsonObject ZoomIsoRecorder::session_status_locked(Session &session, bool comple
     obj["startup_buffering"] = status.startup;
     obj["media_stopped"] = !status.error.empty();
     obj["ffmpeg_error"] = QString::fromStdString(status.error);
+    const auto tap = m_audio_taps.find(session.participant);
+    if (tap != m_audio_taps.end() && !tap->second->error().empty())
+        obj["ffmpeg_error"] = QString::fromStdString(tap->second->error());
     obj["ffmpeg_running"] = !status.done;
     obj["completed"] = completed;
     obj["video_encoder"] = QString::fromStdString(session.encoder);
@@ -404,6 +450,10 @@ QJsonObject ZoomIsoRecorder::status_overview()
     obj["session_count"] = int(m_sessions.size());
     obj["completed_session_count"] = int(m_completed_sessions.size());
     QString warning = m_status_warning;
+    for (const auto &entry : m_audio_taps) {
+        const auto error = entry.second->error();
+        if (!error.empty()) { warning = QString::fromStdString(error); break; }
+    }
     for (const auto &entry : m_sessions)
         if (!entry.second.writer->status().error.empty()) {
             warning = "One or more participant recordings failed. Inspect the track errors.";

@@ -425,17 +425,13 @@ Every one of these is documented at length where it lives; the list is the map.
      none, under a comment describing the code above.
      **The leak question, answered from the code rather than assumed**: `Join`
      sets `isAudioOff = false` / `isMyVoiceInMix = true`
-     (`engine/src/main.cpp`) and **nothing in this repository calls
-     `setExternalAudioSource()`** — the only `IZoomSDKAudioRawDataHelper` use
-     anywhere is `engine-audio.cpp`'s `subscribe()`/`unSubscribe()`, the
-     *receive* path — so a bare unmute would open the OBS machine's **default
-     capture device** live into the meeting. The insurance runs once at auth,
-     in `main.cpp`'s existing `CreateSettingService` block (stage
-     `mic_insurance`): `SelectMic()` onto a device id that matches nothing plus
-     `SetMicVol(0)`. **Weaker than ZComms's** never-fed virtual mic, and
-     deliberately so — theirs installs a virtual mic into the same helper our
-     show-critical receive subscribe uses. If a live gate ever hears the room
-     through this, `setExternalAudioSource()` is the escalation.
+     (`engine/src/main.cpp`). Authentication installs `EngineSilentMic` with
+     `setExternalAudioSource()` before reporting auth_ok. It never sends PCM,
+     never selects a physical mic, and outlives SDK cleanup. Registration
+     failure blocks Join. Both automatic microphone level controls are disabled.
+     Never use `SetMicVol` or a fake device selection as a silence safeguard:
+     Zoom may fall back to the Windows default mic and change its system level.
+     EngineAudio's receive subscription and talkback channel PCM stay separate.
   2. **The rate limit is per membership CALL, and invites count** — see the
      next bullet, which this rewrote.
   3. **A same-account host collision hangs the join forever unless answered.**

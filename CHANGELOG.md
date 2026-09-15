@@ -7,6 +7,11 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+### Fixed
+- Windows startup no longer sets the system microphone volume to zero. The
+  Zoom engine uses a silent virtual microphone and disables automatic input
+  level adjustment; joining is blocked if the silent source cannot initialize.
+
 ## [0.1.47] - 2026-09-15
 
 ### Added

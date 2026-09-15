@@ -7,6 +7,35 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.47] - 2026-09-15
+
+### Added
+- ISO feed selection: choose routed outputs, remember choices, and create files
+  only when selected feeds deliver media. TCP accepts `source_uuids`; OSC uses
+  saved panel selections. Empty selections no longer record every source.
+
+### Fixed
+- Each participant ISO is one continuous 1920x1080/30 H.264 MP4 with AAC audio.
+  Incoming resolution changes are scaled with aspect ratio preserved, without
+  splitting files. Duplicate output routes share the same participant recording.
+- ISO audio uses dedicated isolated participant subscriptions, independently of
+  the OBS source's Mix/Isolated setting, without changing Audience audio routing.
+- Participant workers hold video and fill silence through gaps. Startup timing,
+  full-range color, planar chroma, and batched audio timestamps are preserved.
+- Tiles retains valid pending pixels when a shared-memory read is rejected,
+  preventing a path that could flash incorrect colors during resolution changes.
+
+### Validation
+- Windows plugin/engine build and 72 native regressions pass. Real MP4 fixtures
+  cover eight concurrent NVENC tracks, changing resolutions/audio formats, gaps,
+  color preservation and flash/tone sync within 20 ms.
+- Alternating-speaker tests through routing, shared memory and MP4 encoding
+  confirm silence in each participant's file while the other speaker talks.
+- These are synthetic media checks; a live Zoom soak of the final isolated-audio
+  build has not been completed. Existing mixed recordings are not repaired.
+- Windows installer and ZIP include both updated plugin and engine. The signed
+  macOS installer still requires a separate build on the maintainer's Mac.
+
 ## [0.1.46] - 2026-09-14
 
 ### Fixed

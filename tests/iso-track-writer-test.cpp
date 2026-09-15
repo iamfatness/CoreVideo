@@ -54,7 +54,7 @@ int main(int argc, char **argv)
         std::fill_n(pixels.data() + size_t(w) * h * 5 / 4, size_t(w) * h / 4, 180);
         const uint32_t rate = second < 3 ? 32000 : 48000;
         const uint16_t channels = second < 3 ? 1 : 2;
-        std::vector<int16_t> audio(rate / 100 * channels);
+        std::vector<int16_t> audio(size_t(rate / 100) * channels);
         for (uint32_t frame = 0; frame < rate / 100; ++frame) {
             const auto sample = int16_t(
                 flash ? std::sin(double(frame) * 2 * 3.141592653589793 * 1000 / rate) * 16000 : 0);

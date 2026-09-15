@@ -109,6 +109,8 @@ void IsoTrackWriter::run()
     video_scaler_t *scaler = nullptr;
 #endif
     try {
+        // One encoder process owns both streams for the participant's lifetime.
+        // Matroska carries explicit timestamps across the single stdin pipe.
         std::vector<std::string> args = {
             "-hide_banner", "-loglevel", "warning", "-n",   "-f",    "matroska", "-i",
             "pipe:0",       "-map",      "0:v:0",   "-map", "0:a:0", "-c:v",     m_config.encoder};
@@ -148,6 +150,8 @@ void IsoTrackWriter::run()
         uint32_t oldW = 0, oldH = 0;
 #endif
         for (;;) {
+            // Advance a fixed 30 Hz output clock, allowing input a short arrival window.
+            // A missing video frame retains the previous conformed picture.
             Video newest{};
             std::deque<Audio> audio;
             const uint64_t tickNs = m_config.epoch_ns + index * 1000000000ULL / 30;
@@ -211,6 +215,7 @@ void IsoTrackWriter::run()
                 m_status.input_height = newest.h;
             }
             const uint64_t emitted = index * 1600;
+            // Resample into a bounded stereo timeline; unfilled positions remain silent.
             for (auto &packet : audio) {
                 if (packet.rate != rate || packet.channels != channels) {
                     audio_resampler_destroy(resampler);
@@ -266,6 +271,7 @@ void IsoTrackWriter::run()
                     sample = 0;
                 }
             auto batch = iso_av::frame(index, picture, pcm);
+            // Backpressure stays on this participant worker and has a finite timeout.
             const auto queueStart = std::chrono::steady_clock::now();
             while (!pipe.try_queue(std::move(batch))) {
                 if (!pipe.running() || pipe.queue_status().broken)
@@ -296,6 +302,7 @@ void IsoTrackWriter::run()
     video_scaler_destroy(scaler);
 #endif
     pipe.close_stdin();
+    // Let FFmpeg flush audio and finalize the file before reporting completion.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
     while (!pipe.wait_finished(50)) {
         bool abort;

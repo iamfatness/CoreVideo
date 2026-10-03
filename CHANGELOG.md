@@ -7,6 +7,23 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.49] - 2026-10-03
+
+### Fixed
+- The Zoom engine no longer crashes partway through a screen share. When the
+  sharer switched content, or the share restarted or reconnected, the screen
+  share path could deadlock on its own lock and terminate the engine, which
+  dropped every Zoom feed while OBS kept running. Screen share callbacks now
+  never wait on a lock held by an SDK call, and an unexpected error inside one
+  is logged instead of ending the session.
+
+### Validation
+- Windows build and 82 regression tests pass, including a new screen share
+  test where a simulated Zoom SDK calls back synchronously. It reproduces the
+  crash on the previous code.
+- Root cause confirmed from six engine crash dumps. A long live screen share
+  with content switches is still pending.
+
 ## [0.1.48] - 2026-09-15
 
 ### Fixed

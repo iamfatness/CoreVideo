@@ -712,6 +712,12 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/src")
     add_test(NAME CoreVideoFfmpegRuntimeFs COMMAND CoreVideoFfmpegRuntimeFsTest)
 
+    # MANUAL network check that the pinned archive still matches (not in ctest).
+    add_executable(CoreVideoFfmpegRuntimeLiveTest tests/ffmpeg-runtime-live-test.cpp)
+    target_include_directories(CoreVideoFfmpegRuntimeLiveTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(CoreVideoFfmpegRuntimeLiveTest PRIVATE Qt6::Core Qt6::Network)
+
     add_executable(CoreVideoSpeakerDirectorTest
         tests/speaker-director-test.cpp
         src/speaker-director.cpp

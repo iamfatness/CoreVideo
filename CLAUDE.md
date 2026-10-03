@@ -598,6 +598,35 @@ Every one of these is documented at length where it lives; the list is the map.
   timeout can free the name. `members_present_for_target()` and
   `session_start()` now share one `members_present_locked()` implementation
   instead of two hand-copied loops that could drift silently.
+- **Never hold a lock a renderer callback takes while calling the SDK**
+  (`engine/src/engine-share.{h,cpp}`; field crash 2026-10-02, v0.1.48:
+  "screenshare works ~30 min, then the Zoom SDK crashes, OBS stays up").
+  The Windows SDK delivers `onRawDataStatusChanged` and
+  `onRendererBeDestroyed` SYNCHRONOUSLY from inside `subscribe()`,
+  `unSubscribe()` and `destroyRenderer()`, on the calling thread. EngineShare
+  used one `std::mutex` for both its SDK calls and those callbacks; the
+  callback relocked it, MSVC's `std::mutex` threw
+  `resource_deadlock_would_occur`, nothing caught it, and the engine aborted.
+  Proven from six local `ZoomObsEngine` dumps (Aug 9-25, three builds, all
+  `std::_Throw_Cpp_error(5)` in the one function that emits `","status":`).
+  It hits on the first re-subscribe during a live share (content switch,
+  share restart, reconnect, raw-media re-arm), hence "fine for half an hour".
+  Now two locks: `m_lifecycle_mtx` (recursive) for renderer/controller state
+  and every SDK call, never taken by renderer callbacks; `m_targets_mtx` for
+  the SHM targets, taken by the frame/status callbacks and never held across
+  an SDK call. The renderer is published BEFORE `subscribe()` and released by
+  `exchange(nullptr)` BEFORE `unSubscribe()`, so a re-entrant switch or
+  teardown owns it cleanly. Every SDK-invoked entry point runs inside
+  `run_sdk_callback()`, which reports `share_callback_exception` instead of
+  letting an exception reach Zoom's frames. Pinned by
+  `CoreVideoEngineShareReentrancyTest`: a fake renderer calls back on the
+  caller's thread. It fails on the old code, and both mutations (a renderer
+  release moved under the targets lock; the guard removed) are killed. Note
+  that the guard alone would have hidden mutation 1, which is why the test
+  also requires that no callback ever needed rescuing. The video path
+  (`ParticipantSubscription`) already kept SDK calls outside
+  `m_targets_mtx`; macOS learned the same rule separately (see the macOS
+  section).
 - **Engine teardown**: never let SDK callbacks race teardown; `set_terminate`
   is a bare `_exit(5)` (code 5 maps to EngineCrash recovery; no pipe writes,
   no locks, no allocation in the handler).

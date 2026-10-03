@@ -3,6 +3,7 @@
 #include "../../src/engine-ipc.h"
 #include "../../src/shm-generation.h"
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -83,22 +84,38 @@ private:
         bool shm_fail_reported = false;
     };
 
+    void deliver_frame(YUVRawDataI420 *data);
+    // `_locked` = caller holds m_lifecycle_mtx.
     uint32_t active_share_source_id(uint32_t *user_id) const;
     void subscribe_active_share_locked(const char *reason);
     bool subscribe_to_locked(uint32_t share_source_id, const char *reason);
     void unsubscribe_renderer_locked();
-    void clear_target_shm_locked();
+    size_t target_count() const;
     bool ensure_shm(ShareTarget &target,
                     const std::string &source_uuid,
                     size_t y_len);
     void set_active_share_user(uint32_t user_id);
 
+    // Two locks, and the split is the point. The Zoom SDK calls the renderer
+    // delegate (onRawDataStatusChanged, onRendererBeDestroyed) synchronously
+    // from inside subscribe()/unSubscribe()/destroyRenderer(), on the calling
+    // thread. When one mutex guarded both the SDK calls and the callbacks,
+    // that callback relocked a mutex its own thread held; MSVC's std::mutex
+    // threw resource_deadlock_would_occur, nothing caught it, and the engine
+    // aborted mid-share (field crash 2026-10-02, six local dumps Aug 9-25).
+    //
+    // m_lifecycle_mtx: renderer/controller state and every SDK call that
+    //   changes it. Recursive because SDK share events can arrive re-entrantly
+    //   while one of those calls is in progress. Renderer callbacks never take it.
+    // m_targets_mtx: the per-source SHM targets. Taken by the frame and status
+    //   callbacks; NEVER held across an SDK call. Order: lifecycle, then targets.
     EngineShareRosterSink *m_roster_sink = nullptr;
     ZOOMSDK::IMeetingShareController *m_share_ctrl = nullptr;
-    ZOOMSDK::IZoomSDKRenderer *m_renderer = nullptr;
-    mutable std::mutex m_mtx;
+    std::atomic<ZOOMSDK::IZoomSDKRenderer *> m_renderer{nullptr};
+    mutable std::recursive_mutex m_lifecycle_mtx;
+    mutable std::mutex m_targets_mtx;
     std::unordered_map<std::string, std::unique_ptr<ShareTarget>> m_targets;
-    uint32_t m_current_share_source_id = 0;
-    uint32_t m_current_share_user_id = 0;
+    std::atomic<uint32_t> m_current_share_source_id{0};
+    std::atomic<uint32_t> m_current_share_user_id{0};
     bool m_raw_media_active = false;
 };

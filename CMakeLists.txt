@@ -1340,6 +1340,23 @@ if(BUILD_TESTING)
             "${CMAKE_CURRENT_SOURCE_DIR}/engine/src" "${ZOOM_SDK_INCLUDE_DIR}")
         target_compile_definitions(CoreVideoEngineSilentMicTest PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
         add_test(NAME CoreVideoEngineSilentMic COMMAND CoreVideoEngineSilentMicTest)
+        # Compiles the real engine-share.cpp against a fake renderer that calls
+        # back on the caller's thread, the way the SDK does. The relock this
+        # pins killed the engine mid-share in the field (2026-10-02).
+        add_executable(CoreVideoEngineShareReentrancyTest
+            tests/engine-share-reentrancy-test.cpp
+            engine/src/engine-share.cpp
+        )
+        target_include_directories(CoreVideoEngineShareReentrancyTest PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${CMAKE_CURRENT_SOURCE_DIR}/engine/src"
+            "${ZOOM_SDK_INCLUDE_DIR}"
+        )
+        target_compile_definitions(CoreVideoEngineShareReentrancyTest PRIVATE
+            NOMINMAX WIN32_LEAN_AND_MEAN)
+        target_link_libraries(CoreVideoEngineShareReentrancyTest PRIVATE Threads::Threads)
+        add_test(NAME CoreVideoEngineShareReentrancy
+                 COMMAND CoreVideoEngineShareReentrancyTest)
         add_executable(CoreVideoEngineTalkbackSelectTest
             tests/engine-talkback-select-test.cpp
             engine/src/engine-talkback.cpp

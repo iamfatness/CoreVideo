@@ -96,7 +96,7 @@ void FfmpegRuntimeInstaller::on_ready_read()
         return;
     }
     const FfmpegRuntimePin *pin = ffmpeg_runtime_pin_for_host();
-    if (!ffmpeg_download_size_ok(quint64(m_received), pin->size_bytes)) {
+    if (!pin || !ffmpeg_download_size_ok(quint64(m_received), pin->size_bytes)) {
         m_oversized = true;
         m_reply->abort();
         return;
@@ -167,11 +167,12 @@ void FfmpegRuntimeInstaller::on_download_finished()
     // Extraction and the test-run block for seconds; keep them off the UI thread.
     const QString root = m_root;
     const auto abort = m_abort;  // the worker gets a copy, never this's state
-    QThread *worker = QThread::create([this, root, archive, abort] {
+    const QString version = pin ? QString::fromUtf8(pin->version) : QString();
+    QThread *worker = QThread::create([this, root, archive, abort, version] {
         const QString failure = install_from_archive(root, archive, abort);
-        QMetaObject::invokeMethod(this, [this, failure] {
+        QMetaObject::invokeMethod(this, [this, failure, version] {
             finish(failure.isEmpty(), failure.isEmpty()
-                ? QStringLiteral("FFmpeg %1 installed.").arg(ffmpeg_runtime_pin_for_host()->version)
+                ? QStringLiteral("FFmpeg %1 installed.").arg(version)
                 : failure);
         }, Qt::QueuedConnection);
     });
@@ -214,6 +215,8 @@ QString FfmpegRuntimeInstaller::install_from_archive(const QString &root, const 
 {
     const std::atomic<bool> &abort = *abort_ptr;
     const FfmpegRuntimePin *pin = ffmpeg_runtime_pin_for_host();
+    if (!pin)  // start_download() refuses first; this keeps the worker self-contained
+        return QStringLiteral("CoreVideo has no FFmpeg download for this platform.");
     const QDir dir(root);
     const QString extract = dir.filePath(QStringLiteral("extract"));
     const QString staging = dir.filePath(QStringLiteral("staging"));

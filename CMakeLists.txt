@@ -286,6 +286,7 @@ if(COREVIDEO_BUILD_PLUGIN)
         src/zoom-output-profile.cpp
         src/zoom-iso-recorder.cpp
         src/ffmpeg-runtime-locate.cpp
+        src/ffmpeg-runtime-installer.cpp
         src/ffmpeg-runtime-fs.cpp
         src/iso-track-writer.cpp
         src/iso-audio-tap.cpp

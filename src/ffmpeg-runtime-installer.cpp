@@ -189,7 +189,7 @@ static bool run_tool(const QString &program, const QStringList &args, QByteArray
     p.setProgram(program);
     p.setArguments(args);
     p.start();
-    if (!p.waitForStarted(10000)) {
+    if (!p.waitForStarted(2000)) {
         blog(LOG_WARNING, "[obs-zoom-plugin] FFmpeg install: could not start %s: %s",
              program.toUtf8().constData(), p.errorString().toUtf8().constData());
         return false;
@@ -227,6 +227,8 @@ QString FfmpegRuntimeInstaller::install_from_archive(const QString &root, const 
             : QStringLiteral(" Your previous FFmpeg could not be restored; use Download FFmpeg again."));
     };
     auto cancelled = [&] { return fail(QStringLiteral("Download cancelled.")); };
+    // A run_tool failure caused by cancel() is a cancellation, not that step's fault.
+    auto step_failed = [&](const QString &why) { return abort.load() ? cancelled() : fail(why); };
 
     // The pin vouches for the bytes we EXTRACT, not just the bytes we hashed
     // while streaming: re-hash the closed file from disk and trust only that.
@@ -256,11 +258,11 @@ QString FfmpegRuntimeInstaller::install_from_archive(const QString &root, const 
                                    "Choose an existing ffmpeg instead."));
     QByteArray listing;
     if (!run_tool(tar, {QStringLiteral("-tf"), archive}, &listing, 60000, abort))
-        return fail(QStringLiteral("Could not read the downloaded archive."));
+        return step_failed(QStringLiteral("Could not read the downloaded archive."));
 #else
     QByteArray listing;
     if (!run_tool(QStringLiteral("/usr/bin/zipinfo"), {QStringLiteral("-1"), archive}, &listing, 60000, abort))
-        return fail(QStringLiteral("Could not read the downloaded archive."));
+        return step_failed(QStringLiteral("Could not read the downloaded archive."));
 #endif
     if (abort.load()) return cancelled();
     bool has_exe = false;
@@ -277,11 +279,11 @@ QString FfmpegRuntimeInstaller::install_from_archive(const QString &root, const 
 #if defined(_WIN32)
     if (!run_tool(tar, {QStringLiteral("-xf"), archive, QStringLiteral("-C"), extract,
                         QString::fromUtf8(pin->archive_exe)}, nullptr, 300000, abort))
-        return fail(QStringLiteral("Could not unpack FFmpeg."));
+        return step_failed(QStringLiteral("Could not unpack FFmpeg."));
 #else
     if (!run_tool(QStringLiteral("/usr/bin/ditto"), {QStringLiteral("-x"), QStringLiteral("-k"), archive, extract},
                   nullptr, 300000, abort))
-        return fail(QStringLiteral("Could not unpack FFmpeg."));
+        return step_failed(QStringLiteral("Could not unpack FFmpeg."));
 #endif
 
     if (abort.load()) return cancelled();
@@ -302,7 +304,7 @@ QString FfmpegRuntimeInstaller::install_from_archive(const QString &root, const 
     QByteArray version;
     if (!run_tool(exe, {QStringLiteral("-hide_banner"), QStringLiteral("-version")}, &version, 30000, abort) ||
         !version.startsWith("ffmpeg version"))
-        return fail(QStringLiteral("The downloaded FFmpeg did not start on this computer."));
+        return step_failed(QStringLiteral("The downloaded FFmpeg did not start on this computer."));
 
     QFile prov(QDir(staging).filePath(QStringLiteral("provenance.txt")));
     if (!prov.open(QIODevice::WriteOnly | QIODevice::Truncate))

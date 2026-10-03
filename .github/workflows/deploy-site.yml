@@ -45,6 +45,11 @@ jobs:
       - name: Check site SEO invariants
         run: node scripts/check-site-seo.mjs
 
+      # A pinned download (the macOS .pkg) pointed at an asset that was never
+      # uploaded and 404'd for weeks. Block the deploy instead.
+      - name: Check pinned download links resolve
+        run: node scripts/check-site-downloads.mjs
+
       - name: Validate Cloudflare configuration
         id: cloudflare_config
         shell: bash

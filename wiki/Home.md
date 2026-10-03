@@ -2,7 +2,7 @@
 
 CoreVideo is an OBS Studio plugin that pulls Zoom meeting video, audio, screen
 share, and Zoom interpretation audio into OBS as native sources - no NDI, no
-virtual camera, no screen capture of a Zoom window. Current Windows release: **v0.1.45**; macOS Apple Silicon beta: **v0.1.45-beta.3**.
+virtual camera, no screen capture of a Zoom window. Current Windows release: **v0.1.49**; macOS Apple Silicon beta: **v0.1.45-beta.2**.
 
 This wiki holds the policy and support pages. Everything operational - install,
 configuration, architecture, the control APIs - lives on the documentation site,
@@ -43,7 +43,7 @@ the two.
 ## Platform status
 
 **Windows 10/11 x64 and macOS Apple Silicon have packaged builds.** Windows
-uses the stable release channel; macOS v0.1.45-beta.3 is a public beta with a
+uses the stable release channel; macOS v0.1.45-beta.2 is a public beta with a
 Developer ID signed, notarized installer. [Download and install](https://corevideo.io/download/#macos).
 Intel
 Macs are not supported by this package, and Linux requires a source build.

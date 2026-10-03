@@ -1,7 +1,7 @@
 # Support
 
-Current Windows release: **v0.1.45**. macOS Apple Silicon beta:
-**v0.1.45-beta.3**, signed and notarized. See [Downloads](https://corevideo.io/download/)
+Current Windows release: **v0.1.49**. macOS Apple Silicon beta:
+**v0.1.45-beta.2**, signed and notarized. See [Downloads](https://corevideo.io/download/)
 for the correct package. Include your operating system, OBS version, and
 CoreVideo version with a bug report.
 

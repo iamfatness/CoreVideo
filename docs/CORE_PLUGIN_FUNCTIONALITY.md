@@ -4,8 +4,8 @@ This guide covers the main CoreVideo OBS plugin workflows. It intentionally
 focuses on the OBS plugin, `ZoomObsEngine`, Zoom source assignment, control APIs,
 audio routing, talkback, and ISO recording.
 
-Current Windows release: **v0.1.45**. macOS Apple Silicon beta:
-**v0.1.45-beta.3**, available as a signed and notarized installer on the
+Current Windows release: **v0.1.49**. macOS Apple Silicon beta:
+**v0.1.45-beta.2**, available as a signed and notarized installer on the
 [download page](https://corevideo.io/download/#macos). Talkback is unavailable
 on macOS. The Mac package was built against OBS 32.2.1; use that version or newer.
 

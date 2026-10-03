@@ -54,7 +54,7 @@ function latestReleaseVersion() {
 
 const RELEASE_VERSION = latestReleaseVersion();
 // macOS betas are signed locally and published separately from Windows releases.
-const MAC_VERSION = "0.1.45-beta.3";
+const MAC_VERSION = "0.1.45-beta.2";
 const MAC_RELEASE = `https://github.com/iamfatness/CoreVideo/releases/tag/v${MAC_VERSION}`;
 const MAC_INSTALLER = `https://github.com/iamfatness/CoreVideo/releases/download/v${MAC_VERSION}/CoreVideo-Setup-v${MAC_VERSION}.pkg`;
 const RELEASES_LATEST = "https://github.com/iamfatness/CoreVideo/releases/latest";

@@ -691,6 +691,13 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoIsoEncoderPlan
              COMMAND CoreVideoIsoEncoderPlanTest)
 
+    # The pinned FFmpeg runtime archives (spec 2026-10-03): every field set,
+    # well-formed hash, one version across platforms.
+    add_executable(CoreVideoFfmpegRuntimePinsTest tests/ffmpeg-runtime-pins-test.cpp)
+    target_include_directories(CoreVideoFfmpegRuntimePinsTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    add_test(NAME CoreVideoFfmpegRuntimePins COMMAND CoreVideoFfmpegRuntimePinsTest)
+
     add_executable(CoreVideoSpeakerDirectorTest
         tests/speaker-director-test.cpp
         src/speaker-director.cpp

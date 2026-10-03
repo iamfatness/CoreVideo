@@ -141,7 +141,7 @@ inline bool ffmpeg_archive_entry_safe(const std::string &entry)
                 }
             }
             // If all chars are dots and spaces, reject unless it's exactly ".".
-            if (all_dot_space && len > 1) return false;
+            if (all_dot_space && !(len == 1 && segment == ".")) return false;
         }
 
         start = end + 1;

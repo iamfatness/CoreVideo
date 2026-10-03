@@ -131,6 +131,15 @@ int main()
     check(!ffmpeg_archive_entry_safe("a/... /x"), "dot-space segment rejected");
     check(!ffmpeg_archive_entry_safe("ffmpeg.exe:stream"), "NTFS ADS rejected");
     check(!ffmpeg_archive_entry_safe(std::string("..\0/x", 5)), "NUL char rejected");
+    // Additional space/dot segment tests for Windows normalization.
+    check(!ffmpeg_archive_entry_safe(" ."), "space-dot segment rejected");
+    check(!ffmpeg_archive_entry_safe(". "), "dot-space segment (single) rejected");
+    check(!ffmpeg_archive_entry_safe(" "), "space-only segment rejected");
+    check(!ffmpeg_archive_entry_safe("a/ /b"), "space-only in path rejected");
+    check(!ffmpeg_archive_entry_safe(std::string("a\x7f" "b", 3)), "0x7F control char rejected");
+    check(!ffmpeg_archive_entry_safe("a\nb"), "newline control char rejected");
+    check(ffmpeg_archive_entry_safe("."), "lone dot accepted");
+    check(ffmpeg_archive_entry_safe("a.b"), "dot in name accepted");
 
     // Download size rule: abort past expected + 10%.
     check(ffmpeg_download_size_ok(100, 100), "exact ok");

@@ -21,11 +21,11 @@ public:
     static FfmpegRuntimeInstaller &instance();
 
     bool busy() const { return m_busy; }
-    // Starts a download unless one is already running (REVIEW FOCUS 4:
-    // a double click must not start two). Emits finished() on every exit.
+    // Starts a download unless one is already running (a double click must
+    // not start two). Emits finished() on every exit.
     void start_download();
     void cancel();
-    // Refuses while the managed ffmpeg is recording (REVIEW FOCUS 5).
+    // Refuses while the managed ffmpeg is recording (a running recording holds the exe open).
     bool remove(bool in_use, QString *error);
     // Called from obs_module_unload(): stops the download, tells the worker to
     // abort, and waits (bounded) for it so no thread outlives the plugin.

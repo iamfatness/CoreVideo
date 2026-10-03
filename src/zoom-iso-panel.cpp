@@ -349,7 +349,7 @@ ZoomIsoPanel::ZoomIsoPanel(QWidget *parent)
     m_ffmpeg_status = new QLabel(config_group);
     m_ffmpeg_status->setWordWrap(true);
     m_ffmpeg_download_btn = new QPushButton(pin
-        ? QString("Download FFmpeg (~%1 MB)").arg(pin->size_bytes / (1000 * 1000))
+        ? QString("Download FFmpeg (~%1 MB)").arg((pin->size_bytes + 500000) / 1000000)
         : QStringLiteral("Download FFmpeg"), config_group);
     m_ffmpeg_download_btn->setVisible(pin != nullptr);
     m_ffmpeg_remove_btn = new QPushButton("Remove", config_group);
@@ -371,10 +371,16 @@ ZoomIsoPanel::ZoomIsoPanel(QWidget *parent)
     connect(&installer, &FfmpegRuntimeInstaller::progress, this,
             [this](qint64 received, qint64 total) {
                 if (m_shutting_down) return;
+                if (total > 0 && received >= total) {
+                    // Bytes are all in; the checksum, unpack and test-run remain.
+                    m_ffmpeg_progress->setRange(0, 0);
+                    m_ffmpeg_progress->setFormat(QStringLiteral("Verifying and installing FFmpeg..."));
+                    return;
+                }
                 m_ffmpeg_progress->setRange(0, 1000);
                 m_ffmpeg_progress->setValue(total > 0 ? int(received * 1000 / total) : 0);
                 m_ffmpeg_progress->setFormat(QString("Downloading FFmpeg... %1 / %2 MB")
-                    .arg(received / (1000 * 1000)).arg(total / (1000 * 1000)));
+                    .arg((received + 500000) / 1000000).arg((total + 500000) / 1000000));
             });
     connect(&installer, &FfmpegRuntimeInstaller::finished, this,
             [this](bool ok, const QString &message) {
@@ -578,6 +584,18 @@ void ZoomIsoPanel::test_ffmpeg()
         return;
     }
     set_error(QString());
+    if (encoder == QStringLiteral("auto")) {
+        QStringList have;
+        for (const char *name : {"libx264", "h264_nvenc", "h264_qsv", "h264_amf", "h264_videotoolbox"})
+            if (ffmpeg_has_encoder(program, QString::fromLatin1(name)))
+                have << QString::fromLatin1(name);
+        QMessageBox::information(this, "FFmpeg",
+            QString("FFmpeg was found at %1. Encoders available: %2.")
+                .arg(QDir::toNativeSeparators(program),
+                     have.isEmpty() ? QStringLiteral("none of the H.264 encoders CoreVideo uses")
+                                    : have.join(", ")));
+        return;
+    }
     QMessageBox::information(this, "FFmpeg",
         QString("FFmpeg was found at %1 and encoder '%2' is available.")
             .arg(QDir::toNativeSeparators(program), encoder));
@@ -624,7 +642,7 @@ void ZoomIsoPanel::refresh_ffmpeg_status()
     m_ffmpeg_status->setVisible(!busy);
     m_ffmpeg_download_btn->setVisible(pin && (busy || !managed));
     m_ffmpeg_download_btn->setText(busy ? QStringLiteral("Cancel")
-        : (pin ? QString("Download FFmpeg (~%1 MB)").arg(pin->size_bytes / (1000 * 1000)) : QString()));
+        : (pin ? QString("Download FFmpeg (~%1 MB)").arg((pin->size_bytes + 500000) / 1000000) : QString()));
     // Never offer Remove while a recording could be using it.
     m_ffmpeg_remove_btn->setVisible(managed && !busy);
     m_ffmpeg_remove_btn->setEnabled(!recording);
@@ -676,7 +694,7 @@ bool ZoomIsoPanel::ensure_ffmpeg_for_start()
     QPushButton *download = nullptr;
     if (pin) {
         box.setText(QString("ISO recording needs FFmpeg. Download it now (~%1 MB from %2)?")
-                        .arg(pin->size_bytes / (1000 * 1000)).arg(QString::fromUtf8(pin->host)));
+                        .arg((pin->size_bytes + 500000) / 1000000).arg(QString::fromUtf8(pin->host)));
         download = box.addButton("Download", QMessageBox::AcceptRole);
     } else {
         box.setText("ISO recording needs FFmpeg. Choose an existing ffmpeg executable.");

@@ -49,7 +49,7 @@ int main()
         const auto r = ffmpeg_resolve(in);
         check(r.source == FfmpegSource::Managed && r.path == managed, "configured==managed reports Managed");
     }
-    // REVIEW FOCUS 1: a saved path that vanished falls through AND says so.
+    // a saved path that vanished falls through AND says so.
     {
         auto in = base({managed});
         in.configured = "D:/tools/ffmpeg.exe";

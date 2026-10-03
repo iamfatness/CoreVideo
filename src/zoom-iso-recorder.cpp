@@ -95,6 +95,7 @@ bool ZoomIsoRecorder::start(const ZoomIsoRecordConfig &config, std::string *erro
     // One resolution for every caller (dock, control API, OSC): explicit
     // path, then CoreVideo's managed FFmpeg, then PATH, then Homebrew on
     // macOS. Spec 2026-10-03.
+    const std::string configured_ffmpeg = normalized.ffmpeg_path;
     const FfmpegResolution resolved = cv_ffmpeg_resolve(normalized.ffmpeg_path);
     if (resolved.source == FfmpegSource::None) {
         if (error) {
@@ -104,6 +105,9 @@ bool ZoomIsoRecorder::start(const ZoomIsoRecordConfig &config, std::string *erro
         }
         return false;
     }
+    if (resolved.configured_missing)
+        blog(LOG_WARNING, "[obs-zoom-plugin] ISO: configured FFmpeg '%s' not found; using %s",
+             configured_ffmpeg.c_str(), resolved.path.c_str());
     normalized.ffmpeg_path = resolved.path;
     const std::string requested_encoder = normalized_video_encoder(normalized.video_encoder);
     normalized.video_encoder = requested_encoder;

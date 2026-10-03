@@ -181,13 +181,15 @@ void FfmpegRuntimeInstaller::on_download_finished()
 }
 
 static bool run_tool(const QString &program, const QStringList &args, QByteArray *out, int timeout_ms,
-                     const std::atomic<bool> &abort)
+                     const std::atomic<bool> &abort, const QString &working_dir = QString())
 {
     // Argument LIST, never a joined string: profile paths contain spaces and
-    // non-ASCII characters (REVIEW FOCUS 3).
+    // non-ASCII characters, so no shell may re-parse them.
     QProcess p;
     p.setProgram(program);
     p.setArguments(args);
+    if (!working_dir.isEmpty())
+        p.setWorkingDirectory(working_dir);
     p.start();
     if (!p.waitForStarted(2000)) {
         blog(LOG_WARNING, "[obs-zoom-plugin] FFmpeg install: could not start %s: %s",
@@ -249,6 +251,14 @@ QString FfmpegRuntimeInstaller::install_from_archive(const QString &root, const 
             return fail(QStringLiteral("Download failed: file didn't match the expected checksum."));
     }
 
+    // Archive and extract dir are passed to tar/zipinfo/ditto as ASCII RELATIVE
+    // names with the install root as working directory. Windows bsdtar reads
+    // its argv as ANSI, so an absolute path under a profile whose name has
+    // characters outside the ANSI code page (a CJK user name on cp1252) fails
+    // with "Failed to open" on a mangled download.part path. The working
+    // directory itself goes through CreateProcessW (Unicode), so it is safe.
+    const QString archive_rel = QFileInfo(archive).fileName();
+    const QString extract_rel = QStringLiteral("extract");
 #if defined(_WIN32)
     const QString tar = QDir(QProcessEnvironment::systemEnvironment().value(
                                  QStringLiteral("SystemRoot"), QStringLiteral("C:\\Windows")))
@@ -257,11 +267,11 @@ QString FfmpegRuntimeInstaller::install_from_archive(const QString &root, const 
         return fail(QStringLiteral("This version of Windows has no built-in tar.exe (Windows 10 1803 or newer). "
                                    "Choose an existing ffmpeg instead."));
     QByteArray listing;
-    if (!run_tool(tar, {QStringLiteral("-tf"), archive}, &listing, 60000, abort))
+    if (!run_tool(tar, {QStringLiteral("-tf"), archive_rel}, &listing, 60000, abort, root))
         return step_failed(QStringLiteral("Could not read the downloaded archive."));
 #else
     QByteArray listing;
-    if (!run_tool(QStringLiteral("/usr/bin/zipinfo"), {QStringLiteral("-1"), archive}, &listing, 60000, abort))
+    if (!run_tool(QStringLiteral("/usr/bin/zipinfo"), {QStringLiteral("-1"), archive_rel}, &listing, 60000, abort, root))
         return step_failed(QStringLiteral("Could not read the downloaded archive."));
 #endif
     if (abort.load()) return cancelled();
@@ -277,12 +287,12 @@ QString FfmpegRuntimeInstaller::install_from_archive(const QString &root, const 
         return fail(QStringLiteral("The downloaded archive does not contain ffmpeg."));
 
 #if defined(_WIN32)
-    if (!run_tool(tar, {QStringLiteral("-xf"), archive, QStringLiteral("-C"), extract,
-                        QString::fromUtf8(pin->archive_exe)}, nullptr, 300000, abort))
+    if (!run_tool(tar, {QStringLiteral("-xf"), archive_rel, QStringLiteral("-C"), extract_rel,
+                        QString::fromUtf8(pin->archive_exe)}, nullptr, 300000, abort, root))
         return step_failed(QStringLiteral("Could not unpack FFmpeg."));
 #else
-    if (!run_tool(QStringLiteral("/usr/bin/ditto"), {QStringLiteral("-x"), QStringLiteral("-k"), archive, extract},
-                  nullptr, 300000, abort))
+    if (!run_tool(QStringLiteral("/usr/bin/ditto"), {QStringLiteral("-x"), QStringLiteral("-k"), archive_rel, extract_rel},
+                  nullptr, 300000, abort, root))
         return step_failed(QStringLiteral("Could not unpack FFmpeg."));
 #endif
 

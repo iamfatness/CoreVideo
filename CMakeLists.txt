@@ -698,6 +698,11 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/src")
     add_test(NAME CoreVideoFfmpegRuntimePins COMMAND CoreVideoFfmpegRuntimePinsTest)
 
+    add_executable(CoreVideoFfmpegRuntimePlanTest tests/ffmpeg-runtime-plan-test.cpp)
+    target_include_directories(CoreVideoFfmpegRuntimePlanTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    add_test(NAME CoreVideoFfmpegRuntimePlan COMMAND CoreVideoFfmpegRuntimePlanTest)
+
     add_executable(CoreVideoSpeakerDirectorTest
         tests/speaker-director-test.cpp
         src/speaker-director.cpp

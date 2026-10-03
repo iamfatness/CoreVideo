@@ -154,14 +154,20 @@ channel` usually means the talent is in a different room.
 ## ISO Recording
 
 1. Open **Zoom ISO Recorder**.
-2. Choose an output folder.
-3. Choose the video encoder:
+2. If the status line says **FFmpeg not found**, click **Download FFmpeg**.
+   CoreVideo fetches a verified FFmpeg build (about 115 MB on Windows, 28 MB on
+   Mac) into your OBS settings folder; no admin rights are needed. To use your
+   own FFmpeg instead, click **Browse**. On a Mac, an FFmpeg installed with
+   Homebrew is found automatically.
+3. Choose an output folder.
+4. Choose the video encoder:
    - `libx264` is the safest CPU fallback.
    - `h264_nvenc`, `h264_qsv`, and `h264_amf` reduce CPU load when supported by
      the installed FFmpeg build and hardware.
-4. Enable **Record program** if CoreVideo should also start OBS program
+   - On a Mac, `h264_videotoolbox` (Apple VideoToolbox) is the hardware encoder.
+5. Enable **Record program** if CoreVideo should also start OBS program
    recording.
-5. Click **Start ISO Recording**.
+6. Click **Start ISO Recording**.
 
 ISO recording follows assigned outputs. It records assigned participant video
 to MP4 and matching audio to WAV. The panel shows requested encoder, actual

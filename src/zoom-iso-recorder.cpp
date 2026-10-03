@@ -2,6 +2,7 @@
 #include "iso-encoder-plan.h"
 #include "iso-provider-policy.h"
 #include "iso-feed-selection.h"
+#include "ffmpeg-runtime-locate.h"
 #include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
@@ -91,20 +92,26 @@ bool ZoomIsoRecorder::start(const ZoomIsoRecordConfig &config, std::string *erro
         if (error) *error = "None of the selected ISO feeds is currently routed. Assign a participant first.";
         return false;
     }
-    if (normalized.ffmpeg_path.empty())
-        normalized.ffmpeg_path = "ffmpeg";
-    const std::string requested_encoder = normalized_video_encoder(normalized.video_encoder);
-    normalized.video_encoder = requested_encoder;
-    const QString ffmpegProgram = QString::fromStdString(normalized.ffmpeg_path);
-    const QFileInfo ffmpegInfo(ffmpegProgram);
-    if ((ffmpegInfo.isRelative() && QStandardPaths::findExecutable(ffmpegProgram).isEmpty()) ||
-        (!ffmpegInfo.isRelative() && !ffmpegInfo.exists())) {
+    // One resolution for every caller (dock, control API, OSC): explicit
+    // path, then CoreVideo's managed FFmpeg, then PATH, then Homebrew on
+    // macOS. Spec 2026-10-03.
+    const std::string configured_ffmpeg = normalized.ffmpeg_path;
+    const FfmpegResolution resolved = cv_ffmpeg_resolve(normalized.ffmpeg_path);
+    if (resolved.source == FfmpegSource::None) {
         if (error) {
-            *error = "FFmpeg was not found on PATH. Set ffmpeg_path to a "
-                     "valid ffmpeg executable.";
+            *error = "FFmpeg was not found. Use Download FFmpeg in the ISO "
+                     "Recorder dock, or set ffmpeg_path to a valid ffmpeg "
+                     "executable.";
         }
         return false;
     }
+    if (resolved.configured_missing)
+        blog(LOG_WARNING, "[obs-zoom-plugin] ISO: configured FFmpeg '%s' not found; using %s",
+             configured_ffmpeg.c_str(), resolved.path.c_str());
+    normalized.ffmpeg_path = resolved.path;
+    const std::string requested_encoder = normalized_video_encoder(normalized.video_encoder);
+    normalized.video_encoder = requested_encoder;
+    const QString ffmpegProgram = QString::fromStdString(normalized.ffmpeg_path);
     std::string encoder_error;
     QString status_warning;
     // Probe which hardware encoder families this FFmpeg build offers; the
@@ -114,12 +121,16 @@ bool ZoomIsoRecorder::start(const ZoomIsoRecordConfig &config, std::string *erro
     avail.nvenc = ffmpeg_encoder_available(ffmpegProgram, "h264_nvenc", nullptr);
     avail.qsv = ffmpeg_encoder_available(ffmpegProgram, "h264_qsv", nullptr);
     avail.amf = ffmpeg_encoder_available(ffmpegProgram, "h264_amf", nullptr);
+#if defined(__APPLE__)
+    avail.videotoolbox = ffmpeg_encoder_available(ffmpegProgram, "h264_videotoolbox", nullptr);
+#endif
     if (normalized.video_encoder == "auto") {
         blog(LOG_INFO,
              "[obs-zoom-plugin] ISO encoder placement: automatic "
-             "(nvenc=%d qsv=%d amf=%d, NVENC session limit %d, "
+             "(nvenc=%d qsv=%d amf=%d videotoolbox=%d, NVENC session limit %d, "
              "OBS NVENC encoders active %d)",
-             avail.nvenc, avail.qsv, avail.amf, iso_nvenc_default_session_limit(),
+             avail.nvenc, avail.qsv, avail.amf, avail.videotoolbox,
+             iso_nvenc_default_session_limit(),
              count_obs_nvenc_encoders());
     } else if (!ffmpeg_encoder_available(ffmpegProgram, normalized.video_encoder, &encoder_error)) {
         if (is_hardware_encoder(normalized.video_encoder) &&
@@ -478,7 +489,7 @@ QJsonObject ZoomIsoRecorder::status_overview()
 static std::string normalized_video_encoder(const std::string &encoder)
 {
     if (encoder == "auto" || encoder == "h264_nvenc" || encoder == "h264_qsv" ||
-        encoder == "h264_amf" || encoder == "libx264") {
+        encoder == "h264_amf" || encoder == "h264_videotoolbox" || encoder == "libx264") {
         return encoder;
     }
     return "auto";
@@ -513,7 +524,8 @@ static int count_obs_nvenc_encoders()
 
 static bool is_hardware_encoder(const std::string &encoder)
 {
-    return encoder == "h264_nvenc" || encoder == "h264_qsv" || encoder == "h264_amf";
+    return encoder == "h264_nvenc" || encoder == "h264_qsv" || encoder == "h264_amf" ||
+           encoder == "h264_videotoolbox";
 }
 
 static bool ffmpeg_encoder_available(const QString &ffmpeg_path, const std::string &encoder,

@@ -46,7 +46,7 @@ Named output profiles (source-to-participant mappings) are saved as JSON files u
 ## 3. Data CoreVideo Does NOT Collect
 
 - CoreVideo does not collect analytics, telemetry, or usage statistics.
-- CoreVideo does not transmit meeting media or participant media to any party other than Zoom (via the Zoom Meeting SDK). Published builds contact the CoreVideo OAuth broker only for Zoom OAuth token exchange and token refresh, and GitHub only for the opt-out-able update check described in §4.3.
+- CoreVideo does not transmit meeting media or participant media to any party other than Zoom (via the Zoom Meeting SDK). Published builds contact the CoreVideo OAuth broker only for Zoom OAuth token exchange and token refresh, GitHub only for the opt-out-able update check described in §4.3, and the FFmpeg download hosts described in §4.4 only when the operator clicks Download FFmpeg.
 - CoreVideo does not use cookies, tracking pixels, or persistent identifiers.
 - CoreVideo does not create accounts or user profiles.
 
@@ -61,7 +61,10 @@ The CoreVideo source code and documentation are hosted on GitHub. GitHub's [Priv
 ### 4.3 Update Check (GitHub Releases API)
 Once per OBS session, CoreVideo makes a single anonymous HTTPS GET request to the public GitHub Releases API (`api.github.com/repos/iamfatness/CoreVideo/releases/latest`) to check whether a newer release is available. The request carries no meeting data, credentials, telemetry, or CoreVideo-specific identifiers - only what GitHub already logs for any anonymous HTTP request (e.g. IP address), governed by GitHub's own Privacy Statement (§4.2). The check never blocks plugin startup, never downloads or installs anything automatically, and fails silently if the request errors or the operator is offline. It can be disabled via **Tools -> Zoom Plugin Settings -> Check for updates on startup** (enabled by default).
 
-### 4.4 No Other Third-Party Services
+### 4.4 FFmpeg Download (operator-initiated)
+ISO recording runs an FFmpeg program. When the operator clicks **Download FFmpeg** in the ISO Recorder dock (or chooses Download when ISO recording asks for it), CoreVideo makes one anonymous HTTPS download of a pinned FFmpeg build: from `github.com` (gyan.dev builds, served from GitHub's release-asset download host) on Windows, or from `ffmpeg.martin-riedl.de` on macOS. The request carries no meeting data, credentials, telemetry or CoreVideo-specific identifiers, only what those hosts log for any anonymous download (e.g. IP address). CoreVideo never downloads FFmpeg without that click, never at startup or install time, and verifies the file against a SHA-256 hash built into CoreVideo before using it. The binary is stored in the operator's OBS settings folder and can be removed with **Remove** in the same dock.
+
+### 4.5 No Other Third-Party Services
 CoreVideo does not integrate with analytics platforms, advertising networks, or cloud storage services.
 
 ## 5. Operator Obligations

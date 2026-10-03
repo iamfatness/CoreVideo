@@ -12,6 +12,7 @@ class QCheckBox;
 class QComboBox;
 class QLabel;
 class QLineEdit;
+class QProgressBar;
 class QPushButton;
 class QTableWidget;
 class QTimer;
@@ -37,6 +38,13 @@ private:
     void refresh_capacity_guidance();
     void persist_settings() const;
     void set_error(const QString &message);
+    void download_ffmpeg();
+    void remove_ffmpeg();
+    void refresh_ffmpeg_status();
+    // Returns true when an FFmpeg is resolvable; otherwise offers Download /
+    // Choose existing / Cancel and returns false (spec 2026-10-03 first use).
+    bool ensure_ffmpeg_for_start();
+    bool recording_active() const;
 
     QLineEdit *m_output_dir = nullptr;
     QLineEdit *m_ffmpeg_path = nullptr;
@@ -55,5 +63,9 @@ private:
     QLabel *m_error = nullptr;
     QTableWidget *m_sessions = nullptr;
     QTimer *m_refresh_timer = nullptr;
+    QLabel *m_ffmpeg_status = nullptr;
+    QPushButton *m_ffmpeg_download_btn = nullptr;
+    QPushButton *m_ffmpeg_remove_btn = nullptr;
+    QProgressBar *m_ffmpeg_progress = nullptr;
     bool m_shutting_down = false;
 };

@@ -1,6 +1,7 @@
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 #include <util/platform.h>
+#include "ffmpeg-runtime-installer.h"
 #include "zoom-source.h"
 #include "zoom-participant-audio-source.h"
 #include "zoom-supersource.h"
@@ -542,6 +543,7 @@ bool obs_module_load(void)
 void obs_module_unload(void)
 {
     blog(LOG_INFO, "[obs-zoom-plugin] Unloading plugin");
+    FfmpegRuntimeInstaller::instance().shutdown();
     if (g_frontend_callback_registered) {
         obs_frontend_remove_event_callback(frontend_event_callback, nullptr);
         g_frontend_callback_registered = false;

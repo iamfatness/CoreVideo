@@ -60,7 +60,9 @@ $required = @(
     # exists, though — it says nothing about whether its contents are
     # current; an existing-but-stale effect file passes this check and would
     # only show up as a degraded wall at runtime, not a build failure.
-    "data\obs-plugins\obs-zoom-plugin\effects\corevideo-tiles.effect"
+    "data\obs-plugins\obs-zoom-plugin\effects\corevideo-tiles.effect",
+    # Shipped beside every managed FFmpeg (the macOS zip carries no license).
+    "data\obs-plugins\obs-zoom-plugin\ffmpeg\LICENSE-GPLv3.txt"
 )
 
 foreach ($file in $required) {

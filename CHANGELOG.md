@@ -7,6 +7,17 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+### Added
+- **Download FFmpeg** in the ISO Recorder dock: one click fetches a verified
+  FFmpeg 9.0.2 build (Windows and Apple Silicon) into your OBS settings folder,
+  with no admin rights and no separate install. ISO recording offers it the
+  first time it needs FFmpeg. Nothing is downloaded without that click.
+
+### Fixed
+- macOS: the FFmpeg picker no longer asks for `ffmpeg.exe`, Homebrew's FFmpeg
+  is found even when OBS is launched from the Dock, and ISO recording offers
+  Apple VideoToolbox in place of the Windows-only NVIDIA/Intel/AMD encoders.
+
 ## [0.1.49] - 2026-10-03
 
 ### Fixed

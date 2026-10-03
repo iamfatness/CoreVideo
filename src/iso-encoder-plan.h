@@ -19,6 +19,9 @@ struct IsoEncoderAvailability {
     bool nvenc = false;
     bool qsv = false;
     bool amf = false;
+    // Apple VideoToolbox (macOS). No session budget we need to model; it
+    // demotes straight to x264. Never true on Windows FFmpeg builds.
+    bool videotoolbox = false;
 };
 
 inline int iso_nvenc_default_session_limit()
@@ -40,12 +43,14 @@ inline std::string iso_choose_session_encoder(
     const bool automatic = requested == "auto";
 
     if (!automatic && requested != "h264_nvenc") {
-        // Explicit non-NVENC choice: QSV/AMF have no meaningful shared
-        // session budget on the hardware we target; x264 always works.
-        // (Availability probing/fallback for absent hardware happens at
-        // start, as before.)
+        // Explicit non-NVENC choice (QSV/AMF/VideoToolbox/x264): honored; no
+        // shared budget to model. Absent hardware is handled at start.
         return requested;
     }
+
+    // macOS: VideoToolbox is the only hardware encoder there.
+    if (automatic && avail.videotoolbox)
+        return "h264_videotoolbox";
 
     // "auto", or explicit NVENC: NVENC while the budget lasts.
     if (avail.nvenc && nvenc_remaining > 0)
@@ -75,5 +80,6 @@ inline std::string iso_demote_encoder(const std::string &failed,
             return "h264_amf";
         return "libx264";
     }
+    // h264_videotoolbox, h264_amf, anything else: x264 cannot run out.
     return "libx264";
 }

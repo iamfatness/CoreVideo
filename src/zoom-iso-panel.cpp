@@ -1,6 +1,10 @@
 #include <set>
 #include "zoom-iso-panel.h"
 #include "cv-style.h"
+#include "ffmpeg-runtime-installer.h"
+#include "ffmpeg-runtime-locate.h"
+#include "ffmpeg-runtime-pins.h"
+#include "ffmpeg-runtime-plan.h"
 #include "zoom-iso-recorder.h"
 #include "zoom-output-manager.h"
 #include "zoom-settings.h"
@@ -23,6 +27,7 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QProcess>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSet>
@@ -53,17 +58,6 @@ static QString effective_output_dir(const QString &text)
 {
     const QString trimmed = text.trimmed();
     return trimmed.isEmpty() ? default_iso_output_dir() : trimmed;
-}
-
-static bool ffmpeg_exists(const QString &path)
-{
-    const QString trimmed = path.trimmed();
-    if (trimmed.isEmpty())
-        return false;
-    const QFileInfo info(trimmed);
-    if (info.isRelative())
-        return !QStandardPaths::findExecutable(trimmed).isEmpty();
-    return info.exists() && info.isFile();
 }
 
 static QTableWidgetItem *item(const QString &text)
@@ -223,12 +217,18 @@ static bool ffmpeg_has_encoder(const QString &path, const QString &encoder)
 static QString encoder_guidance_text(const QString &encoder)
 {
     if (encoder == QStringLiteral("auto")) {
+#if defined(__APPLE__)
+        return QStringLiteral(
+            "Automatic uses Apple VideoToolbox when this FFmpeg build has it, then CPU x264. "
+            "The Encoder column shows each feed's placement.");
+#else
         return QStringLiteral(
             "Automatic places each ISO feed on the best available encoder "
             "within hardware session limits: NVENC first (counting OBS's own "
             "program/stream encoders against the GPU budget), then Intel "
             "Quick Sync, then CPU x264. The Encoder column shows each feed's "
             "placement.");
+#endif
     }
     if (encoder == QStringLiteral("libx264")) {
         return QStringLiteral(
@@ -246,6 +246,11 @@ static QString encoder_guidance_text(const QString &encoder)
         return QStringLiteral(
             "AMD AMF lowers CPU load when available. Watch GPU encoder utilization and fall back to CPU x264 if FFmpeg reports encoder failures.");
     }
+    if (encoder == QStringLiteral("h264_videotoolbox")) {
+        return QStringLiteral(
+            "Apple VideoToolbox uses the Mac's media engine and keeps CPU load low. "
+            "If FFmpeg reports an encoder failure, the feed falls back to CPU x264.");
+    }
     return QStringLiteral("Unknown encoder. Test FFmpeg before recording.");
 }
 
@@ -253,7 +258,8 @@ static bool is_hardware_encoder(const QString &encoder)
 {
     return encoder == QStringLiteral("h264_nvenc") ||
         encoder == QStringLiteral("h264_qsv") ||
-        encoder == QStringLiteral("h264_amf");
+        encoder == QStringLiteral("h264_amf") ||
+        encoder == QStringLiteral("h264_videotoolbox");
 }
 
 static bool is_iso_eligible_output(const ZoomOutputInfo &output)
@@ -337,14 +343,71 @@ ZoomIsoPanel::ZoomIsoPanel(QWidget *parent)
     ffmpeg_row->addWidget(m_test_btn);
     config_layout->addLayout(ffmpeg_row);
 
+    const FfmpegRuntimePin *pin = ffmpeg_runtime_pin_for_host();
+    auto *managed_row = new QHBoxLayout;
+    managed_row->setSpacing(6);
+    m_ffmpeg_status = new QLabel(config_group);
+    m_ffmpeg_status->setWordWrap(true);
+    m_ffmpeg_download_btn = new QPushButton(pin
+        ? QString("Download FFmpeg (~%1 MB)").arg((pin->size_bytes + 500000) / 1000000)
+        : QStringLiteral("Download FFmpeg"), config_group);
+    m_ffmpeg_download_btn->setVisible(pin != nullptr);
+    m_ffmpeg_remove_btn = new QPushButton("Remove", config_group);
+    m_ffmpeg_progress = new QProgressBar(config_group);
+    m_ffmpeg_progress->setVisible(false);
+    m_ffmpeg_progress->setTextVisible(true);
+    managed_row->addWidget(m_ffmpeg_status, 1);
+    managed_row->addWidget(m_ffmpeg_progress, 1);
+    managed_row->addWidget(m_ffmpeg_download_btn);
+    managed_row->addWidget(m_ffmpeg_remove_btn);
+    config_layout->addLayout(managed_row);
+
+    connect(m_ffmpeg_download_btn, &QPushButton::clicked, this, &ZoomIsoPanel::download_ffmpeg);
+    connect(m_ffmpeg_remove_btn, &QPushButton::clicked, this, &ZoomIsoPanel::remove_ffmpeg);
+    connect(m_ffmpeg_path, &QLineEdit::textChanged, this, [this] { refresh_ffmpeg_status(); });
+    auto &installer = FfmpegRuntimeInstaller::instance();
+    connect(&installer, &FfmpegRuntimeInstaller::state_changed, this,
+            [this] { if (!m_shutting_down) refresh_ffmpeg_status(); });
+    connect(&installer, &FfmpegRuntimeInstaller::progress, this,
+            [this](qint64 received, qint64 total) {
+                if (m_shutting_down) return;
+                if (total > 0 && received >= total) {
+                    // Bytes are all in; the checksum, unpack and test-run remain.
+                    m_ffmpeg_progress->setRange(0, 0);
+                    m_ffmpeg_progress->setFormat(QStringLiteral("Verifying and installing FFmpeg..."));
+                    return;
+                }
+                m_ffmpeg_progress->setRange(0, 1000);
+                m_ffmpeg_progress->setValue(total > 0 ? int(received * 1000 / total) : 0);
+                m_ffmpeg_progress->setFormat(QString("Downloading FFmpeg... %1 / %2 MB")
+                    .arg((received + 500000) / 1000000).arg((total + 500000) / 1000000));
+            });
+    connect(&installer, &FfmpegRuntimeInstaller::finished, this,
+            [this](bool ok, const QString &message) {
+                if (m_shutting_down) return;
+                if (ok) {
+                    m_ffmpeg_path->setText(QDir::toNativeSeparators(cv_ffmpeg_managed_exe()));
+                    persist_settings();
+                    set_error(QString());
+                    test_ffmpeg();
+                } else {
+                    set_error(message);
+                }
+                refresh_ffmpeg_status();
+            });
+
     auto *encoder_row = new QHBoxLayout;
     encoder_row->setSpacing(6);
     m_video_encoder = new QComboBox(config_group);
     m_video_encoder->addItem("Automatic (recommended)", "auto");
     m_video_encoder->addItem("CPU - x264 (safe fallback)", "libx264");
+#if defined(__APPLE__)
+    m_video_encoder->addItem("Apple VideoToolbox - H.264", "h264_videotoolbox");
+#else
     m_video_encoder->addItem("NVIDIA NVENC - H.264", "h264_nvenc");
     m_video_encoder->addItem("Intel Quick Sync - H.264", "h264_qsv");
     m_video_encoder->addItem("AMD AMF - H.264", "h264_amf");
+#endif
     m_video_encoder->setCurrentIndex(
         encoder_index(m_video_encoder, settings.iso_video_encoder));
     m_video_encoder->setToolTip(
@@ -459,6 +522,7 @@ ZoomIsoPanel::ZoomIsoPanel(QWidget *parent)
     refresh_encoder_guidance();
     refresh_capacity_guidance();
     refresh_status();
+    refresh_ffmpeg_status();
 }
 
 ZoomIsoPanel::~ZoomIsoPanel()
@@ -491,10 +555,15 @@ void ZoomIsoPanel::browse_output_dir()
 
 void ZoomIsoPanel::browse_ffmpeg()
 {
+#if defined(_WIN32)
+    const QString filter = QStringLiteral("FFmpeg (ffmpeg.exe);;All files (*)");
+#else
+    const QString filter = QStringLiteral("FFmpeg (ffmpeg);;All files (*)");
+#endif
     const QString path = QFileDialog::getOpenFileName(
-        this, "Select ffmpeg executable", QString(), "FFmpeg (ffmpeg.exe ffmpeg);;All files (*)");
+        this, "Select ffmpeg executable", QString(), filter);
     if (!path.isEmpty()) {
-        m_ffmpeg_path->setText(path);
+        m_ffmpeg_path->setText(QDir::toNativeSeparators(path));
         persist_settings();
     }
 }
@@ -502,21 +571,142 @@ void ZoomIsoPanel::browse_ffmpeg()
 void ZoomIsoPanel::test_ffmpeg()
 {
     persist_settings();
-    if (!ffmpeg_exists(m_ffmpeg_path->text())) {
-        set_error("FFmpeg was not found. Use a full path or make sure ffmpeg is on PATH.");
+    const FfmpegResolution r = cv_ffmpeg_resolve(m_ffmpeg_path->text().toStdString());
+    if (r.source == FfmpegSource::None) {
+        set_error("FFmpeg was not found. Use Download FFmpeg, or Browse to an existing ffmpeg.");
         return;
     }
-
+    const QString program = QString::fromStdString(r.path);
     const QString encoder = m_video_encoder->currentData().toString();
-    if (!ffmpeg_has_encoder(m_ffmpeg_path->text(), encoder)) {
+    if (encoder != QStringLiteral("auto") && !ffmpeg_has_encoder(program, encoder)) {
         set_error(QString("FFmpeg was found, but encoder '%1' is not available in this FFmpeg build.")
             .arg(encoder));
         return;
     }
-
     set_error(QString());
+    if (encoder == QStringLiteral("auto")) {
+        QStringList have;
+        for (const char *name : {"libx264", "h264_nvenc", "h264_qsv", "h264_amf", "h264_videotoolbox"})
+            if (ffmpeg_has_encoder(program, QString::fromLatin1(name)))
+                have << QString::fromLatin1(name);
+        QMessageBox::information(this, "FFmpeg",
+            QString("FFmpeg was found at %1. Encoders available: %2.")
+                .arg(QDir::toNativeSeparators(program),
+                     have.isEmpty() ? QStringLiteral("none of the H.264 encoders CoreVideo uses")
+                                    : have.join(", ")));
+        return;
+    }
     QMessageBox::information(this, "FFmpeg",
-        QString("FFmpeg was found and encoder '%1' is available.").arg(encoder));
+        QString("FFmpeg was found at %1 and encoder '%2' is available.")
+            .arg(QDir::toNativeSeparators(program), encoder));
+}
+
+bool ZoomIsoPanel::recording_active() const
+{
+    // Same two facts refresh_status() uses for the Start button.
+    auto &recorder = ZoomIsoRecorder::instance();
+    return recorder.active() || recorder.status_overview().value("finishing").toBool();
+}
+
+void ZoomIsoPanel::refresh_ffmpeg_status()
+{
+    const auto &installer = FfmpegRuntimeInstaller::instance();
+    const bool busy = installer.busy();
+    const FfmpegRuntimePin *pin = ffmpeg_runtime_pin_for_host();
+    const bool managed = cv_ffmpeg_managed_installed();
+    const FfmpegResolution r = cv_ffmpeg_resolve(m_ffmpeg_path->text().toStdString());
+
+    QString text;
+    QString color;
+    switch (r.source) {
+    case FfmpegSource::Managed:
+        text = QString("Managed FFmpeg %1").arg(pin ? QString::fromUtf8(pin->version) : QString());
+        break;
+    case FfmpegSource::Explicit:
+    case FfmpegSource::Path:
+    case FfmpegSource::Homebrew:
+        text = QString("Using ffmpeg at %1").arg(QDir::toNativeSeparators(QString::fromStdString(r.path)));
+        break;
+    case FfmpegSource::None:
+        text = QStringLiteral("FFmpeg not found");
+        color = QStringLiteral("#e0a030");
+        break;
+    }
+    if (r.configured_missing && r.source != FfmpegSource::None)
+        text = QStringLiteral("Configured FFmpeg not found; ") + text.left(1).toLower() + text.mid(1);
+    m_ffmpeg_status->setText(text);
+    m_ffmpeg_status->setStyleSheet(color.isEmpty() ? QString() : QString("color: %1;").arg(color));
+
+    const bool recording = recording_active();
+    m_ffmpeg_progress->setVisible(busy);
+    m_ffmpeg_status->setVisible(!busy);
+    m_ffmpeg_download_btn->setVisible(pin && (busy || !managed));
+    m_ffmpeg_download_btn->setText(busy ? QStringLiteral("Cancel")
+        : (pin ? QString("Download FFmpeg (~%1 MB)").arg((pin->size_bytes + 500000) / 1000000) : QString()));
+    // Never offer Remove while a recording could be using it.
+    m_ffmpeg_remove_btn->setVisible(managed && !busy);
+    m_ffmpeg_remove_btn->setEnabled(!recording);
+    m_ffmpeg_remove_btn->setToolTip(recording
+        ? QStringLiteral("Stop ISO recording before removing FFmpeg.") : QString());
+}
+
+void ZoomIsoPanel::download_ffmpeg()
+{
+    auto &installer = FfmpegRuntimeInstaller::instance();
+    if (installer.busy()) {
+        installer.cancel();
+        return;
+    }
+    set_error(QString());
+    installer.start_download();
+    refresh_ffmpeg_status();
+}
+
+void ZoomIsoPanel::remove_ffmpeg()
+{
+    QString error;
+    const QString managed = QDir::toNativeSeparators(cv_ffmpeg_managed_exe());
+    if (!FfmpegRuntimeInstaller::instance().remove(recording_active(), &error)) {
+        set_error(error);
+        return;
+    }
+    if (QDir::toNativeSeparators(m_ffmpeg_path->text().trimmed()) == managed) {
+        m_ffmpeg_path->setText(QStringLiteral("ffmpeg"));
+        persist_settings();
+    }
+    set_error(QString());
+    refresh_ffmpeg_status();
+}
+
+bool ZoomIsoPanel::ensure_ffmpeg_for_start()
+{
+    // A download in flight is not "missing".
+    if (FfmpegRuntimeInstaller::instance().busy()) {
+        set_error("FFmpeg is still downloading. Start ISO recording when it finishes.");
+        return false;
+    }
+    if (cv_ffmpeg_resolve(m_ffmpeg_path->text().toStdString()).source != FfmpegSource::None)
+        return true;
+    const FfmpegRuntimePin *pin = ffmpeg_runtime_pin_for_host();
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Question);
+    box.setWindowTitle("FFmpeg needed");
+    QPushButton *download = nullptr;
+    if (pin) {
+        box.setText(QString("ISO recording needs FFmpeg. Download it now (~%1 MB from %2)?")
+                        .arg((pin->size_bytes + 500000) / 1000000).arg(QString::fromUtf8(pin->host)));
+        download = box.addButton("Download", QMessageBox::AcceptRole);
+    } else {
+        box.setText("ISO recording needs FFmpeg. Choose an existing ffmpeg executable.");
+    }
+    QPushButton *choose = box.addButton("Choose existing...", QMessageBox::ActionRole);
+    box.addButton(QMessageBox::Cancel);
+    box.exec();
+    if (download && box.clickedButton() == download)
+        download_ffmpeg();
+    else if (box.clickedButton() == choose)
+        browse_ffmpeg();
+    return false;  // the operator presses Start again once FFmpeg is ready
 }
 
 void ZoomIsoPanel::start_recording()
@@ -525,6 +715,8 @@ void ZoomIsoPanel::start_recording()
         set_error("Select at least one routed feed to record.");
         return;
     }
+    if (!ensure_ffmpeg_for_start())
+        return;
     persist_settings();
     set_error(QString());
 
@@ -817,6 +1009,7 @@ void ZoomIsoPanel::refresh_status()
     }
     restore_session_table_view_state(m_sessions, table_state);
     m_sessions->setUpdatesEnabled(true);
+    refresh_ffmpeg_status();
 }
 
 void ZoomIsoPanel::refresh_encoder_guidance()

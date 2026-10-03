@@ -35,7 +35,7 @@ int main()
 {
     // Profile path with spaces and non-ASCII characters must survive Windows filesystem encoding.
     const fs::path root = fs::temp_directory_path() /
-        fs::u8path(u8"cv ffmpeg test José Müller") / "ffmpeg";
+        fs::u8path(u8"cv ffmpeg test Jos\u00e9 M\u00fcller") / "ffmpeg";
     fs::remove_all(root.parent_path());
 
     check(!cvff::install_complete(root, "ffmpeg.exe"), "nothing installed yet");

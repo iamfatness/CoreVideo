@@ -103,6 +103,25 @@ int main()
     check(iso_demote_encoder("libx264", nv_qsv) == "libx264",
           "x264 never demotes further");
 
+    // macOS (spec 2026-10-03): Apple VideoToolbox is the hardware path, and it
+    // demotes straight to x264. The Windows chain is untouched.
+    {
+        IsoEncoderAvailability mac;
+        mac.videotoolbox = true;
+        check(iso_choose_session_encoder("auto", 8, mac) == "h264_videotoolbox",
+              "auto picks VideoToolbox when available");
+        check(iso_choose_session_encoder("libx264", 8, mac) == "libx264",
+              "explicit x264 honored on mac");
+        check(iso_choose_session_encoder("h264_videotoolbox", 0, mac) == "h264_videotoolbox",
+              "explicit VideoToolbox honored");
+        check(iso_demote_encoder("h264_videotoolbox", mac) == "libx264",
+              "VideoToolbox demotes to x264");
+        IsoEncoderAvailability win;
+        win.nvenc = true;
+        check(iso_choose_session_encoder("auto", 8, win) == "h264_nvenc",
+              "windows auto unchanged (nvenc)");
+    }
+
     if (g_failures == 0)
         std::cout << "All ISO encoder plan tests passed\n";
     return g_failures == 0 ? 0 : 1;

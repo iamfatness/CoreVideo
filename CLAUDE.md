@@ -301,6 +301,34 @@ Every one of these is documented at length where it lives; the list is the map.
   FFmpeg is fed by a raw pipe + blocking writer thread + bounded
   drop-oldest queue, pinned by CoreVideoIsoFfmpegPipeTest. The `-encoders`
   availability probe may keep QProcess: `waitFor*` pumps without a loop.
+- **Managed FFmpeg is pinned, user-initiated, per-user** (`src/ffmpeg-runtime-*`,
+  spec `docs/superpowers/specs/2026-10-03-ffmpeg-runtime-download-design.md`):
+  ISO recording runs an external `ffmpeg` that no package ships. **Download
+  FFmpeg** fetches the pin for the host (`ffmpeg-runtime-pins.h`: gyan.dev
+  9.0.2 essentials on Windows, Martin Riedl 9.0.2 on Apple Silicon, both GPLv3)
+  ONLY on an operator click, verifies the compiled-in SHA-256 (never an
+  upstream `.sha256`), unpacks it with the OS tool (`tar.exe` / `ditto`) after
+  rejecting unsafe entries, test-runs `-version`, and swaps it into
+  `obs_module_config_path("ffmpeg")/current` by rename, so a failed or
+  interrupted update never loses the old install (`clean_leftovers` restores
+  `previous/` after a mid-swap crash). The macOS zip has no license, so
+  `data/ffmpeg/LICENSE-GPLv3.txt` is installed beside every managed binary.
+  Resolution, shared by the dock, control API and OSC through
+  `ZoomIsoRecorder::start()`: explicit path, then managed, then PATH, then
+  Homebrew (macOS; OBS from the Dock has no shell PATH). To move FFmpeg,
+  edit BOTH pins and run `CoreVideoFfmpegRuntimeLiveTest` on each platform.
+  Hardened in review: the hash is re-checked on the CLOSED file on disk on
+  the worker thread (the pin vouches for the bytes actually extracted, not
+  the bytes received); `ffmpeg_archive_entry_safe` also rejects control
+  characters, any `:` (NTFS streams), and any segment made only of
+  dots/spaces other than `.` (Win32 strips trailing dots/spaces, so `.. `
+  acts as `..`); swaps restore an interrupted swap before touching
+  `previous/`, and Remove renames `current/` to `removing/` first so a
+  locked exe never leaves half an install; every QString becomes a
+  filesystem path through `cv_ffmpeg_fs_path()` (UTF-8 on POSIX, where OBS
+  runs in the C locale); `FfmpegRuntimeInstaller::shutdown()` from
+  `obs_module_unload()` aborts and bounded-waits the worker, and Cancel also
+  stops the unpack/test-run.
 - **Talkback keying SELECTS, it never creates** (`session_start` in
   `engine/src/engine-talkback.cpp`, feat/talkback): channels are created at
   NOMINATION time, one `CreateChannel` at a time through the arbiter in

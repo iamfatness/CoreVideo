@@ -119,6 +119,18 @@ int main()
     check(!ffmpeg_archive_entry_safe("a/../../x"), "nested parent rejected");
     check(!ffmpeg_archive_entry_safe("a\\..\\x"), "backslash parent rejected");
     check(ffmpeg_archive_entry_safe("a/..b/x"), "'..b' is a name, not a parent");
+    // Additional security tests: parent at start, end, UNC paths, dot/space normalization.
+    check(!ffmpeg_archive_entry_safe(".."), "parent alone rejected");
+    check(!ffmpeg_archive_entry_safe("a/.."), "parent at end rejected");
+    check(!ffmpeg_archive_entry_safe("a\\.."), "parent with backslash rejected");
+    check(!ffmpeg_archive_entry_safe("\\\\server\\share\\x"), "UNC path rejected");
+    check(!ffmpeg_archive_entry_safe("//server/x"), "forward-slash UNC rejected");
+    check(ffmpeg_archive_entry_safe("a/./b"), "lone dot segment accepted");
+    check(!ffmpeg_archive_entry_safe("..."), "three dots rejected");
+    check(!ffmpeg_archive_entry_safe(".. "), "dot-dot-space rejected");
+    check(!ffmpeg_archive_entry_safe("a/... /x"), "dot-space segment rejected");
+    check(!ffmpeg_archive_entry_safe("ffmpeg.exe:stream"), "NTFS ADS rejected");
+    check(!ffmpeg_archive_entry_safe(std::string("..\0/x", 5)), "NUL char rejected");
 
     // Download size rule: abort past expected + 10%.
     check(ffmpeg_download_size_ok(100, 100), "exact ok");

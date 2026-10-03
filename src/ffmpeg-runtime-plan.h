@@ -101,17 +101,49 @@ inline FfmpegResolution ffmpeg_resolve(const FfmpegResolveInputs &in)
 }
 
 // True when extracting `entry` cannot write outside the staging root.
+// Rejects absolute paths, UNC paths, parent-directory segments (..), control
+// characters (which enable hiding payloads), NTFS alternate data streams (:),
+// and dot/space-only segments (Windows normalizes ".. " and ". " as ".." and ".").
 inline bool ffmpeg_archive_entry_safe(const std::string &entry)
 {
     if (entry.empty()) return false;
+    // Reject absolute paths (Unix and Windows).
     if (entry[0] == '/' || entry[0] == '\\') return false;
+    // Reject drive letters and UNC paths at the start.
     if (entry.size() >= 2 && entry[1] == ':') return false;
+
+    // Reject control characters (0x00–0x1F, 0x7F) and NTFS alternate data
+    // streams (:). These can be used to escape the archive root.
+    for (unsigned char c : entry) {
+        if (c < 0x20 || c == 0x7F || c == ':') return false;
+    }
+
+    // Segment-by-segment check: reject "..", UNC-like starts, and dot/space
+    // segments (Windows normalizes them, e.g., ".. " → "..", ". " → ".").
     size_t start = 0;
     while (start <= entry.size()) {
         size_t end = entry.find_first_of("/\\", start);
         if (end == std::string::npos) end = entry.size();
-        if (entry.compare(start, end - start, "..") == 0 && end - start == 2)
-            return false;
+
+        const size_t len = end - start;
+        const std::string segment = entry.substr(start, len);
+
+        // Reject ".." exactly.
+        if (len == 2 && segment == "..") return false;
+
+        // Reject segments that are only '.' and ' ' chars, except "." alone.
+        if (len > 0) {
+            bool all_dot_space = true;
+            for (char c : segment) {
+                if (c != '.' && c != ' ') {
+                    all_dot_space = false;
+                    break;
+                }
+            }
+            // If all chars are dots and spaces, reject unless it's exactly ".".
+            if (all_dot_space && len > 1) return false;
+        }
+
         start = end + 1;
     }
     return true;

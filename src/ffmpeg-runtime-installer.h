@@ -7,9 +7,13 @@
 #include <QCryptographicHash>
 #include <QPointer>
 
+#include <atomic>
+#include <memory>
+
 class QNetworkAccessManager;
 class QNetworkReply;
 class QFile;
+class QThread;
 
 class FfmpegRuntimeInstaller : public QObject {
     Q_OBJECT
@@ -23,6 +27,10 @@ public:
     void cancel();
     // Refuses while the managed ffmpeg is recording (REVIEW FOCUS 5).
     bool remove(bool in_use, QString *error);
+    // Called from obs_module_unload(): stops the download, tells the worker to
+    // abort, and waits (bounded) for it so no thread outlives the plugin.
+    // After this, any queued finish() is a no-op.
+    void shutdown();
 
 signals:
     void progress(qint64 received, qint64 total);
@@ -36,7 +44,8 @@ private:
     void finish(bool ok, const QString &message);
     // Runs on a worker thread: list, extract, copy, test-run, provenance,
     // swap. Returns "" on success, else the operator-facing failure line.
-    static QString install_from_archive(const QString &root, const QString &archive);
+    static QString install_from_archive(const QString &root, const QString &archive,
+                                        const std::shared_ptr<std::atomic<bool>> &abort);
 
     QNetworkAccessManager *m_nam = nullptr;
     QPointer<QNetworkReply> m_reply;
@@ -47,4 +56,8 @@ private:
     bool m_cancelled = false;
     bool m_oversized = false;
     QString m_root;
+    QString m_write_error;
+    bool m_shut_down = false;
+    QPointer<QThread> m_worker;
+    std::shared_ptr<std::atomic<bool>> m_abort;
 };

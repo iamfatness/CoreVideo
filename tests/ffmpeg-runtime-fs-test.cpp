@@ -33,7 +33,7 @@ static void fill(const fs::path &dir, const std::string &tag)
 
 int main()
 {
-    // REVIEW FOCUS 3: a profile path with spaces and non-ASCII characters.
+    // Profile path with spaces and non-ASCII characters must survive Windows filesystem encoding.
     const fs::path root = fs::temp_directory_path() /
         fs::u8path(u8"cv ffmpeg test José Müller") / "ffmpeg";
     fs::remove_all(root.parent_path());
@@ -65,7 +65,7 @@ int main()
     check(!cvff::install_complete(root, "ffmpeg.exe"), "missing license => incomplete");
     write(cvff::current_dir(root) / "LICENSE.txt", "gpl");
 
-    // REVIEW FOCUS 2: leftovers from an interrupted run are cleaned...
+    // Leftovers from an interrupted run are cleaned while current survives.
     write(cvff::download_file(root), "partial");
     fill(cvff::staging_dir(root), "half");
     write(cvff::extract_dir(root) / "x" / "ffmpeg.exe", "junk");
@@ -77,20 +77,44 @@ int main()
     check(!fs::exists(cvff::previous_dir(root)), "stale previous removed when current exists");
     check(read(cvff::current_dir(root) / "ffmpeg.exe") == "v2", "current untouched by cleanup");
 
-    // ...and a crash between "current -> previous" and "staging -> current"
-    // is recovered by restoring previous, never by deleting it.
+    // A crash between current->previous and staging->current is recovered by restoring previous.
     fs::rename(cvff::current_dir(root), cvff::previous_dir(root));
     cvff::clean_leftovers(root);
     check(read(cvff::current_dir(root) / "ffmpeg.exe") == "v2", "previous restored after mid-swap crash");
     check(cvff::install_complete(root, "ffmpeg.exe"), "restored install complete");
 
-    // REVIEW FOCUS 5: remove refuses while the managed ffmpeg is in use.
+    // swap_in_staging in crash state: only previous/ has the good install (no current/).
+    // Staging "v3", swap directly without clean_leftovers first -> restore current from previous first.
+    fs::rename(cvff::current_dir(root), cvff::previous_dir(root));
+    fill(cvff::staging_dir(root), "v3");
+    check(cvff::swap_in_staging(root, &err), "swap in crash state with staging succeeds");
+    check(read(cvff::current_dir(root) / "ffmpeg.exe") == "v3", "v3 in place after crash recovery");
+    check(!fs::exists(cvff::previous_dir(root)), "previous removed after swap");
+
+    // swap_in_staging in crash state with empty staging: restore current from previous, fail on empty staging.
+    fs::rename(cvff::current_dir(root), cvff::previous_dir(root));
+    check(!cvff::swap_in_staging(root, &err), "swap in crash state with empty staging fails");
+    check(read(cvff::current_dir(root) / "ffmpeg.exe") == "v3", "v3 restored from previous despite failed swap");
+    check(cvff::install_complete(root, "ffmpeg.exe"), "restored install complete");
+
+    // Remove refuses while the managed ffmpeg is in use.
     check(!cvff::remove_install(root, /*in_use=*/true, &err), "remove refused while in use");
     check(err.find("recording") != std::string::npos, "refusal mentions recording");
     check(cvff::install_complete(root, "ffmpeg.exe"), "refused remove leaves install");
-    check(cvff::remove_install(root, false, &err), "remove succeeds when idle");
+
+    // remove_install in crash state: only previous/ present (no current/).
+    fs::rename(cvff::current_dir(root), cvff::previous_dir(root));
+    check(cvff::remove_install(root, false, &err), "remove in crash state succeeds");
     check(!fs::exists(cvff::current_dir(root)), "current gone after remove");
-    check(cvff::remove_install(root, false, &err), "remove with nothing installed is a no-op success");
+    check(!fs::exists(cvff::previous_dir(root)), "previous gone after remove (not restored)");
+
+    // Remove with nothing installed is a no-op success.
+    check(cvff::remove_install(root, false, &err), "remove with nothing installed succeeds");
+
+    // clean_leftovers removes a leftover removing/ dir.
+    write(cvff::removing_dir(root) / "x" / "ffmpeg.exe", "trash");
+    cvff::clean_leftovers(root);
+    check(!fs::exists(cvff::removing_dir(root)), "removing dir removed");
 
     fs::remove_all(root.parent_path());
     if (g_failures) { std::cerr << g_failures << " failure(s)\n"; return 1; }

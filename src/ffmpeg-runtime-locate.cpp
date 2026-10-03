@@ -26,12 +26,21 @@ QString cv_ffmpeg_managed_exe()
         QStringLiteral("current/") + QString::fromUtf8(pin->exe_name));
 }
 
+std::filesystem::path cv_ffmpeg_fs_path(const QString &p)
+{
+#if defined(_WIN32)
+    return std::filesystem::path(p.toStdWString());
+#else
+    return std::filesystem::u8path(p.toUtf8().constData());
+#endif
+}
+
 bool cv_ffmpeg_managed_installed()
 {
     const FfmpegRuntimePin *pin = ffmpeg_runtime_pin_for_host();
     if (!pin) return false;
     return cvff::install_complete(
-        std::filesystem::path(cv_ffmpeg_install_root().toStdWString()), pin->exe_name);
+        cv_ffmpeg_fs_path(cv_ffmpeg_install_root()), pin->exe_name);
 }
 
 FfmpegResolution cv_ffmpeg_resolve(const std::string &configured)

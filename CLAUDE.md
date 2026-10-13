@@ -1693,3 +1693,5 @@ A trailing fallback diagnostic must use the selected target's own request too,
 never the shared maximum: a 360 tile sharing a 1080 source at accepted 720 is
 healthy while the 1080 source is downgraded. The complete creation publication
 sequence lives in `shared_video_publish_created_resolution` and its regression.
+
+Unlisted owner review pages are copied from `site-assets/reviews/` without navigation or sitemap registration. See `docs/SITE_DEPLOYMENT.md`; preserve their noindex status when updating captures.

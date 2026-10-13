@@ -50,6 +50,7 @@ if (htmlFiles.length === 0) fail("no HTML files found in public/");
 // duplicate a canonical page, so uniqueness is checked per canonical, not per
 // file.
 const titlesByCanonical = new Map();
+const nonIndexableCanonicals = new Set();
 
 for (const file of htmlFiles) {
   const rel = path.relative(outDir, file).replaceAll("\\", "/");
@@ -79,6 +80,9 @@ for (const file of htmlFiles) {
     }
     if (!titlesByCanonical.has(canonical)) titlesByCanonical.set(canonical, new Set());
     titlesByCanonical.get(canonical).add(title);
+    if (/<meta name="robots" content="[^"]*\bnoindex\b/i.test(html)) {
+      nonIndexableCanonicals.add(canonical);
+    }
   }
 
   for (const [name, pattern] of REQUIRED_SOCIAL) {
@@ -124,6 +128,10 @@ if (!fs.existsSync(sitemapPath)) {
 
   // Every canonical page should be discoverable from the sitemap.
   for (const canonical of titlesByCanonical.keys()) {
+    if (nonIndexableCanonicals.has(canonical)) {
+      if (locs.includes(canonical)) fail(`${canonical} is noindex but advertised in sitemap.xml`);
+      continue;
+    }
     if (!locs.includes(canonical)) fail(`${canonical} is canonical but missing from sitemap.xml`);
   }
 }

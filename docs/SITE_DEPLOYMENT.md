@@ -70,3 +70,7 @@ curl -I https://corevideo.iamfatness.us/core-plugin/
 # www must redirect to the apex:
 curl -sI https://www.corevideo.io/ | grep -i location
 ```
+
+## Unlisted Pro review gallery
+
+`/reviews/scene-builder/` serves actual CoreVideo Pro review-build screenshots copied from `site-assets/reviews/scene-builder/`. It is deliberately absent from the shared navigation and sitemap and declares `noindex, nofollow, noarchive`. It is a public URL accessible without ChatGPT sign-in, not an authenticated/private page. Update the static captures and their captions together; do not imply that a screenshot is the installed app or a live remote session.

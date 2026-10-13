@@ -1271,6 +1271,11 @@ if (fs.existsSync(logoSource)) {
 }
 
 const proStudioSource = path.join(siteAssetsDir, "corevideo-pro-studio.webp");
+// Owner review pages have their own URLs, but are not navigation or sitemap entries.
+const reviewPagesSource = path.join(siteAssetsDir, "reviews");
+if (fs.existsSync(reviewPagesSource)) {
+  fs.cpSync(reviewPagesSource, path.join(outDir, "reviews"), { recursive: true });
+}
 if (fs.existsSync(proStudioSource)) {
   const proStudioTarget = path.join(outDir, "pro", "images", "corevideo-pro-studio.webp");
   ensureDir(proStudioTarget);

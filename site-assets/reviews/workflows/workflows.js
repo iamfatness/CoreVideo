@@ -1,0 +1,8 @@
+const byId=id=>document.getElementById(id);
+document.querySelectorAll('[data-task]').forEach(button=>button.addEventListener('click',()=>{document.querySelectorAll('[data-task]').forEach(b=>{const active=b===button;b.setAttribute('aria-pressed',String(active));byId('task-'+b.dataset.task).hidden=!active;});byId('feedback-area').value=button.dataset.task==='sources'?'Source list and identity':button.dataset.task==='lower'?'Lower-third designer':'Grade curves and scope ROI';byId('feedback-area').dispatchEvent(new Event('input'));}));
+let applied='#44c1a1',draft=applied;
+function preview(){byId('draft-plate').style.borderLeftColor=draft;byId('applied-plate').style.borderLeftColor=applied;byId('color-picker').value=draft;byId('color-hex').value=draft;byId('color-error').textContent='';byId('color-status').textContent=draft===applied?'Draft matches applied reference. Nothing is sent to CoreVideo.':'Unsaved color draft. Applied reference is unchanged.';}
+byId('color-picker').addEventListener('input',()=>{draft=byId('color-picker').value;preview();});
+byId('color-hex').addEventListener('change',()=>{const value=byId('color-hex').value.trim();if(!/^#[a-f0-9]{6}$/i.test(value)){byId('color-error').textContent='Use # followed by six hex digits, or choose a color with the swatch. The draft is unchanged.';return;}draft=value.toLowerCase();preview();});
+byId('apply-color').addEventListener('click',()=>{if(!/^#[a-f0-9]{6}$/i.test(byId('color-hex').value)){byId('color-error').textContent='Correct the hex value or choose a color before applying.';return;}applied=draft;preview();byId('color-status').textContent='Simulated look applied. This page never controls the app.';});
+byId('cancel-color').addEventListener('click',()=>{draft=applied;preview();});preview();

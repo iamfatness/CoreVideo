@@ -1,4 +1,5 @@
 const AREAS = new Set(['Overall workflow','Source list and identity','Layout and compact view','Picture controls and live edits','Audio controls','Lower-third text','Live versus draft behavior','Health and status clarity']);
+const REVIEWS = new Map([['sources-workspace-v1',AREAS],['operator-uiux-v1',new Set(['Overall workflow','Starter scenes','Lower-third designer','Shared sliders and resets','Grade curves and scope ROI','Settings and Health','Source list and identity'])]]);
 const VERDICTS = new Set(['changes','approve','question']);
 const SCENARIOS = new Set(['populated','offline','returns','unassigned']);
 const response = (value,status=200)=>new Response(JSON.stringify(value),{status,headers:{'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff','x-robots-tag':'noindex, nofollow'}});
@@ -18,13 +19,13 @@ export async function handleReviewFeedback(request,env){
   if(!request.headers.get('content-type')?.toLowerCase().startsWith('application/json'))return response({error:'Use JSON feedback.'},415);
   if(!env.REVIEW_FEEDBACK)return response({error:'Feedback storage is unavailable. Please keep your draft and try again.'},503);
   let body;try{body=await boundedJson(request);}catch(error){return response({error:error instanceof RangeError?'Feedback request is too large.':'Feedback could not be read.'},error instanceof RangeError?413:400);}
-  if(!body || typeof body!=='object'||Array.isArray(body)||body.review!=='sources-workspace-v1'||
+  if(!body || typeof body!=='object'||Array.isArray(body)||!REVIEWS.has(body.review)||
       typeof body.submissionId!=='string'||!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.submissionId)||
-      !AREAS.has(body.area)||!VERDICTS.has(body.verdict)||!SCENARIOS.has(body.scenario)||!['wide','compact'].includes(body.view)||
+      !REVIEWS.get(body.review).has(body.area)||!VERDICTS.has(body.verdict)||!SCENARIOS.has(body.scenario)||!['wide','compact'].includes(body.view)||
       typeof body.comment!=='string'||body.comment.trim().length<3||body.comment.length>4000||body.website)
     return response({error:'Check the review fields and enter 3–4000 characters of feedback.'},400);
   const note={review:body.review,area:body.area,verdict:body.verdict,comment:body.comment.trim(),scenario:body.scenario,view:body.view};
-  const id=body.submissionId.toLowerCase(),key=`feedback:sources-workspace-v1:${id}`;
+  const id=body.submissionId.toLowerCase(),key=`feedback:${body.review}:${id}`;
   try{
     const existing=await env.REVIEW_FEEDBACK.get(key,'json');
     if(existing){if(JSON.stringify(existing.note)!==JSON.stringify(note))return response({error:'This submission has changed. Please reload and submit your saved draft again.'},409);return response({saved:true,id,savedAt:existing.savedAt},201);}

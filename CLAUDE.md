@@ -1719,3 +1719,10 @@ unmocked destinations and unresolved acceptance. Source rows retain format/fps,
 category filtering and quick MV inclusion across ten stable slots. Source
 selection/MV inclusion must not become an alternate Scene Take workflow. The
 color sample illustrates visual picking and draft/apply, not Windows rendering.
+
+The alternative `/reviews/sources-table/` keeps the table as the default and
+opens a collapsible inspector for the same selected input. It is a simulated
+design review, not desktop behavior. Source format/FPS, MV and ISO stay visible;
+optional columns persist in browser storage and narrow views expose secondary
+values through row Details. ISO arm is explicitly distinct from writer state.
+Its feedback is isolated under `sources-table-v1`; preserve prior proposals.

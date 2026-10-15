@@ -54,3 +54,5 @@ pipe-test-*.log
 companion/companion-module-corevideo-obs/dist/
 companion/companion-module-corevideo-obs/pkg/
 companion/companion-module-corevideo-obs/*.tgz
+wrangler.review.generated.jsonc
+.playwright-cli/

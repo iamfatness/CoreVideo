@@ -11,7 +11,7 @@
     "build": "node scripts/build-site.mjs",
     "dev": "npm run build && wrangler dev",
     "check": "npm run build && wrangler deploy --dry-run",
-    "deploy": "npm run build && wrangler deploy",
+    "deploy": "npm run build && node scripts/configure-review-storage.mjs && wrangler deploy --config wrangler.review.generated.jsonc",
     "tail": "wrangler tail"
   },
   "devDependencies": {

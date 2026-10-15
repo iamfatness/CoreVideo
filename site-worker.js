@@ -1,3 +1,5 @@
+import { handleReviewFeedback } from './review-feedback.js';
+
 const SECURITY_HEADERS = {
   "content-security-policy":
     "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; script-src 'self' https://cdn.jsdelivr.net; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
@@ -542,6 +544,9 @@ export default {
     }
 
     const pathname = url.pathname.replace(/\/$/u, "") || "/";
+    if (pathname === "/reviews/api/feedback") {
+      return withHeaders(await handleReviewFeedback(request,env));
+    }
 
     // /download used to 302 straight to the GitHub releases list. It is now a
     // real page (public/download/index.html) that carries the install steps,

@@ -1695,3 +1695,10 @@ healthy while the 1080 source is downgraded. The complete creation publication
 sequence lives in `shared_video_publish_created_resolution` and its regression.
 
 Unlisted owner review pages are copied from `site-assets/reviews/` without navigation or sitemap registration. See `docs/SITE_DEPLOYMENT.md`; preserve their noindex status when updating captures.
+
+The interactive Sources workspace proposal lives at `/reviews/sources-workspace/`.
+It uses simulated media and never controls the desktop app. Its same-origin
+`POST /reviews/api/feedback` endpoint stores private notes in REVIEW_FEEDBACK KV
+for 180 days; there is no public read endpoint. Deployment provisions the binding
+with `scripts/configure-review-storage.mjs` using the existing CI credential.
+Run `node --test tests/review-feedback.test.mjs` when changing that contract.

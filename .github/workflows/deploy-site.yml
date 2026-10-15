@@ -11,6 +11,8 @@ on:
       - "scripts/check-site-seo.mjs"
       - "public/**"
       - "site-worker.js"
+      - "review-feedback.js"
+      - "scripts/configure-review-storage.mjs"
       - "wrangler.jsonc"
       - ".github/workflows/deploy-site.yml"
   workflow_dispatch:
@@ -45,6 +47,9 @@ jobs:
       - name: Check site SEO invariants
         run: node scripts/check-site-seo.mjs
 
+      - name: Check review feedback contract
+        run: node --test tests/review-feedback.test.mjs
+
       # A pinned download (the macOS .pkg) pointed at an asset that was never
       # uploaded and 404'd for weeks. Block the deploy instead.
       - name: Check pinned download links resolve
@@ -67,9 +72,13 @@ jobs:
           fi
           echo "deploy_enabled=true" >> "$GITHUB_OUTPUT"
 
+      - name: Configure private review feedback storage
+        if: steps.cloudflare_config.outputs.deploy_enabled == 'true'
+        run: node scripts/configure-review-storage.mjs
+
       - name: Deploy to Cloudflare Workers
         if: steps.cloudflare_config.outputs.deploy_enabled == 'true'
-        run: npx wrangler@latest deploy
+        run: npx wrangler@latest deploy --config wrangler.review.generated.jsonc
 
       # Purge the edge cache so a new deploy is served immediately instead of
       # leaving a stale-cache window. Non-fatal: if the API token lacks

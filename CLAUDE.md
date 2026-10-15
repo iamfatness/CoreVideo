@@ -1726,3 +1726,9 @@ design review, not desktop behavior. Source format/FPS, MV and ISO stay visible;
 optional columns persist in browser storage and narrow views expose secondary
 values through row Details. ISO arm is explicitly distinct from writer state.
 Its feedback is isolated under `sources-table-v1`; preserve prior proposals.
+
+The table mockup exposes Grade selected in the toolbar and Grade in the
+inspector. Both open the source-bound expanded grade dialog, then return to
+the same table state. Picture/scopes are explicitly illustrative, not sampled
+video or native processing. ROI is scopes-only; the LUT/native stack remains
+a preservation requirement rather than a claim of complete web simulation.

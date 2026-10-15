@@ -1707,3 +1707,8 @@ Run `node --test tests/review-feedback.test.mjs` when changing that contract.
 at `/reviews/operator-controls/`. Gallery notes use the distinct
 `operator-uiux-v1` review key and validated area list. Preserve capture limits:
 these images exclude GPU video, are static, and are not installed acceptance.
+
+Maintainers can dispatch Deploy Site with a base64 RSA public key (3072+ bits)
+in `feedback_public_key` to export encrypted review notes instead of deploying.
+The private key stays local. The one-day artifact contains ciphertext only;
+never print private feedback or credentials into public Actions logs.

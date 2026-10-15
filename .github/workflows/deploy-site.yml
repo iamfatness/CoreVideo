@@ -16,14 +16,42 @@ on:
       - "wrangler.jsonc"
       - ".github/workflows/deploy-site.yml"
   workflow_dispatch:
+    inputs:
+      feedback_public_key:
+        description: "Optional base64 RSA public key: export encrypted review notes instead of deploying"
+        required: false
+        type: string
 
 concurrency:
   group: deploy-site
   cancel-in-progress: true
 
 jobs:
+  feedback:
+    name: Export encrypted review feedback
+    if: github.event_name == 'workflow_dispatch' && inputs.feedback_public_key != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Read and encrypt private review notes
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || vars.CLOUDFLARE_ACCOUNT_ID }}
+          REVIEW_PUBLIC_KEY: ${{ inputs.feedback_public_key }}
+        run: node scripts/export-review-feedback.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: encrypted-review-feedback
+          path: review-feedback.encrypted.json
+          retention-days: 1
   deploy:
     name: Deploy corevideo.io
+    if: github.event_name != 'workflow_dispatch' || inputs.feedback_public_key == ''
     runs-on: ubuntu-latest
     permissions:
       contents: read

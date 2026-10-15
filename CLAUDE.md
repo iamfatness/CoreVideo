@@ -1702,3 +1702,8 @@ It uses simulated media and never controls the desktop app. Its same-origin
 for 180 days; there is no public read endpoint. Deployment provisions the binding
 with `scripts/configure-review-storage.mjs` using the existing CI credential.
 Run `node --test tests/review-feedback.test.mjs` when changing that contract.
+
+`/reviews/` links that proposal and the October 15 development capture gallery
+at `/reviews/operator-controls/`. Gallery notes use the distinct
+`operator-uiux-v1` review key and validated area list. Preserve capture limits:
+these images exclude GPU video, are static, and are not installed acceptance.

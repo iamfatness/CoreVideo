@@ -1732,3 +1732,8 @@ inspector. Both open the source-bound expanded grade dialog, then return to
 the same table state. Picture/scopes are explicitly illustrative, not sampled
 video or native processing. ROI is scopes-only; the LUT/native stack remains
 a preservation requirement rather than a claim of complete web simulation.
+
+`/reviews/sources-table/native/` shows actual compiled candidate 2f6802e controls.
+Keep it distinct from the simulated mockup. Synthetic API captures exclude GPU
+video/scopes; installed, physical/high-DPI and live meeting acceptance remain open.
+Its feedback link reuses the existing sources-table-v1 private form.

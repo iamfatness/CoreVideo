@@ -1737,3 +1737,13 @@ a preservation requirement rather than a claim of complete web simulation.
 Keep it distinct from the simulated mockup. Synthetic API captures exclude GPU
 video/scopes; installed, physical/high-DPI and live meeting acceptance remain open.
 Its feedback link reuses the existing sources-table-v1 private form.
+
+## Volt graphics review page
+
+`site-assets/reviews/volt-graphics/` is the standalone Pro graphics design review
+(no main-header link). Its images are native DirectWrite/D2D/WIC reference
+thumbnails; its browser controls simulate workflows and do not control the app.
+`review-feedback.js` isolates `volt-graphics-v1` notes in the existing private KV
+service. Rebuild with `npm run build`; publish through Deploy Site when the local
+Cloudflare login is unavailable. Do not describe this page as an installed beta
+or claim full-output qualification from its reference images.

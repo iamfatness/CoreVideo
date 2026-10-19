@@ -44,7 +44,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || vars.CLOUDFLARE_ACCOUNT_ID }}
           REVIEW_PUBLIC_KEY: ${{ inputs.feedback_public_key }}
         run: node scripts/export-review-feedback.mjs
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: encrypted-review-feedback
           path: review-feedback.encrypted.json

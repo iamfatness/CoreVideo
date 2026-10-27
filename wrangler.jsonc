@@ -19,6 +19,9 @@
       "zone_name": "iamfatness.us"
     }
   ],
+  "observability": {
+    "enabled": true
+  },
   "assets": {
     "binding": "ASSETS",
     "directory": "./public",

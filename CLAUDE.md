@@ -1616,6 +1616,15 @@ instead; both paths create a normal release for the tag. **Never publish the
 (auto on docs/site paths, `workflow_dispatch` otherwise) rebuilds `public/`
 from `scripts/build-site.mjs` — never hand-edit `public/`.
 
+## Site analytics (2026-10-26)
+
+Cloudflare Web Analytics (cookieless) is emitted by `scripts/build-site.mjs` (`ANALYTICS_BEACON`) into the
+shared layout and the docs head, never into the unlisted `/reviews/` pages. It needs the two Cloudflare hosts in
+`site-worker.js`'s CSP (`script-src` static.cloudflareinsights.com, `connect-src` cloudflareinsights.com): the
+zone's auto-install had been silently blocked by the old CSP, so the dashboard was empty. Workers Logs is on for
+`corevideo-docs` (`observability` in `wrangler.jsonc`); it serves corevideo.io and corevideo.iamfatness.us,
+including the OAuth broker, so sign-ins are visible in the Cloudflare Workers logs.
+
 ## Style
 
 Comments state the constraint the code can't show — most files here carry the

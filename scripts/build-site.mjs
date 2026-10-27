@@ -12,6 +12,12 @@ const outDir = path.join(root, "public");
 // primary host so the two domains are not treated as duplicate content.
 const PRIMARY_ORIGIN = "https://corevideo.io";
 const SITE_NAME = "CoreVideo";
+// Cloudflare Web Analytics (cookieless). The zone's auto-install never reached
+// the pages: the worker's CSP blocked the injected beacon, so the dashboard
+// stayed empty. Emitted explicitly here, with site-worker.js allowing the two
+// Cloudflare hosts. The token is public by design (it ships in every page).
+const ANALYTICS_BEACON =
+  `  <script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "606f185a54e7489bb11a93235343469b"}'></script>\n`;
 const OG_IMAGE = `${PRIMARY_ORIGIN}/assets/corevideo-share.jpg`;
 const OG_IMAGE_ALT =
   "CoreVideo - Zoom participant video and audio as native OBS Studio sources";
@@ -926,7 +932,7 @@ function layout(page, content, options = {}) {
   <link rel="preload" href="/assets/fonts/IBMPlexMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
 ${options.canonical ? `  <link rel="canonical" href="${escapeHtml(options.canonical)}">\n` : ""}${socialTags({ title: fullTitle, description: page.description, url: options.canonical, image: ogImage })}
   <link rel="stylesheet" href="/assets/site.css">
-${options.jsonLd ? jsonLdBlock(options.jsonLd) : ""}</head>
+${ANALYTICS_BEACON}${options.jsonLd ? jsonLdBlock(options.jsonLd) : ""}</head>
 <body class="${options.home ? "home-page" : "document-page"}">
   <header class="site-header">
     <a class="brand" href="/">${MULTIVIEW_MARK}<span>CoreVideo</span></a>
@@ -1324,7 +1330,7 @@ const docsHtml = fs.readFileSync(path.join(docsDir, "index.html"), "utf8")
         url: DOCS_CANONICAL,
         image: OG_IMAGE,
       }) +
-      "\n</head>",
+      "\n" + ANALYTICS_BEACON + "</head>",
   );
 if (!docsHtml.includes('rel="canonical"')) {
   throw new Error(

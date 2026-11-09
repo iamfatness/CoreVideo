@@ -1,6 +1,6 @@
 # Privacy Policy
 
-_Last updated: September 2026_
+_Last updated: November 2026_
 
 ## Overview
 
@@ -108,6 +108,14 @@ The documentation site at `corevideo.io` is served through Cloudflare and source
 
 - [Cloudflare Privacy Policy](https://www.cloudflare.com/privacypolicy/)
 - [GitHub Privacy Statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement)
+
+### Google Analytics (Website)
+
+The public pages on `corevideo.io` use Google Analytics through Google Tag
+Manager to measure site usage, including page views. Google Analytics may use
+cookies to distinguish visits. See [how Google uses information from sites that
+use its services](https://policies.google.com/technologies/partner-sites) and the
+[Google Analytics opt-out browser add-on](https://tools.google.com/dlpage/gaoptout).
 
 ---
 

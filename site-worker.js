@@ -2,7 +2,10 @@ import { handleReviewFeedback } from './review-feedback.js';
 
 const SECURITY_HEADERS = {
   "content-security-policy":
-    "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; script-src 'self' https://cdn.jsdelivr.net https://static.cloudflareinsights.com; connect-src 'self' https://cloudflareinsights.com; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+    "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; " +
+    "script-src 'self' https://cdn.jsdelivr.net https://static.cloudflareinsights.com https://www.googletagmanager.com; " +
+    "connect-src 'self' https://cloudflareinsights.com https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com; " +
+    "font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
   "referrer-policy": "strict-origin-when-cross-origin",
   "x-content-type-options": "nosniff",
 };

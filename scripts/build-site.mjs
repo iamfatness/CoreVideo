@@ -18,6 +18,10 @@ const SITE_NAME = "CoreVideo";
 // Cloudflare hosts. The token is public by design (it ships in every page).
 const ANALYTICS_BEACON =
   `  <script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "606f185a54e7489bb11a93235343469b"}'></script>\n`;
+// Initialize the data layer before loading the container. The site's CSP
+// requires the initializer to be served as a separate script.
+const GOOGLE_TAG_MANAGER = `  <script src="/assets/google-tag-manager.js"></script>
+  <script async src="https://www.googletagmanager.com/gtm.js?id=GTM-PSHZHBGZ"></script>`;
 const OG_IMAGE = `${PRIMARY_ORIGIN}/assets/corevideo-share.jpg`;
 const OG_IMAGE_ALT =
   "CoreVideo - Zoom participant video and audio as native OBS Studio sources";
@@ -923,6 +927,7 @@ function layout(page, content, options = {}) {
 <html lang="en">
 <head>
   <meta charset="utf-8">
+${GOOGLE_TAG_MANAGER}
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${escapeHtml(fullTitle)}</title>
   <meta name="description" content="${escapeHtml(page.description)}">
@@ -1310,6 +1315,7 @@ const DOCS_DESCRIPTION =
 const DOCS_CANONICAL = canonicalUrl("documentation/index.html");
 
 const docsHtml = fs.readFileSync(path.join(docsDir, "index.html"), "utf8")
+  .replace(/(<meta charset="UTF-8"\s*\/>)/i, `$1\n${GOOGLE_TAG_MANAGER}`)
   .replaceAll("iamfatness.github.io/CoreVideo", publicDocumentationUrl
     ? new URL("/documentation", publicDocumentationUrl).host + "/documentation"
     : "CoreVideo documentation")
@@ -1353,6 +1359,11 @@ writeText(
 writeText(
   "assets/docs-init.js",
   fs.readFileSync(path.join(siteAssetsDir, "docs-init.js"), "utf8"),
+);
+
+writeText(
+  "assets/google-tag-manager.js",
+  fs.readFileSync(path.join(siteAssetsDir, "google-tag-manager.js"), "utf8"),
 );
 
 // Bundled application fonts (Space Grotesk + IBM Plex Mono), self-hosted so

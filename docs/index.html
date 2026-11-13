@@ -78,6 +78,7 @@
       background: rgba(34,200,110,.1); border: 1px solid rgba(34,200,110,.28); border-radius: 4px; padding: 1px 6px;
       font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
       font-size: 0.85em; color: #a7f0c8;
+      overflow-wrap: anywhere;
     }
     pre {
       background: #0e1112; border: 1px solid var(--border); border-radius: 8px;
@@ -112,7 +113,8 @@
     }
     .card:hover { border-color: var(--accent); transform: translateY(-2px); }
     .card-icon { font-size: 1.5rem; margin-bottom: 8px; }
-    .card h4 { margin: 0 0 6px; font-size: 0.9rem; }
+    /* h3 for document order (h2 > h3); sized and coloured as the h4 they replaced. */
+    .card h3 { margin: 0 0 6px; font-size: 0.9rem; font-weight: 600; color: var(--text); }
     .card p { font-size: 0.8rem; color: var(--muted); margin: 0; }
 
     .diagram-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -145,7 +147,11 @@
       display: flex; align-items: center; justify-content: center;
       font-size: 0.8rem; font-weight: 700; flex-shrink: 0; margin-top: 2px;
     }
-    .step-body h4 { margin-top: 0; color: var(--text); }
+    /* A flex child defaults to min-width:auto, so a wide pre, table or diagram
+       inside a step stretched the step and the whole page (1652 px wide on a
+       375 px phone). min-width:0 lets those blocks scroll inside themselves. */
+    .step-body { flex: 1 1 auto; min-width: 0; }
+    .step-body h3 { margin: 0 0 8px; font-size: 0.95rem; font-weight: 600; color: var(--text); }
 
     section { scroll-margin-top: 24px; }
 
@@ -162,6 +168,7 @@
       .site-topbar { flex-direction: column; align-items: flex-start; gap: 10px; }
       .site-topbar .topnav { justify-content: flex-start; }
       main > footer { margin-left: 0 !important; }
+      table { display: block; overflow-x: auto; }
     }
   </style>
 </head>
@@ -172,6 +179,7 @@
   <nav class="topnav">
     <a href="/">Home</a>
     <a href="/pro/">CoreVideo Pro</a>
+    <a href="/zcomms/">ZComms</a>
     <a href="/pro/documentation/">Pro Docs</a>
     <a href="/documentation/" aria-current="page">Plugin Docs</a>
     <a href="/core-plugin/">Core Plugin</a>
@@ -313,53 +321,53 @@
   <section id="features">
     <h2>Features</h2>
     <div class="card-grid">
-      <div class="card"><div class="card-icon">🎥</div><h4>Raw Video Capture</h4>
+      <div class="card"><div class="card-icon">🎥</div><h3>Raw Video Capture</h3>
         <p>I420 YUV per participant. Selectable 360p / 720p / 1080p resolution. Hardware-accelerated color conversion (CUDA, VAAPI, VideoToolbox, QSV).</p></div>
-      <div class="card"><div class="card-icon">⬛</div><h4>Video Loss &amp; Placeholder</h4>
+      <div class="card"><div class="card-icon">⬛</div><h3>Video Loss &amp; Placeholder</h3>
         <p>Hold last frame or show black on feed drop. Shows a color-bar placeholder when not yet subscribed.</p></div>
-      <div class="card"><div class="card-icon">🎙️</div><h4>Raw Audio Capture</h4>
+      <div class="card"><div class="card-icon">🎙️</div><h3>Raw Audio Capture</h3>
         <p>48 kHz PCM, mono or stereo, with per-participant audio isolation and mixer routing.</p></div>
-      <div class="card"><div class="card-icon">🌐</div><h4>Interpretation Audio Capture</h4>
+      <div class="card"><div class="card-icon">🌐</div><h3>Interpretation Audio Capture</h3>
         <p>Dedicated OBS source for existing Zoom interpretation audio channels in the meeting.</p></div>
-      <div class="card"><div class="card-icon">🖥️</div><h4>Screen Share Capture</h4>
+      <div class="card"><div class="card-icon">🖥️</div><h3>Screen Share Capture</h3>
         <p>Source type that follows active screen-share feed via <code>ScreenShare</code> assignment mode.</p></div>
-      <div class="card"><div class="card-icon">🎯</div><h4>Spotlight / ZoomISO Modes</h4>
+      <div class="card"><div class="card-icon">🎯</div><h3>Spotlight / ZoomISO Modes</h3>
         <p>Assign a source to Spotlight 1-8, exactly like ZoomISO. Engine resolves which participant owns each slot.</p></div>
-      <div class="card"><div class="card-icon">🔄</div><h4>Active Speaker Mode</h4>
+      <div class="card"><div class="card-icon">🔄</div><h3>Active Speaker Mode</h3>
         <p>Sensitivity (ms) + hold-time (ms) debounce with liveness guard, supersede logic, and failover participant.</p></div>
-      <div class="card"><div class="card-icon">🔁</div><h4>Failover Participant</h4>
+      <div class="card"><div class="card-icon">🔁</div><h3>Failover Participant</h3>
         <p>Configure a secondary participant ID that activates automatically when the primary leaves the meeting.</p></div>
-      <div class="card"><div class="card-icon">🔌</div><h4>Auto-Reconnect</h4>
+      <div class="card"><div class="card-icon">🔌</div><h3>Auto-Reconnect</h3>
         <p>Automatic re-join after engine crash, network drop, or disconnection — exponential back-off with cancel UI.</p></div>
-      <div class="card"><div class="card-icon">🎬</div><h4>Webinar Support</h4>
+      <div class="card"><div class="card-icon">🎬</div><h3>Webinar Support</h3>
         <p>Join Zoom Webinars using the dedicated SDK entry point — set the Webinar checkbox in the control dock.</p></div>
-      <div class="card"><div class="card-icon">👥</div><h4>Rich Participant Roster</h4>
+      <div class="card"><div class="card-icon">👥</div><h3>Rich Participant Roster</h3>
         <p>Live list with video, mute, talking, host, co-host, raised hand, spotlight slot, and screen-sharing state.</p></div>
-      <div class="card"><div class="card-icon">🔊</div><h4>Per-Participant Audio</h4>
+      <div class="card"><div class="card-icon">🔊</div><h3>Per-Participant Audio</h3>
         <p>Standalone OBS audio source per meeting participant; audio mixed into OBS audio mixer.</p></div>
-      <div class="card"><div class="card-icon">🎛️</div><h4>Control Dock</h4>
+      <div class="card"><div class="card-icon">🎛️</div><h3>Control Dock</h3>
         <p>Dockable Qt panel with join/leave, state indicator, Active Speaker Director controls, recovery countdown, and Output Manager launch.</p></div>
-      <div class="card"><div class="card-icon">DIAG</div><h4>Diagnostics</h4>
+      <div class="card"><div class="card-icon">DIAG</div><h3>Diagnostics</h3>
         <p>The dockable Zoom Diagnostics panel shows requested versus observed resolution, FPS, frame age, retry counters, recent engine debug events, ISO/FFmpeg recorder status, and redacted support bundle export.</p></div>
-      <div class="card"><div class="card-icon">OUT</div><h4>Dockable Output Manager</h4>
+      <div class="card"><div class="card-icon">OUT</div><h3>Dockable Output Manager</h3>
         <p>Zoom Output Manager is now a persistent OBS dock for source assignments, live preview thumbnails, feed health, profile save/load, and manual recovery actions.</p></div>
-      <div class="card"><div class="card-icon">🌐</div><h4>TCP Control API</h4>
+      <div class="card"><div class="card-icon">🌐</div><h3>TCP Control API</h3>
         <p>JSON server on port 19870 — query, join, leave, assign outputs from scripts or dashboards.</p></div>
-      <div class="card"><div class="card-icon">🎛️</div><h4>OSC Control API</h4>
+      <div class="card"><div class="card-icon">🎛️</div><h3>OSC Control API</h3>
         <p>UDP OSC server on port 19871 for lighting consoles and broadcast hardware.</p></div>
-      <div class="card"><div class="card-icon">💾</div><h4>Output Profiles</h4>
+      <div class="card"><div class="card-icon">💾</div><h3>Output Profiles</h3>
         <p>Save and load named participant-to-source mappings as JSON files.</p></div>
-      <div class="card"><div class="card-icon">⌨️</div><h4>OBS Hotkeys</h4>
+      <div class="card"><div class="card-icon">⌨️</div><h3>OBS Hotkeys</h3>
         <p>Per-source hotkeys to enable/disable active speaker mode from OBS keyboard shortcuts.</p></div>
-      <div class="card"><div class="card-icon">🔒</div><h4>Hardened Security</h4>
+      <div class="card"><div class="card-icon">🔒</div><h3>Hardened Security</h3>
         <p>Constant-time token comparison, validated IPC input, sanitised participant IDs, SIGPIPE handling, DPAPI token storage (Windows).</p></div>
-      <div class="card"><div class="card-icon">🔑</div><h4>Zoom OAuth PKCE</h4>
+      <div class="card"><div class="card-icon">🔑</div><h3>Zoom OAuth PKCE</h3>
         <p>Broker-backed OAuth 2.0 with S256 PKCE for attributed joins and Marketplace compliance. Meeting SDK auth uses the embedded Marketplace Public Client ID as publicAppKey. Custom URL scheme with platform callback helpers.</p></div>
-      <div class="card"><div class="card-icon">🎨</div><h4>Modern UI</h4>
+      <div class="card"><div class="card-icon">🎨</div><h3>Modern UI</h3>
         <p>CoreVideo dark stylesheet with animated <code>CvStatusDot</code>, <code>CvBanner</code> first-run notices, and button role variants (primary / danger).</p></div>
-      <div class="card"><div class="card-icon">ISO</div><h4>Auto ISO Recording</h4>
+      <div class="card"><div class="card-icon">ISO</div><h3>Auto ISO Recording</h3>
         <p>Record assigned participant video/audio tracks to separate files while optionally recording the main OBS program output.</p></div>
-      <div class="card"><div class="card-icon">💻</div><h4>Multi-Platform</h4>
+      <div class="card"><div class="card-icon">💻</div><h3>Multi-Platform</h3>
         <p>Windows has a release installer; macOS has a signed <a href="#mac-beta">Apple Silicon beta installer</a>. Linux requires a source build.</p></div>
     </div>
   </section>
@@ -373,27 +381,27 @@
     </p>
     <div class="steps">
       <div class="step"><div class="step-body">
-        <h4>1. Download CoreVideo</h4>
+        <h3>1. Download CoreVideo</h3>
         <p>Go to <a href="https://corevideo.io/download">corevideo.io/download</a> and get the
         latest Windows installer (<code>CoreVideo-Setup.exe</code>). Every release also publishes a
         matching <code>.sha256</code> checksum you can verify.</p>
       </div></div>
       <div class="step"><div class="step-body">
-        <h4>2. Run the installer</h4>
+        <h3>2. Run the installer</h3>
         <p>Close OBS Studio if it is open, then double-click <code>CoreVideo-Setup.exe</code> and
         follow the prompts. The installer adds the CoreVideo plugin and its bundled Zoom runtime to
         your OBS Studio installation.</p>
         
       </div></div>
       <div class="step"><div class="step-body">
-        <h4>3. Open OBS Studio</h4>
+        <h3>3. Open OBS Studio</h3>
         <p>Launch OBS Studio 30 or newer. CoreVideo loads automatically: you'll see the
         <strong>Zoom Control</strong> dock and a <strong>Tools&nbsp;→&nbsp;Zoom Plugin Settings</strong>
         menu item. If the dock is hidden, enable it from <strong>Docks&nbsp;→&nbsp;Zoom Control</strong>.</p>
         
       </div></div>
       <div class="step"><div class="step-body">
-        <h4>4. Sign in with Zoom</h4>
+        <h3>4. Sign in with Zoom</h3>
         <p>Click <strong>Sign in with Zoom</strong> and authorize CoreVideo in your browser
         (details in <a href="#signin">Sign in with Zoom</a> below). That's it — you're ready to use it.</p>
       </div></div>
@@ -473,18 +481,18 @@
     hosted broker with OAuth&nbsp;2.0 + PKCE.</p>
     <div class="steps">
       <div class="step"><div class="step-body">
-        <h4>1. Click "Sign in with Zoom"</h4>
+        <h3>1. Click "Sign in with Zoom"</h3>
         <p>In the Zoom Control dock, or via <strong>Tools&nbsp;→&nbsp;Zoom Plugin Settings</strong>.</p>
         <figure class="shot"><img src="/documentation/images/settings.png" alt="Tools → Zoom Plugin Settings: Sign in with Zoom (no Client ID or secret for end users)."><figcaption>Tools → Zoom Plugin Settings: Sign in with Zoom (no Client ID or secret for end users).</figcaption></figure>
       </div></div>
       <div class="step"><div class="step-body">
-        <h4>2. Authorize in your browser</h4>
+        <h3>2. Authorize in your browser</h3>
         <p>Your browser opens Zoom's consent screen. Approve access. CoreVideo registers its
         <code>corevideo://</code> callback handler automatically the first time.</p>
         
       </div></div>
       <div class="step"><div class="step-body">
-        <h4>3. Done</h4>
+        <h3>3. Done</h3>
         <p>The dock shows a connected status and token expiry. Tokens are stored locally on your
         machine (DPAPI-encrypted on Windows). CoreVideo never sees your Zoom password, and no client
         secret is stored in the app.</p>
@@ -633,14 +641,14 @@
     </p>
     <div class="steps">
       <div class="step"><div class="step-body">
-        <h4>1. Click "More info"</h4>
+        <h3>1. Click "More info"</h3>
         <p>On the SmartScreen dialog, click <strong>More info</strong>, then
         <strong>Run anyway</strong>. If you don't see a "More info" link, your
         organization's policy may be blocking unsigned installers entirely — check
         with your IT administrator.</p>
       </div></div>
       <div class="step"><div class="step-body">
-        <h4>2. (Optional but recommended) Verify the checksum</h4>
+        <h3>2. (Optional but recommended) Verify the checksum</h3>
         <p>Every release publishes a matching <code>.sha256</code> file next to the
         installer and ZIP. Compare it against a local hash before running the
         installer:</p>
@@ -1250,24 +1258,24 @@ sequenceDiagram
     <h3>Setup (one-time per machine)</h3>
     <div class="steps">
       <div class="step"><div class="step-body">
-        <h4>Use the embedded broker</h4>
+        <h3>Use the embedded broker</h3>
         <p>Published builds already contain the CoreVideo broker URL. Open
         <strong>Tools → Zoom Plugin Settings</strong>; there are no Client ID,
         Client Secret, or Authorization URL fields for end users to configure.</p>
       </div></div>
       <div class="step"><div class="step-body">
-        <h4>Register the URL scheme</h4>
+        <h3>Register the URL scheme</h3>
         <p>Click <strong>Sign in with Zoom</strong>. CoreVideo registers the
         <code>corevideo://</code> callback helper automatically on first use.</p>
       </div></div>
       <div class="step"><div class="step-body">
-        <h4>Authorize</h4>
+        <h3>Authorize</h3>
         <p>CoreVideo opens the browser at
         <code>https://corevideo.iamfatness.us/oauth/start</code>. Approve the app
         in Zoom.</p>
       </div></div>
       <div class="step"><div class="step-body">
-        <h4>Callback forwarding</h4>
+        <h3>Callback forwarding</h3>
         <p>Zoom redirects to the broker callback, then the broker returns an
         encrypted broker token to <code>corevideo://oauth/callback</code>. The
         helper forwards that URL to the plugin via the TCP control server

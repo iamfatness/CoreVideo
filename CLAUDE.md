@@ -1616,6 +1616,21 @@ instead; both paths create a normal release for the tag. **Never publish the
 (auto on docs/site paths, `workflow_dispatch` otherwise) rebuilds `public/`
 from `scripts/build-site.mjs` — never hand-edit `public/`.
 
+## CoreVideo Pro 1.0 on the site (2026-11-12)
+
+Pro ships from `iamfatness/CoreVideoPro`; `PRO_VERSION` and the `PRO_*` URLs in
+`scripts/build-site.mjs` are its only coupling. The announcement
+(`/news/corevideo-pro-1-0/`) pins the 1.0.0 installer on purpose; every other
+Pro download button uses releases/latest. `/pro/` and `/pro/documentation/`
+describe only what the CoreVideoPro README marks proven or shipped. The old
+June concept render (captions, Magic Scene) is no longer shown because 1.0
+excludes both; replace the brand-lockup hero with a real 1.0 capture when one
+exists. The home page `announcementStrip()` is news: remove it once 1.0 is old.
+
+Every `<pre>` and `<table>` gets `tabindex="0"` at the single write point
+(`focusableScrollRegions()` in `writeText`), because they scroll inside
+themselves on phones and a scrolling region must be keyboard-reachable.
+
 ## Site analytics (2026-10-26)
 
 Cloudflare Web Analytics (cookieless) is emitted by `scripts/build-site.mjs` (`ANALYTICS_BEACON`) into the

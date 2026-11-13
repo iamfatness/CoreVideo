@@ -79,6 +79,18 @@ const ZCOMMS_VERSION =
 const ZCOMMS_REPO = "https://github.com/iamfatness/ZComms";
 const ZCOMMS_RELEASES_LATEST = `${ZCOMMS_REPO}/releases/latest`;
 
+// CoreVideo Pro also ships from its own repository. 1.0.0 (2026-11-12) is the
+// first stable release. The announcement pins the 1.0.0 installer on purpose:
+// it is the release being announced, and that asset never moves. Every other
+// Pro download button points at releases/latest so a later 1.0.x is what
+// people get.
+const PRO_VERSION = "1.0.0";
+const PRO_REPO = "https://github.com/iamfatness/CoreVideoPro";
+const PRO_RELEASES_LATEST = `${PRO_REPO}/releases/latest`;
+const PRO_RELEASE_TAG = `${PRO_REPO}/releases/tag/v${PRO_VERSION}`;
+const PRO_SETUP = `${PRO_REPO}/releases/download/v${PRO_VERSION}/CoreVideoPro-Setup-v${PRO_VERSION}.exe`;
+const PRO_ANNOUNCEMENT = "/news/corevideo-pro-1-0/";
+
 // The CoreVideo "Multiview" brand mark (mirrors Controls/MultiviewMark.xaml in
 // the app): a 16:9 monitor frame split 2x2 with the top-right tile live-green.
 const MULTIVIEW_MARK =
@@ -219,8 +231,15 @@ function normalizeText(value) {
     .replaceAll("https://iamfatness.github.io/CoreVideo", "/documentation");
 }
 
+// The one-line strip that opens the home page while a release is news. It is a
+// link, not a modal or a cookie-gated banner: one sentence and a destination.
+function announcementStrip() {
+  return `<a class="announce" href="${PRO_ANNOUNCEMENT}"><span class="tally tally-live">New</span><span class="announce-text"><strong>CoreVideo Pro 1.0 is here.</strong> The first stable release of the standalone Zoom production studio for Windows.</span><span class="announce-cta">Read the announcement &rarr;</span></a>`;
+}
+
 function homeContent() {
-  return `<section class="hero">
+  return `${announcementStrip()}
+<section class="hero">
   <figure class="hero-media">
     <div class="console">
       <div class="console-bar"><span class="tally tally-live">Live</span><span>Program</span><span class="tc">1080p60 &middot; 6 Zoom sources</span></div>
@@ -261,169 +280,203 @@ function homeContent() {
 </section>
 <section class="link-grid products" aria-label="CoreVideo products">
   <a href="/download/"><span class="tier">Free &middot; OBS plugin</span><strong>CoreVideo for OBS</strong><span>The plugin on this page: Zoom participant video, audio, screen share, interpretation, and ISO recording as native sources in the OBS you already run. MIT licensed.</span></a>
-  <a class="featured" href="/pro/"><span class="tier tier-premium">Premium &middot; Standalone app</span><strong>CoreVideo Pro</strong><span>Want the whole console instead of a plugin? Pro is the standalone studio being built around the same capture core: multi-scene production, participant management, recording, and streaming.</span></a>
+  <a class="featured" href="/pro/"><span class="tier tier-premium">New &middot; 1.0 &middot; Windows</span><strong>CoreVideo Pro</strong><span>Want the whole console instead of a plugin? Pro is the standalone studio: every Zoom guest as their own 1080p source, scenes with Take, talkback inside the meeting, and Program, per-guest ISO, stream, NDI and a virtual camera at once.</span></a>
   <a href="/zcomms/"><span class="tier">Standalone &middot; Talkback</span><strong>ZComms</strong><span>The intercom on its own. Named talk keys into Zoom&rsquo;s private talkback channels, extern feeds from a multichannel interface, and honest key states. Windows.</span></a>
 </section>
 <section class="link-grid" aria-label="CoreVideo resources">
   <a href="/documentation/"><strong>Plugin Docs</strong><span>Architecture, setup, control APIs, and operating notes.</span></a>
   <a href="/core-plugin/"><strong>Core Plugin Guide</strong><span>OBS workflows, participant routing, isolated audio, and ISO recording.</span></a>
   <a href="/zcomms/"><strong>ZComms</strong><span>Standalone talkback and IFB station for Zoom productions.</span></a>
-  <a href="/pro/"><strong>CoreVideo Pro</strong><span>Standalone production app for live and recorded conversations.</span></a>
-  <a href="/pro/documentation/"><strong>CoreVideo Pro Architecture</strong><span>Native media core, typed IPC, capture, AI direction, and outputs &mdash; with diagrams.</span></a>
+  <a href="/pro/"><strong>CoreVideo Pro</strong><span>Standalone production studio for live and recorded Zoom shows. Version 1.0, Windows.</span></a>
+  <a href="/pro/documentation/"><strong>CoreVideo Pro Architecture</strong><span>How 1.0 is built: the WinUI console, the C++ media core, the isolated Zoom engine, and the outputs.</span></a>
   <a href="/terms/"><strong>Terms of Use</strong><span>Marketplace-ready usage terms and license requirements.</span></a>
   <a href="/privacy/"><strong>Privacy Policy</strong><span>Data processing, local storage, and third-party service details.</span></a>
   <a href="/support/"><strong>Support</strong><span>Issue reporting, troubleshooting, and common fixes.</span></a>
 </section>`;
 }
 
+// Pro's page describes the 1.0 that ships, and nothing it does not: every item
+// below is "proven" or "shipped" in the CoreVideoPro README's capability table.
+// The June concept render that used to head this page showed captions and the
+// Magic Scene auto-director, both excluded from 1.0, so the hero is the brand
+// lockup until a real 1.0 capture replaces it.
 function proPageContent() {
   return `<section class="hero">
   <figure class="hero-media">
     <div class="console">
-      <div class="console-bar"><span class="tally tally-air">On Air</span><span class="tally tally-pgm">Pgm</span><span class="tc">2160p60 &middot; 00:12:47:03</span></div>
-      <div class="console-screen"><img src="/pro/images/corevideo-pro-studio.webp" alt="CoreVideo Pro production console: scene list, live program with multi-camera layout and lower-third, participant roster with roles and audio meters, and Take/Record/Stream controls"></div>
+      <div class="console-bar"><span class="tally tally-air">On Air</span><span class="tally tally-pgm">Pgm</span><span class="tc">1080p60 &middot; v${PRO_VERSION}</span></div>
+      <div class="console-screen center"><div class="brand-lockup">${MULTIVIEW_MARK}<div class="wordmark">CoreVideo Pro</div><div class="brand-sub">Zoom production studio for Windows</div></div></div>
     </div>
   </figure>
   <div class="hero-copy">
-    <p class="eyebrow">In development &middot; standalone studio</p>
-    <h1>Produce polished live conversations from your Zoom calls.</h1>
-    <p class="lede">CoreVideo Pro is the premium, all-in-one studio being built for live Zoom production: everything the CoreVideo plugin captures, plus multi-scene production, participant management, recording and multi-destination streaming, and an AI auto-director &mdash; in one standalone app for producers who want a dedicated console rather than a plugin.</p>
-    <p class="lede"><strong>Pro is not released yet.</strong> There is no download and no price. This page and the architecture notes describe what is being built; the <a href="/download/">free OBS plugin</a> is the shipping product today, and <a href="/zcomms/">ZComms</a> is the shipping talkback desk.</p>
+    <p class="eyebrow">Version ${PRO_VERSION} &middot; standalone studio for Windows</p>
+    <h1>Produce your Zoom show from one console.</h1>
+    <p class="lede">CoreVideo Pro is a standalone production studio built around Zoom. Every guest arrives as their own clean 1080p source, you build the show in scenes and Take it to Program, you cue talent privately inside the meeting, and the same Program goes out as a recording, per-guest ISOs, a stream, NDI and a Windows virtual camera at the same time.</p>
     <div class="hero-actions">
-      <a class="button primary" href="/pro/documentation/">Read the architecture docs</a>
-      <a class="button" href="/download/">Get the free OBS plugin</a>
+      <a class="button primary" href="${PRO_RELEASES_LATEST}">Download for Windows</a>
+      <a class="button" href="${PRO_ANNOUNCEMENT}">What&rsquo;s in 1.0</a>
+      <a class="button" href="${PRO_REPO}">View on GitHub</a>
     </div>
   </div>
 </section>
 <section class="link-grid" aria-label="CoreVideo Pro features">
-  <div><strong>Multi-Scene Production</strong><span>Intro, interview, speaker-plus-slides, panel, and closing scene templates with Cut/Fade/Slide transitions and Take.</span></div>
-  <div><strong>Participant Management</strong><span>Live Zoom roster with Host, Presenter, Panelist, and Guest roles, manual scene-slot assignment, and per-participant audio and video controls.</span></div>
-  <div><strong>Streaming &amp; Recording</strong><span>Program and ISO recording, 1080p/4K output profiles, and multi-destination RTMP/NDI/SRT streaming with preflight checks.</span></div>
-  <div><strong>AI Auto-Direct</strong><span>Magic Scene and Set &amp; Forget automatically recommend and take scene layouts from live Zoom activity, so a show can run itself.</span></div>
+  <div><strong>Zoom-first, not Zoom-as-an-input</strong><span>Join by link and each participant comes in through the Zoom Meeting SDK as a separate raw 1080p video and audio source, with the live roster and the active speaker beside them.</span></div>
+  <div><strong>Talkback inside the meeting</strong><span>The Comms page talks to people in the meeting over Zoom&rsquo;s private talkback channels. The room does not hear you, and there is no second app or audio cable.</span></div>
+  <div><strong>1080p60 on the GPU</strong><span>A Direct3D 11 compositor renders Program, Preview and the multiviewer, with per-source framing, borders, colour grading, lower thirds and graphics.</span></div>
+  <div><strong>Every output at once</strong><span>Program recording, per-guest ISO recordings, an SRT or RTMP stream, NDI with an optional graphics key, and the &ldquo;CoreVideo Pro Camera&rdquo; for Zoom, Teams or OBS.</span></div>
 </section>
 <section>
-  <h2>The complete production studio</h2>
-  <p>Pro is designed as a Zoom-native studio for Windows and macOS. Everything below is the capability set the product is being <strong>built toward</strong> &mdash; a target, not an inventory of what runs today. Individual items land, and get announced, one at a time.</p>
+  <h2>What ships in 1.0</h2>
   <div class="feature-set">
     <div>
-      <h3>Zoom capture &amp; media core</h3>
+      <h3>Sources</h3>
       <ul>
-        <li>True Zoom Meeting SDK raw video and audio &mdash; no window or virtual-camera hacks</li>
-        <li>Clean per-participant video, audio, and screen-share capture</li>
-        <li>GPU compositor (Direct3D on Windows, Metal on macOS)</li>
-        <li>Isolated capture process, automatic reconnect, and webinar mode</li>
+        <li>Zoom participants as separate 1080p video and audio sources</li>
+        <li>Webcams and capture cards</li>
+        <li>Screen and window capture</li>
+        <li>Local video clips and stills</li>
       </ul>
     </div>
     <div>
-      <h3>Scenes, templates &amp; switching</h3>
+      <h3>Production</h3>
       <ul>
-        <li>One-click professional templates: solo, interview, panel, screen-share, webinar</li>
-        <li>Grid, speaker-focus, and picture-in-picture layouts with slot rules</li>
-        <li>Program/preview workflow with explicit Take and Cut/Fade/Slide transitions</li>
-        <li>Save and reload complete show presets</li>
+        <li>Scenes with Preview, Program and Take</li>
+        <li>CoreVideo Tiles: guests composed into one styled gallery</li>
+        <li>A multiviewer with Program and Preview tally</li>
+        <li>Graphics playout with a built-in designer, and lower thirds</li>
       </ul>
     </div>
     <div>
-      <h3>AI direction</h3>
+      <h3>Comms</h3>
       <ul>
-        <li>Magic Scene builds a ready-to-stream show from the live call</li>
-        <li>Set &amp; Forget auto-director switches on active speaker and screen share</li>
-        <li>Role-aware logic &mdash; host for intros, presenter for shares, speaker for discussion</li>
-        <li>Manual overrides always win, with one click back to auto</li>
-      </ul>
-    </div>
-    <div>
-      <h3>Participants &amp; framing</h3>
-      <ul>
-        <li>Every participant treated as a production-ready source, not a raw feed</li>
-        <li>Face-aware auto-crop, centering, and manual zoom override</li>
-        <li>Speaker holds to prevent rapid cutting, with graceful video-drop fallback</li>
-        <li>Stable Host / Presenter / Panelist / Guest role overrides</li>
+        <li>Talk privately to people in your Zoom meeting</li>
+        <li>Private comms mode, so the room never hears you</li>
+        <li>Needs host or co-host, and talent on the Zoom desktop or mobile app</li>
       </ul>
     </div>
     <div>
       <h3>Audio</h3>
       <ul>
-        <li>Per-participant gain with smart auto-leveling and manual trim</li>
-        <li>Per-source noise suppression, mute, and solo</li>
-        <li>Master meter with limiter and clipping warnings</li>
-        <li>A/V sync offset for local capture sources</li>
-      </ul>
-    </div>
-    <div>
-      <h3>Graphics, captions &amp; branding</h3>
-      <ul>
-        <li>Auto lower-thirds from Zoom name and role, with manual override</li>
-        <li>Real-time program captions with speaker-name attribution</li>
-        <li>Brand kit &mdash; logo, color, font, background &mdash; applied automatically</li>
-        <li>Brand bug, banners, call-to-action overlays, and per-source chroma key</li>
-      </ul>
-    </div>
-    <div>
-      <h3>Local cameras (Blackmagic &amp; AJA)</h3>
-      <ul>
-        <li>Auto-detect DeckLink/UltraStudio and AJA Io/Kona, with hot-plug</li>
-        <li>SDI/HDMI input selection with embedded or separate audio</li>
-        <li>Local cameras as first-class sources, fillable into any slot</li>
-        <li>Sub-100ms preview latency with signal-health monitoring</li>
+        <li>Routing matrix with Program and per-guest ISO taps</li>
+        <li>BS.1770 loudness metering</li>
+        <li>Bus dynamics and a limiter</li>
+        <li>Monitor output to any Windows audio device</li>
       </ul>
     </div>
     <div>
       <h3>Recording &amp; streaming</h3>
       <ul>
-        <li>Local MP4/MOV recording up to 4K at 30/60fps</li>
-        <li>Multi-destination RTMP/NDI/SRT with YouTube, Twitch, and custom presets</li>
-        <li>Per-participant ISO recording for clean guest capture</li>
-        <li>Hardware encoding (NVENC, Quick Sync, AMF, VideoToolbox) with output preflight</li>
+        <li>Program and per-guest ISO MP4s on hardware encoders</li>
+        <li>SRT with GPU-direct HEVC or H.264, and RTMP</li>
+        <li>NDI output on its own switch, plus an NDI graphics key (fill and key)</li>
+        <li>Recording resumes on its own if the media engine restarts</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Control</h3>
+      <ul>
+        <li>Keyboard and Stream Deck control through a Bitfocus Companion module</li>
+        <li>A local control API for automation</li>
+        <li>Redacted support bundles for troubleshooting</li>
       </ul>
     </div>
   </div>
 </section>
 <section>
+  <h2>Before you install</h2>
+  <ul>
+    <li>Windows 10 or later, 64-bit, with a Direct3D 11 GPU and current graphics drivers.</li>
+    <li>The installer is <strong>not yet code-signed</strong>, so Windows SmartScreen may warn the first time. Choose <em>More info &rarr; Run anyway</em>. A signed build will follow in a 1.0.x update.</li>
+    <li>Setup asks for administrator approval once, to register the virtual camera.</li>
+    <li>First launch downloads and verifies the media runtime, so it needs internet access.</li>
+  </ul>
+  <p>Not in 1.0: macOS, captions, the automatic scene director, and Blackmagic or AJA capture. They are not on this page because they do not ship.</p>
+</section>
+<section>
   <h2>Which one do I use?</h2>
-  <p>Already run your shows in OBS? The free <a href="/core-plugin/">OBS plugin</a> brings clean Zoom participants in as native sources, and it is available today. Need to talk to one person without talking to the room? <a href="/zcomms/">ZComms</a> is the standalone talkback desk, also available today. CoreVideo Pro is the dedicated console being built on the same capture core &mdash; when it is ready to install, it will be on this page with a download button, not a paragraph.</p>
+  <p>Already run your shows in OBS? The free <a href="/core-plugin/">OBS plugin</a> brings clean Zoom participants into the OBS you already have. Need only talkback, with its own operator? <a href="/zcomms/">ZComms</a> is the standalone desk. Want the whole studio in one app? That is CoreVideo Pro.</p>
   <table>
-    <thead><tr><th>Tier</th><th>Form factor</th><th>Best for</th></tr></thead>
+    <thead><tr><th>Product</th><th>Form factor</th><th>Best for</th></tr></thead>
     <tbody>
       <tr><td><strong>CoreVideo</strong> &mdash; Free, available now</td><td>OBS Studio plugin</td><td>Operators already running shows in OBS who want clean Zoom participants as native sources, ISO recording, an Active Speaker Director, and Stream Deck control.</td></tr>
       <tr><td><strong>ZComms</strong> &mdash; Available now</td><td>Standalone Windows app</td><td>Productions that need talkback: named keys into Zoom&apos;s private talkback channels, with its own operator position. See <a href="/zcomms/">ZComms</a>.</td></tr>
-      <tr><td><strong>CoreVideo Pro</strong> &mdash; In development</td><td>Standalone app</td><td>Producers who want a dedicated studio &mdash; scenes, participants, outputs, recording, and AI auto-direct in one app. Not yet released.</td></tr>
+      <tr><td><strong>CoreVideo Pro</strong> &mdash; 1.0, available now</td><td>Standalone Windows app</td><td>Producers who want a dedicated studio: Zoom guests, cameras, screens and media in scenes, talkback, and every output from one console.</td></tr>
     </tbody>
   </table>
 </section>`;
 }
 
+// As built for 1.0, from the CoreVideoPro README's architecture section. This
+// page used to be the June design document (a React/Vite renderer in an
+// Electron or Tauri shell, macOS, an AI director, Blackmagic/AJA); none of
+// that is what shipped, so it now describes the product people can install.
 function proDocsContent() {
   return `<h1>CoreVideo Pro Architecture</h1>
-<p>CoreVideo Pro is a live-production studio for Windows and macOS, built around a native media core. It is <strong>in development and not released</strong>: this guide is a design document describing how the product is architected, in the present tense the way architecture is normally written, and not a claim that every stage below is finished. It describes end to end &mdash; how Zoom participants and local cameras are captured, how frames are composited and directed, and how program, ISO, and streaming outputs are produced. For the OBS plugin&apos;s internals, see the <a href="/core-plugin/">Core Plugin guide</a>.</p>
-<h2>Design principles</h2>
+<p>How CoreVideo Pro ${PRO_VERSION} is put together on Windows. The as-built detail, with the evidence behind each capability, lives in the <a href="${PRO_REPO}#readme">project README</a>. For the OBS plugin&apos;s internals, see the <a href="/core-plugin/">Core Plugin guide</a>.</p>
+<h2>Three processes</h2>
 <ul>
-<li><strong>Native media core, web renderer.</strong> A C++ media core owns the real-time pipeline; the React/Vite renderer drives the UI and never touches media frames directly.</li>
-<li><strong>Typed IPC contracts.</strong> The renderer and core talk over typed command/state contracts, so the host shell (Electron, Tauri, or a custom native shell) stays replaceable.</li>
-<li><strong>Process isolation.</strong> The Zoom Meeting SDK runs in its own process, so an SDK crash cannot take down the operator console.</li>
-<li><strong>Local-first.</strong> Capture, compositing, recording, and streaming all run on the operator&apos;s machine; nothing is routed through a third-party cloud.</li>
+<li><strong>The operator console</strong> is a native WinUI 3 app on .NET 9. It owns no real-time media: it sends production commands and draws the program, preview and multiviewer from shared GPU textures.</li>
+<li><strong>The media core</strong> is a C++ process that owns real-time pixels and audio: the Direct3D 11 compositor, the audio mixer and dynamics, the Media Foundation recorder, and every output sender.</li>
+<li><strong>The Zoom engine</strong> is a separate process that runs the Zoom Meeting SDK and writes each participant&apos;s raw video and audio to shared memory, so a problem inside the SDK cannot take the console down with it.</li>
 </ul>
-<h2>System architecture</h2>
-<figure class="doc-image"><img src="/pro/images/corevideo-pro-architecture.svg" alt="CoreVideo Pro system architecture: the React/Vite renderer over typed IPC, a native C++ media core, an isolated Zoom capture process plus local Blackmagic/AJA capture, and recording, ISO, and streaming outputs."></figure>
-<p>The <strong>operator renderer</strong> presents the production console, scene and template editor, source and audio panels, and a keyboard command layer. It issues typed commands (assign slot, take, arm record, start stream) and receives typed state snapshots (feed health, output status, levels). It renders no media itself.</p>
-<p>The <strong>native media core</strong> receives raw frames over a shared media bus, composites the active scene graph on the GPU, mixes audio, draws graphics and captions, and hands a program feed to the hardware encoder. The <strong>outputs</strong> stage records the program and per-guest ISOs and streams to one or more destinations.</p>
-<h2>Capture and the media core</h2>
-<p>Zoom media is captured through the Zoom Meeting SDK&apos;s raw video and audio APIs in a dedicated capture process &mdash; no window grabbing, virtual cameras, or display capture. Each participant becomes a clean video, audio, and screen-share source with a full data model: name, role, talking/mute/video state, spotlight, breakout room, and feed quality.</p>
-<p>Local cameras from Blackmagic (DeckLink, UltraStudio) and AJA (Io, Kona) devices are detected on launch and on hot-plug, and appear as first-class sources alongside Zoom participants. Frames move from the capture process to the core over a shared media bus as GPU textures, so large frames are never copied through the IPC pipe. The GPU compositor renders with Direct3D 11/12 on Windows and Metal on macOS.</p>
-<h2>Production pipeline</h2>
-<figure class="doc-image"><img src="/pro/images/corevideo-pro-pipeline.svg" alt="CoreVideo Pro production pipeline: sources flow through capture and sync into a GPU scene-graph compositor fed by the AI director and audio mixer, producing a program feed that is encoded to recording, ISO, and streaming outputs."></figure>
-<p>Sources are captured and synchronised, then routed into the scene-graph compositor. A scene is a template with typed slots (fixed, host, presenter, active speaker, screen share, gallery, fallback), assignment rules, and safe regions for lower-thirds and captions. Producers work in a program/preview model: stage a layout, then <strong>Take</strong> it to program with a Cut, Fade, or Slide transition.</p>
-<p>The <strong>AI director</strong> watches the live call and feeds scene decisions into the compositor; the <strong>audio mixer</strong> levels every source and supplies the mixed bus to the program feed. The program feed is encoded once on hardware and fanned out to recording, ISO, and streaming.</p>
-<h2>AI direction</h2>
-<p><strong>Magic Scene</strong> inspects participant count, roles, screen-share, and the active speaker, picks a template, fills the slots, adds lower-thirds and captions, applies the brand kit, and produces a ready-to-stream scene set you can accept, regenerate, or edit. <strong>Set &amp; Forget</strong> then runs the show: it switches on active speaker and screen share, holds shots to avoid rapid cutting, reveals lower-thirds, and returns to the host or panel. Manual overrides always win, with one click back to automatic.</p>
-<h2>Audio</h2>
-<p>Each Zoom participant and local source has independent gain with smart auto-leveling and a manual trim on top, per-source noise suppression, and mute/solo. A master meter provides a limiter and clipping warnings, and an A/V sync offset aligns local capture with Zoom audio.</p>
-<h2>Graphics, captions and branding</h2>
-<p>Lower-thirds are generated automatically from each participant&apos;s Zoom name and role and can be overridden; they reveal and hide on cue and reposition to avoid collisions. Real-time program captions carry speaker attribution. A brand kit (logo, color, font, background) is applied automatically, alongside a brand bug, banners, call-to-action overlays, and per-source chroma key.</p>
+<p>The console and the core talk over typed JSON-line commands and snapshots on the child process&apos;s standard input and output. Video crosses process boundaries as keyed-mutex DXGI shared textures, never as copies through a pipe.</p>
+<h2>Sources</h2>
+<p>Zoom participants arrive as separate raw 1080p video and audio sources. Webcams and capture cards are read by Media Foundation inside the core, screens and windows through Windows Graphics Capture, and local clips and stills play from a media bin with cue, live and pause owned by the core. Each source keeps its own clock and texture, and scenes select from them.</p>
+<h2>Program</h2>
+<p>A scene is a layout of slots. The operator builds the next shot in Preview and Takes it to Program. The compositor renders Program, Preview and the multiviewer on the GPU at 1080p60, with per-source framing, borders, colour grading, CoreVideo Tiles, lower thirds and graphics. A short Program buffer (two or three frames) gives every output a steady 60 fps cadence.</p>
 <h2>Outputs</h2>
-<p>CoreVideo Pro records the program to MP4/MOV (up to 4K, 30/60fps) and captures per-guest ISO feeds for clean re-edits. Streaming targets RTMP, NDI, and SRT with YouTube, Twitch, and custom presets and a multi-destination model that tracks armed/live state, bitrate, latency, and health per destination. Hardware encoders (NVENC, Quick Sync, AMF on Windows; VideoToolbox on macOS) keep CPU load low, and an output preflight blocks streaming when a destination is missing an endpoint, key, or compatible URL.</p>
-<h2>Platform and shell</h2>
-<p>The renderer is shell-agnostic: it runs inside whatever native host is present (Electron, Tauri, or a custom shell) and falls back to mock engines only for local development. Engine bundles are injected, so the UI swaps simulated engines for the native Zoom, media, and output implementations without importing mock singletons. The native media core stays the durable part of the product; the shell and renderer can evolve independently behind the typed IPC contracts.</p>`;
+<p>The same Program feeds every output at once: an MP4 Program recording and per-guest ISO recordings on hardware encoders with isolated write queues, an SRT stream with GPU-direct HEVC or H.264 encoding or an RTMP stream, NDI with an optional graphics key, and the &ldquo;CoreVideo Pro Camera&rdquo; registered with the Windows Frame Server for Zoom, Teams or OBS. If the media core restarts, recording resumes and the stream reconnects on their own.</p>
+<h2>Comms</h2>
+<p>Talkback rides the Zoom Meeting SDK&apos;s private talkback channels, so the operator speaks to chosen people in the meeting without the room hearing. Private comms keeps the operator&apos;s own meeting audio silent.</p>
+<h2>How a release is qualified</h2>
+<p>Before a release, the installed build runs a 30-minute outputs soak in which every output is judged frame by frame by a picture identity stamped into Program, alongside a clean-machine install test. The ${PRO_VERSION} results are in the <a href="${PRO_RELEASE_TAG}">release notes</a>.</p>`;
+}
+
+// The CoreVideo Pro 1.0 announcement. Leads with the four pillars the owner
+// chose (Zoom-first, talkback inside the meeting, 1080p60 GPU pipeline with
+// every output at once, per-guest ISO plus reliability), never with "native
+// Zoom": every serious competitor has a Zoom integration. Qualification is
+// reported as measured, including the stream frames skipped under game load.
+function proAnnouncementContent() {
+  return `<p class="eyebrow">Release &middot; November 12, 2026</p>
+<h1>CoreVideo Pro 1.0 is here</h1>
+<p class="lede">CoreVideo Pro, the standalone production studio for Zoom shows, has its first stable release. Version ${PRO_VERSION} is available today for Windows.</p>
+<div class="hero-actions">
+  <a class="button primary" href="${PRO_SETUP}">Download CoreVideo Pro ${PRO_VERSION} for Windows</a>
+  <a class="button" href="${PRO_RELEASE_TAG}">Release notes and checksums</a>
+  <a class="button" href="/pro/">About CoreVideo Pro</a>
+</div>
+<h2>Built around the guests, not around a capture window</h2>
+<p>Most tools can get a Zoom call on screen. The question is what happens next: when the seventh guest joins, when someone drops and comes back, when you need to tell one panelist to wrap up without the room hearing. CoreVideo Pro starts from the meeting. Every participant arrives through the Zoom Meeting SDK as their own raw 1080p video and audio source, the live roster and active speaker sit beside them, and the show is built in scenes you cue in Preview and Take to Program.</p>
+<h2>Talkback, inside the meeting</h2>
+<p>New since the last beta, the <strong>Comms</strong> page puts a talkback station into Pro. Talk to the people you choose over Zoom&rsquo;s private talkback channels: they hear you, the room and the recording do not. Turn on Private comms and your own meeting audio stays silent. Comms needs Pro&rsquo;s Zoom account to be host or co-host, and talent on the Zoom desktop or mobile app.</p>
+<h2>One Program, every output at once</h2>
+<p>The compositor runs on the GPU at 1080p60, with framing, borders, colour grading, CoreVideo Tiles, lower thirds and graphics from a built-in designer. The same Program goes out as:</p>
+<ul>
+<li>a Program recording and per-guest ISO recordings for the edit, on hardware encoders;</li>
+<li>an SRT stream with GPU-direct encoding, or RTMP;</li>
+<li>NDI on its own switch, plus an NDI graphics key for a downstream switcher;</li>
+<li>the &ldquo;CoreVideo Pro Camera&rdquo;, a Windows virtual camera for Zoom, Teams or OBS.</li>
+</ul>
+<h2>Tested the way it will be used</h2>
+<p>Before release, the installed 1.0 build ran 30-minute output soaks in which every frame of every output is checked against a picture identity stamped into Program. A separate test installed, launched and uninstalled the exact release files on a fresh Windows machine.</p>
+<ul>
+<li>The Program recording delivered every frame, with none missing or repeated.</li>
+<li>The virtual camera delivered every frame in the first soak. In a second soak it delivered one frame out of order.</li>
+<li>The stream skipped 12 single frames out of about 108,000 in the first soak and 10 in the second.</li>
+</ul>
+<p>Both soaks ran while the same PC was also running a game. Earlier soaks of the same test on an idle machine delivered every frame on all three outputs. Frame skips under heavy competing GPU load are tracked for a 1.0.x update.</p>
+<h2>Install</h2>
+<ol>
+<li>Download <a href="${PRO_SETUP}">CoreVideoPro-Setup-v${PRO_VERSION}.exe</a> and run it.</li>
+<li>The installer is <strong>not yet code-signed</strong>. If Windows SmartScreen warns, choose <em>More info &rarr; Run anyway</em>. A signed build will follow in a 1.0.x update.</li>
+<li>Approve the administrator prompt. It registers the CoreVideo Pro Camera.</li>
+<li>Sign in with Zoom, then rehearse: select a source in Preview, Take it, and make a short test recording before your first show.</li>
+</ol>
+<p>Pro needs Windows 10 or later, 64-bit, with a Direct3D 11 GPU and current graphics drivers. Installing 1.0 removes earlier CoreVideo Pro betas and keeps your settings and recordings.</p>
+<h2>What 1.0 does not do yet</h2>
+<p>CoreVideo Pro 1.0 is Windows only. Captions, the automatic scene director, and Blackmagic or AJA capture are not part of this release.</p>
+<p>Found a problem? Diagnostics &rarr; Export support bundle collects redacted logs, and <a href="${PRO_REPO}/issues">GitHub issues</a> is where to report it.</p>`;
 }
 
 function zcommsPageContent() {
@@ -543,7 +596,8 @@ function zcommsPageContent() {
     <thead><tr><th>Product</th><th>Form factor</th><th>Talkback</th></tr></thead>
     <tbody>
       <tr><td><strong>ZComms</strong></td><td>Standalone Windows app</td><td>The whole product &mdash; a full desk, extern feeds, and its own operator position. Shipping now.</td></tr>
-      <tr><td><strong>CoreVideo</strong> for OBS</td><td>OBS Studio plugin</td><td>An intercom dock beside the video routing, for the operator already cutting the show. In development, unreleased.</td></tr>
+      <tr><td><strong>CoreVideo</strong> for OBS</td><td>OBS Studio plugin</td><td>A Zoom Talkback dock beside the video routing, for the operator already cutting the show in OBS. Windows, v0.1.45 and later; unavailable on macOS.</td></tr>
+      <tr><td><strong>CoreVideo Pro</strong></td><td>Standalone Windows app</td><td>The Comms page inside the production studio, for the operator running the whole show from Pro. Shipping in <a href="${PRO_ANNOUNCEMENT}">version 1.0</a>.</td></tr>
     </tbody>
   </table>
 </section>`;
@@ -954,10 +1008,18 @@ ${ANALYTICS_BEACON}${options.jsonLd ? jsonLdBlock(options.jsonLd) : ""}</head>
 `;
 }
 
+// Code blocks and (on phones) tables scroll inside themselves, and a region
+// that scrolls must be reachable by keyboard (axe scrollable-region-focusable,
+// WCAG 2.1.1). One rule at the single write point instead of at each emitter:
+// several emitters already added it to <pre> and several did not.
+function focusableScrollRegions(html) {
+  return html.replace(/<(pre|table)(?![^>]*\btabindex=)([^>]*)>/g, '<$1 tabindex="0"$2>');
+}
+
 function writeText(relativePath, content) {
   const filePath = path.join(outDir, relativePath);
   ensureDir(filePath);
-  fs.writeFileSync(filePath, content, "utf8");
+  fs.writeFileSync(filePath, relativePath.endsWith(".html") ? focusableScrollRegions(content) : content, "utf8");
 }
 
 // Clean the output directory. On CI (fresh checkout) this always succeeds. On a
@@ -1024,8 +1086,9 @@ writeText(
   layout(
     {
       title: "CoreVideo Pro",
+      seoTitle: "CoreVideo Pro 1.0 - Zoom Production Studio for Windows",
       description:
-        "A standalone Windows studio for live Zoom production: scenes, participant management, recording, streaming and AI auto-direct. In development, not yet released.",
+        "CoreVideo Pro 1.0 for Windows: Zoom guests as 1080p sources, scenes with Take, in-meeting talkback, ISO recording, streaming, NDI and a virtual camera.",
     },
     proPageContent(),
     {
@@ -1044,11 +1107,30 @@ writeText(
     {
       title: "CoreVideo Pro Architecture",
       description:
-        "CoreVideo Pro architecture: native media core, typed IPC, isolated Zoom capture, Blackmagic/AJA input, GPU compositing, AI direction, and ISO/streaming outputs.",
+        "How CoreVideo Pro 1.0 is built: WinUI console, C++ media core, isolated Zoom engine, Direct3D 11 compositor, and recording, ISO, stream, NDI and camera outputs.",
     },
     proDocsContent(),
     {
       canonical: canonicalUrl("pro/documentation/index.html"),
+      footerText:
+        "CoreVideo and CoreVideo Pro are independent products and are not affiliated with Zoom Video Communications, Inc.",
+    },
+  ),
+);
+
+// CoreVideo Pro 1.0 announcement (linked from the home page strip).
+writeText(
+  "news/corevideo-pro-1-0/index.html",
+  layout(
+    {
+      title: "CoreVideo Pro 1.0 is here",
+      seoTitle: "CoreVideo Pro 1.0 Released - Zoom Production Studio for Windows",
+      description:
+        "CoreVideo Pro 1.0, the first stable release of the standalone Zoom production studio for Windows: scenes, in-meeting talkback, ISO recording and every output.",
+    },
+    proAnnouncementContent(),
+    {
+      canonical: canonicalUrl("news/corevideo-pro-1-0/index.html"),
       footerText:
         "CoreVideo and CoreVideo Pro are independent products and are not affiliated with Zoom Video Communications, Inc.",
     },

@@ -1627,6 +1627,12 @@ June concept render (captions, Magic Scene) is no longer shown because 1.0
 excludes both; replace the brand-lockup hero with a real 1.0 capture when one
 exists. The home page `announcementStrip()` is news: remove it once 1.0 is old.
 
+`/pro/system-guide/` (`proSystemGuideContent()`) tags every tip with how we know it:
+the app enforces it, we measured it, or standard Windows practice. Its numbers mirror
+CoreVideoPro v1.0.0 (GpuTierPolicy 9/10 tiles, NVENC-only hardware tier, 8 ISOs, the
+1.0 soak skips). Bump `PRO_GUIDE_VERIFIED` when re-checked; never add an unmeasured
+tip as measured, and keep 10 tiles until the 16-source soak passes.
+
 Every `<pre>` and `<table>` gets `tabindex="0"` at the single write point
 (`focusableScrollRegions()` in `writeText`), because they scroll inside
 themselves on phones and a scrolling region must be keyboard-reachable.

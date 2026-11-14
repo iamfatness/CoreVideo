@@ -196,6 +196,8 @@ int main()
         share.onSharingStatus(share_info(50, 11, Sharing_Other_Share_Begin));
         EngineIpc::test_sink() = [](const std::string &l) {
             if (l.find("share_raw_status") != std::string::npos)
+                // Deliberate: this throw IS the test (the engine must absorb it).
+                // cppcheck-suppress throwInEntryPoint
                 throw std::runtime_error("simulated failure inside a callback");
         };
         bool escaped = false;

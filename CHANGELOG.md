@@ -7,6 +7,8 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.50-beta.1] - 2026-11-14
+
 ### Added
 - **Download FFmpeg** in the ISO Recorder dock: one click fetches a verified
   FFmpeg 9.0.2 build (Windows and Apple Silicon) into your OBS settings folder,

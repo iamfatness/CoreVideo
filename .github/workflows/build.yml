@@ -341,7 +341,7 @@ jobs:
     # Builds the ACTUAL obs-zoom-plugin bundle (COREVIDEO_BUILD_PLUGIN=ON) plus
     # the macOS ZoomObsEngine scaffold linked against the real ZoomSDK.framework
     # (COREVIDEO_BUILD_ENGINE=ON when the SDK is fetched). This is arm64-only
-    # (host arch on the macos-14 runner) by design - NOT a universal binary and
+    # (host arch on the macos-15 runner) by design - NOT a universal binary and
     # NOT a signed/notarized shippable package yet (see PR for remaining work).
     #
     # The engine is a SCAFFOLD: the macOS Zoom Meeting SDK is Objective-C only,
@@ -349,7 +349,7 @@ jobs:
     # the framework (validating fetch + link) and fails loudly at runtime on any
     # meeting request. See engine/src/main-macos.mm.
     name: macOS arm64 (plugin + engine scaffold)
-    runs-on: macos-14
+    runs-on: macos-15
     permissions:
       # DRAFT releases are only visible to a token with write-level (push)
       # access; contents: read cannot enumerate them, so the SDK asset lookup

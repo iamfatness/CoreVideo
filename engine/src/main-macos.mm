@@ -61,6 +61,7 @@
 #include "../../src/raw-media-lifecycle.h"
 #include "../../src/video-quality-policy.h"
 #include "../../src/meeting-callback-epoch.h"
+#include "../../src/share-renderer-policy.h"
 #include "engine-writer.h"
 #include "macos-admission-state.h"
 #include "tile-clock-log.h"
@@ -1326,11 +1327,41 @@ struct ShareTarget {
     bool      shm_fail_reported = false;
 };
 
+// Two locks, the same split the Windows engine adopted after its share
+// crash (engine/src/engine-share.h):
+//
+// g_share_mtx: the renderer, its delegate and the current source id -- and
+//   it is held across every SDK call that changes them (createRender,
+//   subscribe, unSubscribe, destroyRender).
+// g_share_targets_mtx: the per-output SHM targets. Taken by the frame
+//   callback; NEVER held across an SDK call. Order: g_share_mtx first.
+//
+// Before 2026-11-14 one mutex did both, so the frame callback had to try_lock
+// and DROP the frame whenever the main thread was inside an SDK call (or the
+// SDK delivered on the main thread while it was). For a camera at 30 fps a
+// dropped frame is invisible. For a share it can be the only frame for a long
+// time: a static slide delivers ~1 fps, and the frame most likely to collide
+// with the lock is the first one, delivered while subscribe is still on the
+// stack. Lost, the output showed nothing until the presenter changed the
+// slide. The frame callback now blocks on a lock no SDK caller holds.
 static std::mutex g_share_mtx;
+static std::mutex g_share_targets_mtx;
 static std::unordered_map<std::string, ShareTarget> g_share_targets;
 static ZoomSDKRenderer *g_share_renderer = nil;
 static id g_share_renderer_delegate = nil;
-static uint32_t g_share_source_id = 0;
+static std::atomic<uint32_t> g_share_source_id{0};
+// For the idle-renderer rule (src/share-renderer-policy.h): when the current
+// renderer was created and when it last delivered a frame (0 = never).
+static std::atomic<uint64_t> g_share_renderer_created_ns{0};
+static std::atomic<uint64_t> g_share_last_frame_ns{0};
+
+static uint64_t share_now_ns()
+{
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
 
 static ZoomSDKASController *as_controller()
 {
@@ -1401,15 +1432,15 @@ static void share_on_frame(ZoomSDKYUVRawDataI420 *data)
         return;
     }
 
+    g_share_last_frame_ns.store(share_now_ns(), std::memory_order_release);
+
     // The plugin keys share frames by the SHARING participant, matching the
     // Windows engine, so an operator sees the share attributed to a person.
     const uint32_t share_user_id = g_active_share_user.load(std::memory_order_acquire);
 
-    // try_lock for the same reason as video_on_frame: never block an SDK
-    // callback thread on a mutex the main thread holds across SDK teardown
-    // calls. A dropped share frame at 1-30 fps is repainted by the next one.
-    std::unique_lock<std::mutex> lock(g_share_mtx, std::try_to_lock);
-    if (!lock.owns_lock()) return;
+    // Blocking, and safe to be: nothing holds g_share_targets_mtx across an
+    // SDK call (see the lock comment above g_share_mtx). No frame is dropped.
+    std::lock_guard<std::mutex> lock(g_share_targets_mtx);
     for (auto &entry : g_share_targets) {
         const std::string &source_uuid = entry.first;
         ShareTarget &target = entry.second;
@@ -1460,7 +1491,7 @@ static void share_on_frame(ZoomSDKYUVRawDataI420 *data)
             EngineIpc::write(
                 R"({"cmd":"debug","stage":"share_frame_received","source_uuid":")" +
                 source_uuid + R"(","share_source_id":)" +
-                std::to_string(g_share_source_id) + R"(,"count":)" +
+                std::to_string(g_share_source_id.load()) + R"(,"count":)" +
                 std::to_string(target.frame_count) + R"(,"w":)" + std::to_string(w) +
                 R"(,"h":)" + std::to_string(h) + "}");
         }
@@ -1479,7 +1510,13 @@ static void share_unsubscribe_renderer_locked()
     ZoomSDKRenderer *renderer = g_share_renderer;
     g_share_renderer = nil;
     g_share_source_id = 0;
-    if (!renderer) return;
+    if (!renderer) {
+        // The SDK destroyed it itself (onRendererBeDestroyed nils only the
+        // renderer); the delegate is still ours to release.
+        [g_share_renderer_delegate release];
+        g_share_renderer_delegate = nil;
+        return;
+    }
     // Same synchronous-callback deadlock as video_teardown_locked: detach the
     // delegate before destroyRender or onRendererBeDestroyed relocks
     // g_share_mtx on this thread.
@@ -1513,6 +1550,8 @@ static bool share_subscribe_to_locked(uint32_t share_source_id, const char *reas
 
     CVShareRenderer *delegate = [[CVShareRenderer alloc] init];
     renderer.delegate = delegate;
+    g_share_last_frame_ns.store(0, std::memory_order_release);
+    g_share_renderer_created_ns.store(share_now_ns(), std::memory_order_release);
 
     const ZoomSDKError res_err = [renderer setResolution:ZoomSDKResolution_1080P];
     EngineIpc::write(R"({"cmd":"debug","stage":"share_set_resolution","code":)" +
@@ -1535,6 +1574,52 @@ static bool share_subscribe_to_locked(uint32_t share_source_id, const char *reas
     g_share_renderer = renderer;
     g_share_renderer_delegate = delegate;
     g_share_source_id = share_source_id;
+    return true;
+}
+
+// The share source id share_subscribe_active_locked() would pick, or 0.
+static uint32_t share_viewable_source_id()
+{
+    ZoomSDKASController *as = as_controller();
+    if (!as) return 0;
+    for (NSNumber *uid in [as getViewableSharingUserList]) {
+        for (ZoomSDKSharingSourceInfo *info in
+             [as getSharingSourceInfoList:uid.unsignedIntValue]) {
+            if (info.shareSourceID != 0) return info.shareSourceID;
+        }
+    }
+    return 0;
+}
+
+// Rebuild the current share renderer if it has gone idle
+// (src/share-renderer-policy.h): the plugin's stale recovery and a share
+// Resume both reach this engine as a subscribe for the source it already
+// holds, which short-circuits and so could never restart a share Zoom had
+// stopped delivering. Caller must hold g_share_mtx. True if it rebuilt.
+static bool share_rebuild_idle_renderer_locked(const char *reason)
+{
+    const uint32_t share_source_id = g_share_source_id.load();
+    const uint64_t now = share_now_ns();
+    const uint64_t created = g_share_renderer_created_ns.load(std::memory_order_acquire);
+    const uint64_t last_frame = g_share_last_frame_ns.load(std::memory_order_acquire);
+    if (!share_renderer_needs_rebuild(g_share_renderer != nil && share_source_id != 0,
+                                      created, last_frame, now))
+        return false;
+    // Only if the share is still viewable: a renderer bound to an ended share
+    // crashed the SDK in live testing. When the scan disagrees, leave it to
+    // share_subscribe_active_locked() to switch or release.
+    if (share_viewable_source_id() != share_source_id)
+        return false;
+    const uint64_t since = last_frame > created ? last_frame : created;
+    EngineIpc::write(
+        R"({"cmd":"debug","stage":"share_renderer_rebuilt","reason":")" +
+        std::string(reason ? reason : "unknown") + R"(","share_source_id":)" +
+        std::to_string(share_source_id) + R"(,"idle_ms":)" +
+        std::to_string((now - since) / 1'000'000ULL) + R"(,"ever_delivered":)" +
+        std::string(last_frame != 0 ? "true" : "false") + "}");
+    // Same source id: the same share, given a fresh subscription.
+    share_unsubscribe_renderer_locked();
+    share_subscribe_to_locked(share_source_id, reason);
     return true;
 }
 
@@ -1572,6 +1657,8 @@ static void share_subscribe_active_locked(const char *reason)
 static void share_subscribe(const std::string &source_uuid)
 {
     std::lock_guard<std::mutex> lock(g_share_mtx);
+    {
+    std::lock_guard<std::mutex> targets(g_share_targets_mtx);
     const bool present = g_share_targets.find(source_uuid) != g_share_targets.end();
     if (shm_source_over_cap(g_share_targets.size(), present)) {
         EngineIpc::write(
@@ -1583,31 +1670,39 @@ static void share_subscribe(const std::string &source_uuid)
         return;
     }
     g_share_targets.emplace(source_uuid, ShareTarget{});
+    } // targets lock released: everything below may call into the SDK
     if (!g_raw_media_active) {
         EngineIpc::write(
             R"({"cmd":"debug","stage":"share_subscribe_deferred","source_uuid":")" +
             source_uuid + "\"}");
         return;
     }
+    share_rebuild_idle_renderer_locked("resubscribe_idle");
     share_subscribe_active_locked("share_subscribe");
 }
 
 static void share_unsubscribe(const std::string &source_uuid)
 {
     std::lock_guard<std::mutex> lock(g_share_mtx);
-    auto it = g_share_targets.find(source_uuid);
-    if (it == g_share_targets.end()) return;
-    shm_region_destroy(it->second.shm);
-    g_share_targets.erase(it);
+    bool now_empty = false;
+    {
+        std::lock_guard<std::mutex> targets(g_share_targets_mtx);
+        auto it = g_share_targets.find(source_uuid);
+        if (it == g_share_targets.end()) return;
+        shm_region_destroy(it->second.shm);
+        g_share_targets.erase(it);
+        now_empty = g_share_targets.empty();
+    }
     // Last consumer gone: drop the Zoom subscription too rather than decoding a
     // share nobody is showing.
-    if (g_share_targets.empty()) share_unsubscribe_renderer_locked();
+    if (now_empty) share_unsubscribe_renderer_locked();
 }
 
 static void share_teardown()
 {
     std::lock_guard<std::mutex> lock(g_share_mtx);
     share_unsubscribe_renderer_locked();
+    std::lock_guard<std::mutex> targets(g_share_targets_mtx);
     for (auto &entry : g_share_targets) shm_region_destroy(entry.second.shm);
     g_share_targets.clear();
     g_active_share_user.store(0, std::memory_order_release);
@@ -1653,6 +1748,14 @@ static bool share_is_self(unsigned int user_id)
     case ZoomSDKShareStatus_ViewOther:
     case ZoomSDKShareStatus_Resume:
         if (self_share) break;
+        // A resume of the share we hold short-circuits in
+        // share_subscribe_to_locked(); after a long pause the renderer may
+        // have gone idle for good, so give it a fresh subscription first.
+        if (shareInfo.status == ZoomSDKShareStatus_Resume &&
+            (shareInfo.shareSourceID == 0 ||
+             shareInfo.shareSourceID == g_share_source_id.load()) &&
+            share_rebuild_idle_renderer_locked("share_resume"))
+            break;
         if (shareInfo.userID != 0)
             g_active_share_user.store(shareInfo.userID, std::memory_order_release);
         if (shareInfo.shareSourceID != 0)
@@ -2025,7 +2128,12 @@ static void resubscribe_raw_media(const char *reason)
     // video subscriptions are; pick up whatever is being shared now.
     {
         std::lock_guard<std::mutex> lock(g_share_mtx);
-        if (!g_share_targets.empty())
+        bool have_targets = false;
+        {
+            std::lock_guard<std::mutex> targets(g_share_targets_mtx);
+            have_targets = !g_share_targets.empty();
+        }
+        if (have_targets)
             share_subscribe_active_locked(reason);
     }
 }

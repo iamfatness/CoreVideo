@@ -184,13 +184,18 @@ int main()
                        ZoomOutputHealthReason::StaleFrame))
         return 1;
 
-    ZoomOutputInfo share_low = share_ok;
-    share_low.video_resolution = VideoResolution::P1080;
-    share_low.observed_width = 1280;
-    share_low.observed_height = 720;
-    if (!expect_reason("screen share available but lower than requested",
-                       share_low, {sharing_participant(102)}, true,
-                       ZoomOutputHealthReason::ZoomDeliveredLowerResolution))
+    // A share is the sharer's screen size, and the share property sheet hides
+    // Resolution, so every share output carries the 1080p default. Grading a
+    // 1280x720 (or 1440x900, or 1728x1117) share against it reported a fault
+    // nothing can fix and fed the quality-upgrade retry loop
+    // (src/share-output-policy.h, rule 2).
+    ZoomOutputInfo share_small = share_ok;
+    share_small.video_resolution = VideoResolution::P1080;
+    share_small.observed_width = 1280;
+    share_small.observed_height = 720;
+    if (!expect_reason("screen share smaller than the 1080p default is healthy",
+                       share_small, {sharing_participant(102)}, true,
+                       ZoomOutputHealthReason::Ok))
         return 1;
 
     ZoomOutputInfo active;

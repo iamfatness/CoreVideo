@@ -7,6 +7,39 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+### Fixed
+- **Screen share no longer freezes on program after the presenter stops
+  sharing.** Nothing used to clear a share source, so the last frame stayed on
+  air until somebody shared again. The source now goes empty about three
+  seconds after the share ends, and a share source shows nothing (instead of
+  color bars) while nobody is sharing. Windows and macOS.
+- **Shared text is sharp.** Share frames were shrunk into the source's canvas
+  by dropping whole pixel rows and columns, so small text from a Retina or
+  1440p screen broke up and shimmered when scrolled. Share frames are now
+  filtered properly. Camera feeds are unchanged.
+- **A static slide no longer reads as a broken feed.** Zoom sends very few
+  frames for content that is not changing, and the share source was graded
+  like a camera: "Video stale" after 3 seconds, followed by endless automatic
+  recovery attempts. Any share that was not exactly 1080p also showed "Zoom
+  delivered lower resolution" and retried forever. Share outputs now use
+  share-appropriate health rules.
+- **A stalled share can actually recover.** Automatic and manual recovery of
+  a share did nothing on either platform while the engine still held the old
+  subscription, so a share Zoom had stopped delivering stayed dark until it
+  ended. The engine now rebuilds a share subscription that has delivered
+  nothing for 8 seconds when recovery asks for it, and after a long pause is
+  resumed. Windows also now handles the share Resume event at all.
+- macOS: the first frame of a share could be dropped when it arrived while the
+  engine was still setting the subscription up. For a static slide that meant
+  nothing appeared until the presenter changed the slide.
+
+### Validation
+- 86 native tests pass on macOS (arm64), including new tests for the share
+  scaler, the share health/clear rules and the engine's idle-rebuild rule. The
+  Windows engine's share module test now also runs on macOS and Linux CI.
+- Live screen-share validation (docs/VALIDATION_MATRIX.md) on both platforms
+  is still pending.
+
 ## [0.1.50-beta.1] - 2026-11-14
 
 ### Added

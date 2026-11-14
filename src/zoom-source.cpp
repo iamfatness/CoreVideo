@@ -3,6 +3,8 @@
 #include "director-handover.h"
 #include "director-preview-frame-guard.h"
 #include "shm-resubscribe.h"
+#include "i420-scale.h"
+#include "share-output-policy.h"
 #include "luma-range-probe.h"
 #include "speaker-director.h"
 #include "speaker-settings-merge.h"
@@ -610,7 +612,8 @@ ZoomOutputInfo ZoomSource::output_info() const
     if (last_frame_ns != 0) {
         const uint64_t age_ns = now_ns > last_frame_ns ? now_ns - last_frame_ns : 0;
         info.last_frame_age_ms = age_ns / 1'000'000ULL;
-        info.video_stale = age_ns > kStaleVideoNs;
+        info.video_stale = age_ns > video_stale_threshold_ns(
+            mode == AssignmentMode::ScreenShare, kStaleVideoNs);
         const uint64_t last_recover_ns =
             m_last_stale_recover_ns.load(std::memory_order_relaxed);
         if (last_recover_ns != 0) {
@@ -808,13 +811,23 @@ void ZoomSource::subscribe()
         m_subscribed = true;
         return;
     }
-    case AssignmentMode::ScreenShare:
+    case AssignmentMode::ScreenShare: {
+        // Seed the roster's word on sharing now rather than at the next
+        // roster update, which a quiet meeting may not send for a while.
+        const auto roster = ZoomEngineClient::instance().roster();
+        note_share_roster(
+            std::any_of(roster.begin(), roster.end(),
+                        [](const ParticipantInfo &p) {
+                            return p.is_sharing_screen;
+                        }),
+            os_gettime_ns());
         release_video_shm();  // before the subscribe — see shm-resubscribe.h
         ZoomEngineClient::instance().subscribe_screenshare(source_uuid);
         m_current_subscription_id = 0xFFFFFFFFu;
         m_last_subscribe_ns.store(os_gettime_ns(), std::memory_order_release);
         m_subscribed = true;
         return;
+    }
     case AssignmentMode::ActiveSpeaker:
     case AssignmentMode::Participant:
     default: {
@@ -963,6 +976,21 @@ bool ZoomSource::recover_stale_video(uint64_t now_ns, bool force)
         return true;
     }
 
+    // A share subscription is a standing registration that has to exist
+    // before anyone shares, which is why the re-subscribe above runs for it
+    // regardless. But with nobody sharing there is no feed to recover, and
+    // "recovering" one resubscribed forever on a backoff
+    // (src/share-output-policy.h).
+    const bool screen_share =
+        assignment.load(std::memory_order_acquire) == AssignmentMode::ScreenShare;
+    if (screen_share &&
+        !share_wants_stale_recovery(
+            m_share_roster_available.load(std::memory_order_acquire)))
+        return false;
+    const uint64_t stale_ns = video_stale_threshold_ns(screen_share, kStaleVideoNs);
+    const uint64_t no_signal_ns =
+        video_stale_threshold_ns(screen_share, kNoSignalRecoverNs);
+
     const uint64_t last_frame_ns =
         m_last_frame_ns.load(std::memory_order_acquire);
     const uint64_t last_subscribe_ns =
@@ -971,12 +999,12 @@ bool ZoomSource::recover_stale_video(uint64_t now_ns, bool force)
     uint64_t age_ns = 0;
     if (last_frame_ns == 0) {
         if (last_subscribe_ns == 0 || now_ns <= last_subscribe_ns ||
-            now_ns - last_subscribe_ns <= kNoSignalRecoverNs)
+            now_ns - last_subscribe_ns <= no_signal_ns)
             return false;
         missing_initial_frame = true;
         age_ns = now_ns - last_subscribe_ns;
     } else {
-        if (now_ns <= last_frame_ns || now_ns - last_frame_ns <= kStaleVideoNs)
+        if (now_ns <= last_frame_ns || now_ns - last_frame_ns <= stale_ns)
             return false;
         age_ns = now_ns - last_frame_ns;
     }
@@ -1016,6 +1044,11 @@ bool ZoomSource::upgrade_low_quality_video(uint64_t now_ns, bool force)
     if (!ZoomEngineClient::instance().is_running() ||
         ZoomEngineClient::instance().state() != MeetingState::InMeeting ||
         !ZoomEngineClient::instance().is_media_active())
+        return false;
+    // A share is the sharer's screen size; no resubscribe can raise it
+    // (src/share-output-policy.h, rule 2).
+    if (!quality_upgrade_applies(assignment.load(std::memory_order_acquire) ==
+                                 AssignmentMode::ScreenShare))
         return false;
 
     const uint32_t observed_w = m_width.load(std::memory_order_relaxed);
@@ -1065,6 +1098,60 @@ bool ZoomSource::upgrade_low_quality_video(uint64_t now_ns, bool force)
     return true;
 }
 
+bool ZoomSource::note_share_roster(bool sharing, uint64_t now_ns)
+{
+    const bool was =
+        m_share_roster_available.exchange(sharing, std::memory_order_acq_rel);
+    if (sharing) {
+        m_share_roster_false_since_ns.store(0, std::memory_order_release);
+        return !was;
+    }
+    // Start the debounce on the edge, or on the first word we get (a source
+    // created mid-meeting with nobody sharing has no edge to see).
+    uint64_t expected = 0;
+    m_share_roster_false_since_ns.compare_exchange_strong(
+        expected, now_ns, std::memory_order_acq_rel);
+    return false;
+}
+
+bool ZoomSource::clear_ended_share(uint64_t now_ns)
+{
+    if (assignment.load(std::memory_order_acquire) != AssignmentMode::ScreenShare)
+        return false;
+    if (!share_should_clear(
+            m_share_roster_available.load(std::memory_order_acquire),
+            m_share_roster_false_since_ns.load(std::memory_order_acquire),
+            m_output_has_picture.load(std::memory_order_acquire),
+            m_last_frame_ns.load(std::memory_order_acquire), now_ns))
+        return false;
+
+    std::lock_guard<std::mutex> lk(m_mtx);
+    // Again under the lock: a frame published between the check above and
+    // here (on_engine_frame holds m_mtx while it outputs) must not be blanked.
+    if (!source ||
+        !share_should_clear(
+            m_share_roster_available.load(std::memory_order_acquire),
+            m_share_roster_false_since_ns.load(std::memory_order_acquire),
+            m_output_has_picture.load(std::memory_order_acquire),
+            m_last_frame_ns.load(std::memory_order_acquire), now_ns))
+        return false;
+    // NULL is libobs's "no frame": the async source stops drawing instead of
+    // holding the last picture. The engine keeps the share target and its
+    // region registered, so the next share is picked up with no resubscribe.
+    obs_source_output_video(source, nullptr);
+    m_output_has_picture.store(false, std::memory_order_release);
+    m_width.store(0, std::memory_order_relaxed);
+    m_height.store(0, std::memory_order_relaxed);
+    m_observed_fps_x100.store(0, std::memory_order_relaxed);
+    m_last_frame_ns.store(0, std::memory_order_relaxed);
+    m_last_stale_recover_ns.store(0, std::memory_order_relaxed);
+    m_stale_recover_attempts.store(0, std::memory_order_relaxed);
+    blog(LOG_INFO,
+         "[obs-zoom-plugin] Screen share ended; cleared output: source=%s uuid=%s",
+         output_name().c_str(), source_uuid.c_str());
+    return true;
+}
+
 // Subscriptions belong to the ASSIGNMENT (the Output Manager row), not to
 // scene visibility. Tearing the Zoom subscription down on every scene exit
 // and rebuilding it on entry meant a scene jump churned the SDK's raw-data
@@ -1077,11 +1164,15 @@ bool ZoomSource::upgrade_low_quality_video(uint64_t now_ns, bool force)
 void ZoomSource::activate()
 {
     m_active.store(true, std::memory_order_release);
-    if (m_width.load(std::memory_order_relaxed) == 0)
+    const AssignmentMode mode = assignment.load(std::memory_order_acquire);
+    // Not for a share: "nobody is sharing" is an ordinary moment in a show,
+    // and color bars put on program by cutting to the share scene early are a
+    // worse picture than an empty source.
+    if (m_width.load(std::memory_order_relaxed) == 0 &&
+        mode != AssignmentMode::ScreenShare)
         output_placeholder_frame(true);
     if (m_subscribed.load(std::memory_order_acquire))
         return; // feed already warm — a scene switch must not touch it
-    const AssignmentMode mode = assignment.load(std::memory_order_acquire);
     if (source_wants_subscription(mode, participant_id.load(std::memory_order_acquire)))
         subscribe();
 }
@@ -1096,6 +1187,28 @@ void ZoomSource::on_roster_changed()
 {
     const AssignmentMode mode = assignment.load(std::memory_order_acquire);
     const auto roster = ZoomEngineClient::instance().roster();
+    if (mode == AssignmentMode::ScreenShare) {
+        const uint64_t now_ns = os_gettime_ns();
+        const bool sharing = std::any_of(
+            roster.begin(), roster.end(),
+            [](const ParticipantInfo &p) { return p.is_sharing_screen; });
+        // Somebody is sharing again and this output is empty -- possibly
+        // because a roster blip cleared a static slide that will not
+        // re-deliver on its own. A resubscribe makes the engine rebuild an
+        // idle renderer, which re-delivers the current picture; on an
+        // ordinary share start the engine treats it as a no-op.
+        if (note_share_roster(sharing, now_ns) &&
+            !m_output_has_picture.load(std::memory_order_acquire) &&
+            m_subscribed.load(std::memory_order_acquire)) {
+            blog(LOG_INFO,
+                 "[obs-zoom-plugin] Screen share available; refreshing empty output: source=%s uuid=%s",
+                 output_name().c_str(), source_uuid.c_str());
+            subscribe();
+        }
+        // An ended share clears here or on the 1 s health sweep, once the
+        // roster debounce and the frame grace have both elapsed.
+        clear_ended_share(now_ns);
+    }
     const auto participant_has_video = [&roster](uint32_t id, bool &has_video) {
         const auto it = std::find_if(
             roster.begin(), roster.end(),
@@ -1497,8 +1610,19 @@ bool ZoomSource::output_video_from_shared_memory(
             static_cast<size_t>(canvas_w) * canvas_h * 3 / 2;
         if (scaled_video_buf.size() < scaled_size)
             scaled_video_buf.resize(scaled_size);
-        scale_i420_letterbox(y_ptr, u_ptr, v_ptr, w, h,
-                             scaled_video_buf.data(), canvas_w, canvas_h);
+        // A share is almost never canvas-sized and is mostly text, which
+        // nearest-neighbour decimation at a non-integer ratio shreds (see
+        // src/i420-scale.h). Cameras keep the cheap path: eight of them run
+        // through here, nearly always unscaled.
+        if (assignment.load(std::memory_order_acquire) ==
+            AssignmentMode::ScreenShare) {
+            scale_i420_letterbox_filtered(y_ptr, u_ptr, v_ptr, w, h,
+                                          scaled_video_buf.data(), canvas_w,
+                                          canvas_h, m_share_scale_scratch);
+        } else {
+            scale_i420_letterbox(y_ptr, u_ptr, v_ptr, w, h,
+                                 scaled_video_buf.data(), canvas_w, canvas_h);
+        }
         obs_y_ptr = scaled_video_buf.data();
         obs_u_ptr = obs_y_ptr + static_cast<size_t>(canvas_w) * canvas_h;
         obs_v_ptr = obs_u_ptr + static_cast<size_t>(canvas_w) * canvas_h / 4;
@@ -1550,6 +1674,7 @@ bool ZoomSource::output_video_from_shared_memory(
     set_yuv_frame_color_info(frame);
 
     obs_source_output_video(source, &frame);
+    m_output_has_picture.store(true, std::memory_order_release);
     if (commit_director_cut && dedicated_active_speaker_source) {
         const uint32_t previous_id =
             m_current_subscription_id.load(std::memory_order_acquire);
@@ -2222,6 +2347,7 @@ void ZoomSource::output_placeholder_frame(bool color_bars)
     frame.linesize[2] = w / 2;
     set_yuv_frame_color_info(frame);
     obs_source_output_video(source, &frame);
+    m_output_has_picture.store(true, std::memory_order_release);
 }
 
 void ZoomSource::set_preview_cb(ZoomPreviewCallback cb)

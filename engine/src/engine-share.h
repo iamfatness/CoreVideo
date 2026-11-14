@@ -2,9 +2,11 @@
 
 #include "../../src/engine-ipc.h"
 #include "../../src/shm-generation.h"
+#include "../../src/share-renderer-policy.h"
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -52,6 +54,10 @@ public:
     void unsubscribe_all();
     void resubscribe_all();
 
+    // TEST-ONLY: replace the monotonic clock the idle-renderer rule reads
+    // (src/share-renderer-policy.h). No production call site.
+    void set_clock_for_test(std::function<uint64_t()> clock);
+
     void onRendererBeDestroyed() override;
     void onRawDataFrameReceived(YUVRawDataI420 *data) override;
     void onRawDataStatusChanged(RawDataStatus status) override;
@@ -90,6 +96,10 @@ private:
     void subscribe_active_share_locked(const char *reason);
     bool subscribe_to_locked(uint32_t share_source_id, const char *reason);
     void unsubscribe_renderer_locked();
+    // Rebuild the current share renderer if it has gone idle
+    // (src/share-renderer-policy.h). True if it rebuilt.
+    bool rebuild_idle_renderer_locked(const char *reason);
+    uint64_t now_ns() const;
     size_t target_count() const;
     bool ensure_shm(ShareTarget &target,
                     const std::string &source_uuid,
@@ -117,5 +127,11 @@ private:
     std::unordered_map<std::string, std::unique_ptr<ShareTarget>> m_targets;
     std::atomic<uint32_t> m_current_share_source_id{0};
     std::atomic<uint32_t> m_current_share_user_id{0};
+    // For the idle-renderer rule: when the current renderer was created and
+    // when it last delivered a frame (0 = never). Written by the frame
+    // callback without m_lifecycle_mtx, hence atomic.
+    std::atomic<uint64_t> m_renderer_created_ns{0};
+    std::atomic<uint64_t> m_last_frame_ns{0};
+    std::function<uint64_t()> m_clock;
     bool m_raw_media_active = false;
 };

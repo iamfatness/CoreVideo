@@ -33,8 +33,9 @@ existing object is EINVAL — create-over-held fstats and recreates instead).
 The engine's SDK-facing rules are documented in `engine/src/main-macos.mm`:
 never subscribe to the local user's own share, detach `renderer.delegate`
 before `destroyRender:` (synchronous callback re-entry deadlocked the main
-thread for hours), frame callbacks `try_lock` and drop rather than block SDK
-threads, heartbeat pings route through the main queue only after
+thread for hours), video frame callbacks `try_lock` and drop rather than block
+SDK threads (the SHARE callback instead blocks on a targets-only lock no SDK
+caller holds -- see the screen-share entry below), heartbeat pings route through the main queue only after
 `initSDKWithParams` returns. `ShmAudioSlot::capture_ns` crosses processes on
 DIFFERENT clocks on macOS (see the struct comment) — `audio_latency_us` is
 untrustworthy there until that is reconciled. Kill a mid-meeting engine only
@@ -263,6 +264,41 @@ Every one of these is documented at length where it lives; the list is the map.
   read-only from a third process and histogramming luma; the signature is a
   floor lifted off 0, a ceiling capped near 235, and the sub-16 population
   collapsing to single digits for exactly one frame.
+- **Screen share is not a camera** (2026-11-14; `src/share-output-policy.h`,
+  `src/share-renderer-policy.h`, `src/i420-scale.h`). A share output used to be
+  graded, recovered and scaled by the camera rules, and four things followed.
+  (1) An ended share stayed FROZEN on program: nothing cleared the source.
+  `ZoomSource::clear_ended_share()` now outputs NULL once the roster has shown
+  no sharer for `kShareRosterDebounceNs` (2 s) AND frames have stopped for
+  `kShareEndGraceNs` (1 s). Neither alone: roster and frames ride different
+  dispatch lanes and a sharer missing from the participant list would flicker
+  a live share; and a static slide goes seconds without a frame while both
+  engines zero the sharer on any momentarily empty viewable list (review
+  finding). Because a wrong clear of a static slide would otherwise be
+  permanent, the roster's false->true edge on an EMPTY output resubscribes,
+  and the engine's idle rebuild re-delivers the picture. It runs on roster
+  changes and on the 1 s health sweep. Share sources show no color bars.
+  (2) A static slide (1-5 fps measured live) went `Video stale` at 3 s and was
+  resubscribed forever; share outputs use `kShareStaleVideoNs` (10 s), never
+  recover while nobody shares, and never enter the quality-upgrade loop -- a
+  share IS the sharer's screen size, and the hidden Resolution property left
+  every share graded against 1080p. (3) Recovery was a no-op on BOTH engines:
+  a subscribe for the share source already held short-circuits. Both engines
+  now rebuild a renderer idle for `kShareRendererIdleRebuildNs` (8 s, must stay
+  below the plugin's 10 s) on a resubscribe or a share Resume; Windows did not
+  handle `Sharing_Resume` at all, and resolves a missing renderer through the
+  viewable-share scan because the enum does not say whose share resumed
+  (subscribing to our own share crashed the SDK on macOS); a rebuild also
+  requires the viewable-share scan to still report the same source, so a
+  renderer outliving a missed end event is never re-bound to a dead share. (4) Share frames
+  were nearest-neighbour decimated into the canvas at ratios like 1.48x,
+  shredding text; they go through the area/bilinear scaler, cameras keep the
+  cheap path. On macOS the share lock is split like Windows' (`g_share_mtx` for
+  SDK calls, `g_share_targets_mtx` for SHM targets) so the frame callback no
+  longer try_lock-drops -- a dropped FIRST frame of a static slide meant an
+  empty output until the slide changed. `CoreVideoEngineShareReentrancy` now
+  also runs on macOS/Linux (the tracked Windows headers have a POSIX branch).
+  Live validation on both platforms is pending (`docs/VALIDATION_MATRIX.md`).
 - **Speaker-director tick stays local to the cut** (`src/zoom-dock.cpp`'s
   100ms refresh timer): the Active Speaker cut is entirely self-contained
   in `zoom-source.cpp`'s director-handover machinery. Never call

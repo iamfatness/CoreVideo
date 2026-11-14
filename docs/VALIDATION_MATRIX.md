@@ -5,16 +5,32 @@ changing the Zoom sign-in or meeting-join path.
 
 ## Screen Share Live Validation
 
-- Assign one output to **Screen share** before anyone shares.
-- Confirm Output Manager reports `Screen share unavailable`.
+Run on **both** Windows and macOS. The sharer must be a *remote* participant:
+the engine never subscribes to the local user's own share (by SDK design).
+
+- Assign one output to **Screen share** before anyone shares, and put it on
+  program.
+- Confirm Output Manager reports `Screen share unavailable` and the source is
+  **empty** (no color bars).
 - Start a screen share from a meeting participant.
-- Confirm the output moves through waiting-for-frame, then OK or lower-quality
-  health depending on the delivered feed.
+- Confirm the output moves through waiting-for-frame to OK. A share smaller
+  or larger than 1080p is still OK — it must never read "lower resolution".
+- Share a page of small text from a high-resolution screen (Retina / 1440p)
+  and confirm thin strokes stay legible and do not shimmer while scrolling.
+- Leave a static slide up for **two minutes**. Health must stay OK — never
+  `Video stale`, no `Recovering stale` lines in the log.
+- Have the sharer switch windows/apps mid-share; the picture must follow.
+- Pause and resume the share from the sharer's Zoom toolbar (short and >10 s
+  pauses); the picture must return after resume.
 - Stop the share.
-- Confirm the output returns to `Screen share unavailable` without changing OBS
-  source geometry.
+- Confirm within ~3 s the source goes **empty** (not a frozen last frame), the
+  log shows `Screen share ended; cleared output`, and Output Manager returns to
+  `Screen share unavailable` without changing OBS source geometry.
+- Start a second share from a different participant; it must appear with no
+  operator action.
 - Export a support bundle and confirm `screen_share_unavailable` appears only
-  when no share is active.
+  when no share is active, and any `share_renderer_rebuilt` lines carry an
+  `idle_ms` above 8000.
 
 ## Active Speaker Director Live Validation
 

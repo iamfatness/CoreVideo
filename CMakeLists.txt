@@ -1135,6 +1135,53 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoI420RangeExpand
              COMMAND CoreVideoI420RangeExpandTest)
 
+    # Screen-share frames are rarely canvas-sized (2560x1600, 2560x1440, any
+    # window size), and nearest-neighbour decimation by those ratios dropped
+    # whole pixel columns from shared text. See src/i420-scale.h.
+    add_executable(CoreVideoI420ScaleTest
+        tests/i420-scale-test.cpp
+    )
+    target_include_directories(CoreVideoI420ScaleTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoI420Scale
+             COMMAND CoreVideoI420ScaleTest)
+
+    # A share output was graded and recovered by the camera rules: a static
+    # slide went "stale" in 3 s, every non-1080-line share entered the quality
+    # upgrade loop, and an ended share stayed frozen on program. See
+    # src/share-output-policy.h.
+    add_executable(CoreVideoShareOutputPolicyTest
+        tests/share-output-policy-test.cpp
+    )
+    target_include_directories(CoreVideoShareOutputPolicyTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoShareOutputPolicy
+             COMMAND CoreVideoShareOutputPolicyTest)
+
+    # The Windows engine's share module also compiles against the TRACKED
+    # Windows SDK headers alone (third_party/zoom-sdk/h has a POSIX branch),
+    # so macOS and Linux CI run it too. Windows registers it below against
+    # the full SDK tree; this is the same test, not a second one.
+    if(NOT WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/zoom-sdk/h/meeting_sharing_interface.h")
+        add_executable(CoreVideoEngineShareReentrancyTest
+            tests/engine-share-reentrancy-test.cpp
+            engine/src/engine-share.cpp
+        )
+        target_include_directories(CoreVideoEngineShareReentrancyTest PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${CMAKE_CURRENT_SOURCE_DIR}/engine/src"
+            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/zoom-sdk/h"
+        )
+        target_link_libraries(CoreVideoEngineShareReentrancyTest PRIVATE Threads::Threads)
+        if(NOT APPLE)
+            target_link_libraries(CoreVideoEngineShareReentrancyTest PRIVATE rt)
+        endif()
+        add_test(NAME CoreVideoEngineShareReentrancy
+                 COMMAND CoreVideoEngineShareReentrancyTest)
+    endif()
+
     # A Zoom waiting room is an open-ended wait on a human, not a stalled join.
     # Charged against the join deadline it auto-left a live meeting after 114s
     # (2026-08-22). See src/join-watchdog.h.

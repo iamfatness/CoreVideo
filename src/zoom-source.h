@@ -95,6 +95,14 @@ struct ZoomSource {
     void clear_subscription_state();
     bool recover_stale_video(uint64_t now_ns, bool force = false);
     bool upgrade_low_quality_video(uint64_t now_ns, bool force = false);
+    // Screen-share mode only: blank the output once the share it was showing
+    // has ended (src/share-output-policy.h, rule 3). Driven by the 1 s health
+    // timer and by roster changes; a no-op for every other mode. Returns true
+    // if it cleared.
+    bool clear_ended_share(uint64_t now_ns);
+    // Record the roster's latest word on sharing; true on a nobody ->
+    // somebody edge.
+    bool note_share_roster(bool sharing, uint64_t now_ns);
     void activate();
     void deactivate();
     void on_roster_changed();
@@ -207,6 +215,9 @@ private:
     std::vector<uint8_t> m_scaled_video_buf;
     std::vector<uint8_t> m_director_preview_buf;
     std::vector<uint8_t> m_director_preview_scaled_buf;
+    // Intermediate for the filtered share scaler (src/i420-scale.h). Guarded
+    // by m_mtx like the buffers above.
+    std::vector<uint8_t> m_share_scale_scratch;
     std::vector<uint8_t> m_audio_buf;
     std::atomic<uint32_t> m_width{0};
     std::atomic<uint32_t> m_height{0};
@@ -218,6 +229,14 @@ private:
     std::atomic<uint64_t> m_last_quality_upgrade_ns{0};
     std::atomic<uint32_t> m_quality_upgrade_attempts{0};
     std::atomic<int> m_last_roster_video_state{-1};
+    // Screen-share mode: the roster's latest word on whether anyone is
+    // sharing, and whether this output currently has a picture on it (a real
+    // frame or a placeholder) that an ended share would leave frozen.
+    std::atomic<bool> m_share_roster_available{false};
+    // When the roster last went from "someone sharing" to "nobody" (0 while
+    // someone is) -- the clear is debounced on it (share-output-policy.h).
+    std::atomic<uint64_t> m_share_roster_false_since_ns{0};
+    std::atomic<bool> m_output_has_picture{false};
     std::vector<int16_t> m_stereo_buf;
     ZoomPreviewCallback m_preview_cb;
     uint64_t m_preview_last_ns = 0;

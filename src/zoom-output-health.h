@@ -1,5 +1,6 @@
 #pragma once
 
+#include "share-output-policy.h"
 #include "zoom-output-manager.h"
 #include <algorithm>
 #include <unordered_map>
@@ -105,7 +106,9 @@ inline void apply_output_health(std::vector<ZoomOutputInfo> &outputs,
             out.health_reason = ZoomOutputHealthReason::StaleFrame;
         } else if (out.observed_width == 0 || out.observed_height == 0) {
             out.health_reason = ZoomOutputHealthReason::WaitingForFirstFrame;
-        } else if (output_signal_below_requested(out)) {
+        } else if (quality_upgrade_applies(
+                       out.assignment == AssignmentMode::ScreenShare) &&
+                   output_signal_below_requested(out)) {
             out.health_reason = ZoomOutputHealthReason::ZoomDeliveredLowerResolution;
         }
     }

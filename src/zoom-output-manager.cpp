@@ -256,7 +256,12 @@ uint32_t ZoomOutputManager::recover_stale_sources(bool force)
     return static_cast<uint32_t>(std::count_if(
         m_sources.begin(), m_sources.end(),
         [now_ns, force](ZoomSource *src) {
-            return src && src->recover_stale_video(now_ns, force);
+            if (!src) return false;
+            // Rides this sweep because it is the only periodic per-source
+            // pass: a share whose last frames were still landing when the
+            // roster announced its end is cleared here (share-output-policy.h).
+            src->clear_ended_share(now_ns);
+            return src->recover_stale_video(now_ns, force);
         }));
 }
 

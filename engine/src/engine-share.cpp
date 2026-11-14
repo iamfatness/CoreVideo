@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <exception>
 #include <string>
@@ -137,6 +138,11 @@ void EngineShare::subscribe(const std::string &source_uuid, IpcFd e2p_fd)
         std::to_string(m_current_share_source_id.load()) +
         R"(,"raw_media_active":)" +
         std::string(m_raw_media_active ? "true" : "false") + "}");
+    // The plugin's stale recovery arrives as exactly this call. Without the
+    // rebuild, subscribe_active_share_locked() below short-circuits on the
+    // renderer we already hold, and a share Zoom stopped delivering could
+    // never come back (src/share-renderer-policy.h).
+    rebuild_idle_renderer_locked("resubscribe_idle");
     subscribe_active_share_locked("source_registered");
 }
 
@@ -175,6 +181,56 @@ void EngineShare::resubscribe_all()
 {
     std::lock_guard<std::recursive_mutex> lifecycle(m_lifecycle_mtx);
     subscribe_active_share_locked("resubscribe_all");
+}
+
+void EngineShare::set_clock_for_test(std::function<uint64_t()> clock)
+{
+    m_clock = std::move(clock);
+}
+
+uint64_t EngineShare::now_ns() const
+{
+    if (m_clock)
+        return m_clock();
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
+
+bool EngineShare::rebuild_idle_renderer_locked(const char *reason)
+{
+    const uint32_t share_source_id = m_current_share_source_id.load();
+    const uint64_t now = now_ns();
+    const uint64_t created = m_renderer_created_ns.load();
+    const uint64_t last_frame = m_last_frame_ns.load();
+    if (!share_renderer_needs_rebuild(
+            m_renderer.load() != nullptr && share_source_id != 0, created,
+            last_frame, now))
+        return false;
+    // Only if the share is still there. A renderer outliving its share (a
+    // missed end event) must not be re-bound to a dead source -- a renderer
+    // left bound to an ended share crashed the SDK in macOS live testing.
+    // When the scan disagrees, return false and let the caller's
+    // subscribe_active_share_locked() switch or release it. (No controller
+    // is attached only in the host test harness.)
+    if (m_share_ctrl) {
+        uint32_t user_id = 0;
+        if (active_share_source_id(&user_id) != share_source_id)
+            return false;
+    }
+    const uint64_t since = last_frame > created ? last_frame : created;
+    EngineIpc::write(
+        R"({"cmd":"debug","stage":"share_renderer_rebuilt","reason":")" +
+        std::string(reason ? reason : "unknown") + R"(","share_source_id":)" +
+        std::to_string(share_source_id) + R"(,"idle_ms":)" +
+        std::to_string((now - since) / 1'000'000ULL) +
+        R"(,"ever_delivered":)" + std::string(last_frame != 0 ? "true" : "false") +
+        "}");
+    // Same source id: this is the same share, given a fresh subscription.
+    unsubscribe_renderer_locked();
+    subscribe_to_locked(share_source_id, reason);
+    return true;
 }
 
 size_t EngineShare::target_count() const
@@ -269,6 +325,8 @@ bool EngineShare::subscribe_to_locked(uint32_t share_source_id, const char *reas
     // we would overwrite it, leaking a live subscription.
     m_renderer.store(renderer);
     m_current_share_source_id.store(share_source_id);
+    m_last_frame_ns.store(0);
+    m_renderer_created_ns.store(now_ns());
     err = renderer->subscribe(share_source_id, ZOOMSDK::RAW_DATA_TYPE_SHARE);
     EngineIpc::write(
         R"({"cmd":"debug","stage":"share_subscribe","code":)" +
@@ -369,6 +427,7 @@ void EngineShare::deliver_frame(YUVRawDataI420 *data)
         return;
     }
 
+    m_last_frame_ns.store(now_ns());
     const uint32_t raw_share_source_id = data->GetSourceID();
     const uint32_t share_user_id = m_current_share_user_id.load();
 
@@ -492,6 +551,22 @@ void EngineShare::onSharingStatus(ZOOMSDK::ZoomSDKSharingSourceInfo shareInfo)
                 set_active_share_user(0);
                 subscribe_active_share_locked("share_end");
             }
+            break;
+        case ZOOMSDK::Sharing_Resume:
+            // Nothing handled this before 2026-11-14 (the macOS engine
+            // always did). A short pause keeps its renderer; one that went
+            // idle across a long pause is rebuilt. The enum does not say
+            // WHOSE share resumed, so a missing renderer is re-found through
+            // the viewable-share scan, which never offers the local user's
+            // own share -- subscribing to that crashed the SDK in macOS live
+            // testing (main-macos.mm, share_is_self).
+            if (shareInfo.shareSourceID != 0 &&
+                shareInfo.shareSourceID != m_current_share_source_id.load())
+                break;
+            if (rebuild_idle_renderer_locked("share_resume"))
+                break;
+            if (!m_renderer.load())
+                subscribe_active_share_locked("share_resume");
             break;
         default:
             break;

@@ -7,6 +7,8 @@ int main()
     uint64_t last = 0;
     const auto require = [](bool value) {
         if (!value)
+            // Caught by main()'s try block below; cppcheck cannot see that.
+            // cppcheck-suppress throwInEntryPoint
             throw "provider policy regression";
     };
     try {

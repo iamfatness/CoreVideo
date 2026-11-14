@@ -196,6 +196,8 @@ int main()
         share.onSharingStatus(share_info(50, 11, Sharing_Other_Share_Begin));
         EngineIpc::test_sink() = [](const std::string &l) {
             if (l.find("share_raw_status") != std::string::npos)
+                // Deliberate: this throw IS the test (the engine must absorb it).
+                // cppcheck-suppress throwInEntryPoint
                 throw std::runtime_error("simulated failure inside a callback");
         };
         bool escaped = false;
@@ -208,6 +210,69 @@ int main()
         EngineIpc::test_sink() = nullptr;
         share.detach();
     }
+
+    // An idle share renderer is rebuilt by the plugin's recovery resubscribe
+    // and by a share Resume; a fresh one is left alone. Before 2026-11-14 both
+    // were no-ops while any renderer existed, so a share Zoom had stopped
+    // delivering stayed dark until the share ended (src/share-renderer-policy.h).
+    //
+    // This harness attaches no share controller, so subscribe()'s own
+    // active-share scan always finds nothing and drops the renderer after the
+    // rebuild decision has been made. Renderer creations are what is counted.
+    {
+        lines.clear();
+        EngineIpc::test_sink() = [&lines](const std::string &l) { lines.push_back(l); };
+        uint64_t fake_now = 1'000'000'000'000ULL;
+        EngineShare share;
+        share.set_clock_for_test([&fake_now] { return fake_now; });
+        share.set_raw_media_active(true);
+        share.subscribe("src_r", kIpcInvalidFd);
+
+        step("share begins", [&] {
+            share.onSharingStatus(share_info(60, 21, Sharing_Other_Share_Begin));
+        });
+        int created = g_created;
+        fake_now += 1'000'000'000ULL; // 1 s: fresh
+        step("recovery resubscribe on a fresh renderer", [&] {
+            share.subscribe("src_r", kIpcInvalidFd);
+        });
+        check(g_created == created, "a fresh renderer must not be rebuilt by a resubscribe");
+        check(count_lines(lines, "share_renderer_rebuilt") == 0,
+              "no rebuild may be reported for a fresh renderer");
+
+        step("share begins again", [&] {
+            share.onSharingStatus(share_info(60, 21, Sharing_Other_Share_Begin));
+        });
+        created = g_created;
+        fake_now += 9'000'000'000ULL; // 9 s with no frame: idle
+        step("recovery resubscribe on an idle renderer", [&] {
+            share.subscribe("src_r", kIpcInvalidFd);
+        });
+        check(g_created == created + 1,
+              "an idle renderer must be rebuilt by the recovery resubscribe");
+        check(count_lines(lines, "share_renderer_rebuilt") == 1,
+              "the rebuild must be reported");
+
+        step("share begins again for resume", [&] {
+            share.onSharingStatus(share_info(60, 22, Sharing_Other_Share_Begin));
+        });
+        created = g_created;
+        fake_now += 500'000'000ULL;
+        step("short pause resumed", [&] {
+            share.onSharingStatus(share_info(60, 22, Sharing_Resume));
+        });
+        check(g_created == created, "a resume after a short pause must keep the renderer");
+        fake_now += 20'000'000'000ULL;
+        step("long pause resumed", [&] {
+            share.onSharingStatus(share_info(60, 22, Sharing_Resume));
+        });
+        check(g_created == created + 1,
+              "a resume after a long pause must rebuild the idle renderer");
+
+        share.detach();
+        EngineIpc::test_sink() = nullptr;
+    }
+    check(g_created == g_destroyed, "every renderer created was destroyed (rebuild block)");
 
     if (g_failures) {
         std::cerr << g_failures << " failure(s)\n";

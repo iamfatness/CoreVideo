@@ -1526,6 +1526,28 @@ fresh epoch and delegate identity. Offline CoreVideoRawMediaLifecycle sequences
 and a real SDK build cover these code defects; repeated live delayed-grant and
 breakout resource-lifetime/recovery-time acceptance remains outstanding.
 
+## Screen-share black-flash diagnostics (2026-11-14, open defect)
+
+Field reports (one Mac, one Windows operator, v0.1.49): a Screen Share source
+goes black and the image reappears about once a second. On a still screen Zoom
+drops share delivery to ~1 fps, so the black sits BETWEEN frames. A live test
+on 2026-11-14 (normal desktop share, Windows sharer) could not reproduce it:
+0 dark frames from the SDK, from the plugin, or in 35k OBS source screenshots
+across scene switches, hide/show, forced recovery and Retry Media. Diagnostics
+are in place to locate it on the next occurrence. All use one classifier,
+`src/share-frame-diag.h` (CoreVideoShareFrameDiag):
+- engine (`engine-share.cpp`, and `share_on_frame` in `main-macos.mm`):
+  `share_frame_dark` / `_dark_end` (the SDK delivered black),
+  `share_frame_gap` (>=1 s between SDK frames), `share_frame_format`
+  (size or limited-range change);
+- plugin (`ZoomSource::log_share_frame_diag`, ScreenShare mode only):
+  `Share dark frame published` / `Share dark run ended`, `Share frame size`.
+Dark in the engine = Zoom's. Dark only in the plugin = ours. Neither while the
+operator sees black = OBS-side rendering. Also measured: share frames arrive
+LIMITED range (`limited:1`), and unlike the camera path
+(`i420-range-expand.h`) the share path does not expand them. That washes out a
+share, it does not blacken it; a separate fix.
+
 ## Live testing against a real meeting
 
 The control API (TCP line-JSON, `127.0.0.1:19870`, no HTTP) drives a full

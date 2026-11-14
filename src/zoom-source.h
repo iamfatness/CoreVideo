@@ -144,6 +144,11 @@ private:
     // callbacks. Neither talks to the engine, so neither blocks on IPC.
     void release_video_shm();
     void release_video_shm_locked();
+    void log_share_frame_diag(uint32_t src_w, uint32_t src_h,
+                              const uint8_t *obs_y, uint32_t obs_w,
+                              uint32_t obs_h, uint32_t obs_stride,
+                              uint64_t now_ns, uint32_t participant,
+                              uint32_t shm_gen, bool cpu_frame);
     // Audio only needs this where an explicit unsubscribe precedes the
     // re-subscribe, which destroys the engine's AudioTarget — see the comment
     // on the definition. Within one engine process that is the active-speaker
@@ -222,6 +227,14 @@ private:
     ZoomPreviewCallback m_preview_cb;
     uint64_t m_preview_last_ns = 0;
     uint64_t m_frame_count = 0;
+    // Screen-share black-flash diagnostics (src/share-frame-diag.h). Guarded
+    // by m_mtx like m_frame_count; written only in output_video_from_shared_memory.
+    uint32_t m_share_diag_w = 0;
+    uint32_t m_share_diag_h = 0;
+    uint32_t m_share_diag_dark_run = 0;
+    uint32_t m_share_diag_dark_total = 0;
+    uint64_t m_share_diag_frames = 0;
+    uint64_t m_share_diag_last_ns = 0;
     uint64_t m_fps_window_start_ns = 0;
     uint32_t m_fps_window_frames = 0;
     uint64_t m_audio_frame_count = 0;

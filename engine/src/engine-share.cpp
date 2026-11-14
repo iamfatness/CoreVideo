@@ -1,8 +1,10 @@
 #include "engine-share.h"
 #include "engine-writer.h"
+#include "share-frame-diag.h"
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <exception>
 #include <string>
@@ -371,6 +373,63 @@ void EngineShare::deliver_frame(YUVRawDataI420 *data)
 
     const uint32_t raw_share_source_id = data->GetSourceID();
     const uint32_t share_user_id = m_current_share_user_id.load();
+
+    // Black-flash diagnostics (src/share-frame-diag.h): classify what the SDK
+    // handed us BEFORE anything of ours touches it, so a dark frame reported
+    // here is Zoom's and one reported only by the plugin is ours.
+    {
+        const uint64_t now_ms = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+        const uint64_t gap_ms =
+            m_diag.last_frame_ms ? now_ms - m_diag.last_frame_ms : 0;
+        m_diag.last_frame_ms = now_ms;
+        ++m_diag.frames;
+        const int limited = data->IsLimitedI420() ? 1 : 0;
+        if (w != m_diag.last_w || h != m_diag.last_h ||
+            limited != m_diag.last_limited) {
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"share_frame_format","w":)" +
+                std::to_string(w) + R"(,"h":)" + std::to_string(h) +
+                R"(,"prev_w":)" + std::to_string(m_diag.last_w) +
+                R"(,"prev_h":)" + std::to_string(m_diag.last_h) +
+                R"(,"limited":)" + std::to_string(limited) +
+                R"(,"frame":)" + std::to_string(m_diag.frames) + "}");
+            m_diag.last_w = w;
+            m_diag.last_h = h;
+            m_diag.last_limited = limited;
+        }
+        if (gap_ms >= 1000) {
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"share_frame_gap","gap_ms":)" +
+                std::to_string(gap_ms) + R"(,"frame":)" +
+                std::to_string(m_diag.frames) + "}");
+        }
+        const ShareLumaStats luma = share_luma_stats(
+            reinterpret_cast<const uint8_t *>(data->GetYBuffer()), w, h, w, 16);
+        if (share_frame_is_dark(luma)) {
+            ++m_diag.dark_run;
+            ++m_diag.dark_total;
+            if (share_dark_should_log(m_diag.dark_total)) {
+                EngineIpc::write(
+                    R"({"cmd":"debug","stage":"share_frame_dark","frame":)" +
+                    std::to_string(m_diag.frames) +
+                    R"(,"run":)" + std::to_string(m_diag.dark_run) +
+                    R"(,"total":)" + std::to_string(m_diag.dark_total) +
+                    R"(,"mean":)" + std::to_string(luma.mean) +
+                    R"(,"max":)" + std::to_string(luma.max) +
+                    R"(,"w":)" + std::to_string(w) + R"(,"h":)" + std::to_string(h) +
+                    R"(,"limited":)" + std::to_string(limited) +
+                    R"(,"gap_ms":)" + std::to_string(gap_ms) + "}");
+            }
+        } else if (m_diag.dark_run != 0) {
+            EngineIpc::write(
+                R"({"cmd":"debug","stage":"share_frame_dark_end","frame":)" +
+                std::to_string(m_diag.frames) +
+                R"(,"run":)" + std::to_string(m_diag.dark_run) + "}");
+            m_diag.dark_run = 0;
+        }
+    }
 
     // Targets only. Never m_lifecycle_mtx: a frame callback that waited on a
     // thread inside an SDK call would be waiting on the SDK to finish

@@ -1464,6 +1464,17 @@ if(BUILD_TESTING)
     add_test(NAME CoreVideoLumaRangeProbe
              COMMAND CoreVideoLumaRangeProbeTest)
 
+    # Screen-share black-flash diagnostics: the dark-frame classifier the
+    # engine and plugin share (src/share-frame-diag.h).
+    add_executable(CoreVideoShareFrameDiagTest
+        tests/share-frame-diag-test.cpp
+    )
+    target_include_directories(CoreVideoShareFrameDiagTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME CoreVideoShareFrameDiag
+             COMMAND CoreVideoShareFrameDiagTest)
+
     # Per-slot left/right crop composed with the cover-crop. The composition
     # order is the point: the slot crop narrows the usable source first, and the
     # cover-crop then fills the tile from what is left. Reversing the two cuts a

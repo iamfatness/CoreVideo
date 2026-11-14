@@ -4,6 +4,7 @@
 #include "director-preview-frame-guard.h"
 #include "shm-resubscribe.h"
 #include "luma-range-probe.h"
+#include "share-frame-diag.h"
 #include "speaker-director.h"
 #include "speaker-settings-merge.h"
 #include "zoom-engine-client.h"
@@ -1387,6 +1388,58 @@ void ZoomSource::on_director_preview_frame(uint32_t event_width,
                                     true);
 }
 
+// Screen-share black-flash diagnostics. Classifies the exact luma plane about
+// to be handed to OBS (after letterboxing) with the same function the engine
+// uses on what Zoom delivered, so a dark verdict here with none in the engine
+// log means the black was introduced on our side of the pipe. Caller holds m_mtx.
+void ZoomSource::log_share_frame_diag(uint32_t src_w, uint32_t src_h,
+                                      const uint8_t *obs_y, uint32_t obs_w,
+                                      uint32_t obs_h, uint32_t obs_stride,
+                                      uint64_t now_ns, uint32_t participant,
+                                      uint32_t shm_gen, bool cpu_frame)
+{
+    ++m_share_diag_frames;
+    const uint64_t gap_ms = m_share_diag_last_ns && now_ns > m_share_diag_last_ns
+        ? (now_ns - m_share_diag_last_ns) / 1'000'000ULL : 0;
+    m_share_diag_last_ns = now_ns;
+    const uint64_t subscribed_ns = m_last_subscribe_ns.load(std::memory_order_acquire);
+    const uint64_t since_sub_ms = subscribed_ns && now_ns > subscribed_ns
+        ? (now_ns - subscribed_ns) / 1'000'000ULL : 0;
+    if (src_w != m_share_diag_w || src_h != m_share_diag_h) {
+        blog(LOG_INFO,
+             "[obs-zoom-plugin] Share frame size: source=%s %ux%u -> %ux%u canvas=%ux%u frame=%llu participant=%u gen=%u since_subscribe_ms=%llu",
+             output_name().c_str(), m_share_diag_w, m_share_diag_h, src_w, src_h,
+             obs_w, obs_h, static_cast<unsigned long long>(m_share_diag_frames),
+             participant, shm_gen, static_cast<unsigned long long>(since_sub_ms));
+        m_share_diag_w = src_w;
+        m_share_diag_h = src_h;
+    }
+    // With hardware conversion obs_y is still the CPU I420 source plane, which
+    // is what we want to classify; the frame handed to OBS is derived from it.
+    (void)cpu_frame;
+    const ShareLumaStats luma = share_luma_stats(obs_y, obs_w, obs_h, obs_stride, 16);
+    if (share_frame_is_dark(luma)) {
+        ++m_share_diag_dark_run;
+        ++m_share_diag_dark_total;
+        if (share_dark_should_log(m_share_diag_dark_total))
+            blog(LOG_WARNING,
+                 "[obs-zoom-plugin] Share dark frame published: source=%s frame=%llu run=%u total=%u mean=%u max=%u src=%ux%u canvas=%ux%u participant=%u gen=%u gap_ms=%llu since_subscribe_ms=%llu",
+                 output_name().c_str(),
+                 static_cast<unsigned long long>(m_share_diag_frames),
+                 m_share_diag_dark_run, m_share_diag_dark_total, luma.mean,
+                 static_cast<unsigned>(luma.max), src_w, src_h, obs_w, obs_h,
+                 participant, shm_gen, static_cast<unsigned long long>(gap_ms),
+                 static_cast<unsigned long long>(since_sub_ms));
+    } else if (m_share_diag_dark_run != 0) {
+        blog(LOG_WARNING,
+             "[obs-zoom-plugin] Share dark run ended: source=%s frame=%llu run=%u",
+             output_name().c_str(),
+             static_cast<unsigned long long>(m_share_diag_frames),
+             m_share_diag_dark_run);
+        m_share_diag_dark_run = 0;
+    }
+}
+
 bool ZoomSource::output_video_from_shared_memory(
     const std::string &uuid,
     ShmRegion &video_shm,
@@ -1548,6 +1601,11 @@ bool ZoomSource::output_video_from_shared_memory(
     configure_cpu_frame();
 #endif
     set_yuv_frame_color_info(frame);
+
+    if (assignment.load(std::memory_order_relaxed) == AssignmentMode::ScreenShare)
+        log_share_frame_diag(w, h, obs_y_ptr, obs_w, obs_h, obs_stride_y, ts,
+                             resolved_participant_id, video_shm_gen,
+                             frame.format == VIDEO_FORMAT_I420);
 
     obs_source_output_video(source, &frame);
     if (commit_director_cut && dedicated_active_speaker_source) {

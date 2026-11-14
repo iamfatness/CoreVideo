@@ -56,6 +56,8 @@
 #import <ZoomSDK/ZoomSDK.h>
 #import <Cocoa/Cocoa.h>
 
+#include "share-frame-diag.h"
+#include <chrono>
 #include "../../src/engine-ipc.h"
 #include "../../src/shm-generation.h"
 #include "../../src/raw-media-lifecycle.h"
@@ -1399,6 +1401,55 @@ static void share_on_frame(ZoomSDKYUVRawDataI420 *data)
                          std::to_string(src_w) + R"(,"h":)" +
                          std::to_string(src_h) + "}");
         return;
+    }
+
+    // Black-flash diagnostics (src/share-frame-diag.h), mirroring
+    // engine-share.cpp: classify what the SDK delivered before we touch it.
+    // The SDK delivers share frames serially on one callback thread, so plain
+    // statics are enough for these counters.
+    {
+        static uint32_t last_w = 0, last_h = 0, dark_run = 0, dark_total = 0;
+        static uint64_t last_ms = 0, frames = 0;
+        const uint64_t now_ms = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+        const uint64_t gap_ms = last_ms ? now_ms - last_ms : 0;
+        last_ms = now_ms;
+        ++frames;
+        if (w != last_w || h != last_h) {
+            EngineIpc::write(R"({"cmd":"debug","stage":"share_frame_format","w":)" +
+                             std::to_string(w) + R"(,"h":)" + std::to_string(h) +
+                             R"(,"prev_w":)" + std::to_string(last_w) +
+                             R"(,"prev_h":)" + std::to_string(last_h) +
+                             R"(,"frame":)" + std::to_string(frames) + "}");
+            last_w = w;
+            last_h = h;
+        }
+        if (gap_ms >= 1000)
+            EngineIpc::write(R"({"cmd":"debug","stage":"share_frame_gap","gap_ms":)" +
+                             std::to_string(gap_ms) + R"(,"frame":)" +
+                             std::to_string(frames) + "}");
+        const ShareLumaStats luma = share_luma_stats(
+            reinterpret_cast<const uint8_t *>([data getYBuffer]), w, h, src_w, 16);
+        if (share_frame_is_dark(luma)) {
+            ++dark_run;
+            ++dark_total;
+            if (share_dark_should_log(dark_total))
+                EngineIpc::write(R"({"cmd":"debug","stage":"share_frame_dark","frame":)" +
+                                 std::to_string(frames) +
+                                 R"(,"run":)" + std::to_string(dark_run) +
+                                 R"(,"total":)" + std::to_string(dark_total) +
+                                 R"(,"mean":)" + std::to_string(luma.mean) +
+                                 R"(,"max":)" + std::to_string(luma.max) +
+                                 R"(,"w":)" + std::to_string(w) +
+                                 R"(,"h":)" + std::to_string(h) +
+                                 R"(,"gap_ms":)" + std::to_string(gap_ms) + "}");
+        } else if (dark_run != 0) {
+            EngineIpc::write(R"({"cmd":"debug","stage":"share_frame_dark_end","frame":)" +
+                             std::to_string(frames) + R"(,"run":)" +
+                             std::to_string(dark_run) + "}");
+            dark_run = 0;
+        }
     }
 
     // The plugin keys share frames by the SHARING participant, matching the

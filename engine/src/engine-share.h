@@ -84,6 +84,20 @@ private:
         bool shm_fail_reported = false;
     };
 
+    // Screen-share black-flash diagnostics (src/share-frame-diag.h). Touched
+    // only from deliver_frame(), i.e. the SDK's share frame callback, which is
+    // serialised per renderer; no lock needed beyond that.
+    struct ShareFrameDiag {
+        uint32_t last_w = 0;
+        uint32_t last_h = 0;
+        int      last_limited = -1;
+        uint64_t last_frame_ms = 0;
+        uint64_t frames = 0;
+        uint32_t dark_run = 0;     // consecutive dark frames
+        uint32_t dark_total = 0;   // dark frames this renderer
+    };
+    ShareFrameDiag m_diag;
+
     void deliver_frame(YUVRawDataI420 *data);
     // `_locked` = caller holds m_lifecycle_mtx.
     uint32_t active_share_source_id(uint32_t *user_id) const;

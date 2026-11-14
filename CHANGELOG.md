@@ -7,6 +7,18 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.50] - 2026-11-14
+
+Full release for Windows and macOS (Apple Silicon). Screen share is the
+headline: it was reported as unreliable on both platforms, and this release
+fixes the ways it failed. It also promotes everything in v0.1.50-beta.1.
+
+### Added
+- **Download FFmpeg** in the ISO Recorder dock: one click fetches a verified
+  FFmpeg 9.0.2 build (Windows and Apple Silicon) into your OBS settings folder,
+  with no admin rights and no separate install. ISO recording offers it the
+  first time it needs FFmpeg. Nothing is downloaded without that click.
+
 ### Fixed
 - **Screen share no longer freezes on program after the presenter stops
   sharing.** Nothing used to clear a share source, so the last frame stayed on
@@ -32,13 +44,18 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 - macOS: the first frame of a share could be dropped when it arrived while the
   engine was still setting the subscription up. For a static slide that meant
   nothing appeared until the presenter changed the slide.
+- macOS: the FFmpeg picker no longer asks for `ffmpeg.exe`, Homebrew's FFmpeg
+  is found even when OBS is launched from the Dock, and ISO recording offers
+  Apple VideoToolbox in place of the Windows-only NVIDIA/Intel/AMD encoders.
 
 ### Validation
-- 86 native tests pass on macOS (arm64), including new tests for the share
-  scaler, the share health/clear rules and the engine's idle-rebuild rule. The
-  Windows engine's share module test now also runs on macOS and Linux CI.
-- Live screen-share validation (docs/VALIDATION_MATRIX.md) on both platforms
-  is still pending.
+- 86 native tests pass on macOS (arm64) and the Windows x64 CI build and
+  tests pass, including new tests for the share scaler, the share health and
+  clear rules, and the engine's idle-rebuild rule. The Windows engine's share
+  module test now also runs on macOS and Linux CI.
+- A first live macOS session confirmed a remote participant's share reaches
+  the share source within milliseconds of subscribing. The full live checklist
+  (docs/VALIDATION_MATRIX.md) has not been completed on either platform.
 
 ## [0.1.50-beta.1] - 2026-11-14
 

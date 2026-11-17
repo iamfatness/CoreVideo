@@ -332,9 +332,10 @@ function proPageContent() {
       <h3>Sources</h3>
       <ul>
         <li>Zoom participants as separate 1080p video and audio sources</li>
-        <li>Webcams and capture cards</li>
-        <li>Screen and window capture</li>
-        <li>Local video clips and stills</li>
+        <li>NDI sources on your network</li>
+        <li>SRT feeds, including CoreVideo Edge</li>
+        <li>Local: webcams and capture cards, screen and window capture, video clips and stills</li>
+        <li>Coming later: Blackmagic and AJA capture cards</li>
       </ul>
     </div>
     <div>
@@ -390,7 +391,8 @@ function proPageContent() {
     <li>Setup asks for administrator approval once, to register the virtual camera.</li>
     <li>First launch downloads and verifies the media runtime, so it needs internet access.</li>
   </ul>
-  <p>Not in 1.0: macOS, captions, the automatic scene director, and Blackmagic or AJA capture. They are not on this page because they do not ship.</p>
+  <p>Setting up a machine for a show? Read the <a href="/pro/system-guide/">system guide</a>: GPU and memory tiers, ISO limits, networking, and a pre-show checklist.</p>
+  <p>Not in 1.0: macOS, captions and the automatic scene director. Blackmagic and AJA capture cards are planned for a later release.</p>
 </section>
 <section>
   <h2>Which one do I use?</h2>
@@ -477,6 +479,70 @@ function proAnnouncementContent() {
 <h2>What 1.0 does not do yet</h2>
 <p>CoreVideo Pro 1.0 is Windows only. Captions, the automatic scene director, and Blackmagic or AJA capture are not part of this release.</p>
 <p>Found a problem? Diagnostics &rarr; Export support bundle collects redacted logs, and <a href="${PRO_REPO}/issues">GitHub issues</a> is where to report it.</p>`;
+}
+
+// The CoreVideo Pro system guide. Every recommendation names how we know it:
+// "the app enforces this" (a rule in the shipped code), "measured" (a 1.0
+// qualification result), or "standard Windows practice" (sound, but not
+// measured by us). Nothing unmeasured is presented as measured. The numbers
+// come from CoreVideoPro v1.0.0: GpuTierPolicy (9 tiles under 8 GB, offered
+// ceiling min(tier, 10)), EncoderPolicy.h (NVENC is the supported hardware
+// tier), IsoEncoderAdmission.h (software spill warns, over-budget refuses),
+// kIsoReaderCount = 8, and the 1.0 soaks in the release notes. Do not add a
+// CPU/RAM minimum, a driver version or a GPU-scheduling tip until it has been
+// measured; do not raise the 10-tile figure until the 16-source soak passes.
+const PRO_GUIDE_VERIFIED = "November 14, 2026";
+
+function proSystemGuideContent() {
+  return `<p class="eyebrow">CoreVideo Pro ${PRO_VERSION} &middot; last verified ${PRO_GUIDE_VERIFIED}</p>
+<h1>System guide</h1>
+<p class="lede">What to run CoreVideo Pro on, and how to set the PC up before a show. Each item says how we know it: <strong>the app enforces it</strong>, <strong>we measured it</strong> in 1.0 qualification, or it is <strong>standard Windows practice</strong> that we recommend but have not measured ourselves.</p>
+
+<h2>Sources</h2>
+<ul>
+  <li><strong>Zoom:</strong> up to 8 guests&rsquo; video, each as its own 1080p source.</li>
+  <li><strong>NDI:</strong> any NDI source on your network.</li>
+  <li><strong>SRT:</strong> feeds from CoreVideo Edge or any SRT encoder.</li>
+  <li><strong>Local:</strong> webcams and capture cards, screen and window capture, and video clips and stills.</li>
+  <li><strong>Coming later:</strong> Blackmagic and AJA capture cards.</li>
+</ul>
+
+<h2>Hardware</h2>
+<table>
+  <thead><tr><th>Part</th><th>What Pro needs</th><th>How we know</th></tr></thead>
+  <tbody>
+    <tr><td>Windows</td><td>Windows 10 or later, 64-bit.</td><td>Required by the installer.</td></tr>
+    <tr><td>Graphics</td><td>A Direct3D 11 GPU with current drivers. <strong>NVIDIA is the supported GPU</strong>: recording and streaming use NVIDIA&rsquo;s hardware encoder (NVENC). On Intel or AMD graphics, Pro runs, but recordings fall back to the CPU encoder.</td><td>The app enforces it, and tells you before you record when it falls back.</td></tr>
+    <tr><td>Graphics memory</td><td><strong>Under 8 GB:</strong> 1080p canvas, multiviewer up to 9 tiles.<br><strong>8 GB or more:</strong> 4K canvas available, multiviewer up to 10 tiles (every Show Input).</td><td>The app enforces it. If memory can&rsquo;t be measured, it uses the under-8 GB limits and says so.</td></tr>
+    <tr><td>CPU and memory</td><td>No published minimum yet. Pro 1.0 was qualified on a high-end desktop with an NVIDIA RTX 40-series GPU.</td><td>That is the machine we measured, not a minimum.</td></tr>
+  </tbody>
+</table>
+
+<h2>Recording per-guest ISOs</h2>
+<ul>
+  <li><strong>Up to 8 guest ISOs at once</strong>, alongside the Program recording. <em>The app enforces it.</em></li>
+  <li>On an NVIDIA GPU, all of them record on the GPU encoder. If the GPU runs out of encode sessions, or there is no NVIDIA GPU, the rest move to the CPU encoder and Pro warns you before you start. If the CPU can&rsquo;t keep up either, Pro turns ISO recording off before the show, rather than failing during it. Program keeps recording either way. <em>The app enforces it.</em></li>
+</ul>
+
+<h2>Network</h2>
+<ul>
+  <li><strong>Use wired Ethernet</strong> for the Pro PC, and for any machine sending it NDI or SRT, such as a CoreVideo Edge node. Wi-Fi adds jitter and drops, and every guest feed rides on it. <em>Standard practice.</em></li>
+  <li><strong>NDI is heavy.</strong> Full-bandwidth NDI uses far more network than a compressed stream, so a gigabit link carries only a few feeds. Check NDI&rsquo;s published bandwidth for your format, and send SRT when you need more remote feeds. <em>Standard practice.</em></li>
+  <li><strong>Zoom download speed</strong> sets how many guests arrive in full quality. Pro receives up to 8 guests&rsquo; video. Check Zoom&rsquo;s published bandwidth requirements against your connection, and leave headroom for your stream&rsquo;s upload. <em>Standard practice.</em></li>
+</ul>
+
+<h2>Before every show</h2>
+<ol>
+  <li><strong>Close games and other GPU-heavy apps.</strong> In our 1.0 soaks, the stream skipped 10&ndash;12 single frames out of about 108,000 while a game ran on the same PC. On an idle machine it skipped none. <em>We measured it.</em></li>
+  <li><strong>Plug in a laptop</strong> and use the High performance or Best performance power mode. On battery, Windows slows the CPU and GPU. <em>Standard Windows practice.</em></li>
+  <li><strong>Pause Windows Update</strong> for the day (Settings &rarr; Windows Update &rarr; Pause updates), so a restart or a driver install can&rsquo;t land mid-show. <em>Standard Windows practice.</em></li>
+  <li><strong>Turn on Do not disturb</strong>, so notifications don&rsquo;t pop over a captured screen or steal focus. <em>Standard Windows practice.</em></li>
+  <li><strong>Rehearse:</strong> join the meeting, put a source in Preview, Take it, and make a short test recording. That checks the whole chain on the day&rsquo;s machine and network. <em>Standard practice.</em></li>
+</ol>
+
+<h2>Not on this page yet</h2>
+<p>Settings we have not measured ourselves are left out on purpose, for example hardware-accelerated GPU scheduling, Game Mode and specific driver versions. We will add them once tested. If something on your machine contradicts this guide, Diagnostics &rarr; Export support bundle collects redacted logs, and <a href="${PRO_REPO}/issues">GitHub issues</a> is where to report it.</p>
+<p><a href="/pro/">&larr; Back to CoreVideo Pro</a></p>`;
 }
 
 function zcommsPageContent() {
@@ -1094,6 +1160,24 @@ writeText(
     {
       home: true,
       canonical: canonicalUrl("pro/index.html"),
+      footerText:
+        "CoreVideo and CoreVideo Pro are independent products and are not affiliated with Zoom Video Communications, Inc.",
+    },
+  ),
+);
+
+// CoreVideo Pro system guide (hardware tiers, ISO limits, network, pre-show).
+writeText(
+  "pro/system-guide/index.html",
+  layout(
+    {
+      title: "CoreVideo Pro System Guide",
+      description:
+        "What to run CoreVideo Pro on and how to set up Windows before a show: GPU and memory tiers, ISO recording limits, networking and a pre-show checklist.",
+    },
+    proSystemGuideContent(),
+    {
+      canonical: canonicalUrl("pro/system-guide/index.html"),
       footerText:
         "CoreVideo and CoreVideo Pro are independent products and are not affiliated with Zoom Video Communications, Inc.",
     },

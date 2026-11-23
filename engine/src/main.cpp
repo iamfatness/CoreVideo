@@ -8,6 +8,7 @@
 #include "engine-talkback.h"
 #include "engine-silent-mic.h"
 #include "engine-input-policy.h"
+#include "engine-settings-lifetime.h"
 #if __has_include(<rawdata/zoom_rawdata_api.h>)
 #include <rawdata/zoom_rawdata_api.h>
 #else
@@ -706,6 +707,14 @@ class EngineAuthEvent : public ZOOMSDK::IAuthServiceEvent {
 public:
     explicit EngineAuthEvent(IpcFd e2p) : m_e2p(e2p) {}
 
+    ZOOMSDK::ISettingService *settings(int &result) {
+        return m_settings.get(result, [](ZOOMSDK::ISettingService **out) {
+            return static_cast<int>(ZOOMSDK::CreateSettingService(out));
+        });
+    }
+    void destroy_settings() {
+        m_settings.reset([](ZOOMSDK::ISettingService *s) { ZOOMSDK::DestroySettingService(s); });
+    }
     bool microphone_ready() const { return m_silent_mic.ready(); }
     bool external_input_attempted() const { return m_external_input_attempted; }
     ZOOMSDK::SDKError install_silent_microphone() {
@@ -717,9 +726,8 @@ public:
             // Opt into HD video so the meeting negotiates Group HD / 1080p
             // streams when the account is entitled. Defaults to off on
             // many account tiers — without this the SDK may downgrade.
-            ZOOMSDK::ISettingService *settings = nullptr;
-            ZOOMSDK::SDKError s_err =
-                ZOOMSDK::CreateSettingService(&settings);
+            int s_err = 0;
+            auto *settings = this->settings(s_err);
             if (s_err == ZOOMSDK::SDKERR_SUCCESS && settings) {
                 if (auto *vs = settings->GetVideoSettings()) {
                     ZOOMSDK::SDKError h_err = vs->EnableHDVideo(true);
@@ -737,7 +745,7 @@ public:
                         R"({"cmd":"debug","stage":"disable_mic_auto_adjust","code":)" +
                         std::to_string(static_cast<int>(err)) + "}");
                 }
-                ZOOMSDK::DestroySettingService(settings);
+
             } else {
                 EngineIpc::write(
                     R"({"cmd":"debug","stage":"create_setting_service_failed","code":)" +
@@ -765,6 +773,7 @@ public:
 #endif
 private:
     IpcFd m_e2p;
+    EngineSettingsLifetime<ZOOMSDK::ISettingService> m_settings;
     EngineSilentMic m_silent_mic;
     bool m_external_input_attempted = false; // Sticky until process exit, even on registration failure.
 };
@@ -1563,12 +1572,16 @@ int main()
             }
 
         } else if (command == IpcCommand::InputDevices) {
-            ZOOMSDK::ISettingService *settings = nullptr;
-            const auto result = ZOOMSDK::CreateSettingService(&settings);
+            int result = 0;
+            auto *settings = auth_event.settings(result);
             auto *audio = settings ? settings->GetAudioSettings() : nullptr;
             auto *devices = audio ? audio->GetMicList() : nullptr;
             std::string message = R"({"cmd":"input_devices","available":)";
             message += (result == ZOOMSDK::SDKERR_SUCCESS && devices) ? "true" : "false";
+            message += R"(,"settings_code":)" + std::to_string(result) +
+                R"(,"audio_available":)" + (audio ? "true" : "false") +
+                R"(,"inventory_null":)" + (devices ? "false" : "true") +
+                R"(,"count":)" + std::to_string(devices ? devices->GetCount() : -1);
             message += R"(,"devices":[)";
             bool first = true;
             if (devices) for (int i = 0; i < devices->GetCount(); ++i) {
@@ -1580,7 +1593,7 @@ int main()
                     R"(","name":")" + json_escape(zchar_to_utf8(device->GetDeviceName())) + "\"}";
             }
             EngineIpc::write(message + "]}");
-            if (settings) ZOOMSDK::DestroySettingService(settings);
+
         } else if (command == IpcCommand::Join) {
             std::string mode = json_str(line, "input_mode");
             if (mode.empty()) mode = "unchanged";
@@ -1590,12 +1603,19 @@ int main()
                 EngineIpc::write(R"({"cmd":"error","reason":"input_policy","msg":"Restart OBS to leave silent talkback input mode."})");
                 continue;
             }
-            ZOOMSDK::ISettingService *settings = nullptr;
-            ZOOMSDK::CreateSettingService(&settings);
+            int settings_result = 0;
+            auto *settings = auth_event.settings(settings_result);
             auto *audio = settings ? settings->GetAudioSettings() : nullptr;
+            EngineInputDiagnostics input_diag;
             const char *input_error = prepare_engine_input(audio, mode,
-                to_zstr(json_str(line, "input_device_id")));
-            if (settings) ZOOMSDK::DestroySettingService(settings);
+                to_zstr(json_str(line, "input_device_id")), &input_diag);
+            EngineIpc::write(std::string(R"({"cmd":"debug","stage":"input_preflight","settings_code":)") +
+                std::to_string(settings_result) + R"(,"audio_available":)" + (audio ? "true" : "false") +
+                R"(,"mute_set_code":)" + std::to_string(input_diag.mute_set_code) +
+                R"(,"mute_enabled":)" + (input_diag.mute_enabled ? "true" : "false") +
+                R"(,"gain_set_code":)" + std::to_string(input_diag.gain_set_code) +
+                R"(,"gain_enabled":)" + (input_diag.gain_enabled ? "true" : "false") + "}");
+
             if (!input_error && mode == "silent" && !auth_event.microphone_ready() &&
                 auth_event.install_silent_microphone() != ZOOMSDK::SDKERR_SUCCESS)
                 input_error = "silent_microphone_unavailable";
@@ -2043,6 +2063,7 @@ int main()
     if (meeting_svc) meeting_svc->Leave(ZOOMSDK::LEAVE_MEETING);
     share_engine.detach();
     EngineAudio::instance().shutdown();
+    auth_event.destroy_settings();
     ZOOMSDK::CleanUPSDK();
     ipc_teardown(p2e, e2p);
     return 0;

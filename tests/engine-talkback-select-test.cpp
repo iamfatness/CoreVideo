@@ -754,6 +754,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         check(tb.nominate(&svc, {"Sarah", "Luis"}), "nominate refused a clean two-name plan");
         check(svc.ctrl.creates == 1,
               "nominate issued more (or fewer) than one CreateChannel up front");
@@ -788,6 +789,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         std::vector<std::string> nominees;
         for (int i = 0; i < 11; ++i) nominees.push_back("Talent " + std::to_string(i + 1));
         check(tb.nominate(&svc, nominees), "nominate refused an 11-name plan");
@@ -929,6 +931,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
@@ -983,6 +986,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         std::vector<std::string> nominees;
         for (int i = 0; i < 11; ++i) nominees.push_back("Talent " + std::to_string(i + 1));
         check(tb.nominate(&svc, nominees), "nominate refused an 11-name plan");
@@ -1015,6 +1019,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
@@ -1041,6 +1046,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         check(!tb.nominate(&svc, {"Sarah", "all"}),
               "a nominee named \"all\" was nominated -- keying that name would go "
               "out to everyone");
@@ -1062,6 +1068,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         check(!tb.session_start(&svc, "Sarah"),
               "keying with nothing nominated was accepted");
         check(svc.ctrl.creates == 0,
@@ -1088,6 +1095,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         check(svc.ctrl.creates == 1, "nominate did not issue its first create");
 
@@ -1109,6 +1117,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         for (int i = 1; i <= 2; ++i)
             respond(tb, chan_id(i).c_str(), kOk);
@@ -1134,6 +1143,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);   // all-talent
         respond(tb, chan_id(2).c_str(), kOk);   // Sarah private
@@ -1210,6 +1220,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         check(tb.nominate(&svc, {"Ivan"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
@@ -1230,6 +1241,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
@@ -1263,6 +1275,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
@@ -1291,6 +1304,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
@@ -1343,6 +1357,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);   // all-talent
         respond(tb, chan_id(2).c_str(), kOk);   // Sarah private
@@ -1401,6 +1416,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         check(tb.nominate(&svc, {"Ivan"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
@@ -1441,6 +1457,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
@@ -1496,6 +1513,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);   // all-talent
         respond(tb, chan_id(2).c_str(), kOk);   // Sarah private
@@ -1544,6 +1562,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -1597,6 +1616,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         // "Sarah" plans 2 channels: all-talent + her private.
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         check(svc.ctrl.creates == 1, "setup: the first create was not issued");
@@ -1628,6 +1648,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -1677,6 +1698,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -1728,6 +1750,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -1771,6 +1794,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -1805,6 +1829,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -1835,6 +1860,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -1894,6 +1920,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -1931,6 +1958,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -2007,6 +2035,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);   // all-talent
         respond(tb, chan_id(2).c_str(), kOk);   // Sarah private
@@ -2062,6 +2091,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");
         respond(tb, chan_id(1).c_str(), kOk);
         respond(tb, chan_id(2).c_str(), kOk);
@@ -2110,6 +2140,7 @@ int main()
 
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         svc.participants.users.push_back(make_user(4101, "Sarah"));
         svc.participants.users.push_back(make_user(4102, "Luis"));
         check(tb.nominate(&svc, {"Sarah", "Luis"}), "nominate refused a two-name plan");
@@ -2186,6 +2217,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -2276,6 +2308,19 @@ int main()
         shm_region_destroy(region);
     }
 
+    // Default/physical input must never unmute, even on an intentional key.
+    {
+        FakeMeetingService svc;
+        EngineTalkback tb;
+        svc.participants.has_self = true;
+        svc.participants.self = make_user(7700, "CoreVideo Engine");
+        svc.participants.self.muted = true;
+        check(!tb.session_start(&svc, "Sarah"), "physical mic talkback was allowed");
+        tb.debug_expire_mic_assert_for_test();
+        tb.mic_tick();
+        check(svc.audio.unmuted.empty(), "physical mic was unmuted by key/tick");
+    }
+
     // (d) A CLIENT THAT WAS ALREADY OPEN is not touched, and is not re-muted
     // on release. "Restore the prior state" means exactly that; muting a bot
     // the operator deliberately left unmuted would be this file inventing
@@ -2283,6 +2328,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         svc.participants.has_self = true;
         svc.participants.self = make_user(7700, "CoreVideo Engine");
         svc.participants.self.muted = false;   // already open
@@ -2312,6 +2358,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -2366,6 +2413,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         svc.participants.users.push_back(make_user(8001, "Sarah"));
         svc.participants.users.push_back(make_user(8002, "Luis"));
 
@@ -2428,6 +2476,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         svc.participants.users.push_back(make_user(8001, "Sarah"));
         svc.participants.users.push_back(make_user(8002, "Luis"));
         check(tb.nominate(&svc, {"Sarah", "Luis"}), "nominate refused a two-name plan");
@@ -2474,6 +2523,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         svc.participants.users.push_back(make_user(8201, "Sarah"));
         svc.participants.users.push_back(make_user(8202, "Luis"));
         check(tb.nominate(&svc, {"Sarah", "Luis"}), "nominate refused a two-name plan");
@@ -2523,6 +2573,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -2574,6 +2625,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         std::vector<std::string> lines;
         EngineIpc::test_sink() = [&](const std::string &l) { lines.push_back(l); };
 
@@ -2655,6 +2707,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         svc.participants.users.push_back(make_user(8301, "Sarah"));
         svc.participants.users.push_back(make_user(8302, "Luis"));
 
@@ -2742,6 +2795,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         svc.participants.users.push_back(make_user(8401, "Sarah"));
         svc.participants.users.push_back(make_user(8402, "Luis"));
 
@@ -2798,6 +2852,7 @@ int main()
     {
         FakeMeetingService svc;
         EngineTalkback tb;
+        tb.set_safe_meeting_input(true); // Explicit silent-input opt-in for these channel tests.
         svc.participants.users.push_back(make_user(8501, "Sarah"));
 
         check(tb.nominate(&svc, {"Sarah"}), "nominate refused a one-name plan");

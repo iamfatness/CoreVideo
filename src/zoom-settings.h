@@ -41,6 +41,9 @@ struct ZoomPluginSettings {
     // Milliseconds to delay CoreVideo audio, to align it with the slower video
     // path. vMix operators routinely run 20-100+ ms here. 0-500 ms.
     uint32_t            audio_delay_ms = 0;
+    std::string         windows_input_mode = "unchanged";
+    std::string         windows_input_device_id;
+    std::string         windows_input_device_name;
 
     // ISO recorder panel defaults.
     std::string         iso_output_dir;

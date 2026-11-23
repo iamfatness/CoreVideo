@@ -31,6 +31,7 @@
 
 enum class IpcCommand {
     Unknown,
+    InputDevices,
     Quit,
     Init,
     Join,
@@ -86,6 +87,7 @@ inline std::string ipc_command_name(const std::string &line)
 inline IpcCommand ipc_command_of(const std::string &line)
 {
     const std::string cmd = ipc_command_name(line);
+    if (cmd == "input_devices") return IpcCommand::InputDevices;
     if (cmd == IPC_CMD_QUIT)            return IpcCommand::Quit;
     if (cmd == IPC_CMD_INIT)            return IpcCommand::Init;
     if (cmd == IPC_CMD_JOIN)            return IpcCommand::Join;

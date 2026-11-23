@@ -3604,19 +3604,17 @@ void EngineTalkback::debug_expire_pending_create_for_test()
 // LIVE-RELEVANT THE DAY THIS SHIPPED: the operator's own production had the
 // bot muted by the host. Every send that show would have been that ghost.
 //
-// THE LEAK QUESTION -- ANSWERED FROM THE CODE, NOT ASSUMED. Does opening this
-// client's mic put the ENGINE MACHINE'S microphone into the meeting? YES, it
-// could, and the insurance is therefore real rather than theoretical:
-//   * engine/src/main.cpp's Join sets JoinParam4WithoutLogin::isAudioOff =
-//     false and isMyVoiceInMix = true. Authentication installs EngineSilentMic
-//     as the SDK's external capture source before auth_ok. This never-fed
-//     virtual microphone cannot capture the physical input and never changes
-//     Windows endpoint volume. Join fails closed if registration fails.
-// The microphone object outlives CleanUPSDK. Raw audio receive subscriptions
-// remain owned by EngineAudio; talkback PCM uses its own channel sender.
+// Opening the meeting mic is safe only with explicitly opted-in external
+// silent capture. Default and physical-device modes must never unmute here.
+// Incoming audio and OBS talkback channel PCM remain separate.
 bool EngineTalkback::ensure_mic_open(const char *when)
 {
     const std::string when_field = R"(,"when":")" + std::string(when) + "\"";
+    if (!m_safe_meeting_input) {
+        m_mic_open = false;
+        report_session("mic_open", R"("ok":false,"reason":"Select silent talkback input in Settings and reconnect before using talkback.")" + when_field);
+        return false;
+    }
     if (!m_svc) {
         m_mic_open = false;
         report_session("mic_open", R"("ok":false,"reason":"no_meeting_service")" + when_field);
@@ -3749,6 +3747,10 @@ void EngineTalkback::mic_tick()
 bool EngineTalkback::session_start(ZOOMSDK::IMeetingService *svc,
                                    const std::string &target)
 {
+    if (!m_safe_meeting_input) {
+        report_session_state(false, "Silent talkback input must be explicitly enabled in Settings before joining.", "blocked");
+        return false;
+    }
     if (m_session_live) {
         // Refusing a redundant start does not end the existing live session
         // -- no report_session_state() here, unlike every other early return

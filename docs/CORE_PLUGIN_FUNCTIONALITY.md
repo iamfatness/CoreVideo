@@ -7,7 +7,7 @@ audio routing, talkback, and ISO recording.
 Current Windows release: **v0.1.49**. macOS Apple Silicon beta:
 **v0.1.45-beta.2**, available as a signed and notarized installer on the
 [download page](https://corevideo.io/download/#macos). Talkback is unavailable
-on macOS. The Mac package was built against OBS 32.2.1; use that version or newer.
+on macOS. The Mac package was built against OBS 32.2.1; current CoreVideo requires OBS 32.2.2 or newer.
 
 One naming quirk to get out of the way: the OBS **sources** this plugin
 registers are called `CoreVideo ...`, but its **docks and Tools menu entries**
@@ -850,7 +850,7 @@ Start and stop ISO recording:
 | No isolated audio | Confirm the source is assigned to a real participant and `isolate_audio` is true. |
 | ISO recording does not start | Confirm `ffmpeg` is on PATH or provide `ffmpeg_path`; read the session's `.ffmpeg.log`. |
 | External meeting rejected | Confirm the Meeting SDK app/client ID is approved or published for external meeting joins. |
-| Plugin cannot launch engine | Confirm `ZoomObsEngine.exe` and the Zoom SDK runtime DLLs are installed under `obs-plugins/64bit/zoom-runtime`. The plugin looks there first, then beside its own DLL. A DLL-only copy is the most common self-inflicted failure - install both binaries as a pair. |
+| Plugin cannot launch engine | Confirm `ZoomObsEngine.exe` and the Zoom SDK runtime DLLs are installed under `plugins/obs-zoom-plugin/zoom-runtime` in ProgramData/obs-studio (standard Windows install) or the portable OBS root. Compatibility entry DLLs resolve this same shared runtime. A DLL-only copy is the most common self-inflicted failure - install both binaries as a pair. |
 | Every source black after a breakout room | Zoom revokes the raw-recording privilege on breakout entry without disconnecting you. Re-requested automatically since v0.1.40; on older builds, stop and start raw media. |
 | Audio breaks up on every source at once | Look for an orphaned `ZoomObsEngine.exe` from a previous OBS session ghost-writing the same shared memory. Swept automatically at launch since v0.1.41. |
 | Talkback key says live but nobody hears | Read the banner. **ON AIR - BOT MUTED** means Zoom refused the unmute; a cell reading `not in channel` usually means a different breakout room. |

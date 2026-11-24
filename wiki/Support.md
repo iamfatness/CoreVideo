@@ -52,7 +52,7 @@ the Tools menu for "CoreVideo" finds nothing.
 
 Use the [signed macOS installer](https://corevideo.io/download/#macos), close OBS
 before installing, then reopen it. The replacement beta was built against
-OBS 32.2.1; use that version or newer. If an earlier copy reports a signature
+OBS 32.2.1; current CoreVideo requires OBS 32.2.2 or newer. If an earlier copy reports a signature
 error, download the replacement package rather than disabling Gatekeeper.
 The plugin installs under `~/Library/Application Support/obs-studio/plugins/`.
 

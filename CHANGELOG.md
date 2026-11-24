@@ -1,3 +1,12 @@
+## Unreleased — OBS compatibility and Windows layout
+
+- Require OBS Studio 32.2.2+; retire OBS 30/31 support.
+- Install Windows CoreVideo in the modern plugin layout, with same-name OBS 32
+  compatibility entries sharing one helper/SDK runtime. Preserve portable support
+  and let OBS 33 suppress duplicate legacy entries during upgrades.
+- Check minimum/latest OBS startup in CI, including source/dock registration,
+  Tiles data and duplicate loading. Future OBS versions remain subject to testing.
+
 # Changelog
 
 All notable changes to CoreVideo are documented in this file. The format is

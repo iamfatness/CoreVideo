@@ -1,3 +1,4 @@
+#include "corevideo-runtime-path.h"
 #include "cv-ffmpeg-loader.h"
 
 #include <obs-module.h>
@@ -53,7 +54,7 @@ static std::wstring plugin_directory()
     size_t slash = dir.find_last_of(L"\\/");
     if (slash == std::wstring::npos)
         return {};
-    return dir.substr(0, slash + 1);
+    return corevideo_runtime_directory(path).wstring() + L"\\";
 }
 
 static bool is_delayed_ffmpeg_dll(const char *name)

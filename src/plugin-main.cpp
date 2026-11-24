@@ -1,3 +1,4 @@
+#include "corevideo-runtime-path.h"
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 #include <util/platform.h>
@@ -152,7 +153,7 @@ static void configure_qt_plugin_paths()
     }
 
     const QFileInfo plugin_info(QString::fromWCharArray(module_path));
-    const QDir plugin_dir = plugin_info.dir();
+    const QDir plugin_dir(QString::fromStdWString(corevideo_runtime_directory(module_path).wstring()));
     const QStringList candidates = {
         plugin_dir.absoluteFilePath("plugins"),
         plugin_dir.absoluteFilePath("qt/plugins"),
@@ -178,7 +179,7 @@ static void configure_qt_plugin_paths()
     if (dladdr(reinterpret_cast<const void *>(&configure_qt_plugin_paths), &info) &&
         info.dli_fname) {
         const QFileInfo plugin_info(QString::fromUtf8(info.dli_fname));
-        const QDir plugin_dir = plugin_info.dir(); // <bundle>/Contents/MacOS
+        const QDir plugin_dir(QString::fromStdWString(corevideo_runtime_directory(module_path).wstring())); // <bundle>/Contents/MacOS
         const QStringList candidates = {
             plugin_dir.absoluteFilePath("plugins"),
             plugin_dir.absoluteFilePath("../PlugIns"),
@@ -470,6 +471,10 @@ MODULE_EXPORT const char *obs_module_description(void)
 
 bool obs_module_load(void)
 {
+    if (obs_get_version() < ((32u << 24) | (2u << 16) | 2u)) {
+        blog(LOG_ERROR, "[obs-zoom-plugin] CoreVideo requires OBS Studio 32.2.2 or newer.");
+        return false;
+    }
     blog(LOG_INFO, "[obs-zoom-plugin] Loading plugin v%s", OBS_ZOOM_PLUGIN_VERSION);
 #ifdef COREVIDEO_HW_ACCEL
     cv_ffmpeg_loader_init();

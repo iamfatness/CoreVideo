@@ -1,3 +1,4 @@
+#include "corevideo-runtime-path.h"
 #include "zoom-oauth.h"
 #include "zoom-join-decision.h"
 #include "zoom-settings.h"
@@ -661,7 +662,7 @@ bool ZoomOAuthManager::register_url_scheme(QString *error)
     }
 
     const QFileInfo plugin_info(QString::fromWCharArray(module_path));
-    const QString helper = plugin_info.dir().absoluteFilePath("CoreVideoOAuthCallback.exe");
+    const QString helper = QString::fromStdWString((corevideo_runtime_directory(module_path) / "CoreVideoOAuthCallback.exe").wstring());
     if (!QFileInfo::exists(helper)) {
         if (error) *error = "CoreVideoOAuthCallback.exe was not found beside the plugin DLL.";
         return false;

@@ -5,7 +5,7 @@
 [![Latest release](https://img.shields.io/github/v/release/iamfatness/CoreVideo?label=release)](https://github.com/iamfatness/CoreVideo/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20(beta)-blue)](https://corevideo.io/download/)
-[![OBS Studio](https://img.shields.io/badge/OBS%20Studio-30%2B-302E31)](https://obsproject.com/)
+[![OBS Studio](https://img.shields.io/badge/OBS%20Studio-32.2.2%2B-302E31)](https://obsproject.com/)
 
 ![OBS Studio multiview showing preview and program alongside four scenes built from individual Zoom participant sources](site-assets/obs-multiview.webp)
 
@@ -85,11 +85,33 @@ disconnects.
 - **Modern UI** - CoreVideo stylesheet with dark theme, animated `CvStatusDot`, `CvBanner` first-run notices, and button role variants (primary / danger)
 - **Platform support** - Windows 10/11 x64 (supported) and macOS on Apple Silicon (public beta) are the packaged, CI-released targets. Intel Macs are not supported. The same CMake project also configures on Windows arm64 and Linux, but those are unsupported/experimental source builds. See [Platform Support](#platform-support) below.
 
+## OBS compatibility and Windows installation
+
+CoreVideo requires **OBS Studio 32.2.2 or newer**. OBS 30 and 31 are no longer
+supported. Release validation covers the minimum and the latest stable OBS;
+unreleased OBS versions are not guaranteed compatible.
+
+Close OBS before installing. The Windows installer selects your OBS installation
+and places the shared plugin under `C:\ProgramData\obs-studio\plugins\obs-zoom-plugin`.
+For portable OBS (with `portable_mode.txt`), it installs inside that OBS folder.
+The modern entry is `plugins/obs-zoom-plugin/obs-zoom-plugin.dll`; an identical
+`bin/64bit` entry supports OBS 32, and the portable ZIP also includes the OBS 32
+`obs-plugins/64bit` entry. Helpers and SDK files are shared, not separate copies.
+OBS 33 loads the modern entry and skips the same-name compatibility entry.
+Do not rename the plugin DLL or move it alone. Extract the entire ZIP into the
+portable OBS root, or use the installer for a standard installation.
+
+When upgrading a standard installation, the installer retires the old Program
+Files entry only after verifying the new runtime, preserving a `.pre-modern`
+rollback copy. It leaves old shared dependencies and user scenes/settings alone.
+Use the current CoreVideo uninstaller; older uninstallers may remove files used
+by a portable compatibility installation.
+
 ## Requirements
 
 | Dependency | Version | Notes |
 |---|---|---|
-| OBS Studio | 30+ | `libobs` + `obs-frontend-api` |
+| OBS Studio | 32.2.2+ | `libobs` + `obs-frontend-api` |
 | CMake | 3.16+ | Build system |
 | Qt | 6.x | Core + Network + Widgets |
 | FFmpeg | Runtime executable | Required for auto ISO recording. Must be on `PATH` or supplied via `ffmpeg_path`. |
@@ -175,13 +197,14 @@ session) and on the [Releases page](https://github.com/iamfatness/CoreVideo/rele
    contains `LibObsConfig.cmake` and `obs-frontend-apiConfig.cmake`, plus a
    matching Qt 6 MSVC package.
 
-   Windows builds must ship Qt's TLS backend plugins (`obs-plugins/64bit/plugins/tls/`)
+   Windows builds must ship Qt's TLS backend plugins (`plugins/obs-zoom-plugin/plugins/tls/`)
    for OAuth HTTPS requests to succeed.
 
-3. **Install into OBS**
-   ```sh
-   cmake --install build --prefix "/path/to/obs-studio"
-   ```
+3. **Package and install**
+   On Windows, use `scripts/release-local.ps1` below. A raw CMake install is an
+   intermediate staging tree; the release script converts it to the supported
+   modern/compatibility layout and builds the installer. Do not copy an individual DLL.
+   On macOS, use `scripts/make-macos-bundle.sh` as described in the macOS section.
 
 4. **Configure local settings** - published builds already contain the CoreVideo broker URL and do not require end users to enter Zoom app credentials. Open OBS -> **Tools -> Zoom Plugin Settings** to sign in with Zoom, configure the local control-server token/ports, and manage reconnect behavior. Developer-only builds can still use local credential overrides when the embedded broker identity is blank.
 

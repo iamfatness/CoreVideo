@@ -31,16 +31,18 @@ SetCompressor /SOLID lzma
   !endif
 !macroend
 
+!insertmacro RequireSourceFile "plugins\obs-zoom-plugin\obs-zoom-plugin.dll"
+!insertmacro RequireSourceFile "plugins\obs-zoom-plugin\bin\64bit\obs-zoom-plugin.dll"
 !insertmacro RequireSourceFile "obs-plugins\64bit\obs-zoom-plugin.dll"
-!insertmacro RequireSourceFile "obs-plugins\64bit\CoreVideoOAuthCallback.exe"
-!insertmacro RequireSourceFile "obs-plugins\64bit\Qt6Core.dll"
-!insertmacro RequireSourceFile "obs-plugins\64bit\Qt6Gui.dll"
-!insertmacro RequireSourceFile "obs-plugins\64bit\Qt6Network.dll"
-!insertmacro RequireSourceFile "obs-plugins\64bit\Qt6Widgets.dll"
-!insertmacro RequireSourceFile "obs-plugins\64bit\plugins\platforms\qwindows.dll"
-!insertmacro RequireSourceFile "obs-plugins\64bit\plugins\tls\qcertonlybackend.dll"
-!insertmacro RequireSourceFile "obs-plugins\64bit\plugins\tls\qschannelbackend.dll"
-!insertmacro RequireSourceFile "data\obs-plugins\obs-zoom-plugin\locale\en-US.ini"
+!insertmacro RequireSourceFile "plugins\obs-zoom-plugin\CoreVideoOAuthCallback.exe"
+!insertmacro RequireSourceFile "plugins\obs-zoom-plugin\Qt6Core.dll"
+!insertmacro RequireSourceFile "plugins\obs-zoom-plugin\Qt6Gui.dll"
+!insertmacro RequireSourceFile "plugins\obs-zoom-plugin\Qt6Network.dll"
+!insertmacro RequireSourceFile "plugins\obs-zoom-plugin\Qt6Widgets.dll"
+!insertmacro RequireSourceFile "plugins\obs-zoom-plugin\plugins\platforms\qwindows.dll"
+!insertmacro RequireSourceFile "plugins\obs-zoom-plugin\plugins\tls\qcertonlybackend.dll"
+!insertmacro RequireSourceFile "plugins\obs-zoom-plugin\plugins\tls\qschannelbackend.dll"
+!insertmacro RequireSourceFile "plugins\obs-zoom-plugin\data\locale\en-US.ini"
 ; The Tiles wall's shader, shipped by the same install(DIRECTORY data/ ...) rule
 ; as the locale file above. This check only proves the file is present in the
 ; package being built: a package missing it (or missing the data/ tree
@@ -48,17 +50,20 @@ SetCompressor /SOLID lzma
 ; src/zoom-tiles-effect-policy.h). It says nothing about whether the file's
 ; CONTENTS match this build of the DLL — an existing-but-stale effect file
 ; passes this check and would only show up as a degraded wall at runtime.
-!insertmacro RequireSourceFile "data\obs-plugins\obs-zoom-plugin\effects\corevideo-tiles.effect"
-!insertmacro RequireSourceFile "obs-plugins\64bit\zoom-runtime\ZoomObsEngine.exe"
-!insertmacro RequireSourceFile "obs-plugins\64bit\zoom-runtime\sdk.dll"
-!insertmacro RequireSourceFile "obs-plugins\64bit\zoom-runtime\sdkExt.dll"
-!insertmacro RequireSourceFile "obs-plugins\64bit\zoom-runtime\zSDK.dll"
-!insertmacro RequireSourceFile "obs-plugins\64bit\zoom-runtime\zVideoApp.dll"
-!insertmacro RequireSourceFile "obs-plugins\64bit\zoom-runtime\zVideoUI.dll"
-!insertmacro RequireSourceFile "obs-plugins\64bit\zoom-runtime\zNet.dll"
-!insertmacro RequireSourceFile "obs-plugins\64bit\zoom-runtime\libcrypto-3-zm.dll"
-!insertmacro RequireSourceFile "obs-plugins\64bit\zoom-runtime\libssl-3-zm.dll"
-!insertmacro RequireSourceFile "obs-plugins\64bit\zoom-runtime\zoom.manifest"
+!insertmacro RequireSourceFile "plugins\obs-zoom-plugin\data\effects\corevideo-tiles.effect"
+!insertmacro RequireSourceFile "plugins\obs-zoom-plugin\zoom-runtime\ZoomObsEngine.exe"
+!insertmacro RequireSourceFile "plugins\obs-zoom-plugin\zoom-runtime\sdk.dll"
+!insertmacro RequireSourceFile "plugins\obs-zoom-plugin\zoom-runtime\sdkExt.dll"
+!insertmacro RequireSourceFile "plugins\obs-zoom-plugin\zoom-runtime\zSDK.dll"
+!insertmacro RequireSourceFile "plugins\obs-zoom-plugin\zoom-runtime\zVideoApp.dll"
+!insertmacro RequireSourceFile "plugins\obs-zoom-plugin\zoom-runtime\zVideoUI.dll"
+!insertmacro RequireSourceFile "plugins\obs-zoom-plugin\zoom-runtime\zNet.dll"
+!insertmacro RequireSourceFile "plugins\obs-zoom-plugin\zoom-runtime\libcrypto-3-zm.dll"
+!insertmacro RequireSourceFile "plugins\obs-zoom-plugin\zoom-runtime\libssl-3-zm.dll"
+!insertmacro RequireSourceFile "plugins\obs-zoom-plugin\zoom-runtime\zoom.manifest"
+
+Var ObsRoot
+Var PortableInstall
 
 Name "CoreVideo for OBS"
 OutFile "${OUT_FILE}"
@@ -145,51 +150,75 @@ FunctionEnd
 !macroend
 
 Function VerifyInstalledRuntime
+  !insertmacro VerifyInstalledFile "plugins\obs-zoom-plugin\obs-zoom-plugin.dll"
+  !insertmacro VerifyInstalledFile "plugins\obs-zoom-plugin\bin\64bit\obs-zoom-plugin.dll"
   !insertmacro VerifyInstalledFile "obs-plugins\64bit\obs-zoom-plugin.dll"
-  !insertmacro VerifyInstalledFile "obs-plugins\64bit\CoreVideoOAuthCallback.exe"
-  !insertmacro VerifyInstalledFile "obs-plugins\64bit\Qt6Core.dll"
-  !insertmacro VerifyInstalledFile "obs-plugins\64bit\Qt6Gui.dll"
-  !insertmacro VerifyInstalledFile "obs-plugins\64bit\Qt6Network.dll"
-  !insertmacro VerifyInstalledFile "obs-plugins\64bit\Qt6Widgets.dll"
-  !insertmacro VerifyInstalledFile "obs-plugins\64bit\plugins\platforms\qwindows.dll"
-  !insertmacro VerifyInstalledFile "obs-plugins\64bit\plugins\tls\qcertonlybackend.dll"
-  !insertmacro VerifyInstalledFile "obs-plugins\64bit\plugins\tls\qschannelbackend.dll"
-  !insertmacro VerifyInstalledFile "data\obs-plugins\obs-zoom-plugin\locale\en-US.ini"
+  !insertmacro VerifyInstalledFile "plugins\obs-zoom-plugin\CoreVideoOAuthCallback.exe"
+  !insertmacro VerifyInstalledFile "plugins\obs-zoom-plugin\Qt6Core.dll"
+  !insertmacro VerifyInstalledFile "plugins\obs-zoom-plugin\Qt6Gui.dll"
+  !insertmacro VerifyInstalledFile "plugins\obs-zoom-plugin\Qt6Network.dll"
+  !insertmacro VerifyInstalledFile "plugins\obs-zoom-plugin\Qt6Widgets.dll"
+  !insertmacro VerifyInstalledFile "plugins\obs-zoom-plugin\plugins\platforms\qwindows.dll"
+  !insertmacro VerifyInstalledFile "plugins\obs-zoom-plugin\plugins\tls\qcertonlybackend.dll"
+  !insertmacro VerifyInstalledFile "plugins\obs-zoom-plugin\plugins\tls\qschannelbackend.dll"
+  !insertmacro VerifyInstalledFile "plugins\obs-zoom-plugin\data\locale\en-US.ini"
   ; Checked after the copy as well as before it: the partial install this guards
   ; against is one where the DLL landed and data\ did not.
-  !insertmacro VerifyInstalledFile "data\obs-plugins\obs-zoom-plugin\effects\corevideo-tiles.effect"
-  !insertmacro VerifyInstalledFile "obs-plugins\64bit\zoom-runtime\ZoomObsEngine.exe"
-  !insertmacro VerifyInstalledFile "obs-plugins\64bit\zoom-runtime\sdk.dll"
-  !insertmacro VerifyInstalledFile "obs-plugins\64bit\zoom-runtime\sdkExt.dll"
-  !insertmacro VerifyInstalledFile "obs-plugins\64bit\zoom-runtime\zSDK.dll"
-  !insertmacro VerifyInstalledFile "obs-plugins\64bit\zoom-runtime\zVideoApp.dll"
-  !insertmacro VerifyInstalledFile "obs-plugins\64bit\zoom-runtime\zVideoUI.dll"
-  !insertmacro VerifyInstalledFile "obs-plugins\64bit\zoom-runtime\zNet.dll"
-  !insertmacro VerifyInstalledFile "obs-plugins\64bit\zoom-runtime\libcrypto-3-zm.dll"
-  !insertmacro VerifyInstalledFile "obs-plugins\64bit\zoom-runtime\libssl-3-zm.dll"
-  !insertmacro VerifyInstalledFile "obs-plugins\64bit\zoom-runtime\zoom.manifest"
+  !insertmacro VerifyInstalledFile "plugins\obs-zoom-plugin\data\effects\corevideo-tiles.effect"
+  !insertmacro VerifyInstalledFile "plugins\obs-zoom-plugin\zoom-runtime\ZoomObsEngine.exe"
+  !insertmacro VerifyInstalledFile "plugins\obs-zoom-plugin\zoom-runtime\sdk.dll"
+  !insertmacro VerifyInstalledFile "plugins\obs-zoom-plugin\zoom-runtime\sdkExt.dll"
+  !insertmacro VerifyInstalledFile "plugins\obs-zoom-plugin\zoom-runtime\zSDK.dll"
+  !insertmacro VerifyInstalledFile "plugins\obs-zoom-plugin\zoom-runtime\zVideoApp.dll"
+  !insertmacro VerifyInstalledFile "plugins\obs-zoom-plugin\zoom-runtime\zVideoUI.dll"
+  !insertmacro VerifyInstalledFile "plugins\obs-zoom-plugin\zoom-runtime\zNet.dll"
+  !insertmacro VerifyInstalledFile "plugins\obs-zoom-plugin\zoom-runtime\libcrypto-3-zm.dll"
+  !insertmacro VerifyInstalledFile "plugins\obs-zoom-plugin\zoom-runtime\libssl-3-zm.dll"
+  !insertmacro VerifyInstalledFile "plugins\obs-zoom-plugin\zoom-runtime\zoom.manifest"
 FunctionEnd
 
 Section "CoreVideo for OBS" SecCoreVideo
   Call CheckObsClosed
 
-  ; v0.1.29 and earlier left the FFmpeg runtime loose in obs-plugins\64bit,
-  ; where it collides with the same-named FFmpeg 8 DLLs OBS 32.2+ keeps in
-  ; bin\64bit and stops OBS's own obs-ffmpeg module from loading. The runtime
-  ; now lives in obs-plugins\64bit\corevideo-ffmpeg\; sweep any leftovers.
-  Delete "$INSTDIR\obs-plugins\64bit\avcodec-*.dll"
-  Delete "$INSTDIR\obs-plugins\64bit\avdevice-*.dll"
-  Delete "$INSTDIR\obs-plugins\64bit\avfilter-*.dll"
-  Delete "$INSTDIR\obs-plugins\64bit\avformat-*.dll"
-  Delete "$INSTDIR\obs-plugins\64bit\avutil-*.dll"
-  Delete "$INSTDIR\obs-plugins\64bit\swresample-*.dll"
-  Delete "$INSTDIR\obs-plugins\64bit\swscale-*.dll"
-
+  ; The directory page selects an OBS installation, not the package destination.
+  Call .onVerifyInstDir
+  StrCpy $ObsRoot $INSTDIR
+  ClearErrors
+  GetDLLVersion "$ObsRoot\bin\64bit\obs64.exe" $0 $1
+  IfErrors unsupported_obs
+  IntCmp $0 2097154 check_patch unsupported_obs version_ok
+check_patch:
+  IntCmp $1 131072 version_ok unsupported_obs version_ok
+unsupported_obs:
+  MessageBox MB_ICONSTOP "CoreVideo requires OBS Studio 32.2.2 or newer. Update OBS before installing." /SD IDOK
+  SetErrorLevel 2
+  Abort
+version_ok:
+  ; Standard installs use ProgramData, portable installs stay self-contained.
+  StrCpy $PortableInstall 1
+  IfFileExists "$ObsRoot\portable_mode.txt" destination_ready
+  IfFileExists "$ObsRoot\portable_mode" destination_ready
+  StrCpy $PortableInstall 0
+  SetShellVarContext all
+  StrCpy $INSTDIR "$APPDATA\obs-studio"
+destination_ready:
   SetOutPath "$INSTDIR"
   File /r "${SOURCE_DIR}\*.*"
   Call VerifyInstalledRuntime
+  ; Retire only the old entry DLL after the new package is verified. Preserve
+  ; its runtime/data and a rollback copy; never sweep shared DLLs by wildcard.
+  ${If} $INSTDIR != $ObsRoot
+    IfFileExists "$ObsRoot\obs-plugins\64bit\obs-zoom-plugin.dll" 0 migration_done
+    IfFileExists "$ObsRoot\obs-plugins\64bit\obs-zoom-plugin.dll.pre-modern" migration_backup_exists
+    Rename "$ObsRoot\obs-plugins\64bit\obs-zoom-plugin.dll" "$ObsRoot\obs-plugins\64bit\obs-zoom-plugin.dll.pre-modern"
+    Goto migration_done
+migration_backup_exists:
+    Delete "$ObsRoot\obs-plugins\64bit\obs-zoom-plugin.dll"
+migration_done:
+  ${EndIf}
 
   WriteUninstaller "$INSTDIR\Uninstall-CoreVideo.exe"
+  ${If} $PortableInstall == 0
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\CoreVideo for OBS" "DisplayName" "CoreVideo for OBS"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\CoreVideo for OBS" "DisplayVersion" "${VERSION}"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\CoreVideo for OBS" "Publisher" "CoreVideo"
@@ -197,13 +226,17 @@ Section "CoreVideo for OBS" SecCoreVideo
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\CoreVideo for OBS" "UninstallString" "$INSTDIR\Uninstall-CoreVideo.exe"
   WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\CoreVideo for OBS" "NoModify" 1
   WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\CoreVideo for OBS" "NoRepair" 1
+  ${EndIf}
 SectionEnd
 
 Section "Uninstall"
   Call un.CheckObsClosed
   !include "${FILE_LIST}"
   Delete "$INSTDIR\Uninstall-CoreVideo.exe"
-  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\CoreVideo for OBS"
+  ReadRegStr $0 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\CoreVideo for OBS" "InstallLocation"
+  ${If} $0 == $INSTDIR
+    DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\CoreVideo for OBS"
+  ${EndIf}
 SectionEnd
 
 Function un.CheckObsClosed

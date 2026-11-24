@@ -1,3 +1,4 @@
+#include "corevideo-runtime-path.h"
 #include "zoom-dock.h"
 #include "cv-combo-utils.h"
 #include "cv-style.h"
@@ -97,7 +98,7 @@ static QString sidecar_executable_path()
         const int slash = path.lastIndexOf(QRegularExpression("[\\\\/]"));
         if (slash >= 0) {
             const QString candidate =
-                path.left(slash + 1) + QStringLiteral("CoreVideoSidecar.exe");
+                QString::fromStdWString((corevideo_runtime_directory(module_path) / "CoreVideoSidecar.exe").wstring());
             if (QFileInfo::exists(candidate))
                 return candidate;
         }

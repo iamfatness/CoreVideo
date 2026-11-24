@@ -222,7 +222,7 @@ jobs:
           4. Start OBS. CoreVideo appears as "Zoom Control" (View > Docks)
              and as the CoreVideo source types.
 
-          Requires OBS Studio 30.2+ for Apple Silicon. On first join, macOS
+          Requires OBS Studio 32.2.2+ for Apple Silicon. On first join, macOS
           will ask for camera/microphone permissions for ZoomObsEngine.
           EOF
           cd package && zip -ry "../CoreVideo-${TAG}-macOS-arm64.zip" CoreVideo-macOS

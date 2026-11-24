@@ -18,6 +18,8 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  schedule:
+    - cron: "0 12 * * 1"
 
 jobs:
   # Windows
@@ -298,6 +300,9 @@ jobs:
         shell: powershell
         run: |
           cmake --install build --config Release --prefix install
+          if (Test-Path install\obs-plugins\64bit\obs-zoom-plugin.dll) {
+            .\scripts\ConvertTo-CoreVideoLayout.ps1 -PackageRoot install
+          }
           if ($env:COREVIDEO_HAS_ZOOM_RUNTIME -eq "true") {
               .\scripts\Test-CoreVideoPackage.ps1 `
                 -PackageRoot install `
@@ -614,3 +619,46 @@ jobs:
 
       - name: Test
         run: npm test
+
+  obs-compatibility:
+    name: OBS compatibility (${{ matrix.obs }})
+    needs: build-windows
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        obs: ["32.2.2", "latest"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: CoreVideo-Windows
+          path: package-download
+      - name: Test packaged plugin in isolated OBS
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Expand-Archive package-download/CoreVideo-Windows-x64.zip package
+          if (-not (Test-Path package/plugins/obs-zoom-plugin/obs-zoom-plugin.dll)) {
+            throw 'Compatibility gate requires an actual Windows plugin package, not a compile-only artifact.'
+          }
+          $version = '${{ matrix.obs }}'
+          if ($version -eq 'latest') {
+            $version = gh api repos/obsproject/obs-studio/releases/latest --jq .tag_name
+            if ($LASTEXITCODE -ne 0) { throw 'Could not resolve latest stable OBS' }
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Unexpected OBS release version' }
+          Invoke-WebRequest "https://github.com/obsproject/obs-studio/releases/download/$version/OBS-Studio-$version-Windows-x64.zip" -OutFile obs.zip
+          Expand-Archive obs.zip obs-fixture
+          $modern = ([version]$version -ge [version]'33.0.0')
+          ./scripts/Test-CoreVideoObsCompatibility.ps1 -ObsRoot obs-fixture -PackageRoot package -ExpectedObsVersion $version -ExpectModern:$modern
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: OBS-compatibility-${{ matrix.obs }}-logs
+          path: obs-fixture/config/obs-studio/logs/
+          if-no-files-found: warn

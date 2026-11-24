@@ -817,13 +817,13 @@ function downloadPageContent() {
     : "Download for Windows";
 
   const versionNote = v
-    ? `<p class="lede">Latest release <strong>v${v}</strong> &mdash; Windows installer for OBS Studio 30 and newer. Free and open source under the MIT license.</p>`
-    : `<p class="lede">Windows installer for OBS Studio 30 and newer. Free and open source under the MIT license.</p>`;
+    ? `<p class="lede">Latest release <strong>v${v}</strong> &mdash; Windows installer for OBS Studio 32.2.2 and newer. Free and open source under the MIT license.</p>`
+    : `<p class="lede">Windows installer for OBS Studio 32.2.2 and newer. Free and open source under the MIT license.</p>`;
 
   const fileRows = v
     ? `<section class="link-grid" aria-label="Release files">
-  <a href="${asset(`CoreVideo-Setup-v${v}.exe`)}"><strong>Windows installer (.exe)</strong><span>Recommended. Installs the plugin into your existing OBS Studio installation.</span></a>
-  <a href="${asset(`CoreVideo-Windows-x64-v${v}.zip`)}"><strong>Portable ZIP (x64)</strong><span>Unpack into the OBS plugin directory yourself &mdash; for locked-down or portable OBS setups.</span></a>
+  <a href="${asset(`CoreVideo-Setup-v${v}.exe`)}"><strong>Windows installer (.exe)</strong><span>Recommended. Installs the shared plugin for your selected standard or portable OBS installation.</span></a>
+  <a href="${asset(`CoreVideo-Windows-x64-v${v}.zip`)}"><strong>Portable ZIP (x64)</strong><span>Extract the entire archive into the portable OBS root &mdash; keep all folders and entry DLL names unchanged.</span></a>
   <a href="${asset(`CoreVideo-Setup-v${v}.exe.sha256`)}"><strong>Installer checksum</strong><span>SHA-256 for the installer, to verify the download before running it.</span></a>
   <a href="${asset(`CoreVideo-Windows-x64-v${v}.zip.sha256`)}"><strong>ZIP checksum</strong><span>SHA-256 for the portable archive.</span></a>
   <a href="${RELEASES_LATEST}"><strong>Companion module</strong><span>The Bitfocus Companion module (<code>corevideo-obs</code>) ships with each release. Requires Companion v5 or newer.</span></a>
@@ -857,7 +857,7 @@ ${fileRows}
 <a class="button" href="${MAC_INSTALLER}.sha256">SHA-256 checksum</a>
 <a class="button" href="${MAC_RELEASE}">macOS release notes</a>
 </div>
-<p>Requires an Apple Silicon Mac (M1 or later). The package is built against OBS Studio 32.2.1; use that version or newer for this beta. Intel Macs are not supported by this package.</p>
+<p>Requires an Apple Silicon Mac (M1 or later). The package is built against OBS Studio 32.2.1; current CoreVideo requires OBS 32.2.2 or newer for this beta. Intel Macs are not supported by this package.</p>
 <ol>
 <li>Close OBS, then open the downloaded <code>.pkg</code>.</li>
 <li>Install for your user account. No administrator password is needed.</li>
@@ -870,7 +870,7 @@ ${fileRows}
 </section>
 <h2>Windows requirements</h2>
 <ul>
-<li><strong>OBS Studio 30 or newer</strong>, 64-bit.</li>
+<li><strong>OBS Studio 32.2.2 or newer</strong>, 64-bit.</li>
 <li><strong>Windows 10 or Windows 11</strong> (x64). For macOS, use the <a href="#macos">Apple Silicon beta installer above</a>. Linux requires a source build.</li>
 <li><strong>A Zoom account you can sign in with.</strong> CoreVideo joins meetings through the Zoom Meeting SDK, so the video quality and number of simultaneous feeds you get follow your Zoom account entitlements.</li>
 <li><strong>Downstream bandwidth</strong> for the feeds you subscribe to &mdash; roughly 4-6 Mbps per 1080p participant. Standard accounts are typically capped around 30 Mbps incoming; Enhanced Media / HBM raises that to roughly 100 Mbps.</li>

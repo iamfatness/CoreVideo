@@ -246,6 +246,30 @@ jobs:
           }
           Compress-Archive -Path install\* -DestinationPath "CoreVideo-Windows-x64-$version.zip" -Force
 
+      - name: Verify minimum and latest OBS startup before release
+        if: env.COREVIDEO_HAS_ZOOM_RUNTIME == 'true'
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $latest = gh api repos/obsproject/obs-studio/releases/latest --jq .tag_name
+          if ($LASTEXITCODE -ne 0 -or $latest -notmatch '^\d+\.\d+\.\d+$') { throw 'Cannot verify latest OBS release' }
+          foreach ($version in @('32.2.2', $latest) | Select-Object -Unique) {
+            Invoke-WebRequest "https://github.com/obsproject/obs-studio/releases/download/$version/OBS-Studio-$version-Windows-x64.zip" -OutFile "obs-$version.zip"
+            Expand-Archive "obs-$version.zip" "obs-compat-$version"
+            $modern = ([version]$version -ge [version]'33.0.0')
+            ./scripts/Test-CoreVideoObsCompatibility.ps1 -ObsRoot "obs-compat-$version" -PackageRoot install -ExpectedObsVersion $version -ExpectModern:$modern
+          }
+
+      - name: Preserve OBS compatibility logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Release-OBS-compatibility-logs
+          path: obs-compat-*/config/obs-studio/logs/
+          if-no-files-found: ignore
+
       - name: Install NSIS
         if: env.COREVIDEO_HAS_ZOOM_RUNTIME == 'true'
         shell: powershell

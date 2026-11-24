@@ -96,6 +96,9 @@ Function .onInit
     Abort
   ${EndIf}
 
+  ; Preserve /D for unattended portable installs; validate it before copying.
+  IfSilent init_done
+  IfFileExists "$INSTDIR\bin\64bit\obs64.exe" init_done
   ReadRegStr $0 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\OBS Studio" "InstallLocation"
   ${If} $0 != ""
     StrCpy $INSTDIR $0
@@ -119,7 +122,7 @@ Function .onVerifyInstDir
   StrCpy $INSTDIR "$INSTDIR\..\.."
   Goto done
 invalid:
-  MessageBox MB_ICONSTOP "Select the OBS Studio install folder, usually C:\Program Files\obs-studio. Do not select a profile folder or a CoreVideo package folder."
+  MessageBox MB_ICONSTOP "Select the OBS Studio install folder, usually C:\Program Files\obs-studio. Do not select a profile folder or a CoreVideo package folder." /SD IDOK
   Abort
 done:
 FunctionEnd

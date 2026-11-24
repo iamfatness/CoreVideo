@@ -1,12 +1,3 @@
-## Unreleased — OBS compatibility and Windows layout
-
-- Require OBS Studio 32.2.2+; retire OBS 30/31 support.
-- Install Windows CoreVideo in the modern plugin layout, with same-name OBS 32
-  compatibility entries sharing one helper/SDK runtime. Preserve portable support
-  and let OBS 33 suppress duplicate legacy entries during upgrades.
-- Check minimum/latest OBS startup in CI, including source/dock registration,
-  Tiles data and duplicate loading. Future OBS versions remain subject to testing.
-
 # Changelog
 
 All notable changes to CoreVideo are documented in this file. The format is
@@ -15,6 +6,20 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 [GitHub Releases](https://github.com/iamfatness/CoreVideo/releases).
 
 ## [Unreleased]
+
+- Require OBS Studio 32.2.2+; retire OBS 30/31 support.
+- Install Windows CoreVideo in the modern plugin layout, with same-name OBS 32
+  compatibility entries sharing one helper/SDK runtime. Preserve portable support
+  and let OBS 33 suppress duplicate legacy entries during upgrades.
+- Check minimum/latest OBS startup in CI, including source/dock registration,
+  Tiles data and duplicate loading. Future OBS versions remain subject to testing.
+
+## [0.1.51] - 2026-11-24
+
+Windows SDK input selection fix: retain the SDK settings service across auth,
+device enumeration and joins, preserve muted-join preflight, and leave the SDK
+input unchanged unless explicitly selected. Replaces withdrawn beta.1. This
+release changes Windows only; the macOS package remains v0.1.50.
 
 ## [0.1.50] - 2026-11-14
 

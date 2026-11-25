@@ -34,6 +34,7 @@ private:
     QLineEdit    *m_filter            = nullptr;
     QCheckBox    *m_hide_non_video    = nullptr;
     QComboBox    *m_profile_combo     = nullptr;
+    QLabel       *m_output_instruction = nullptr;
     QLabel       *m_output_summary    = nullptr;
     bool          m_deferred_refresh_queued = false;
     // Bounds schedule_deferred_refresh()'s retry loop for the SPINBOX-FOCUS

@@ -16,12 +16,14 @@
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListView>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QPixmap>
 #include <QPointer>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QScopedValueRollback>
 #include <QSpinBox>
 #include <QStringList>
 #include <QTableWidget>
@@ -55,6 +57,36 @@ enum OutputColumns {
 // under an operator mid-selection is worse than a stale table.
 // See ZoomOutputDialog::m_deferred_refresh_attempts.
 static constexpr int kMaxDeferredRefreshAttempts = 8;
+
+// Use a Qt view even on macOS. A native combo menu does not show the view(),
+// so refresh() would otherwise replace the editor while that menu is open.
+class OutputPicker final : public QComboBox {
+public:
+    explicit OutputPicker(QWidget *parent) : QComboBox(parent)
+    {
+        setView(new QListView(this));
+    }
+
+    void showPopup() override
+    {
+        QScopedValueRollback<bool> opening(m_opening, true);
+        QComboBox::showPopup();
+    }
+
+    bool is_interacting() const
+    {
+        return m_opening || view()->isVisible();
+    }
+
+private:
+    bool m_opening = false;
+};
+
+static bool picker_is_interacting(const QComboBox *combo)
+{
+    const auto *picker = dynamic_cast<const OutputPicker *>(combo);
+    return picker && picker->is_interacting();
+}
 
 // QTableWidget stretches a cell widget to fill the whole (tall) row cell. A
 // widget that cannot grow (fixed-size preview label) ends up anchored to the
@@ -517,7 +549,7 @@ static bool combo_has_user_edit(QComboBox *combo)
         return false;
     if (combo->property("user_dirty").toBool())
         return true;
-    return combo->view() && combo->view()->isVisible();
+    return picker_is_interacting(combo);
 }
 
 // QSpinBox has no equivalent to QComboBox::activated (a signal that only
@@ -601,11 +633,10 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     // column, including the two new ones, is Fixed), so there is no need to
     // force the whole dock wider on an operator's 1920x1080 canvas just to
     // avoid a scrollbar.
-    setMinimumSize(1500, 840);
-    resize(1600, 920);
+    resize(1150, 650);
 
     // Profile toolbar.
-    m_profile_combo = new QComboBox(this);
+    m_profile_combo = new OutputPicker(this);
     m_profile_combo->setMinimumWidth(180);
     m_profile_combo->setPlaceholderText("- select profile -");
 
@@ -663,7 +694,7 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     m_participant_table->verticalHeader()->setVisible(false);
     m_participant_table->setSelectionMode(QAbstractItemView::SingleSelection);
     m_participant_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_participant_table->setMinimumHeight(170);
+    m_participant_table->setMinimumHeight(110);
 
     m_table = new QTableWidget(this);
     m_table->setColumnCount(ColumnCount);
@@ -703,15 +734,9 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     m_table->verticalHeader()->setVisible(false);
     m_table->verticalHeader()->setDefaultSectionSize(104);
     m_table->setSelectionMode(QAbstractItemView::NoSelection);
-    m_table->setMinimumHeight(460);
-    // Left at its pre-Task-7 value on purpose -- see the dock-width comment
-    // on setMinimumSize() in the constructor above. The table scrolls
-    // horizontally to reach the Delay/A/V Offset columns rather than forcing
-    // the host dock wider.
-    m_table->setMinimumWidth(1440);
+    m_table->setMinimumHeight(200);
 
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Apply |
-                                         QDialogButtonBox::Close, this);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Apply, this);
     auto *refresh_button = buttons->addButton("Refresh", QDialogButtonBox::ActionRole);
     auto *recover_button = buttons->addButton("Recover Stale Feeds",
                                               QDialogButtonBox::ActionRole);
@@ -744,7 +769,6 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     });
     connect(buttons->button(QDialogButtonBox::Apply), &QPushButton::clicked,
             this, [this]() { apply(); });
-    connect(buttons, &QDialogButtonBox::rejected, this, &QWidget::hide);
 
     auto *layout = new QVBoxLayout(this);
     layout->addLayout(profile_row);
@@ -753,8 +777,11 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
     layout->addWidget(m_hide_non_video);
     layout->addWidget(m_participant_table);
     layout->addWidget(new QLabel("Outputs", this));
+    m_output_instruction = new QLabel(this);
+    m_output_instruction->setWordWrap(true);
+    layout->addWidget(m_output_instruction);
     layout->addWidget(m_output_summary);
-    layout->addWidget(m_table);
+    layout->addWidget(m_table, 1);
     layout->addWidget(buttons);
 
     setStyleSheet(cv_stylesheet());
@@ -765,7 +792,7 @@ ZoomOutputDialog::ZoomOutputDialog(QWidget *parent)
         if (!alive->load(std::memory_order_acquire) || !self) return;
         QMetaObject::invokeMethod(self, [self, alive]() {
             if (!alive->load(std::memory_order_acquire) || !self) return;
-            self->refresh();
+            self->schedule_deferred_refresh();
         }, Qt::QueuedConnection);
     });
 
@@ -793,15 +820,14 @@ void ZoomOutputDialog::refresh_now()
 
 bool ZoomOutputDialog::has_open_output_combo_popup() const
 {
+    if (picker_is_interacting(m_profile_combo)) return true;
     if (!m_table) return false;
     for (int row = 0; row < m_table->rowCount(); ++row) {
         for (const int col : {
                  ColumnAssignment, ColumnResolution, ColumnAudio, ColumnAudioRole
              }) {
-            if (auto *combo = cell_combo(m_table, row, col)) {
-                if (combo->view() && combo->view()->isVisible())
-                    return true;
-            }
+            if (picker_is_interacting(cell_combo(m_table, row, col)))
+                return true;
         }
     }
     return false;
@@ -934,6 +960,9 @@ void ZoomOutputDialog::refresh()
     auto outputs = ZoomOutputManager::instance().outputs();
     std::sort(outputs.begin(), outputs.end(), output_sort_less);
     const std::vector<ParticipantInfo> roster = ZoomEngineClient::instance().roster();
+    m_output_instruction->setText(outputs.empty()
+        ? QStringLiteral("Add a CoreVideo Participant source with + in the OBS Sources dock, then click Refresh here.")
+        : QStringLiteral("Choose an Assignment for each output, then click Apply."));
     if (m_output_summary) {
         const bool has_warning = std::any_of(
             outputs.begin(), outputs.end(), [](const ZoomOutputInfo &output) {
@@ -989,7 +1018,7 @@ void ZoomOutputDialog::refresh()
         name_item->setData(Qt::UserRole, QString::fromStdString(output.source_name));
         m_table->setItem(row, ColumnName, name_item);
 
-        auto *assignment = new QComboBox(m_table);
+        auto *assignment = new OutputPicker(m_table);
         assignment->setMinimumWidth(280);
         // NOTE: "Active speaker" sits at index 0 — never leave a combo at
         // its default index when the real assignment can't be matched (see
@@ -1018,14 +1047,14 @@ void ZoomOutputDialog::refresh()
         m_table->setCellWidget(row, ColumnAssignment,
             center_in_cell(assignment, Qt::AlignVCenter, 6));
 
-        auto *audio = new QComboBox(m_table);
+        auto *audio = new OutputPicker(m_table);
         audio->setMinimumWidth(112);
         audio->addItem("Mono", static_cast<int>(AudioChannelMode::Mono));
         audio->addItem("Stereo", static_cast<int>(AudioChannelMode::Stereo));
         audio->setCurrentIndex(output.audio_mode == AudioChannelMode::Stereo ? 1 : 0);
         mark_dirty_on_user_change(audio);
 
-        auto *resolution = new QComboBox(m_table);
+        auto *resolution = new OutputPicker(m_table);
         resolution->setMinimumWidth(96);
         resolution->addItem("360p", static_cast<int>(VideoResolution::P360));
         resolution->addItem("720p", static_cast<int>(VideoResolution::P720));
@@ -1124,7 +1153,7 @@ void ZoomOutputDialog::refresh()
             "-125 ms.");
         m_table->setCellWidget(row, ColumnAvOffset, av_offset);
 
-        auto *audio_role = new QComboBox(m_table);
+        auto *audio_role = new OutputPicker(m_table);
         audio_role->setMinimumWidth(132);
         audio_role->addItem("Mix", "mix");
         audio_role->addItem("Isolated", "isolate");

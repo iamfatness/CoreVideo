@@ -7,13 +7,17 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
-## [0.1.54] - 2026-11-25
+## [0.1.55] - 2026-11-25
 
 ### Fixed
 
 - Zoom Plugin Settings shows the signed-in state as soon as OBS saves the
   token returned from the browser. The dialog now shows browser instructions
   inline during sign-in.
+- Output Manager waits for open pickers before refreshing their rows, and
+  fits into a smaller OBS dock.
+- Zoom Control shows the next setup step. Output Manager explains how to add
+  the first OBS source and apply assignments.
 
 ## [0.1.53] - 2026-11-25
 

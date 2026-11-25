@@ -56,6 +56,7 @@ private:
     CvStatusDot *m_state_dot   = nullptr;
     QLabel      *m_state_label = nullptr;
     QLabel      *m_error_label = nullptr;
+    QLabel      *m_setup_hint  = nullptr;
 
     // Active speaker
     QLabel      *m_speaker_label = nullptr;

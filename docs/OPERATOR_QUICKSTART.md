@@ -5,9 +5,9 @@ source-build and Marketplace setup details unless they affect day-to-day use.
 
 ## Install
 
-1. Download the latest Windows installer from GitHub Releases.
+1. Download the Windows x64 or macOS Apple Silicon installer from the latest GitHub release.
 2. Close OBS Studio before running the installer.
-3. Run `CoreVideo-Setup-vX.Y.Z.exe`.
+3. Run the `.exe` on Windows or the signed `.pkg` on macOS.
 4. Start OBS Studio.
 5. Confirm these OBS docks/tools are available:
    - **Zoom Control**
@@ -53,15 +53,15 @@ changing settings. The bundle redacts tokens and includes OBS/engine/ISO status.
 
 ## Assign Outputs
 
-1. Open **Zoom Output Manager**.
-2. For each CoreVideo participant source, choose an assignment mode:
+1. In an OBS scene, click **+** in the **Sources** dock and add a **CoreVideo Participant** source.
+2. Open **Zoom Output Manager** from **Zoom Control**. Each row is an existing OBS source. If you just added a source while the manager was open, click **Refresh**.
+3. In the source's **Assignment** menu, choose one of these:
    - **Participant** for a fixed Zoom participant.
    - **Active Speaker** for the directed speaker feed.
    - **Spotlight Slot 1-8** for ZoomISO-style fixed stage slots.
    - **Screen share** for the active meeting share.
-3. Request 1080p for production sources when the Zoom account and meeting
-   entitlements support it.
-4. Watch the health markers:
+4. Click **Apply** to send the assignment to the source.
+5. Check the preview and signal:
    - Resolution/FPS show what Zoom is actually delivering.
    - A warning marker means the observed feed does not match the requested
      output or is stale.

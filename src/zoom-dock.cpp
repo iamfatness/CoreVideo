@@ -613,6 +613,10 @@ ZoomDock::ZoomDock(QWidget *parent)
         CvUpdateChecker::instance().check_once();
     }
 
+    m_setup_hint = new QLabel(this);
+    m_setup_hint->setWordWrap(true);
+    vLayout->addWidget(m_setup_hint);
+
     // -- Join controls ---------------------------------------------------------
     auto *join_group  = new QGroupBox("Join Meeting", this);
     auto *join_layout = new QVBoxLayout(join_group);
@@ -710,14 +714,9 @@ ZoomDock::ZoomDock(QWidget *parent)
     auto *routing_group = new QGroupBox("Routing", this);
     auto *routing_layout = new QHBoxLayout(routing_group);
     routing_layout->setSpacing(8);
-    auto *routing_label = new QLabel(
-        "Manage participant-to-source assignments in the dedicated Output Manager.",
-        routing_group);
-    routing_label->setWordWrap(true);
     m_output_manager_btn = new QPushButton("Open Output Manager", routing_group);
     connect(m_output_manager_btn, &QPushButton::clicked,
             this, [this]() { open_output_manager(); });
-    routing_layout->addWidget(routing_label, 1);
     routing_layout->addWidget(m_output_manager_btn);
     vLayout->addWidget(routing_group);
 
@@ -1132,6 +1131,19 @@ void ZoomDock::update_state_indicator()
         m_start_engine_btn->setEnabled(in_meeting && (!media_active || media_failed) && !transitioning && !recovering);
         m_stop_engine_btn->setEnabled(in_meeting && media_active && !transitioning);
     }
+
+    QString setup_hint;
+    if (transitioning || recovering) {
+        setup_hint = QStringLiteral("Wait for Zoom to connect or for the host to admit you.");
+    } else if (!in_meeting) {
+        setup_hint = QStringLiteral("First time? Sign in under Tools → Zoom Plugin Settings. Then enter the meeting and click Join.");
+    } else if (!media_active) {
+        setup_hint = QStringLiteral("Click Start Engine to receive Zoom media. If asked, have the host grant recording permission.");
+    } else {
+        setup_hint = QStringLiteral("Add a CoreVideo Participant via + in OBS Sources. Open Output Manager, choose an Assignment, then click Apply.");
+    }
+    if (m_setup_hint->text() != setup_hint)
+        m_setup_hint->setText(setup_hint);
 
     update_recovery_panel();
 

@@ -1659,8 +1659,8 @@ Pro ships from `iamfatness/CoreVideoPro`; `PRO_VERSION` and the `PRO_*` URLs in
 (`/news/corevideo-pro-1-0/`) pins the 1.0.0 installer on purpose; every other
 Pro download button uses releases/latest. `/pro/` and `/pro/documentation/`
 describe only what the CoreVideoPro README marks proven or shipped. The Pro
-hero shows the real Studio on macOS with example scenes built from the
-site's public guest imagery. The ZComms hero shows the released `v0.1.14`
+hero shows the real Studio on macOS with eight AI-generated guest feeds
+rendered through the local test engine. The ZComms hero shows the released `v0.1.14`
 panel rendered with sample participant and channel state.
 
 Every `<pre>` and `<table>` gets `tabindex="0"` at the single write point

@@ -12,7 +12,7 @@ import path from "node:path";
 
 const root = process.cwd();
 const outDir = path.join(root, "public");
-const DOWNLOAD_PREFIX = "https://github.com/iamfatness/CoreVideo/releases/download/";
+const PINNED_DOWNLOAD = /^https:\/\/github\.com\/iamfatness\/[^/]+\/releases\/download\//;
 
 if (!fs.existsSync(outDir)) {
   console.error("public/ does not exist - run scripts/build-site.mjs first.");
@@ -32,7 +32,7 @@ for (const file of findHtmlFiles(outDir)) {
   const html = fs.readFileSync(file, "utf8");
   for (const match of html.matchAll(/href="([^"]+)"/g)) {
     const url = match[1];
-    if (url.startsWith(DOWNLOAD_PREFIX) && !urls.has(url))
+    if (PINNED_DOWNLOAD.test(url) && !urls.has(url))
       urls.set(url, path.relative(outDir, file));
   }
 }

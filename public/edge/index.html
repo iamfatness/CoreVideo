@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <script src="/assets/google-tag-manager.js"></script>
+  <script async src="https://www.googletagmanager.com/gtm.js?id=GTM-PSHZHBGZ"></script>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CoreVideo Edge - Zoom Routing and ISO Recording</title>
+  <meta name="description" content="Route, preview, and record additional Zoom participants on a separate Windows machine, then send their feeds to CoreVideo Pro over NDI or SRT.">
+  <meta name="theme-color" content="#0a0b0c">
+  <link rel="icon" href="/favicon.svg">
+  <link rel="preload" href="/assets/fonts/SpaceGrotesk-var.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/assets/fonts/IBMPlexMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="canonical" href="https://corevideo.io/edge/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="CoreVideo">
+  <meta property="og:title" content="CoreVideo Edge - Zoom Routing and ISO Recording">
+  <meta property="og:description" content="Route, preview, and record additional Zoom participants on a separate Windows machine, then send their feeds to CoreVideo Pro over NDI or SRT.">
+  <meta property="og:image" content="https://corevideo.io/assets/edge-routing.png">
+  <meta property="og:image:alt" content="CoreVideo Edge participant routing screen">
+  <meta property="og:image:width" content="1280">
+  <meta property="og:image:height" content="800">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:url" content="https://corevideo.io/edge/">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="CoreVideo Edge - Zoom Routing and ISO Recording">
+  <meta name="twitter:description" content="Route, preview, and record additional Zoom participants on a separate Windows machine, then send their feeds to CoreVideo Pro over NDI or SRT.">
+  <meta name="twitter:image" content="https://corevideo.io/assets/edge-routing.png">
+  <meta name="twitter:image:alt" content="CoreVideo Edge participant routing screen">
+  <link rel="stylesheet" href="/assets/site.css">
+  <script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "606f185a54e7489bb11a93235343469b"}'></script>
+</head>
+<body class="home-page">
+  <header class="site-header">
+    <a class="brand" href="/"><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
+    <nav><a href="/">Home</a><a href="/pro/">CoreVideo Pro</a><a href="/edge/" aria-current="page">Edge</a><a href="/volt/">Volt</a><a href="/zcomms/">ZComms</a><a href="/pro/documentation/">Pro Docs</a><a href="/documentation/">Plugin Docs</a><a href="/core-plugin/">Core Plugin</a><a href="/download/">Download</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a></nav>
+  </header>
+  <main class="content">
+    <section class="hero product-hero">
+  <figure class="hero-media">
+    <div class="console">
+      <div class="console-bar"><span>CoreVideo Edge</span><span class="tc">Routing &middot; Sample session</span></div>
+      <div class="console-screen"><img src="/assets/edge-routing.png" width="1280" height="800" alt="Edge Routing screen showing Zoom participants assigned to eight slots, with feed resolution and frame rate controls"></div>
+    </div>
+  </figure>
+  <div class="hero-copy">
+    <p class="eyebrow">Windows x64 beta</p>
+    <h1>CoreVideo Edge</h1>
+    <p class="lede">Route and record more Zoom guests on a separate Windows machine. Edge joins the same meeting as <a href="/pro/">CoreVideo Pro</a> under its own Zoom account, giving it a separate downlink budget.</p>
+    <div class="hero-actions">
+      <a class="button primary" href="https://github.com/iamfatness/CoreVideoEdge/releases/download/beta-2026-11-11-0d83fc2/CoreVideoEdge-beta-2026-11-11-0d83fc2-Setup.exe">Download Windows beta</a>
+      <a class="button" href="https://github.com/iamfatness/CoreVideoEdge/releases/tag/beta-2026-11-11-0d83fc2">Release notes &amp; checksums</a>
+    </div>
+  </div>
+</section>
+<section class="link-grid product-features" aria-label="What Edge does">
+  <div><strong>Route and monitor guests</strong><span>Choose up to eight Zoom participants and preview each routed feed. Request a resolution and frame rate for each slot. Actual video quality depends on what Zoom delivers.</span></div>
+  <div><strong>Record isolated MP4s</strong><span>Arm the guests you want to record. Edge saves one MP4 per armed guest with their own video and isolated audio.</span></div>
+  <div><strong>Send feeds to Pro</strong><span>Use NDI or SRT to send routed guests from the Edge machine to your production.</span></div>
+</section>
+<section>
+  <h2>Set up the beta</h2>
+  <ol>
+    <li>Install Edge on a separate Windows x64 machine. This beta shares Pro&rsquo;s browser sign-in link, so the apps can intercept each other&rsquo;s callbacks if installed together.</li>
+    <li>Sign in to Zoom with a separate account and join the same meeting as Pro.</li>
+    <li>Choose participants in <strong>Routing</strong>, confirm their previews in <strong>Monitor</strong>, and arm the guests you need for recording.</li>
+  </ol>
+  <p>NDI output requires the NDI 6 Runtime or NDI Tools. SRT output requires FFmpeg on <code>PATH</code> or at <code>COREVIDEO_FFMPEG_DIR</code>. The beta installer is unsigned. See the release notes for validation details and known limitations.</p>
+  <div class="hero-actions">
+    <a class="button" href="https://github.com/iamfatness/CoreVideoEdge/releases/download/beta-2026-11-11-0d83fc2/CoreVideoEdge-beta-2026-11-11-0d83fc2-win-x64.zip">Portable Windows ZIP</a>
+    <a class="button" href="https://github.com/iamfatness/CoreVideoEdge">View source</a>
+  </div>
+</section>
+  </main>
+  <footer class="site-footer">
+    <span>CoreVideo is an independent product and is not affiliated with Zoom Video Communications, Inc.</span>
+  </footer>
+</body>
+</html>

@@ -91,6 +91,15 @@ const PRO_RELEASE_TAG = `${PRO_REPO}/releases/tag/v${PRO_VERSION}`;
 const PRO_SETUP = `${PRO_REPO}/releases/download/v${PRO_VERSION}/CoreVideoPro-Setup-v${PRO_VERSION}.exe`;
 const PRO_ANNOUNCEMENT = "/news/corevideo-pro-1-0/";
 
+// GitHub's releases/latest excludes prereleases. Keep Edge's beta tag explicit.
+const EDGE_REPO = "https://github.com/iamfatness/CoreVideoEdge";
+const EDGE_BETA = "beta-2026-11-11-0d83fc2";
+const EDGE_RELEASE = `${EDGE_REPO}/releases/tag/${EDGE_BETA}`;
+const EDGE_DOWNLOADS = `${EDGE_REPO}/releases/download/${EDGE_BETA}`;
+
+const VOLT_REPO = "https://github.com/iamfatness/CoreVideo-Volt";
+const VOLT_OPERATIONS = `${VOLT_REPO}/blob/HEAD/docs/operations.md`;
+
 // The CoreVideo "Multiview" brand mark (mirrors Controls/MultiviewMark.xaml in
 // the app): a 16:9 monitor frame split 2x2 with the top-right tile live-green.
 const MULTIVIEW_MARK =
@@ -266,6 +275,16 @@ function homeContent() {
     </div>
   </div>
 </section>
+<section aria-labelledby="products-heading">
+  <h2 id="products-heading">CoreVideo products</h2>
+  <div class="link-grid products">
+    <a href="/download/"><span class="tier">OBS plugin</span><strong>CoreVideo for OBS</strong><span>Bring Zoom participant video, audio, screen share, and interpretation into OBS as native sources.</span></a>
+    <a class="featured" href="/pro/"><span class="tier tier-premium">Windows</span><strong>CoreVideo Pro</strong><span>Run a Zoom production from a standalone studio with scenes, Program, streaming, talkback, and ISO recording.</span></a>
+    <a href="/zcomms/"><span class="tier">Windows</span><strong>ZComms</strong><span>Run private Zoom talkback and IFB from a dedicated intercom desk.</span></a>
+    <a href="/edge/"><span class="tier">Windows beta</span><strong>CoreVideo Edge</strong><span>Route and record additional Zoom guests on a separate Windows machine and send feeds to Pro over NDI or SRT.</span></a>
+    <a href="/volt/"><span class="tier">Available from source</span><strong>Volt</strong><span>Manage your rundown, find and cue clips, and publish approved versions from one show session.</span></a>
+  </div>
+</section>
 <section class="link-grid" aria-label="What the plugin does">
   <div><strong>One source per participant</strong><span>Each Zoom participant becomes a separate OBS source at up to 1080p, with their audio on its own track &mdash; not a crop out of a gallery screenshot.</span></div>
   <div><strong>CoreVideo Tiles</strong><span>Arrange participant feeds in a styled gallery within one OBS source, with rounded corners, borders, and flexible layouts.</span></div>
@@ -283,13 +302,8 @@ function homeContent() {
 </figure>
 <section>
   <h2>Talkback, without leaving the meeting</h2>
-  <p>Every show that runs on Zoom eventually needs a way to speak to one person without speaking to the room. The Zoom Meeting SDK carries a private talkback path alongside the meeting floor &mdash; 16 channels, up to 10 people each, and members duck under your voice rather than being muted &mdash; and both products here are built on it.</p>
+  <p>The Zoom Meeting SDK carries a private talkback path alongside the meeting floor &mdash; 16 channels, up to 10 people each, with room audio ducked while you speak.</p>
   <p><a href="/zcomms/">ZComms</a> is the standalone answer: a full intercom desk with named talk keys, ALL CALL, latch, extern feeds from a multichannel interface, and breakout-aware routing. It ships today. The OBS plugin also has a <a href="/core-plugin/">Zoom Talkback dock</a> on Windows (v0.1.45 and later); it is unavailable on macOS.</p>
-</section>
-<section class="link-grid products" aria-label="CoreVideo products">
-  <a href="/download/"><span class="tier">Free &middot; OBS plugin</span><strong>CoreVideo for OBS</strong><span>The plugin on this page: Zoom participant video, audio, screen share, interpretation, and ISO recording as native sources in the OBS you already run. MIT licensed.</span></a>
-  <a class="featured" href="/pro/"><span class="tier tier-premium">New &middot; 1.0 &middot; Windows</span><strong>CoreVideo Pro</strong><span>Want the whole console instead of a plugin? Pro is the standalone studio: every Zoom guest as their own 1080p source, scenes with Take, talkback inside the meeting, and Program, per-guest ISO, stream, NDI and a virtual camera at once.</span></a>
-  <a href="/zcomms/"><span class="tier">Standalone &middot; Talkback</span><strong>ZComms</strong><span>The intercom on its own. Named talk keys into Zoom&rsquo;s private talkback channels, extern feeds from a multichannel interface, and honest key states. Windows.</span></a>
 </section>
 <section class="link-grid" aria-label="CoreVideo resources">
   <a href="/documentation/"><strong>Plugin Docs</strong><span>Architecture, setup, control APIs, and operating notes.</span></a>
@@ -611,6 +625,74 @@ function zcommsPageContent() {
 </section>`;
 }
 
+function edgePageContent() {
+  return `<section class="hero product-hero">
+  <figure class="hero-media">
+    <div class="console">
+      <div class="console-bar"><span>CoreVideo Edge</span><span class="tc">Routing &middot; Sample session</span></div>
+      <div class="console-screen"><img src="/assets/edge-routing.png" width="1280" height="800" alt="Edge Routing screen showing Zoom participants assigned to eight slots, with feed resolution and frame rate controls"></div>
+    </div>
+  </figure>
+  <div class="hero-copy">
+    <p class="eyebrow">Windows x64 beta</p>
+    <h1>CoreVideo Edge</h1>
+    <p class="lede">Route and record more Zoom guests on a separate Windows machine. Edge joins the same meeting as <a href="/pro/">CoreVideo Pro</a> under its own Zoom account, giving it a separate downlink budget.</p>
+    <div class="hero-actions">
+      <a class="button primary" href="${EDGE_DOWNLOADS}/CoreVideoEdge-${EDGE_BETA}-Setup.exe">Download Windows beta</a>
+      <a class="button" href="${EDGE_RELEASE}">Release notes &amp; checksums</a>
+    </div>
+  </div>
+</section>
+<section class="link-grid product-features" aria-label="What Edge does">
+  <div><strong>Route and monitor guests</strong><span>Choose up to eight Zoom participants and preview each routed feed. Request a resolution and frame rate for each slot. Actual video quality depends on what Zoom delivers.</span></div>
+  <div><strong>Record isolated MP4s</strong><span>Arm the guests you want to record. Edge saves one MP4 per armed guest with their own video and isolated audio.</span></div>
+  <div><strong>Send feeds to Pro</strong><span>Use NDI or SRT to send routed guests from the Edge machine to your production.</span></div>
+</section>
+<section>
+  <h2>Set up the beta</h2>
+  <ol>
+    <li>Install Edge on a separate Windows x64 machine. This beta shares Pro&rsquo;s browser sign-in link, so the apps can intercept each other&rsquo;s callbacks if installed together.</li>
+    <li>Sign in to Zoom with a separate account and join the same meeting as Pro.</li>
+    <li>Choose participants in <strong>Routing</strong>, confirm their previews in <strong>Monitor</strong>, and arm the guests you need for recording.</li>
+  </ol>
+  <p>NDI output requires the NDI 6 Runtime or NDI Tools. SRT output requires FFmpeg on <code>PATH</code> or at <code>COREVIDEO_FFMPEG_DIR</code>. The beta installer is unsigned. See the release notes for validation details and known limitations.</p>
+  <div class="hero-actions">
+    <a class="button" href="${EDGE_DOWNLOADS}/CoreVideoEdge-${EDGE_BETA}-win-x64.zip">Portable Windows ZIP</a>
+    <a class="button" href="${EDGE_REPO}">View source</a>
+  </div>
+</section>`;
+}
+
+function voltPageContent() {
+  return `<section class="hero product-hero">
+  <figure class="hero-media">
+    <div class="console">
+      <div class="console-bar"><span>Volt</span><span class="tc">Rundown &middot; Sample session</span></div>
+      <div class="console-screen"><img src="/assets/volt-rundown.png" width="1920" height="1080" alt="Volt operator rundown showing the current and next items, a Take button, and armed cues"></div>
+    </div>
+  </figure>
+  <div class="hero-copy">
+    <p class="eyebrow">Available from source</p>
+    <h1>Volt</h1>
+    <p class="lede">Run the show from a shared rundown. Volt brings your media library, clip cues, and publishing together and keeps the same asset ID from ingest through delivery.</p>
+    <div class="hero-actions">
+      <a class="button primary" href="${VOLT_OPERATIONS}#install">Install from source</a>
+      <a class="button" href="${VOLT_REPO}">View source</a>
+    </div>
+  </div>
+</section>
+<section class="link-grid product-features" aria-label="What Volt does">
+  <div><strong>Find the right clip</strong><span>Ingest media and recordings, build proxies, and use transcript search to find the section you need.</span></div>
+  <div><strong>Cue the rundown</strong><span>Attach clips and cues to rundown items. With a compatible CoreVideo Pro build, send a cleared clip to Preview and take it to Program when it&rsquo;s ready.</span></div>
+  <div><strong>Publish approved clips</strong><span>Create house, streaming, and social versions from the approved clip and track the delivery URLs on its rundown item.</span></div>
+</section>
+<section>
+  <h2>Run Volt</h2>
+  <p>The session runs as a service with a browser-based operator interface. A source installation requires Python 3.12 or newer, FFmpeg, and ffprobe. The operations guide covers setup, storage, health checks, and connecting to <a href="/pro/">CoreVideo Pro</a>.</p>
+  <a class="button" href="${VOLT_OPERATIONS}">Operations guide</a>
+</section>`;
+}
+
 function renderTable(lines) {
   const rows = lines
     .filter((line, index) => index !== 1)
@@ -768,16 +850,19 @@ function markdownToHtml(markdown) {
 // Open Graph and Twitter cards. Without these, every link posted to Reddit,
 // LinkedIn, Slack, or Discord renders as a bare grey URL with no title, blurb,
 // or image - which is most of how anyone first sees the project.
-function socialTags({ title, description, url, image }) {
+function socialTags({
+  title, description, url,
+  image = OG_IMAGE, imageAlt = OG_IMAGE_ALT, imageWidth = 1200, imageHeight = 630,
+}) {
   const tags = [
     ["og:type", "website"],
     ["og:site_name", SITE_NAME],
     ["og:title", title],
     ["og:description", description],
     ["og:image", image],
-    ["og:image:alt", OG_IMAGE_ALT],
-    ["og:image:width", "1200"],
-    ["og:image:height", "630"],
+    ["og:image:alt", imageAlt],
+    ["og:image:width", String(imageWidth)],
+    ["og:image:height", String(imageHeight)],
     ["og:locale", "en_US"],
   ];
   if (url) tags.push(["og:url", url]);
@@ -787,7 +872,7 @@ function socialTags({ title, description, url, image }) {
     ["twitter:title", title],
     ["twitter:description", description],
     ["twitter:image", image],
-    ["twitter:image:alt", OG_IMAGE_ALT],
+    ["twitter:image:alt", imageAlt],
   ];
 
   return [
@@ -895,7 +980,14 @@ ${fileRows}
 <p>Each release ships a SHA-256 file alongside the binary. On Windows, compare the hashes with PowerShell:</p>
 <pre><code class="language-powershell">Get-FileHash .\\CoreVideo-Setup-${v ? `v${v}` : "vX.Y.Z"}.exe -Algorithm SHA256</code></pre>
 <h2>Building from source</h2>
-<p>CoreVideo is MIT-licensed and builds from source on Windows, macOS, and Linux. See the <a href="https://github.com/iamfatness/CoreVideo">repository</a> for the toolchain requirements and CMake options, including hardware-accelerated colour conversion.</p>`;
+<p>CoreVideo is MIT-licensed and builds from source on Windows, macOS, and Linux. See the <a href="https://github.com/iamfatness/CoreVideo">repository</a> for the toolchain requirements and CMake options, including hardware-accelerated colour conversion.</p>
+<section aria-labelledby="more-downloads-heading">
+  <h2 id="more-downloads-heading">Edge and Volt</h2>
+  <ul>
+    <li><a href="/edge/">CoreVideo Edge</a> &mdash; Windows x64 beta installer and portable ZIP.</li>
+    <li><a href="/volt/">Volt</a> &mdash; source installation and operations guide.</li>
+  </ul>
+</section>`;
 }
 
 // Structured data for the free plugin. SoftwareApplication is what earns the
@@ -963,6 +1055,8 @@ function layout(page, content, options = {}) {
   const nav = [
     ["Home", "/"],
     ["CoreVideo Pro", "/pro/"],
+    ["Edge", "/edge/"],
+    ["Volt", "/volt/"],
     ["ZComms", "/zcomms/"],
     ["Pro Docs", "/pro/documentation/"],
     ["Plugin Docs", "/documentation/"],
@@ -982,7 +1076,6 @@ function layout(page, content, options = {}) {
   // sets seoTitle owns the whole string; everything else keeps the
   // "<page> | CoreVideo" suffix convention.
   const fullTitle = page.seoTitle ?? `${page.title} | ${SITE_NAME}`;
-  const ogImage = page.ogImage ?? OG_IMAGE;
 
   return `<!doctype html>
 <html lang="en">
@@ -996,7 +1089,7 @@ ${GOOGLE_TAG_MANAGER}
   <link rel="icon" href="/favicon.svg">
   <link rel="preload" href="/assets/fonts/SpaceGrotesk-var.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/assets/fonts/IBMPlexMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
-${options.canonical ? `  <link rel="canonical" href="${escapeHtml(options.canonical)}">\n` : ""}${socialTags({ title: fullTitle, description: page.description, url: options.canonical, image: ogImage })}
+${options.canonical ? `  <link rel="canonical" href="${escapeHtml(options.canonical)}">\n` : ""}${socialTags({ title: fullTitle, description: page.description, url: options.canonical, ...page.socialImage })}
   <link rel="stylesheet" href="/assets/site.css">
 ${ANALYTICS_BEACON}${options.jsonLd ? jsonLdBlock(options.jsonLd) : ""}</head>
 <body class="${options.home ? "home-page" : "document-page"}">
@@ -1144,9 +1237,47 @@ writeText(
   ),
 );
 
-// ZComms landing page. ZComms is its own product with its own repository and
-// its own release cadence; the site carries it because it is the third thing
-// the same audience buys into, alongside the plugin and Pro.
+writeText(
+  "edge/index.html",
+  layout(
+    {
+      title: "CoreVideo Edge",
+      seoTitle: "CoreVideo Edge - Zoom Routing and ISO Recording",
+      description:
+        "Route, preview, and record additional Zoom participants on a separate Windows machine, then send their feeds to CoreVideo Pro over NDI or SRT.",
+      socialImage: {
+        image: `${PRIMARY_ORIGIN}/assets/edge-routing.png`,
+        imageAlt: "CoreVideo Edge participant routing screen",
+        imageWidth: 1280,
+        imageHeight: 800,
+      },
+    },
+    edgePageContent(),
+    { home: true, canonical: canonicalUrl("edge/index.html") },
+  ),
+);
+
+writeText(
+  "volt/index.html",
+  layout(
+    {
+      title: "Volt",
+      seoTitle: "CoreVideo Volt - Show Rundown, Media Library, and Publishing",
+      description:
+        "Run a show from a shared rundown, find and cue clips, and publish approved versions from one CoreVideo Volt session.",
+      socialImage: {
+        image: `${PRIMARY_ORIGIN}/assets/volt-rundown.png`,
+        imageAlt: "Volt operator rundown and cue controls",
+        imageWidth: 1920,
+        imageHeight: 1080,
+      },
+    },
+    voltPageContent(),
+    { home: true, canonical: canonicalUrl("volt/index.html") },
+  ),
+);
+
+// ZComms has its own repository and release cadence.
 writeText(
   "zcomms/index.html",
   layout(
@@ -1345,13 +1476,13 @@ writeText(
 </svg>`,
 );
 
-// Shared site imagery: the Open Graph card plus the two product screenshots the
-// plugin pages lead with. Missing files are skipped rather than failing the
-// build, matching how the logo and Pro screenshot are handled below.
+// Shared site imagery used in page heroes and social cards.
 for (const name of [
   "corevideo-share.jpg",
   "obs-multiview.webp",
   "dynamic-gallery.webp",
+  "edge-routing.png",
+  "volt-rundown.png",
 ]) {
   const source = path.join(siteAssetsDir, name);
   if (fs.existsSync(source)) {

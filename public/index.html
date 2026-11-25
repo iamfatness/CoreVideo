@@ -68,7 +68,7 @@
 <body class="home-page">
   <header class="site-header">
     <a class="brand" href="/"><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
-    <nav><a href="/" aria-current="page">Home</a><a href="/pro/">CoreVideo Pro</a><a href="/zcomms/">ZComms</a><a href="/pro/documentation/">Pro Docs</a><a href="/documentation/">Plugin Docs</a><a href="/core-plugin/">Core Plugin</a><a href="/download/">Download</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a></nav>
+    <nav><a href="/" aria-current="page">Home</a><a href="/pro/">CoreVideo Pro</a><a href="/edge/">Edge</a><a href="/volt/">Volt</a><a href="/zcomms/">ZComms</a><a href="/pro/documentation/">Pro Docs</a><a href="/documentation/">Plugin Docs</a><a href="/core-plugin/">Core Plugin</a><a href="/download/">Download</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a></nav>
   </header>
   <main class="content">
     <a class="announce" href="/news/corevideo-pro-1-0/"><span class="tally tally-live">New</span><span class="announce-text"><strong>CoreVideo Pro 1.0 is here.</strong> The first stable release of the standalone Zoom production studio for Windows.</span><span class="announce-cta">Read the announcement &rarr;</span></a>
@@ -92,6 +92,16 @@
     </div>
   </div>
 </section>
+<section aria-labelledby="products-heading">
+  <h2 id="products-heading">CoreVideo products</h2>
+  <div class="link-grid products">
+    <a href="/download/"><span class="tier">OBS plugin</span><strong>CoreVideo for OBS</strong><span>Bring Zoom participant video, audio, screen share, and interpretation into OBS as native sources.</span></a>
+    <a class="featured" href="/pro/"><span class="tier tier-premium">Windows</span><strong>CoreVideo Pro</strong><span>Run a Zoom production from a standalone studio with scenes, Program, streaming, talkback, and ISO recording.</span></a>
+    <a href="/zcomms/"><span class="tier">Windows</span><strong>ZComms</strong><span>Run private Zoom talkback and IFB from a dedicated intercom desk.</span></a>
+    <a href="/edge/"><span class="tier">Windows beta</span><strong>CoreVideo Edge</strong><span>Route and record additional Zoom guests on a separate Windows machine and send feeds to Pro over NDI or SRT.</span></a>
+    <a href="/volt/"><span class="tier">Available from source</span><strong>Volt</strong><span>Manage your rundown, find and cue clips, and publish approved versions from one show session.</span></a>
+  </div>
+</section>
 <section class="link-grid" aria-label="What the plugin does">
   <div><strong>One source per participant</strong><span>Each Zoom participant becomes a separate OBS source at up to 1080p, with their audio on its own track &mdash; not a crop out of a gallery screenshot.</span></div>
   <div><strong>CoreVideo Tiles</strong><span>Arrange participant feeds in a styled gallery within one OBS source, with rounded corners, borders, and flexible layouts.</span></div>
@@ -109,13 +119,8 @@
 </figure>
 <section>
   <h2>Talkback, without leaving the meeting</h2>
-  <p>Every show that runs on Zoom eventually needs a way to speak to one person without speaking to the room. The Zoom Meeting SDK carries a private talkback path alongside the meeting floor &mdash; 16 channels, up to 10 people each, and members duck under your voice rather than being muted &mdash; and both products here are built on it.</p>
+  <p>The Zoom Meeting SDK carries a private talkback path alongside the meeting floor &mdash; 16 channels, up to 10 people each, with room audio ducked while you speak.</p>
   <p><a href="/zcomms/">ZComms</a> is the standalone answer: a full intercom desk with named talk keys, ALL CALL, latch, extern feeds from a multichannel interface, and breakout-aware routing. It ships today. The OBS plugin also has a <a href="/core-plugin/">Zoom Talkback dock</a> on Windows (v0.1.45 and later); it is unavailable on macOS.</p>
-</section>
-<section class="link-grid products" aria-label="CoreVideo products">
-  <a href="/download/"><span class="tier">Free &middot; OBS plugin</span><strong>CoreVideo for OBS</strong><span>The plugin on this page: Zoom participant video, audio, screen share, interpretation, and ISO recording as native sources in the OBS you already run. MIT licensed.</span></a>
-  <a class="featured" href="/pro/"><span class="tier tier-premium">New &middot; 1.0 &middot; Windows</span><strong>CoreVideo Pro</strong><span>Want the whole console instead of a plugin? Pro is the standalone studio: every Zoom guest as their own 1080p source, scenes with Take, talkback inside the meeting, and Program, per-guest ISO, stream, NDI and a virtual camera at once.</span></a>
-  <a href="/zcomms/"><span class="tier">Standalone &middot; Talkback</span><strong>ZComms</strong><span>The intercom on its own. Named talk keys into Zoom&rsquo;s private talkback channels, extern feeds from a multichannel interface, and honest key states. Windows.</span></a>
 </section>
 <section class="link-grid" aria-label="CoreVideo resources">
   <a href="/documentation/"><strong>Plugin Docs</strong><span>Architecture, setup, control APIs, and operating notes.</span></a>

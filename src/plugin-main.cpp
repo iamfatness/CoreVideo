@@ -179,7 +179,7 @@ static void configure_qt_plugin_paths()
     if (dladdr(reinterpret_cast<const void *>(&configure_qt_plugin_paths), &info) &&
         info.dli_fname) {
         const QFileInfo plugin_info(QString::fromUtf8(info.dli_fname));
-        const QDir plugin_dir(QString::fromStdWString(corevideo_runtime_directory(module_path).wstring())); // <bundle>/Contents/MacOS
+        const QDir plugin_dir = plugin_info.dir(); // <bundle>/Contents/MacOS
         const QStringList candidates = {
             plugin_dir.absoluteFilePath("plugins"),
             plugin_dir.absoluteFilePath("../PlugIns"),

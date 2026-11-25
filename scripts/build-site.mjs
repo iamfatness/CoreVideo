@@ -91,12 +91,12 @@ const PRO_RELEASE_TAG = `${PRO_REPO}/releases/tag/v${PRO_VERSION}`;
 const PRO_SETUP = `${PRO_REPO}/releases/download/v${PRO_VERSION}/CoreVideoPro-Setup-v${PRO_VERSION}.exe`;
 const PRO_ANNOUNCEMENT = "/news/corevideo-pro-1-0/";
 
-// Pro: the compiled Windows capture in docs/reference/images at tag v1.0.0.
+// Pro 1.0 on macOS with a sample show using the site's public guest imagery.
 const PRO_STUDIO_IMAGE = {
   file: "pro-studio-1-0.webp",
-  width: 1600,
-  height: 900,
-  alt: "CoreVideo Pro Studio showing scene presets, the multiviewer, Take, and the recording and streaming controls",
+  width: 1920,
+  height: 1200,
+  alt: "CoreVideo Pro Studio with a host close-up in Preview and a six-person panel in Program",
 };
 
 // ZComms: the v0.1.14 panel rendered with a sample roster and channel state.
@@ -358,7 +358,7 @@ function proPageContent() {
     </div>
     <p class="product-utility"><a href="${PRO_ANNOUNCEMENT}">What&rsquo;s in 1.0</a><a href="${PRO_REPO}">GitHub repository</a></p>
   </div>
-  ${productScreenshot(PRO_STUDIO_IMAGE, "CoreVideo Pro 1.0 Studio on Windows")}
+  ${productScreenshot(PRO_STUDIO_IMAGE, "Studio on macOS showing Preview and Program in a sample show")}
 </section>
 <section class="link-grid" aria-label="CoreVideo Pro features">
   <div><strong>Individual Zoom sources</strong><span>Join by link and route each guest&rsquo;s video and audio separately. View the live roster and follow the active speaker as needed.</span></div>

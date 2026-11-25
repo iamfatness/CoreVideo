@@ -7,6 +7,18 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.52] - 2026-11-25
+
+### Fixed
+
+- Screen Share uses the Zoom engine's share-discovery state, even when the
+  presenter has no participant roster row. A slow static share can hold its
+  last frame between updates on Windows and macOS.
+- Update notices require a newer stable release with an installer or portable
+  package for the running platform.
+
+Windows includes the microphone selection and muted-join fixes from v0.1.51.
+
 ## [0.1.50] - 2026-11-14
 
 Full release for Windows and macOS (Apple Silicon). Screen share is the

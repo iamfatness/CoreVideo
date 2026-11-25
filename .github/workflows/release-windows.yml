@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release tag to publish, for example v0.1.5"
+        description: "Release tag to build, for example v0.1.5"
         required: true
         type: string
 
@@ -326,13 +326,30 @@ jobs:
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Publish GitHub Release
+      - name: Check whether release is public
+        id: existing_release
         if: env.COREVIDEO_HAS_ZOOM_RUNTIME == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          state="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>&1)" || {
+            if [[ "$state" != "release not found" ]]; then
+              printf '%s\n' "$state" >&2
+              exit 1
+            fi
+            state=true
+          }
+          echo "can_stage=$state" >> "$GITHUB_OUTPUT"
+
+      - name: Stage packages on draft release
+        if: env.COREVIDEO_HAS_ZOOM_RUNTIME == 'true' && steps.existing_release.outputs.can_stage == 'true'
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           tag_name: ${{ steps.release.outputs.tag }}
           name: ${{ steps.release.outputs.name }}
-          draft: false
+          draft: true
           prerelease: ${{ steps.release.outputs.prerelease }}
           generate_release_notes: true
           files: |

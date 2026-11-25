@@ -10,6 +10,7 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -308,6 +309,7 @@ public:
     uint32_t active_speaker_id() const;
     uint32_t raw_active_speaker_id() const;
     std::vector<ParticipantInfo> roster() const;
+    bool screen_share_available() const;
     std::vector<DebugEvent> recent_debug_events() const;
 
     void register_source(const std::string &source_uuid, SourceCallbacks callbacks);
@@ -457,6 +459,7 @@ private:
     std::atomic<uint64_t> m_last_rx_ms{0};
     uint32_t m_active_speaker_id = 0;
     std::vector<ParticipantInfo> m_roster;
+    std::optional<bool> m_share_activity;
     std::unordered_map<std::string, SourceCallbacks> m_sources;
     std::unordered_map<void *, RosterCallback> m_roster_callbacks;
     std::unordered_map<void *, ErrorCallback> m_error_callbacks;

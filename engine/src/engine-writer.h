@@ -52,4 +52,11 @@ inline bool write(const std::string &msg)
     return ipc_write_line(fd(), msg);
 }
 
+// Share discovery is independent of whether the presenter has a roster row.
+inline void write_share_activity(bool active)
+{
+    write(active ? R"({"cmd":"share_activity","active":true})"
+                 : R"({"cmd":"share_activity","active":false})");
+}
+
 } // namespace EngineIpc

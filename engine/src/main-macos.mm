@@ -1532,6 +1532,7 @@ static void share_unsubscribe_renderer_locked()
 static bool share_subscribe_to_locked(uint32_t share_source_id, const char *reason)
 {
     if (share_source_id == 0) return false;
+    EngineIpc::write_share_activity(true);
     if (g_share_renderer && g_share_source_id == share_source_id) return true;
 
     share_unsubscribe_renderer_locked();
@@ -1649,6 +1650,7 @@ static void share_subscribe_active_locked(const char *reason)
     // longer exists is exactly the state that crashed the SDK in live testing.
     share_unsubscribe_renderer_locked();
     g_active_share_user.store(0, std::memory_order_release);
+    EngineIpc::write_share_activity(false);
     EngineIpc::write(R"({"cmd":"debug","stage":"share_none_active","reason":")" +
                      std::string(reason ? reason : "unknown") + R"(","sharers":)" +
                      std::to_string(sharers.count) + "}");
@@ -1706,6 +1708,7 @@ static void share_teardown()
     for (auto &entry : g_share_targets) shm_region_destroy(entry.second.shm);
     g_share_targets.clear();
     g_active_share_user.store(0, std::memory_order_release);
+    EngineIpc::write_share_activity(false);
 }
 
 @interface CVShareDelegate : NSObject <ZoomSDKASControllerDelegate>

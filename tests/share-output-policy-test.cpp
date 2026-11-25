@@ -63,6 +63,18 @@ int main()
     check(!share_should_clear(true, 0, true, now - 60 * kSec, now),
           "a live (static) share must never be cleared");
 
+    // A live share can deliver about 1 fps while its presenter is absent
+    // from the participant roster. The engine's share state is authoritative.
+    check(!share_should_clear(share_is_available(true, false), now - 10 * kSec,
+                              true, now - 1020 * kMs, now),
+          "a live share with a missing roster row must keep its picture");
+    check(share_should_clear(share_is_available(false, true), now - 10 * kSec,
+                             true, now - 1020 * kMs, now),
+          "an ended share must clear even while an old roster lists its presenter");
+    check(share_is_available(std::nullopt, true) &&
+          !share_is_available(std::nullopt, false),
+          "older helpers still report share activity through the roster");
+
     // Nothing on screen, nothing to clear -- no redundant output every tick.
     check(!share_should_clear(false, now - 60 * kSec, false, 0, now),
           "an output showing nothing must not be cleared again");

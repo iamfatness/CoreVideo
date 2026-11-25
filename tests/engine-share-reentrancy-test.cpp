@@ -137,8 +137,10 @@ int main()
         step("register share source", [&] { share.subscribe("src_a", kIpcInvalidFd); });
 
         step("share begins (subscribe fires RawData_On re-entrantly)", [&] {
-            share.onSharingStatus(share_info(42, 7, Sharing_Other_Share_Begin));
+            share.onSharingStatus(share_info(0, 7, Sharing_Other_Share_Begin));
         });
+        check(count_lines(lines, R"({"cmd":"share_activity","active":true})") == 1,
+              "the engine knows the share is live even without a sharer user ID");
         check(g_created == 1, "share begin creates one renderer");
         check(count_lines(lines, R"("stage":"share_raw_status")") >= 1,
               "the re-entrant RawData_On reached the source");
@@ -154,9 +156,14 @@ int main()
         });
         check(g_created == 2, "re-notifying the live source does not re-subscribe");
 
+        const auto inactive_before_end =
+            count_lines(lines, R"({"cmd":"share_activity","active":false})");
         step("share ends", [&] {
             share.onSharingStatus(share_info(42, 8, Sharing_Other_Share_End));
         });
+        check(count_lines(lines, R"({"cmd":"share_activity","active":false})") ==
+                  inactive_before_end + 1,
+              "the engine confirms the end after finding no replacement share");
         check(g_destroyed == 2, "share end releases the renderer");
 
         step("share begins again", [&] {

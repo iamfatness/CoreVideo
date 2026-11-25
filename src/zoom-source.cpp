@@ -812,15 +812,8 @@ void ZoomSource::subscribe()
         return;
     }
     case AssignmentMode::ScreenShare: {
-        // Seed the roster's word on sharing now rather than at the next
-        // roster update, which a quiet meeting may not send for a while.
-        const auto roster = ZoomEngineClient::instance().roster();
-        note_share_roster(
-            std::any_of(roster.begin(), roster.end(),
-                        [](const ParticipantInfo &p) {
-                            return p.is_sharing_screen;
-                        }),
-            os_gettime_ns());
+        note_share_roster(ZoomEngineClient::instance().screen_share_available(),
+                          os_gettime_ns());
         release_video_shm();  // before the subscribe — see shm-resubscribe.h
         ZoomEngineClient::instance().subscribe_screenshare(source_uuid);
         m_current_subscription_id = 0xFFFFFFFFu;
@@ -1106,8 +1099,7 @@ bool ZoomSource::note_share_roster(bool sharing, uint64_t now_ns)
         m_share_roster_false_since_ns.store(0, std::memory_order_release);
         return !was;
     }
-    // Start the debounce on the edge, or on the first word we get (a source
-    // created mid-meeting with nobody sharing has no edge to see).
+    // Start the debounce when share discovery first reports no active share.
     uint64_t expected = 0;
     m_share_roster_false_since_ns.compare_exchange_strong(
         expected, now_ns, std::memory_order_acq_rel);
@@ -1189,9 +1181,7 @@ void ZoomSource::on_roster_changed()
     const auto roster = ZoomEngineClient::instance().roster();
     if (mode == AssignmentMode::ScreenShare) {
         const uint64_t now_ns = os_gettime_ns();
-        const bool sharing = std::any_of(
-            roster.begin(), roster.end(),
-            [](const ParticipantInfo &p) { return p.is_sharing_screen; });
+        const bool sharing = ZoomEngineClient::instance().screen_share_available();
         // Somebody is sharing again and this output is empty -- possibly
         // because a roster blip cleared a static slide that will not
         // re-deliver on its own. A resubscribe makes the engine rebuild an

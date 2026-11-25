@@ -1,6 +1,7 @@
 #include "zoom-engine-client.h"
 #include "zoom-settings.h"
 #include "speaker-director.h"
+#include "share-output-policy.h"
 #include "talkback-nomination-dispatch.h" // Task 5 fix round 2, N5
 #include "talkback-key.h"  // talkback_session_mic_blocked() -- Law 1
 #include "talkback-plan.h" // talkback_dedup_preserve_order() -- Task 5 fix round 1, F4
@@ -15,6 +16,7 @@
 #include <QJsonValue>
 #include <obs-module.h>
 #include <util/platform.h>
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <thread>
@@ -566,6 +568,7 @@ bool ZoomEngineClient::start(const std::string &jwt_token,
     // joined.
     {
         std::lock_guard<std::mutex> lk(m_mtx);
+        m_share_activity.reset();
         talkback_nomination_reset(m_talkback_nomination_status);
         m_talkback_nomination_pending = TalkbackNominationPending{};
         talkback_presence_reset(m_talkback_channel_presence);
@@ -684,6 +687,7 @@ void ZoomEngineClient::stop_for_reconnect()
     m_init_retry_waited_ms = 0;
     {
         std::lock_guard<std::mutex> lk(m_mtx);
+        m_share_activity.reset();
         m_init_payload.clear();
     }
     m_authenticated.store(false, std::memory_order_release);
@@ -1690,6 +1694,7 @@ void ZoomEngineClient::handle_event(const std::string &line)
         {
             std::lock_guard<std::mutex> lk(m_mtx);
             m_roster.clear();
+            m_share_activity.reset();
             m_active_speaker_id = 0;
             SpeakerDirector::instance().reset();
             // Task 5 fix round 1 (F2): the engine's own Leave path calls
@@ -1910,6 +1915,16 @@ void ZoomEngineClient::handle_event(const std::string &line)
         return;
     }
 
+    if (cmd == "share_activity") {
+        const QJsonValue active = obj.value(QStringLiteral("active"));
+        if (active.isBool()) {
+            update_roster_state_and_notify([this, active] {
+                m_share_activity = active.toBool();
+            });
+        }
+        return;
+    }
+
     if (cmd == "participants") {
         // Roster callbacks are dispatched by the helper with m_mtx released;
         // see update_roster_state_and_notify() for why that is mandatory.
@@ -2097,6 +2112,15 @@ std::vector<ParticipantInfo> ZoomEngineClient::roster() const
 {
     std::lock_guard<std::mutex> lk(m_mtx);
     return m_roster;
+}
+
+bool ZoomEngineClient::screen_share_available() const
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    return share_is_available(
+        m_share_activity,
+        std::any_of(m_roster.begin(), m_roster.end(),
+                    [](const ParticipantInfo &p) { return p.is_sharing_screen; }));
 }
 
 std::vector<ZoomEngineClient::DebugEvent>

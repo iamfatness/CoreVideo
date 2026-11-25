@@ -10,6 +10,7 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -51,6 +52,14 @@ int main() {
     client.m_running.store(true); // Invalid pipe drops writes; no launch needed.
     auto event = [&](const char *json) { client.handle_event(json); };
     auto fail = [&] { event(R"({"cmd":"error","msg":"video_subscribe_failed","source_uuid":"fixed","participant_id":42,"code":1})"); };
+    event(R"({"cmd":"participants","participants":[{"id":42,"name":"Panelist"}]})");
+    event(R"({"cmd":"share_activity","active":true})");
+    check(client.screen_share_available(), "a live share does not need a roster row");
+    event(R"({"cmd":"participants","participants":[{"id":42,"name":"Panelist"}]})");
+    check(client.screen_share_available(), "a later roster update cannot hide a live share");
+    event(R"({"cmd":"share_activity","active":false})");
+    event(R"({"cmd":"participants","participants":[{"id":42,"name":"Panelist","is_sharing_screen":true}]})");
+    check(!client.screen_share_available(), "stale roster flags cannot revive an ended share");
     event(R"({"cmd":"participants","participants":[{"id":42,"name":"Panelist"}]})");
     client.register_source("fixed", {});
     client.subscribe("fixed", 42, false);

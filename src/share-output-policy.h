@@ -25,27 +25,20 @@
 //    sharing. The engine drops its renderer and stops writing frames, and the
 //    last frame stayed frozen on program until somebody shared again.
 //
-// Rule 3's signal is the roster's is_sharing_screen flag, which both engines
-// push the moment the active sharer changes. It is deliberately NOT trusted
-// alone: frames and roster updates ride different dispatch lanes (media
-// events vs. the ordered control lane), and a sharer the engine could not
-// match to a participant row would read as "nobody sharing" while frames
-// flow. So a clear also requires that frames have stopped for
-// kShareEndGraceNs. A genuine share end stops frames instantly; a live share
-// that the roster has not caught up with keeps delivering them.
-//
-// The frame gap alone is not enough either (code review, 2026-11-14): a
-// static slide can go far longer than a second without a frame, so for a
-// static share the roster is the only thing standing between it and a blank
-// output -- and both engines zero the active sharer on any momentarily empty
-// viewable-share list. So "nobody sharing" must also have PERSISTED for
-// kShareRosterDebounceNs. And because a clear on a wrong roster would
-// otherwise be permanent for a static slide (nothing re-delivers its frame),
-// zoom-source.cpp resubscribes on the roster's false->true edge while the
-// output is empty; the engine then rebuilds the idle renderer, and a fresh
-// subscription re-delivers the current picture.
+// Rule 3 uses the engine's share discovery state. A live share can have
+// no corresponding participant row and may send frames less than once a
+// second on a still screen. Older engines report only the participant roster.
+// A no-share signal is debounced, and a recent frame delays the clear, so an
+// in-flight frame can finish and a newly discovered share can take over.
 
 #include <cstdint>
+#include <optional>
+
+inline bool share_is_available(std::optional<bool> engine_activity,
+                               bool roster_has_sharer)
+{
+    return engine_activity.value_or(roster_has_sharer);
+}
 
 // See rule 1. Comfortably above a ~1 fps static share, and the engine side
 // rebuilds an idle share renderer on the resubscribe this triggers (see
@@ -58,7 +51,7 @@ inline constexpr uint64_t kShareStaleVideoNs = 10'000'000'000ULL;
 // operator notices it.
 inline constexpr uint64_t kShareEndGraceNs = 1'000'000'000ULL;
 
-// See rule 3: how long the roster must keep saying "nobody sharing".
+// See rule 3: how long share discovery must keep saying "nobody sharing".
 inline constexpr uint64_t kShareRosterDebounceNs = 2'000'000'000ULL;
 
 inline uint64_t video_stale_threshold_ns(bool screen_share,
@@ -79,8 +72,8 @@ inline bool quality_upgrade_applies(bool screen_share)
     return !screen_share;
 }
 
-// See rule 3. `roster_false_since_ns` is when the roster last went from
-// showing a sharer to not (0 = unknown, which never clears); `showing_frame`
+// See rule 3. `roster_false_since_ns` is when share discovery last went
+// inactive (0 = unknown, which never clears); `showing_frame`
 // is whether the output currently has a picture on it (a real frame or a
 // placeholder); `last_frame_ns` is when the last real frame arrived, 0 if
 // none has.

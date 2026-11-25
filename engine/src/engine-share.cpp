@@ -91,6 +91,7 @@ void EngineShare::detach()
         m_share_ctrl = nullptr;
     }
     set_active_share_user(0);
+    EngineIpc::write_share_activity(false);
 }
 
 void EngineShare::set_raw_media_active(bool active)
@@ -283,6 +284,7 @@ void EngineShare::subscribe_active_share_locked(const char *reason)
     if (share_source_id == 0) {
         unsubscribe_renderer_locked();
         set_active_share_user(0);
+        EngineIpc::write_share_activity(false);
         EngineIpc::write(
             R"({"cmd":"debug","stage":"share_unavailable","reason":")" +
             std::string(reason ? reason : "unknown") + "\"}");
@@ -297,6 +299,7 @@ bool EngineShare::subscribe_to_locked(uint32_t share_source_id, const char *reas
 {
     if (share_source_id == 0)
         return false;
+    EngineIpc::write_share_activity(true);
     if (m_renderer.load() && m_current_share_source_id.load() == share_source_id)
         return true;
 

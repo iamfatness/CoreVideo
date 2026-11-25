@@ -74,3 +74,16 @@ inline bool cv_is_newer_version(const std::string &current_raw,
         return true;   // latest dropped the pre-release suffix - it's newer
     return latest.prerelease > current.prerelease;  // lexicographic fallback
 }
+
+enum class CvReleasePlatform { Windows, MacOS, Unsupported };
+
+inline bool cv_is_release_package(const std::string &tag, const std::string &name,
+                                  CvReleasePlatform platform)
+{
+    if (platform == CvReleasePlatform::Windows)
+        return name == "CoreVideo-Setup-" + tag + ".exe" ||
+               name == "CoreVideo-Windows-x64-" + tag + ".zip";
+    if (platform == CvReleasePlatform::MacOS)
+        return name == "CoreVideo-Setup-" + tag + ".pkg";
+    return false;
+}

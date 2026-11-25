@@ -6,7 +6,7 @@ class QNetworkAccessManager;
 
 // Privacy-respecting, opt-out-able update check against the public GitHub
 // Releases API. Design constraints (see docs/policies/privacy-policy.md):
-//   - Exactly one plain GET per OBS session, no query params, no identifiers.
+//   - At most one anonymous GET per OBS session, no install identifiers.
 //   - Never blocks the caller: the request is fully asynchronous.
 //   - Never auto-downloads anything; at most emits update_available() so the
 //     dock can show a dismissible CvBanner linking to the releases page.
@@ -30,7 +30,7 @@ public:
     // update, is still in flight, or failed).
     void check_once();
 
-    // True once a strictly newer release has been confirmed. Lets a dock
+    // True once a newer stable release with a platform package is found. Lets a dock
     // created after the response already arrived show the banner right
     // away instead of missing the one-shot signal below.
     bool has_known_update() const { return m_has_update; }

@@ -59,6 +59,26 @@ int main()
     expect("empty current vs valid latest is newer",
            cv_is_newer_version("", "v0.0.1"));
 
+    expect("Windows installer matches Windows",
+           cv_is_release_package("v0.1.51", "CoreVideo-Setup-v0.1.51.exe",
+                                 CvReleasePlatform::Windows));
+    expect("Windows-only release does not match macOS",
+           !cv_is_release_package("v0.1.51", "CoreVideo-Setup-v0.1.51.exe",
+                                  CvReleasePlatform::MacOS));
+    expect("macOS package matches macOS",
+           cv_is_release_package("v0.1.50", "CoreVideo-Setup-v0.1.50.pkg",
+                                 CvReleasePlatform::MacOS));
+    expect("Windows portable ZIP matches Windows",
+           cv_is_release_package("v0.1.51", "CoreVideo-Windows-x64-v0.1.51.zip",
+                                 CvReleasePlatform::Windows));
+    expect("withdrawn packages, checksums and mismatched versions do not match",
+           !cv_is_release_package("v0.1.51", "CoreVideo-Setup-v0.1.51.exe.withdrawn",
+                                  CvReleasePlatform::Windows) &&
+           !cv_is_release_package("v0.1.51", "CoreVideo-Setup-v0.1.51.pkg.sha256",
+                                  CvReleasePlatform::MacOS) &&
+           !cv_is_release_package("v0.1.51", "CoreVideo-Setup-v0.1.50.pkg",
+                                  CvReleasePlatform::MacOS));
+
     if (g_failures > 0) {
         std::cerr << g_failures << " version-compare test(s) failed\n";
         return 1;

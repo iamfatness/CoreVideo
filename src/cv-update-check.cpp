@@ -2,6 +2,7 @@
 #include "cv-version-compare.h"
 #include "obs-zoom-version.h"
 
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
@@ -12,9 +13,14 @@
 
 namespace {
 constexpr const char *kReleasesApiUrl =
-    "https://api.github.com/repos/iamfatness/CoreVideo/releases/latest";
-constexpr const char *kReleasesPageUrl =
-    "https://github.com/iamfatness/CoreVideo/releases/latest";
+    "https://api.github.com/repos/iamfatness/CoreVideo/releases?per_page=100";
+#if defined(Q_OS_WIN) && (defined(Q_PROCESSOR_X86_64) || defined(Q_PROCESSOR_ARM_64))
+constexpr auto kReleasePlatform = CvReleasePlatform::Windows;
+#elif defined(Q_OS_MACOS) && defined(Q_PROCESSOR_ARM_64)
+constexpr auto kReleasePlatform = CvReleasePlatform::MacOS;
+#else
+constexpr auto kReleasePlatform = CvReleasePlatform::Unsupported;
+#endif
 }
 
 CvUpdateChecker &CvUpdateChecker::instance()
@@ -27,7 +33,7 @@ CvUpdateChecker::CvUpdateChecker(QObject *parent) : QObject(parent) {}
 
 void CvUpdateChecker::check_once()
 {
-    if (m_started)
+    if (m_started || kReleasePlatform == CvReleasePlatform::Unsupported)
         return;
     m_started = true;
 
@@ -63,23 +69,39 @@ void CvUpdateChecker::on_reply_finished()
     const QByteArray body = reply->readAll();
     QJsonParseError parse_error{};
     const QJsonDocument doc = QJsonDocument::fromJson(body, &parse_error);
-    if (parse_error.error != QJsonParseError::NoError || !doc.isObject())
+    if (parse_error.error != QJsonParseError::NoError || !doc.isArray())
         return;
 
-    const QJsonObject obj = doc.object();
-    const QString tag = obj.value(QStringLiteral("tag_name")).toString();
-    if (tag.isEmpty())
-        return;
+    std::string newest_version = OBS_ZOOM_PLUGIN_VERSION;
+    for (const auto &entry : doc.array()) {
+        const QJsonObject release = entry.toObject();
+        if (release.value(QStringLiteral("draft")).toBool(true) ||
+            release.value(QStringLiteral("prerelease")).toBool(true))
+            continue;
 
-    if (!cv_is_newer_version(OBS_ZOOM_PLUGIN_VERSION, tag.toStdString()))
-        return;
+        const QString tag = release.value(QStringLiteral("tag_name")).toString();
+        const std::string version = tag.toStdString();
+        const QString html_url = release.value(QStringLiteral("html_url")).toString();
+        if (html_url.isEmpty() || !cv_is_newer_version(newest_version, version))
+            continue;
 
-    QString html_url = obj.value(QStringLiteral("html_url")).toString();
-    if (html_url.isEmpty())
-        html_url = QString::fromLatin1(kReleasesPageUrl);
+        for (const auto &entry_asset : release.value(QStringLiteral("assets")).toArray()) {
+            const QJsonObject asset = entry_asset.toObject();
+            if (asset.value(QStringLiteral("state")).toString() != QStringLiteral("uploaded") ||
+                asset.value(QStringLiteral("browser_download_url")).toString().isEmpty() ||
+                !cv_is_release_package(version, asset.value(QStringLiteral("name")).toString().toStdString(),
+                                       kReleasePlatform))
+                continue;
 
-    m_has_update = true;
-    m_update_tag = tag;
-    m_update_url = html_url;
-    emit update_available(tag, html_url);
+            newest_version = version;
+            m_update_tag = tag;
+            m_update_url = html_url;
+            break;
+        }
+    }
+
+    if (!m_update_tag.isEmpty()) {
+        m_has_update = true;
+        emit update_available(m_update_tag, m_update_url);
+    }
 }

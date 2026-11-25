@@ -343,8 +343,7 @@ ZoomPluginSettings ZoomPluginSettings::load()
     s.oauth_authorization_url = embedded_oauth_authorization_url
         ? kEmbeddedOAuthAuthorizationUrl
         : (oauth_authorization_url ? oauth_authorization_url : "");
-    if (oauth_redirect_uri && *oauth_redirect_uri)
-        s.oauth_redirect_uri = oauth_redirect_uri;
+    s.oauth_redirect_uri = obs_oauth_return_uri(oauth_redirect_uri ? oauth_redirect_uri : "");
     if (oauth_scopes && *oauth_scopes)
         s.oauth_scopes = oauth_scopes;
     s.oauth_access_token = unprotect_secret(

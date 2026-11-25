@@ -7,6 +7,14 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.53] - 2026-11-25
+
+### Fixed
+
+- Zoom sign-in returns to the OBS plugin when CoreVideo Pro is also installed.
+  The OBS callback uses its own URL scheme on Windows and macOS, including
+  for installs upgrading with the previous callback saved in OBS settings.
+
 ## [0.1.52] - 2026-11-25
 
 ### Fixed

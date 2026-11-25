@@ -1,3 +1,4 @@
+#include "obs-oauth-return-uri.h"
 // Unit test for the centralized Zoom join decision path (issue #89).
 // Verifies the decision state machine and the error catalog without touching
 // Qt, OBS, the Zoom SDK, or any real secret.
@@ -154,6 +155,15 @@ int main()
         JoinDecisionPlan p = plan_join(in);
         check(p.blocking_error == ZoomJoinError::ExpiredToken, "expired: expired_token error");
     }
+
+    check(obs_oauth_return_uri("") == "corevideo-obs://oauth/callback",
+          "unset OBS callback uses the OBS-specific scheme");
+    check(obs_oauth_return_uri("corevideo://oauth/callback") ==
+              "corevideo-obs://oauth/callback",
+          "saved OBS callback migrates off the Pro scheme");
+    check(obs_oauth_return_uri("https://dev.example/oauth/callback") ==
+              "https://dev.example/oauth/callback",
+          "explicit development override is preserved");
 
     // ── Broker URL detection ─────────────────────────────────────────────────
     check(is_broker_authorization_url("https://corevideo.iamfatness.us/oauth/start"),

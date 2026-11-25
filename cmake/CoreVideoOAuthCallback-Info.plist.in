@@ -26,7 +26,7 @@
       <string>CoreVideo OAuth Callback</string>
       <key>CFBundleURLSchemes</key>
       <array>
-        <string>corevideo</string>
+        <string>corevideo-obs</string>
       </array>
     </dict>
   </array>

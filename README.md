@@ -78,7 +78,7 @@ disconnects.
 - **Output profiles** - save and load named participant-to-source mappings as JSON files
 - **Output manager dock** - dockable OBS panel and API for viewing and reconfiguring all sources at runtime, including active speaker, screen-share, and Spotlight 1-8 assignments with roster markers
 - **Public Client Meeting SDK authentication** - published builds pass the Marketplace Public Client ID as `AuthContext.publicAppKey`; no Meeting SDK secret is shipped in the desktop app
-- **Zoom OAuth PKCE** - user-level OAuth 2.0 with PKCE (public client, no desktop secret) for attributed joins and Marketplace compliance; the broker start URL is baked in at build time; `corevideo://` custom URL scheme with platform callback helpers (`CoreVideoOAuthCallback.exe` / `.app`); DPAPI token protection on Windows (plaintext with a logged warning elsewhere - see [Security](#security))
+- **Zoom OAuth PKCE** - user-level OAuth 2.0 with PKCE (public client, no desktop secret) for attributed joins and Marketplace compliance; the broker start URL is baked in at build time; `corevideo-obs://` custom URL scheme with platform callback helpers (`CoreVideoOAuthCallback.exe` / `.app`); DPAPI token protection on Windows (plaintext with a logged warning elsewhere - see [Security](#security))
 - **Visible Zoom Meeting SDK window** - the helper process uses Zoom's default Meeting SDK UI so operators can admit waiting-room participants, start self video/audio, and use normal in-meeting controls while OBS receives raw feeds
 - **SDK 5.17.x and 7.x** - auto-detects flat and subfolder header layouts
 - **Hardened security** - constant-time token comparison, validated IPC input, sanitised participant IDs, SIGPIPE handling
@@ -339,9 +339,9 @@ cmake -B build \
 These values are compiled into the plugin and used for every install of that build. There is no UI for entering production credentials, and embedded values override stale `global.ini` entries. Current production builds use the Public Client ID for OAuth and pass the same value to the Meeting SDK as `AuthContext.publicAppKey`.
 
 ### Flow
-1. In **Tools -> Zoom Plugin Settings**, click **Authorize with Zoom** (no IDs to enter). The plugin registers the `corevideo://` URL scheme automatically on first use.
+1. In **Tools -> Zoom Plugin Settings**, click **Authorize with Zoom** (no IDs to enter). The plugin registers the `corevideo-obs://` URL scheme automatically on first use.
 2. The browser opens at `https://corevideo.iamfatness.us/oauth/start`; the broker generates the PKCE verifier/challenge and redirects to Zoom.
-3. Zoom redirects to `https://corevideo.iamfatness.us/oauth/callback`; the broker returns a short-lived broker token to `corevideo://oauth/callback`.
+3. Zoom redirects to `https://corevideo.iamfatness.us/oauth/callback`; the broker returns a short-lived broker token to `corevideo-obs://oauth/callback`.
 4. `CoreVideoOAuthCallback.exe` (Windows) or `CoreVideoOAuthCallback.app` (macOS) forwards the URL to the plugin via the TCP control server (`oauth_callback` command).
 5. The plugin verifies state, redeems the broker token over HTTPS, and persists access + refresh tokens. On Windows, tokens are DPAPI-protected before storage; on macOS/Linux they are currently stored in plaintext with a logged warning (see [Security](#security)).
 6. Before each meeting join, CoreVideo refreshes the token if needed and fetches the signed-in user's ZAK. The Zoom helper process initializes the SDK with `AuthContext.publicAppKey` set to the embedded Public Client ID and `AuthContext.jwt_token` set to null, then joins with the ZAK.
@@ -368,7 +368,7 @@ echo '{"cmd":"assign_output","source":"Zoom Participant 1","participant_id":123,
 echo '{"cmd":"assign_output","source":"Zoom Participant 1","participant_id":123,"audio_delay_ms":80}' | nc 127.0.0.1 19870
 
 # Forward OAuth callback URL from custom scheme helper
-echo '{"cmd":"oauth_callback","url":"corevideo://oauth/callback?broker_token=...&state=..."}' | nc 127.0.0.1 19870
+echo '{"cmd":"oauth_callback","url":"corevideo-obs://oauth/callback?broker_token=...&state=..."}' | nc 127.0.0.1 19870
 ```
 
 Commands: `help`, `status`, `list_participants`, `list_outputs`, `list_audio_sources`, `assign_output`, `assign_output_ex`, `recover_stale_outputs`, `upgrade_low_quality_outputs`, `join`, `leave`, `oauth_callback`, `iso_recording_start`, `iso_recording_stop`, `iso_recording_status`, `speaker_director_status`, `speaker_director_configure`, `speaker_director_take`, `speaker_director_release`.
@@ -584,9 +584,9 @@ ZoomObsEngine  (separate child process - owns ALL Zoom SDK access)
     `-- Named shared memory (ZoomObsPlugin_<uuid>) for I420 video + PCM audio frames
 
 CoreVideoOAuthCallback  (thin helper binary - ships beside the plugin)
-|-- Windows: CoreVideoOAuthCallback.exe - intercepts corevideo:// URI via registry;
+|-- Windows: CoreVideoOAuthCallback.exe - intercepts corevideo-obs:// URI via registry;
 |            reads control-server port from OBS global config; POSTs oauth_callback command
-`-- macOS:   CoreVideoOAuthCallback.app - registered with Launch Services for corevideo://;
+`-- macOS:   CoreVideoOAuthCallback.app - registered with Launch Services for corevideo-obs://;
              same forwarding behaviour
 ```
 

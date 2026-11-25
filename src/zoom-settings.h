@@ -1,5 +1,6 @@
 #pragma once
 #include "hw-video-pipeline.h"
+#include "obs-oauth-return-uri.h"
 #include "zoom-reconnect.h"
 #include <cstdint>
 #include <string>
@@ -14,7 +15,7 @@ struct ZoomPluginSettings {
     std::string         oauth_client_id;
     // Optional global.ini override for the Zoom authorization URL (dev/staging).
     std::string         oauth_authorization_url;
-    std::string         oauth_redirect_uri = "corevideo://oauth/callback";
+    std::string         oauth_redirect_uri = kObsOAuthReturnUri;
     std::string         oauth_scopes = "user:read:zak user:read:user user:read:token";
     std::string         oauth_access_token;
     std::string         oauth_refresh_token;

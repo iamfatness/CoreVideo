@@ -70,20 +70,20 @@ local config cannot change the published app identity. Developers can still use
    app in the browser. There are no Client ID, Client Secret, or Authorization
    URL fields to configure; the build already knows the broker URL.
 4. The callback helper (`CoreVideoOAuthCallback.exe` on Windows,
-   `CoreVideoOAuthCallback.app` on macOS) is registered for the `corevideo://`
+   `CoreVideoOAuthCallback.app` on macOS) is registered for the `corevideo-obs://`
    URL scheme the first time you click Sign in and forwards the redirect to the
    running plugin on `127.0.0.1:<ControlServerPort>` (default `19870`).
 
 ## Runtime flow
 
 1. CoreVideo opens the system browser at the embedded broker start URL with a
-   local `state` and `return_uri=corevideo://oauth/callback`.
+   local `state` and `return_uri=corevideo-obs://oauth/callback`.
 2. The broker generates a PKCE verifier/challenge and redirects to
    `https://marketplace.zoom.us/v2/authorize` with
    `redirect_uri=https://corevideo.iamfatness.us/oauth/callback`.
 3. Zoom redirects back to the broker.
 4. The broker returns an encrypted, short-lived broker token containing the
-   authorization code to `corevideo://oauth/callback`.
+   authorization code to `corevideo-obs://oauth/callback`.
 5. The callback helper forwards that URL to the running plugin. The plugin
    verifies `state`, redeems the broker token over HTTPS, and the broker
    exchanges the code for access/refresh tokens using Public Client OAuth:

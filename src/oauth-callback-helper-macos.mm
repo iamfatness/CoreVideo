@@ -128,7 +128,7 @@ int main(int argc, char **argv)
 
         for (int i = 1; i < argc; ++i) {
             NSString *arg = [NSString stringWithUTF8String:argv[i]];
-            if ([arg hasPrefix:@"corevideo://"]) {
+            if ([arg hasPrefix:@"corevideo-obs://"]) {
                 forward_url([NSURL URLWithString:arg]);
                 return 0;
             }

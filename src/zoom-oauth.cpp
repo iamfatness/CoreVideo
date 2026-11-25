@@ -115,7 +115,7 @@ bool ZoomOAuthManager::begin_authorization(QWidget *parent, QString *error)
     // cppcheck-suppress knownConditionTrueFalse
     if (!registered_callback) {
         if (error) {
-            *error = "Could not register the corevideo:// OAuth callback URL. " +
+            *error = "Could not register the corevideo-obs:// OAuth callback URL. " +
                      registration_error;
         }
         return false;
@@ -667,7 +667,7 @@ bool ZoomOAuthManager::register_url_scheme(QString *error)
         return false;
     }
 
-    QSettings root("HKEY_CURRENT_USER\\Software\\Classes\\corevideo",
+    QSettings root("HKEY_CURRENT_USER\\Software\\Classes\\corevideo-obs",
                    QSettings::NativeFormat);
     root.setValue(".", "URL:CoreVideo OAuth Callback");
     root.setValue("URL Protocol", "");
@@ -675,7 +675,7 @@ bool ZoomOAuthManager::register_url_scheme(QString *error)
                   QString("\"%1\" \"%2\"").arg(QDir::toNativeSeparators(helper), "%1"));
     root.sync();
     if (root.status() != QSettings::NoError) {
-        if (error) *error = "Could not write the corevideo:// URL registration.";
+        if (error) *error = "Could not write the corevideo-obs:// URL registration.";
         return false;
     }
     return true;
@@ -714,7 +714,7 @@ bool ZoomOAuthManager::register_url_scheme(QString *error)
 #endif
     CFRelease(app_url);
     if (status != noErr) {
-        if (error) *error = QString("Could not register corevideo:// URL scheme (%1).")
+        if (error) *error = QString("Could not register corevideo-obs:// URL scheme (%1).")
             .arg(static_cast<int>(status));
         return false;
     }
@@ -722,7 +722,7 @@ bool ZoomOAuthManager::register_url_scheme(QString *error)
 #else
     if (error) {
         *error = "Automatic custom URL scheme registration is currently implemented "
-                 "for Windows and macOS. Register corevideo://oauth/callback with your OS and "
+                 "for Windows and macOS. Register corevideo-obs://oauth/callback with your OS and "
                  "forward the URL to the plugin oauth_callback control command.";
     }
     return false;

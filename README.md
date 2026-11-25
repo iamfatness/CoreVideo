@@ -21,7 +21,12 @@ Guide: **[Core Plugin Guide & Examples ->](https://corevideo.io/core-plugin/)**
 Operator Quickstart: **[Install, sign in, assign outputs, record ISO ->](docs/OPERATOR_QUICKSTART.md)**
 Changelog: **[Release notes & version history ->](CHANGELOG.md)**
 
-### How it works
+## Related products
+
+- [CoreVideo Edge](https://corevideo.io/edge/) routes and records additional Zoom guests on a separate Windows machine and can send their feeds to CoreVideo Pro.
+- [Volt](https://corevideo.io/volt/) brings the show rundown, media library, clip cues, and publishing into one session.
+
+## How it works
 
 The SDK runs in a dedicated `ZoomObsEngine` child process; the OBS plugin
 communicates with it through a `ZoomEngineClient` singleton over cross-platform

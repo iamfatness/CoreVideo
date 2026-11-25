@@ -16,6 +16,11 @@ the two.
 | **Plugin guide** (sources, assignment, talkback, ISO recording, control APIs) | https://corevideo.io/core-plugin/ |
 | **Downloads** | https://corevideo.io/download/ |
 
+## Related products
+
+- [CoreVideo Edge](https://corevideo.io/edge/) routes and records additional Zoom guests on a separate Windows machine and can send their feeds to CoreVideo Pro.
+- [Volt](https://corevideo.io/volt/) brings the show rundown, media library, clip cues, and publishing into one session.
+
 ---
 
 ## Pages here

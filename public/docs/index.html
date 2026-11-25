@@ -2,6 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <script src="/assets/google-tag-manager.js"></script>
+  <script async src="https://www.googletagmanager.com/gtm.js?id=GTM-PSHZHBGZ"></script>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CoreVideo — OBS Plugin for Live Zoom Video</title>
   <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
@@ -78,6 +80,7 @@
       background: rgba(34,200,110,.1); border: 1px solid rgba(34,200,110,.28); border-radius: 4px; padding: 1px 6px;
       font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
       font-size: 0.85em; color: #a7f0c8;
+      overflow-wrap: anywhere;
     }
     pre {
       background: #0e1112; border: 1px solid var(--border); border-radius: 8px;
@@ -112,7 +115,8 @@
     }
     .card:hover { border-color: var(--accent); transform: translateY(-2px); }
     .card-icon { font-size: 1.5rem; margin-bottom: 8px; }
-    .card h4 { margin: 0 0 6px; font-size: 0.9rem; }
+    /* h3 for document order (h2 > h3); sized and coloured as the h4 they replaced. */
+    .card h3 { margin: 0 0 6px; font-size: 0.9rem; font-weight: 600; color: var(--text); }
     .card p { font-size: 0.8rem; color: var(--muted); margin: 0; }
 
     .diagram-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -145,7 +149,11 @@
       display: flex; align-items: center; justify-content: center;
       font-size: 0.8rem; font-weight: 700; flex-shrink: 0; margin-top: 2px;
     }
-    .step-body h4 { margin-top: 0; color: var(--text); }
+    /* A flex child defaults to min-width:auto, so a wide pre, table or diagram
+       inside a step stretched the step and the whole page (1652 px wide on a
+       375 px phone). min-width:0 lets those blocks scroll inside themselves. */
+    .step-body { flex: 1 1 auto; min-width: 0; }
+    .step-body h3 { margin: 0 0 8px; font-size: 0.95rem; font-weight: 600; color: var(--text); }
 
     section { scroll-margin-top: 24px; }
 
@@ -162,6 +170,7 @@
       .site-topbar { flex-direction: column; align-items: flex-start; gap: 10px; }
       .site-topbar .topnav { justify-content: flex-start; }
       main > footer { margin-left: 0 !important; }
+      table { display: block; overflow-x: auto; }
     }
   </style>
   <link rel="canonical" href="https://corevideo.io/documentation/">
@@ -181,6 +190,7 @@
   <meta name="twitter:description" content="How the CoreVideo OBS plugin works: the Zoom Meeting SDK engine process, IPC and shared-memory frame transport, source types, active-speaker direction, and setup.">
   <meta name="twitter:image" content="https://corevideo.io/assets/corevideo-share.jpg">
   <meta name="twitter:image:alt" content="CoreVideo - Zoom participant video and audio as native OBS Studio sources">
+  <script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "606f185a54e7489bb11a93235343469b"}'></script>
 </head>
 <body>
 
@@ -189,6 +199,7 @@
   <nav class="topnav">
     <a href="/">Home</a>
     <a href="/pro/">CoreVideo Pro</a>
+    <a href="/zcomms/">ZComms</a>
     <a href="/pro/documentation/">Pro Docs</a>
     <a href="/documentation/" aria-current="page">Plugin Docs</a>
     <a href="/core-plugin/">Core Plugin</a>
@@ -250,10 +261,10 @@
       and TCP/OSC control APIs for full broadcast automation.
     </p>
     <div class="callout warning" style="margin-top:18px;">
-      <div class="callout-title">🧪 Beta status</div>
-      CoreVideo is in <strong>public beta</strong>. Packaged builds are available for
+      <div class="callout-title">Install CoreVideo</div>
+      Packaged builds are available for
       <strong>Windows x64</strong> (installer or ZIP) and
-      <strong>macOS Apple Silicon</strong> (signed beta installer). Linux requires a source build
+      <strong>macOS Apple Silicon</strong> (signed and notarized installer). Linux requires a source build
       (<a href="#mac-beta">details</a>) — see
       <a href="https://github.com/iamfatness/CoreVideo/blob/main/docs/ROADMAP.md">the Roadmap</a> for known limitations and what's
       planned next. To report a problem, use
@@ -271,16 +282,15 @@
       100 Mbps. Plan around 4-6 Mbps per standard 1080p feed.
     </div>
     <div class="hero-badges" style="margin-top:16px;">
-      <span class="badge orange">Public beta</span>
       <span class="badge green">Free</span>
-      <span class="badge green">OBS Studio 30+</span>
+      <span class="badge green">OBS Studio 32.2.x</span>
       <span class="badge orange">Windows installer</span>
       <span class="badge purple">Sign in with Zoom</span>
       <span class="badge blue">OAuth 2.0 PKCE</span>
     </div>
     <div style="margin-top:18px;">
       <a href="https://corevideo.io/download" style="display:inline-block;background:var(--accent);color:#06170d;font-weight:700;padding:11px 20px;border-radius:8px;text-decoration:none;">Download for Windows</a>
-      &nbsp;<a href="#mac-beta" style="display:inline-block;padding:11px 18px;border:1px solid var(--border);border-radius:8px;text-decoration:none;">macOS beta installer</a>
+      &nbsp;<a href="#mac-beta" style="display:inline-block;padding:11px 18px;border:1px solid var(--border);border-radius:8px;text-decoration:none;">macOS installer</a>
       &nbsp;<a href="#adding" style="display:inline-block;padding:11px 18px;border:1px solid var(--border);border-radius:8px;text-decoration:none;">How to install</a>
     </div>
   </div>
@@ -317,7 +327,7 @@
       For Zoom App Marketplace compliance and attributed joins, <strong>ZoomOAuthManager</strong>
       uses the CoreVideo HTTPS broker to run Zoom Public Client OAuth with PKCE
       and receive a short-lived broker token through the bundled
-      <code>corevideo://oauth/callback</code> helper. Before each join, the plugin
+      <code>corevideo-obs://oauth/callback</code> helper. Before each join, the plugin
       refreshes OAuth tokens through the broker when needed, fetches the
       signed-in user's ZAK, and starts the Meeting SDK helper with the embedded
       Marketplace Public Client ID as <code>AuthContext.publicAppKey</code>.
@@ -330,54 +340,54 @@
   <section id="features">
     <h2>Features</h2>
     <div class="card-grid">
-      <div class="card"><div class="card-icon">🎥</div><h4>Raw Video Capture</h4>
+      <div class="card"><div class="card-icon">🎥</div><h3>Raw Video Capture</h3>
         <p>I420 YUV per participant. Selectable 360p / 720p / 1080p resolution. Hardware-accelerated color conversion (CUDA, VAAPI, VideoToolbox, QSV).</p></div>
-      <div class="card"><div class="card-icon">⬛</div><h4>Video Loss &amp; Placeholder</h4>
+      <div class="card"><div class="card-icon">⬛</div><h3>Video Loss &amp; Placeholder</h3>
         <p>Hold last frame or show black on feed drop. Shows a color-bar placeholder when not yet subscribed.</p></div>
-      <div class="card"><div class="card-icon">🎙️</div><h4>Raw Audio Capture</h4>
+      <div class="card"><div class="card-icon">🎙️</div><h3>Raw Audio Capture</h3>
         <p>48 kHz PCM, mono or stereo, with per-participant audio isolation and mixer routing.</p></div>
-      <div class="card"><div class="card-icon">🌐</div><h4>Interpretation Audio Capture</h4>
+      <div class="card"><div class="card-icon">🌐</div><h3>Interpretation Audio Capture</h3>
         <p>Dedicated OBS source for existing Zoom interpretation audio channels in the meeting.</p></div>
-      <div class="card"><div class="card-icon">🖥️</div><h4>Screen Share Capture</h4>
+      <div class="card"><div class="card-icon">🖥️</div><h3>Screen Share Capture</h3>
         <p>Source type that follows active screen-share feed via <code>ScreenShare</code> assignment mode.</p></div>
-      <div class="card"><div class="card-icon">🎯</div><h4>Spotlight / ZoomISO Modes</h4>
+      <div class="card"><div class="card-icon">🎯</div><h3>Spotlight / ZoomISO Modes</h3>
         <p>Assign a source to Spotlight 1-8, exactly like ZoomISO. Engine resolves which participant owns each slot.</p></div>
-      <div class="card"><div class="card-icon">🔄</div><h4>Active Speaker Mode</h4>
+      <div class="card"><div class="card-icon">🔄</div><h3>Active Speaker Mode</h3>
         <p>Sensitivity (ms) + hold-time (ms) debounce with liveness guard, supersede logic, and failover participant.</p></div>
-      <div class="card"><div class="card-icon">🔁</div><h4>Failover Participant</h4>
+      <div class="card"><div class="card-icon">🔁</div><h3>Failover Participant</h3>
         <p>Configure a secondary participant ID that activates automatically when the primary leaves the meeting.</p></div>
-      <div class="card"><div class="card-icon">🔌</div><h4>Auto-Reconnect</h4>
+      <div class="card"><div class="card-icon">🔌</div><h3>Auto-Reconnect</h3>
         <p>Automatic re-join after engine crash, network drop, or disconnection — exponential back-off with cancel UI.</p></div>
-      <div class="card"><div class="card-icon">🎬</div><h4>Webinar Support</h4>
+      <div class="card"><div class="card-icon">🎬</div><h3>Webinar Support</h3>
         <p>Join Zoom Webinars using the dedicated SDK entry point — set the Webinar checkbox in the control dock.</p></div>
-      <div class="card"><div class="card-icon">👥</div><h4>Rich Participant Roster</h4>
+      <div class="card"><div class="card-icon">👥</div><h3>Rich Participant Roster</h3>
         <p>Live list with video, mute, talking, host, co-host, raised hand, spotlight slot, and screen-sharing state.</p></div>
-      <div class="card"><div class="card-icon">🔊</div><h4>Per-Participant Audio</h4>
+      <div class="card"><div class="card-icon">🔊</div><h3>Per-Participant Audio</h3>
         <p>Standalone OBS audio source per meeting participant; audio mixed into OBS audio mixer.</p></div>
-      <div class="card"><div class="card-icon">🎛️</div><h4>Control Dock</h4>
+      <div class="card"><div class="card-icon">🎛️</div><h3>Control Dock</h3>
         <p>Dockable Qt panel with join/leave, state indicator, Active Speaker Director controls, recovery countdown, and Output Manager launch.</p></div>
-      <div class="card"><div class="card-icon">DIAG</div><h4>Diagnostics</h4>
+      <div class="card"><div class="card-icon">DIAG</div><h3>Diagnostics</h3>
         <p>The dockable Zoom Diagnostics panel shows requested versus observed resolution, FPS, frame age, retry counters, recent engine debug events, ISO/FFmpeg recorder status, and redacted support bundle export.</p></div>
-      <div class="card"><div class="card-icon">OUT</div><h4>Dockable Output Manager</h4>
+      <div class="card"><div class="card-icon">OUT</div><h3>Dockable Output Manager</h3>
         <p>Zoom Output Manager is now a persistent OBS dock for source assignments, live preview thumbnails, feed health, profile save/load, and manual recovery actions.</p></div>
-      <div class="card"><div class="card-icon">🌐</div><h4>TCP Control API</h4>
+      <div class="card"><div class="card-icon">🌐</div><h3>TCP Control API</h3>
         <p>JSON server on port 19870 — query, join, leave, assign outputs from scripts or dashboards.</p></div>
-      <div class="card"><div class="card-icon">🎛️</div><h4>OSC Control API</h4>
+      <div class="card"><div class="card-icon">🎛️</div><h3>OSC Control API</h3>
         <p>UDP OSC server on port 19871 for lighting consoles and broadcast hardware.</p></div>
-      <div class="card"><div class="card-icon">💾</div><h4>Output Profiles</h4>
+      <div class="card"><div class="card-icon">💾</div><h3>Output Profiles</h3>
         <p>Save and load named participant-to-source mappings as JSON files.</p></div>
-      <div class="card"><div class="card-icon">⌨️</div><h4>OBS Hotkeys</h4>
+      <div class="card"><div class="card-icon">⌨️</div><h3>OBS Hotkeys</h3>
         <p>Per-source hotkeys to enable/disable active speaker mode from OBS keyboard shortcuts.</p></div>
-      <div class="card"><div class="card-icon">🔒</div><h4>Hardened Security</h4>
+      <div class="card"><div class="card-icon">🔒</div><h3>Hardened Security</h3>
         <p>Constant-time token comparison, validated IPC input, sanitised participant IDs, SIGPIPE handling, DPAPI token storage (Windows).</p></div>
-      <div class="card"><div class="card-icon">🔑</div><h4>Zoom OAuth PKCE</h4>
+      <div class="card"><div class="card-icon">🔑</div><h3>Zoom OAuth PKCE</h3>
         <p>Broker-backed OAuth 2.0 with S256 PKCE for attributed joins and Marketplace compliance. Meeting SDK auth uses the embedded Marketplace Public Client ID as publicAppKey. Custom URL scheme with platform callback helpers.</p></div>
-      <div class="card"><div class="card-icon">🎨</div><h4>Modern UI</h4>
+      <div class="card"><div class="card-icon">🎨</div><h3>Modern UI</h3>
         <p>CoreVideo dark stylesheet with animated <code>CvStatusDot</code>, <code>CvBanner</code> first-run notices, and button role variants (primary / danger).</p></div>
-      <div class="card"><div class="card-icon">ISO</div><h4>Auto ISO Recording</h4>
+      <div class="card"><div class="card-icon">ISO</div><h3>Auto ISO Recording</h3>
         <p>Record assigned participant video/audio tracks to separate files while optionally recording the main OBS program output.</p></div>
-      <div class="card"><div class="card-icon">💻</div><h4>Multi-Platform</h4>
-        <p>Windows has a release installer; macOS has a signed <a href="#mac-beta">Apple Silicon beta installer</a>. Linux requires a source build.</p></div>
+      <div class="card"><div class="card-icon">💻</div><h3>Multi-Platform</h3>
+        <p>Windows has a release installer; macOS has a signed <a href="#mac-beta">Apple Silicon installer</a>. Linux requires a source build.</p></div>
     </div>
   </section>
 
@@ -390,27 +400,27 @@
     </p>
     <div class="steps">
       <div class="step"><div class="step-body">
-        <h4>1. Download CoreVideo</h4>
+        <h3>1. Download CoreVideo</h3>
         <p>Go to <a href="https://corevideo.io/download">corevideo.io/download</a> and get the
-        latest Windows installer (<code>CoreVideo-Setup.exe</code>). Every release also publishes a
+        latest Windows installer (<code>CoreVideo-Setup-vX.Y.Z.exe</code>). Every release also publishes a
         matching <code>.sha256</code> checksum you can verify.</p>
       </div></div>
       <div class="step"><div class="step-body">
-        <h4>2. Run the installer</h4>
-        <p>Close OBS Studio if it is open, then double-click <code>CoreVideo-Setup.exe</code> and
+        <h3>2. Run the installer</h3>
+        <p>Close OBS Studio if it is open, then double-click <code>CoreVideo-Setup-vX.Y.Z.exe</code> and
         follow the prompts. The installer adds the CoreVideo plugin and its bundled Zoom runtime to
         your OBS Studio installation.</p>
         
       </div></div>
       <div class="step"><div class="step-body">
-        <h4>3. Open OBS Studio</h4>
-        <p>Launch OBS Studio 30 or newer. CoreVideo loads automatically: you'll see the
+        <h3>3. Open OBS Studio</h3>
+        <p>Launch OBS Studio. CoreVideo loads automatically: you'll see the
         <strong>Zoom Control</strong> dock and a <strong>Tools&nbsp;→&nbsp;Zoom Plugin Settings</strong>
         menu item. If the dock is hidden, enable it from <strong>Docks&nbsp;→&nbsp;Zoom Control</strong>.</p>
         
       </div></div>
       <div class="step"><div class="step-body">
-        <h4>4. Sign in with Zoom</h4>
+        <h3>4. Sign in with Zoom</h3>
         <p>Click <strong>Sign in with Zoom</strong> and authorize CoreVideo in your browser
         (details in <a href="#signin">Sign in with Zoom</a> below). That's it — you're ready to use it.</p>
       </div></div>
@@ -422,15 +432,14 @@
       authorize it. There are two equivalent ways to do that:
     </p>
     <ul>
-      <li><strong>From OBS (recommended):</strong> click <strong>Sign in with Zoom</strong> in the
-      Zoom Control dock or Tools&nbsp;→&nbsp;Zoom Plugin Settings. Your browser opens Zoom's
+      <li><strong>From OBS (recommended):</strong> click <strong>Sign in with Zoom</strong> under
+      <strong>Tools&nbsp;→&nbsp;Zoom Plugin Settings</strong>. Your browser opens Zoom's
       authorization page; review the requested permissions and click <strong>Allow</strong>.
       CoreVideo is added to your account automatically and the sign-in completes back in OBS.</li>
       <li><strong>From the Zoom App Marketplace:</strong> open the
       <a href="https://marketplace.zoom.us/" target="_blank" rel="noopener">Zoom App Marketplace</a>,
       search for <strong>CoreVideo</strong>, open the listing, and click <strong>Add</strong>.
-      After you click <strong>Allow</strong> on the permissions screen, install the Windows app
-      (steps above) and sign in — the account authorization is already in place.</li>
+      After you click <strong>Allow</strong>, install CoreVideo for your platform and sign in from OBS.</li>
     </ul>
     <p>
       Either way, CoreVideo then appears under
@@ -463,9 +472,8 @@
 
   <!-- ── macOS status ─────────────────────────────────── -->
   <section id="mac-beta">
-    <h2>macOS: Apple Silicon beta</h2>
-    <p><strong>CoreVideo v0.1.45-beta.1 is available as a signed and notarized installer.</strong>
-      Requires an Apple Silicon Mac (M1 or later). Use OBS Studio 32.2.1 or newer for this beta; the replacement package was built against OBS 32.2.1.</p>
+    <h2>macOS on Apple Silicon</h2>
+    <p>The signed and notarized installer requires an Apple Silicon Mac (M1 or later) and OBS Studio 32.2.1 or newer.</p>
     <p><a href="/download/#macos">Download the macOS installer and SHA-256 checksum</a>.</p>
     <ol>
       <li>Close OBS and open the downloaded <code>.pkg</code>.</li>
@@ -473,9 +481,7 @@
       <li>Reopen OBS, sign in to Zoom, and join a meeting. Allow the requested permissions.
         The meeting host must grant recording permission before raw video and audio can start.</li>
     </ol>
-    <p>The original macOS downloads were replaced on September 6, 2026 after signature errors.
-      Download the replacement installer if you previously downloaded this beta. The old ZIP was removed.</p>
-    <p>ISO recording requires a working FFmpeg executable configured in Zoom ISO Recorder; the macOS installer does not bundle it.</p>
+    <p>For ISO recording, use <strong>Download FFmpeg</strong> in Zoom ISO Recorder or select an existing executable.</p>
     <p>Talkback remains Windows-only. For your own screen, use OBS's native macOS Screen Capture source.
       Intel Macs are not supported by this package.</p>
   </section>
@@ -490,21 +496,19 @@
     hosted broker with OAuth&nbsp;2.0 + PKCE.</p>
     <div class="steps">
       <div class="step"><div class="step-body">
-        <h4>1. Click "Sign in with Zoom"</h4>
-        <p>In the Zoom Control dock, or via <strong>Tools&nbsp;→&nbsp;Zoom Plugin Settings</strong>.</p>
+        <h3>1. Click "Sign in with Zoom"</h3>
+        <p>Open <strong>Tools&nbsp;→&nbsp;Zoom Plugin Settings</strong>, then click <strong>Sign in with Zoom</strong>.</p>
         <figure class="shot"><img src="/documentation/images/settings.png" alt="Tools → Zoom Plugin Settings: Sign in with Zoom (no Client ID or secret for end users)."><figcaption>Tools → Zoom Plugin Settings: Sign in with Zoom (no Client ID or secret for end users).</figcaption></figure>
       </div></div>
       <div class="step"><div class="step-body">
-        <h4>2. Authorize in your browser</h4>
+        <h3>2. Authorize in your browser</h3>
         <p>Your browser opens Zoom's consent screen. Approve access. CoreVideo registers its
-        <code>corevideo://</code> callback handler automatically the first time.</p>
+        <code>corevideo-obs://</code> callback handler automatically the first time.</p>
         
       </div></div>
       <div class="step"><div class="step-body">
-        <h4>3. Done</h4>
-        <p>The dock shows a connected status and token expiry. Tokens are stored locally on your
-        machine (DPAPI-encrypted on Windows). CoreVideo never sees your Zoom password, and no client
-        secret is stored in the app.</p>
+        <h3>3. Done</h3>
+        <p>Return to OBS. Zoom Plugin Settings shows <strong>Signed in</strong> and the token expiry as soon as the callback succeeds. Tokens are stored locally and DPAPI-encrypted on Windows.</p>
       </div></div>
     </div>
   </section>
@@ -512,10 +516,10 @@
   <!-- ── Requirements ───────────────────────────────────────────── -->
   <section id="requirements">
     <h2>Requirements</h2>
-    <table>
+    <table tabindex="0">
       <tr><th>Requirement</th><th>Notes</th></tr>
-      <tr><td>Windows 10 / 11 (64-bit)</td><td>Windows is the release channel (installer or ZIP). A signed <a href="#mac-beta">macOS Apple Silicon beta installer</a> is also available. Linux requires a source build.</td></tr>
-      <tr><td>OBS Studio 30+</td><td>Install OBS first; CoreVideo loads as a plugin.</td></tr>
+      <tr><td>Windows 10 / 11 (64-bit)</td><td>Windows x64 has an installer and portable ZIP. A signed <a href="#mac-beta">macOS Apple Silicon installer</a> is also available. Linux requires a source build.</td></tr>
+      <tr><td>OBS Studio</td><td>Use 32.2.2 or later on Windows for the tested release configuration, and 32.2.1 or later on Apple Silicon.</td></tr>
       <tr><td>A Zoom account</td><td>Any account you can sign in with. No developer account, SDK key, or client secret required.</td></tr>
       <tr><td>Network bandwidth</td><td>Plan roughly 4-6 Mbps per 1080p participant feed. Your Zoom account and app entitlements affect maximum quality and stream count (standard accounts are commonly limited to ~30 Mbps incoming video; Enhanced Media / HBM can raise that to ~100 Mbps).</td></tr>
     </table>
@@ -559,8 +563,9 @@
     <p><strong>Use case:</strong> See every source's assignment and feed health at a glance, and
     save/load named participant-to-source layouts between shows.</p>
     <p><strong>Prerequisites:</strong> CoreVideo sources added to your scene.</p>
-    <p>Open the <strong>Zoom Output Manager</strong> dock to assign participants, watch live thumbnails
-    and health, and save/load profiles. See <a href="#output-profiles">Output Profiles</a>.</p>
+    <p>Open <strong>Zoom Output Manager</strong>, choose an <strong>Assignment</strong> and click
+    <strong>Apply</strong>. If a new source is missing from the table, click <strong>Refresh</strong>.
+    See the <a href="/quickstart/">Operator Quickstart</a> and <a href="#output-profiles">Output Profiles</a>.</p>
     
 
     <h3>ISO recording</h3>
@@ -622,48 +627,41 @@
   <!-- ── Troubleshooting ────────────────────────────────────────── -->
   <section id="troubleshooting">
     <h2>Troubleshooting</h2>
-    <div class="callout warning">
-      <div class="callout-title">⚠️ Public beta</div>
-      CoreVideo is in public beta. The Windows installer is not yet code-signed, and
-      the issues below are the ones we expect to see most from new installs. If
-      something isn't covered here, see <a href="#filing-a-bug">Filing a bug</a> below.
-    </div>
-    <table>
+    <p>For problems outside this list, see <a href="#filing-a-bug">Filing a bug</a>.</p>
+    <table tabindex="0">
       <tr><th>Symptom</th><th>Fix</th></tr>
-      <tr><td>Zoom Control dock not visible after install</td><td>Enable it from OBS <strong>Docks&nbsp;→&nbsp;Zoom Control</strong> (or <strong>Tools&nbsp;→&nbsp;Zoom Control</strong>, which creates and shows it even if you've never opened it before). Confirm OBS is version 30+ and was fully closed during install.</td></tr>
-      <tr><td>"Sign in with Zoom" doesn't complete</td><td>Finish the browser consent and allow the <code>corevideo://</code> link to open CoreVideo. Re-run sign-in from Tools&nbsp;→&nbsp;Zoom Plugin Settings. See <a href="#signin-loop">Sign-in loop</a> below for more.</td></tr>
+      <tr><td>Zoom Control dock not visible after install</td><td>Enable it from OBS <strong>Docks&nbsp;→&nbsp;Zoom Control</strong> (or <strong>Tools&nbsp;→&nbsp;Zoom Control</strong>, which creates and shows it even if you've never opened it before). Check the supported build on the <a href="/download/">download page</a> and confirm that OBS was closed during installation.</td></tr>
+      <tr><td>"Sign in with Zoom" doesn't complete</td><td>Finish the browser consent and allow the <code>corevideo-obs://</code> link to open CoreVideo. Re-run sign-in from Tools&nbsp;→&nbsp;Zoom Plugin Settings. See <a href="#signin-loop">Sign-in loop</a> below for more.</td></tr>
       <tr><td>Joined, but no video</td><td>Work through the <a href="#no-video-frames">No video frames</a> checklist below.</td></tr>
       <tr><td>Source shows color bars</td><td>The source isn't subscribed yet — assign a participant or slot in the source properties or the Output Manager.</td></tr>
       <tr><td>Choppy or low-resolution feeds</td><td>Reduce the number of concurrent 1080p feeds or the requested resolution, and check available bandwidth (~4-6 Mbps per 1080p feed).</td></tr>
-      <tr><td>Windows warns "Windows protected your PC" during install</td><td>Expected for the unsigned beta installer — see <a href="#smartscreen">SmartScreen</a> below.</td></tr>
+      <tr><td>Windows warns "Windows protected your PC" during install</td><td>Expected for the unsigned and notarized installer — see <a href="#smartscreen">SmartScreen</a> below.</td></tr>
       <tr><td>Windows Firewall prompts for CoreVideo or ZoomObsEngine</td><td>Both control ports are loopback-only — see <a href="#firewall-prompts">Firewall prompts</a> below.</td></tr>
     </table>
 
     <h3 id="smartscreen">Installer blocked by Windows SmartScreen</h3>
     <p>
-      CoreVideo's beta installer (<code>CoreVideo-Setup.exe</code>) is not yet
+      CoreVideo's Windows installer (<code>CoreVideo-Setup-vX.Y.Z.exe</code>) is not yet
       code-signed, so Windows SmartScreen will show <strong>"Windows protected your
-      PC"</strong> the first time you run it. This is expected during the beta —
-      it does not mean the download is unsafe, but you should still confirm you got
-      the file from <a href="https://corevideo.io/download">corevideo.io/download</a>
+      PC"</strong> the first time you run it. Confirm you downloaded the installer from <a href="https://corevideo.io/download">corevideo.io/download</a>
       or the official <a href="https://github.com/iamfatness/CoreVideo/releases">GitHub Releases</a> page.
     </p>
     <div class="steps">
       <div class="step"><div class="step-body">
-        <h4>1. Click "More info"</h4>
+        <h3>1. Click "More info"</h3>
         <p>On the SmartScreen dialog, click <strong>More info</strong>, then
         <strong>Run anyway</strong>. If you don't see a "More info" link, your
         organization's policy may be blocking unsigned installers entirely — check
         with your IT administrator.</p>
       </div></div>
       <div class="step"><div class="step-body">
-        <h4>2. (Optional but recommended) Verify the checksum</h4>
+        <h3>2. (Optional but recommended) Verify the checksum</h3>
         <p>Every release publishes a matching <code>.sha256</code> file next to the
         installer and ZIP. Compare it against a local hash before running the
         installer:</p>
-        <pre tabindex="0"><code>certutil -hashfile CoreVideo-Setup.exe SHA256</code></pre>
+        <pre tabindex="0"><code>certutil -hashfile CoreVideo-Setup-vX.Y.Z.exe SHA256</code></pre>
         <p>or, in PowerShell:</p>
-        <pre tabindex="0"><code>Get-FileHash .\CoreVideo-Setup.exe -Algorithm SHA256</code></pre>
+        <pre tabindex="0"><code>Get-FileHash .\CoreVideo-Setup-vX.Y.Z.exe -Algorithm SHA256</code></pre>
         <p>The result should match the contents of the corresponding
         <code>.sha256</code> file from the same release.</p>
       </div></div>
@@ -706,19 +704,21 @@
     <p>
       "Sign in with Zoom" opens your browser to Zoom's consent screen and expects
       the browser to hand control back to CoreVideo afterward through the
-      <code>corevideo://</code> URL scheme. A few different things can break that
+      <code>corevideo-obs://</code> URL scheme. A few different things can break that
       handoff:
     </p>
     <ul>
-      <li><strong>The <code>corevideo://</code> handler isn't registered yet.</strong>
+      <li><strong>The <code>corevideo-obs://</code> handler isn't registered yet.</strong>
       CoreVideo registers it automatically the first time you click <strong>Sign in
       with Zoom</strong>. If a browser prompt asks which app should open a
-      <code>corevideo://</code> link, choose CoreVideo (and "always allow" it) — if
+      <code>corevideo-obs://</code> link, choose CoreVideo (and "always allow" it) — if
       you dismiss or block that prompt, the callback has nowhere to go and the
       browser tab just sits there after you approve access in Zoom.</li>
+      <li><strong>CoreVideo Pro opens after consent.</strong> Update the OBS plugin from the
+      <a href="/download/">download page</a>. Start a fresh sign-in from OBS to use its own callback address.</li>
       <li><strong>The callback helper didn't launch.</strong> The last hop is a
-      small helper binary, <code>CoreVideoOAuthCallback.exe</code>, which the OS
-      launches for the <code>corevideo://oauth/callback</code> URL and which
+      small helper, <code>CoreVideoOAuthCallback.exe</code> on Windows or <code>CoreVideoOAuthCallback.app</code> on Mac, which the OS
+      launches for the <code>corevideo-obs://oauth/callback</code> URL and which
       forwards it to the plugin's local control server as an
       <code>oauth_callback</code> command. If antivirus software or SmartScreen
       blocked that helper from running, sign-in will look like it hung after you
@@ -1037,7 +1037,7 @@ graph TB
     </div>
 
     <h3>Lifecycle</h3>
-    <table>
+    <table tabindex="0">
       <tr><th>Call</th><th>Effect</th></tr>
       <tr><td><code>ZoomEngineClient::instance().start(auth_token, public_app_key)</code></td><td>Launches engine process, connects pipes/sockets (up to 300 retries × 100 ms), and sends <code>init</code> with publicAppKey for published builds</td></tr>
       <tr><td><code>join(meeting_id, passcode, name)</code></td><td>Sends <code>join</code> command; blocks until <code>joined</code> event or failure</td></tr>
@@ -1103,7 +1103,7 @@ flowchart LR
       </div>
       <div class="diagram-caption">Fig 4 — Cross-platform IPC: JSON over named pipes (Windows) or Unix sockets (macOS/Linux); frames through shared memory.</div>
     </div>
-    <table>
+    <table tabindex="0">
       <tr><th>Platform</th><th>Plugin → Engine</th><th>Engine → Plugin</th></tr>
       <tr><td>Windows</td><td><code>\\.\pipe\ZoomObsPlugin_P2E</code></td><td><code>\\.\pipe\ZoomObsPlugin_E2P</code></td></tr>
       <tr><td>macOS / Linux</td><td><code>/tmp/ZoomObsPlugin_P2E.sock</code></td><td><code>/tmp/ZoomObsPlugin_E2P.sock</code></td></tr>
@@ -1126,7 +1126,7 @@ flowchart TB
       </div>
       <div class="diagram-caption">Fig 5 — Video path: engine writes I420 to shared memory; ZoomSource reads via ShmRegion and forwards to OBS.</div>
     </div>
-    <table>
+    <table tabindex="0">
       <tr><th>Property</th><th>Options</th><th>Notes</th></tr>
       <tr><td>Resolution</td><td><code>P360</code> / <code>P720</code> / <code>P1080</code></td><td>Sent to engine in <code>subscribe</code> command; passed to SDK renderer</td></tr>
       <tr><td>Frame format in SHM</td><td>I420 YUV planar</td><td>Written by engine directly; ZoomSource reads planes from ShmRegion</td></tr>
@@ -1162,7 +1162,7 @@ flowchart TB
       </div>
       <div class="diagram-caption">Fig 6 — Audio pipeline: engine mixes/isolates audio in-process and delivers chunks through shared memory.</div>
     </div>
-    <table>
+    <table tabindex="0">
       <tr><th>Property</th><th>Value</th></tr>
       <tr><td>Sample rate</td><td>48 000 Hz</td></tr>
       <tr><td>Format</td><td>S16LE</td></tr>
@@ -1261,32 +1261,32 @@ sequenceDiagram
       (Proof Key for Code Exchange, S256) for user-level attributed meeting joins
       and Zoom App Marketplace compliance. The desktop plugin opens the broker
       start URL, receives a short-lived broker token through
-      <code>corevideo://oauth/callback</code>, and never stores a Zoom app secret.
+      <code>corevideo-obs://oauth/callback</code>, and never stores a Zoom app secret.
     </p>
 
     <h3>Setup (one-time per machine)</h3>
     <div class="steps">
       <div class="step"><div class="step-body">
-        <h4>Use the embedded broker</h4>
+        <h3>Use the embedded broker</h3>
         <p>Published builds already contain the CoreVideo broker URL. Open
         <strong>Tools → Zoom Plugin Settings</strong>; there are no Client ID,
         Client Secret, or Authorization URL fields for end users to configure.</p>
       </div></div>
       <div class="step"><div class="step-body">
-        <h4>Register the URL scheme</h4>
+        <h3>Register the URL scheme</h3>
         <p>Click <strong>Sign in with Zoom</strong>. CoreVideo registers the
-        <code>corevideo://</code> callback helper automatically on first use.</p>
+        <code>corevideo-obs://</code> callback helper automatically on first use.</p>
       </div></div>
       <div class="step"><div class="step-body">
-        <h4>Authorize</h4>
+        <h3>Authorize</h3>
         <p>CoreVideo opens the browser at
         <code>https://corevideo.iamfatness.us/oauth/start</code>. Approve the app
         in Zoom.</p>
       </div></div>
       <div class="step"><div class="step-body">
-        <h4>Callback forwarding</h4>
+        <h3>Callback forwarding</h3>
         <p>Zoom redirects to the broker callback, then the broker returns an
-        encrypted broker token to <code>corevideo://oauth/callback</code>. The
+        encrypted broker token to <code>corevideo-obs://oauth/callback</code>. The
         helper forwards that URL to the plugin via the TCP control server
         (<code>oauth_callback</code> command). Tokens are stored; on Windows they
         are DPAPI-protected before writing to OBS config.</p>
@@ -1316,7 +1316,7 @@ sequenceDiagram
     ZoomCloud2-->>Browser: consent screen
     User->>Browser: approve
     ZoomCloud2-->>Broker2: redirect to /oauth/callback?code=…&state=…
-    Broker2-->>Browser: redirect → corevideo://oauth/callback
+    Broker2-->>Browser: redirect → corevideo-obs://oauth/callback
     Browser->>Helper: launch CoreVideoOAuthCallback helper
     Helper->>ZCS2: POST {"cmd":"oauth_callback", url}
     ZCS2->>ZOA: handle_redirect_url(url)
@@ -1352,7 +1352,7 @@ sequenceDiagram
     </div>
 
     <h3>Security Notes</h3>
-    <table>
+    <table tabindex="0">
       <tr><th>Property</th><th>Implementation</th></tr>
       <tr><td>PKCE method</td><td>S256 - SHA-256 of a 32-byte random verifier, base64url-encoded by the broker</td></tr>
       <tr><td>State parameter</td><td>16-byte random base64url value; verified on callback to prevent CSRF</td></tr>
@@ -1434,7 +1434,7 @@ sequenceDiagram
       that controls which feed it subscribes to. This is the ZoomISO 3.0 model:
       sources are reusable roles rather than fixed participant bindings.
     </p>
-    <table>
+    <table tabindex="0">
       <tr><th>Mode</th><th>Enum value</th><th>Behaviour</th></tr>
       <tr><td><strong>Participant</strong></td><td><code>AssignmentMode::Participant</code></td><td>Subscribe to a fixed <code>participant_id</code>. If a <code>failover_participant_id</code> is set and the primary participant leaves, the source automatically re-subscribes to the failover.</td></tr>
       <tr><td><strong>Active Speaker</strong></td><td><code>AssignmentMode::ActiveSpeaker</code></td><td>Follow whoever is currently speaking. Uses the two-timer debounce (sensitivity + hold). See Active Speaker Mode section for details.</td></tr>
@@ -1619,7 +1619,7 @@ sequenceDiagram
     </div>
 
     <h3>Timing Parameters</h3>
-    <table>
+    <table tabindex="0">
       <tr><th>Parameter</th><th>Default</th><th>Range</th><th>Description</th></tr>
       <tr><td><code>speaker_sensitivity_ms</code></td><td>500 ms</td><td>0 – 3 000 ms (step 50)</td><td>New speaker must hold the floor this long before the switch fires</td></tr>
       <tr><td><code>speaker_hold_ms</code></td><td>2 000 ms</td><td>0 – 10 000 ms (step 100)</td><td>Minimum time to stay on current speaker after any switch</td></tr>
@@ -1671,7 +1671,7 @@ sequenceDiagram
     </p>
 
     <h3>Director TCP Controls</h3>
-    <table>
+    <table tabindex="0">
       <tr><th>Command</th><th>Request</th><th>Use</th></tr>
       <tr><td><code>speaker_director_status</code></td><td><code>{"cmd":"speaker_director_status"}</code></td><td>Returns directed, raw, candidate, last, manual, sensitivity, and hold state</td></tr>
       <tr><td><code>speaker_director_configure</code></td><td><code>{"cmd":"speaker_director_configure","sensitivity_ms":650,"hold_ms":2500}</code></td><td>Updates director timing</td></tr>
@@ -1702,7 +1702,7 @@ sequenceDiagram
     </p>
 
     <h3>Reconnect Policy</h3>
-    <table>
+    <table tabindex="0">
       <tr><th>Field</th><th>Default</th><th>Description</th></tr>
       <tr><td><code>enabled</code></td><td>true</td><td>Master switch for auto-reconnect</td></tr>
       <tr><td><code>max_attempts</code></td><td>5</td><td>Maximum retry attempts before giving up</td></tr>
@@ -1715,7 +1715,7 @@ sequenceDiagram
     </table>
 
     <h3>Recovery Triggers</h3>
-    <table>
+    <table tabindex="0">
       <tr><th>RecoveryReason</th><th>Cause</th></tr>
       <tr><td><code>EngineCrash</code></td><td>Engine process exited unexpectedly</td></tr>
       <tr><td><code>MeetingDisconnect</code></td><td>SDK reported unexpected meeting end</td></tr>
@@ -1759,7 +1759,7 @@ sequenceDiagram
     </div>
 
     <h3>Meeting Control Bar</h3>
-    <table>
+    <table tabindex="0">
       <tr><th>Control</th><th>Description</th></tr>
       <tr><td><code>CvStatusDot</code> + label</td><td>Animated QPainter status indicator — pulses during transitional states (Joining / Leaving / Recovering); static dot for Idle / InMeeting / Failed</td></tr>
       <tr><td><code>CvBanner</code> (first-run)</td><td>Dismissable notice strip shown until SDK credentials are configured</td></tr>
@@ -1814,7 +1814,7 @@ sequenceDiagram
       using FFmpeg hardware acceleration. This offloads color-space conversion from
       the CPU to the GPU/media engine.
     </p>
-    <table>
+    <table tabindex="0">
       <tr><th>HwAccelMode</th><th>Backend</th><th>Platform</th></tr>
       <tr><td><code>None</code></td><td>CPU path (default)</td><td>All</td></tr>
       <tr><td><code>Auto</code></td><td>First available hardware backend</td><td>All</td></tr>
@@ -1853,7 +1853,7 @@ sequenceDiagram
       <div class="callout-title">Quick test</div>
       <code>echo '{"cmd":"status"}' | nc 127.0.0.1 19870</code>
     </div>
-    <table>
+    <table tabindex="0">
       <tr><th>Command</th><th>Request</th><th>Response fields</th></tr>
       <tr><td><code>help</code></td><td><code>{"cmd":"help"}</code></td><td><code>commands</code> — array of names</td></tr>
       <tr><td><code>status</code></td><td><code>{"cmd":"status"}</code></td><td><code>meeting_state</code>, <code>active_speaker_id</code></td></tr>
@@ -1868,7 +1868,7 @@ sequenceDiagram
       <tr><td><code>speaker_director_release</code></td><td><code>{"cmd":"speaker_director_release"}</code></td><td><code>speaker_director</code> object with automatic direction restored</td></tr>
       <tr><td><code>join</code></td><td><code>{"cmd":"join","meeting_id":"…","passcode":"…","display_name":"OBS"}</code></td><td><code>ok</code></td></tr>
       <tr><td><code>leave</code></td><td><code>{"cmd":"leave"}</code></td><td><code>ok</code></td></tr>
-      <tr><td><code>oauth_callback</code></td><td><code>{"cmd":"oauth_callback","url":"corevideo://oauth/callback?broker_token=…&amp;state=…"}</code></td><td><code>ok</code> or <code>error</code> - forwards the OS URL-scheme callback to <code>ZoomOAuthManager::handle_redirect_url()</code>. Token check is bypassed for this command; OAuth state and broker token validation still guard against replay.</td></tr>
+      <tr><td><code>oauth_callback</code></td><td><code>{"cmd":"oauth_callback","url":"corevideo-obs://oauth/callback?broker_token=…&amp;state=…"}</code></td><td><code>ok</code> or <code>error</code> - forwards the OS URL-scheme callback to <code>ZoomOAuthManager::handle_redirect_url()</code>. Token check is bypassed for this command; OAuth state and broker token validation still guard against replay.</td></tr>
     </table>
 
     <h3>Participant object</h3>
@@ -1881,7 +1881,7 @@ sequenceDiagram
   "isolate_audio": true, "audio_channels": "stereo" }</code></pre>
 
     <h3>Meeting states</h3>
-    <table>
+    <table tabindex="0">
       <tr><th>State</th><th>Meaning</th></tr>
       <tr><td><code>idle</code></td><td>Not in a meeting</td></tr>
       <tr><td><code>joining</code></td><td>Join in progress</td></tr>
@@ -1901,7 +1901,7 @@ sequenceDiagram
     </p>
 
     <h3>Incoming Addresses</h3>
-    <table>
+    <table tabindex="0">
       <tr><th>Address</th><th>Type tags</th><th>Arguments</th><th>Action</th></tr>
       <tr><td><code>/zoom/status</code></td><td>—</td><td>—</td><td>Reply with meeting state + active speaker</td></tr>
       <tr><td><code>/zoom/list_outputs</code></td><td>—</td><td>—</td><td>Reply one <code>/zoom/output</code> packet per output</td></tr>
@@ -1920,7 +1920,7 @@ sequenceDiagram
     </table>
 
     <h3>Reply Addresses (sent by plugin)</h3>
-    <table>
+    <table tabindex="0">
       <tr><th>Address</th><th>Type tags</th><th>Fields</th></tr>
       <tr><td><code>/zoom/status/meeting_state</code></td><td><code>,s</code></td><td>state string</td></tr>
       <tr><td><code>/zoom/status/active_speaker</code></td><td><code>,i</code></td><td>user_id</td></tr>
@@ -1947,7 +1947,7 @@ sequenceDiagram
       delete profiles interactively, or call the <code>ZoomOutputProfile</code> API
       directly from code.
     </p>
-    <table>
+    <table tabindex="0">
       <tr><th>Function</th><th>Description</th></tr>
       <tr><td><code>ZoomOutputProfile::list()</code></td><td>Returns names of all saved profiles</td></tr>
       <tr><td><code>ZoomOutputProfile::save(name, outputs)</code></td><td>Writes profile JSON file</td></tr>
@@ -1980,7 +1980,7 @@ sequenceDiagram
       transferred through named shared memory (prefix <code>ZoomObsPlugin_</code>).
     </p>
     <h3>Plugin → Engine</h3>
-    <table>
+    <table tabindex="0">
       <tr><th>Command</th><th>Payload</th><th>Description</th></tr>
       <tr><td><code>init</code></td><td><code>{"cmd":"init","public_app_key":"…"}</code></td><td>Initialize SDK and authenticate with the embedded Marketplace Public Client ID</td></tr>
       <tr><td><code>join</code></td><td><code>{"cmd":"join","meeting_id":"…","passcode":"…","display_name":"OBS","kind":"meeting|webinar","user_zak":"…","on_behalf_token":"…"}</code></td><td>Join meeting or webinar. Published broker-backed joins authenticate the SDK during <code>init</code>; <code>user_zak</code> and <code>on_behalf_token</code> remain developer/manual fallback fields.</td></tr>
@@ -1992,7 +1992,7 @@ sequenceDiagram
       <tr><td><code>quit</code></td><td><code>{"cmd":"quit"}</code></td><td>Shut down engine process</td></tr>
     </table>
     <h3>Engine → Plugin</h3>
-    <table>
+    <table tabindex="0">
       <tr><th>Event</th><th>Payload</th><th>Description</th></tr>
       <tr><td><code>ready</code></td><td><code>{"cmd":"ready"}</code></td><td>Engine started and IPC connected</td></tr>
       <tr><td><code>auth_ok</code></td><td><code>{"cmd":"auth_ok"}</code></td><td>SDK authenticated; pending join fires now</td></tr>
@@ -2013,21 +2013,21 @@ sequenceDiagram
     <p style="color:var(--muted);font-size:.9rem;">Published builds use the embedded CoreVideo broker &mdash; end users do not enter SDK keys, secrets, or JWT tokens.</p>
     
     <h4>OAuth Settings</h4>
-    <table>
+    <table tabindex="0">
       <tr><th>Field</th><th>Default</th><th>Description</th></tr>
       <tr><td>OAuth Client ID</td><td>Embedded/brokered</td><td>Developer-only field when the build has no embedded broker URL. Published builds use the broker public client configuration.</td></tr>
       <tr><td>OAuth Client Secret</td><td>&mdash;</td><td>Not used in published builds. Public Client OAuth uses PKCE and no desktop secret.</td></tr>
       <tr><td>Authorization URL</td><td>Embedded</td><td>Published builds use <code>https://corevideo.iamfatness.us/oauth/start</code>.</td></tr>
-      <tr><td>Redirect URI</td><td><code>corevideo://oauth/callback</code></td><td>Local return URI used by the callback helper after broker authorization.</td></tr>
+      <tr><td>Redirect URI</td><td><code>corevideo-obs://oauth/callback</code></td><td>Local return URI used by the callback helper after broker authorization.</td></tr>
       <tr><td>Scopes</td><td><code>user:read:token user:read:user</code></td><td>OAuth scopes requested during authorization.</td></tr>
       <tr><td>OAuth Status label</td><td>—</td><td>Shows connected/disconnected status and token expiry</td></tr>
-      <tr><td>Register corevideo:// URL Scheme</td><td>—</td><td>Registers the OS URL scheme handler for the callback helper; published builds do this automatically on sign-in.</td></tr>
+      <tr><td>Register corevideo-obs:// URL Scheme</td><td>—</td><td>Registers the OS URL scheme handler for the callback helper; published builds do this automatically on sign-in.</td></tr>
       <tr><td>Sign in with Zoom</td><td>—</td><td>Opens browser to begin the broker-backed PKCE authorization flow.</td></tr>
       <tr><td>Refresh Token</td><td>—</td><td>Manually trigger token refresh</td></tr>
       <tr><td>Disconnect</td><td>—</td><td>Clears stored access and refresh tokens</td></tr>
     </table>
     <h4>Control &amp; Network</h4>
-    <table>
+    <table tabindex="0">
       <tr><th>Field</th><th>Default</th><th>Description</th></tr>
       <tr><td>Control Server Port</td><td>19870</td><td>TCP JSON API port</td></tr>
       <tr><td>Control Server Token</td><td>(empty)</td><td>Optional auth token; constant-time comparison</td></tr>
@@ -2035,7 +2035,7 @@ sequenceDiagram
     </table>
 
     <h3>Meeting Control Dock</h3>
-    <table>
+    <table tabindex="0">
       <tr><th>Field</th><th>Default</th><th>Description</th></tr>
       <tr><td>Meeting ID or Zoom URL</td><td>last used</td><td>Numeric meeting ID or full Zoom join URL</td></tr>
       <tr><td>Passcode</td><td>—</td><td>Optional meeting password; auto-filled from join URLs when present</td></tr>
@@ -2048,7 +2048,7 @@ sequenceDiagram
       <img src="/core-plugin/images/corevideo-source-properties.svg" alt="CoreVideo Zoom Participant source properties" style="max-width:100%;height:auto;">
       <div class="diagram-caption">Each Zoom Participant source keeps its own assignment mode, audio routing, requested resolution, and failover behavior.</div>
     </div>
-    <table>
+    <table tabindex="0">
       <tr><th>Property</th><th>Default</th><th>Description</th></tr>
       <tr><td>Output Label</td><td>—</td><td>Label shown in the OBS Output Manager</td></tr>
       <tr><td>Participant</td><td>—</td><td>Select from live roster</td></tr>
@@ -2062,14 +2062,14 @@ sequenceDiagram
     </table>
 
     <h3>Zoom Participant Audio Source</h3>
-    <table>
+    <table tabindex="0">
       <tr><th>Property</th><th>Description</th></tr>
       <tr><td>Participant</td><td>Select from live roster</td></tr>
       <tr><td>Audio Channels</td><td>Mono / Stereo</td></tr>
     </table>
 
     <h3>Zoom Interpretation Audio Source</h3>
-    <table>
+    <table tabindex="0">
       <tr><th>Property</th><th>Description</th></tr>
       <tr><td>Language</td><td>Language name as reported by Zoom (e.g. <code>English</code>, <code>Spanish</code>)</td></tr>
     </table>
@@ -2099,7 +2099,7 @@ sequenceDiagram
       program recording, start/stop ISO recording, and monitor active ISO
       sessions with source, participant, resolution, frame counts, audio chunk
       counts, and output file paths. Recently completed sessions remain visible
-      after stop so operators can confirm completed MP4/WAV outputs before
+      after stop so operators can confirm completed MP4 files before
       opening the folder.
     </p>
     <p>
@@ -2113,7 +2113,7 @@ sequenceDiagram
 
     <div class="diagram-wrap" tabindex="0" role="group" aria-label="Architecture diagram (scrollable)">
       <img src="/core-plugin/images/iso-recording-flow.svg" alt="CoreVideo ISO recording flow" style="max-width:100%;height:auto;">
-      <div class="diagram-caption">Assignments resolve the participant IDs. Each assigned Zoom source can feed an FFmpeg writer for video/audio ISO files while OBS continues to own the program output.</div>
+      <div class="diagram-caption">Selected feeds resolve to participant IDs. Each participant gets one MP4 with isolated audio. OBS owns the optional program recording.</div>
     </div>
 
     <h3>Start Recording</h3>
@@ -2121,8 +2121,10 @@ sequenceDiagram
   "cmd": "iso_recording_start",
   "output_dir": "C:/Recordings/CoreVideo",
   "ffmpeg_path": "ffmpeg",
-  "record_program": true
+  "record_program": true,
+  "source_uuids": ["OUTPUT_SOURCE_UUID"]
 }</code></pre>
+    <p>Use the IDs returned by <code>list_outputs</code>. If <code>source_uuids</code> is omitted, TCP uses the saved feed selection in Zoom ISO Recorder. OSC uses the same saved selection.</p>
 
     <h3>Check Status</h3>
     <pre tabindex="0"><code>{ "cmd": "iso_recording_status" }</code></pre>
@@ -2131,7 +2133,7 @@ sequenceDiagram
     <pre tabindex="0"><code>{ "cmd": "iso_recording_stop" }</code></pre>
 
     <h3>OSC Controls</h3>
-    <table>
+    <table tabindex="0">
       <tr><th>Address</th><th>Arguments</th><th>Action</th></tr>
       <tr><td><code>/zoom/iso/start</code></td><td><code>output_dir</code>, optional <code>record_program</code></td><td>Starts ISO recording</td></tr>
       <tr><td><code>/zoom/iso/stop</code></td><td>none</td><td>Stops ISO recording</td></tr>
@@ -2164,7 +2166,7 @@ sequenceDiagram
       Applied widget-level via <code>cv_stylesheet()</code>. Covers group boxes,
       buttons (with role variants), line edits, combo boxes, tables, and scroll bars.
     </p>
-    <table>
+    <table tabindex="0">
       <tr><th>Button role property</th><th>Appearance</th><th>Use</th></tr>
       <tr><td><code>role = "primary"</code></td><td>Zoom-blue accent fill</td><td>Affirmative actions: Join, Apply, Save</td></tr>
       <tr><td><code>role = "danger"</code></td><td>Red tint fill</td><td>Destructive or exit actions: Leave, Delete, Disconnect</td></tr>
@@ -2178,7 +2180,7 @@ sequenceDiagram
       In transitional states (Joining, Leaving, Recovering) a <code>QTimer</code>
       drives a sinusoidal pulse glow animation.
     </p>
-    <table>
+    <table tabindex="0">
       <tr><th>MeetingState</th><th>Colour</th><th>Animation</th></tr>
       <tr><td>Idle</td><td>Grey <code>#555</code></td><td>Static</td></tr>
       <tr><td>Joining</td><td>Amber <code>#d29922</code></td><td>Pulse glow</td></tr>

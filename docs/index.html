@@ -241,12 +241,12 @@
       and TCP/OSC control APIs for full broadcast automation.
     </p>
     <div class="callout warning" style="margin-top:18px;">
-      <div class="callout-title">🧪 Beta status</div>
-      CoreVideo is in <strong>public beta</strong>. Packaged builds are available for
+      <div class="callout-title">Install CoreVideo</div>
+      Packaged builds are available for
       <strong>Windows x64</strong> (installer or ZIP) and
-      <strong>macOS Apple Silicon</strong> (signed beta installer). Linux requires a source build
+      <strong>macOS Apple Silicon</strong> (signed and notarized installer). Linux requires a source build
       (<a href="#mac-beta">details</a>) — see
-      <a href="ROADMAP.md">the Roadmap</a> for known limitations and what's
+      <a href="https://github.com/iamfatness/CoreVideo/blob/main/docs/ROADMAP.md">the Roadmap</a> for known limitations and what's
       planned next. To report a problem, use
       <a href="https://github.com/iamfatness/CoreVideo/issues/new/choose">GitHub Issues</a>
       (the bug report template walks you through attaching a redacted
@@ -262,16 +262,15 @@
       100 Mbps. Plan around 4-6 Mbps per standard 1080p feed.
     </div>
     <div class="hero-badges" style="margin-top:16px;">
-      <span class="badge orange">Public beta</span>
       <span class="badge green">Free</span>
-      <span class="badge green">OBS Studio 30+</span>
+      <span class="badge green">OBS Studio 32.2.x</span>
       <span class="badge orange">Windows installer</span>
       <span class="badge purple">Sign in with Zoom</span>
       <span class="badge blue">OAuth 2.0 PKCE</span>
     </div>
     <div style="margin-top:18px;">
       <a href="https://corevideo.io/download" style="display:inline-block;background:var(--accent);color:#06170d;font-weight:700;padding:11px 20px;border-radius:8px;text-decoration:none;">Download for Windows</a>
-      &nbsp;<a href="#mac-beta" style="display:inline-block;padding:11px 18px;border:1px solid var(--border);border-radius:8px;text-decoration:none;">macOS beta installer</a>
+      &nbsp;<a href="#mac-beta" style="display:inline-block;padding:11px 18px;border:1px solid var(--border);border-radius:8px;text-decoration:none;">macOS installer</a>
       &nbsp;<a href="#adding" style="display:inline-block;padding:11px 18px;border:1px solid var(--border);border-radius:8px;text-decoration:none;">How to install</a>
     </div>
   </div>
@@ -308,7 +307,7 @@
       For Zoom App Marketplace compliance and attributed joins, <strong>ZoomOAuthManager</strong>
       uses the CoreVideo HTTPS broker to run Zoom Public Client OAuth with PKCE
       and receive a short-lived broker token through the bundled
-      <code>corevideo://oauth/callback</code> helper. Before each join, the plugin
+      <code>corevideo-obs://oauth/callback</code> helper. Before each join, the plugin
       refreshes OAuth tokens through the broker when needed, fetches the
       signed-in user's ZAK, and starts the Meeting SDK helper with the embedded
       Marketplace Public Client ID as <code>AuthContext.publicAppKey</code>.
@@ -368,7 +367,7 @@
       <div class="card"><div class="card-icon">ISO</div><h3>Auto ISO Recording</h3>
         <p>Record assigned participant video/audio tracks to separate files while optionally recording the main OBS program output.</p></div>
       <div class="card"><div class="card-icon">💻</div><h3>Multi-Platform</h3>
-        <p>Windows has a release installer; macOS has a signed <a href="#mac-beta">Apple Silicon beta installer</a>. Linux requires a source build.</p></div>
+        <p>Windows has a release installer; macOS has a signed <a href="#mac-beta">Apple Silicon installer</a>. Linux requires a source build.</p></div>
     </div>
   </section>
 
@@ -383,19 +382,19 @@
       <div class="step"><div class="step-body">
         <h3>1. Download CoreVideo</h3>
         <p>Go to <a href="https://corevideo.io/download">corevideo.io/download</a> and get the
-        latest Windows installer (<code>CoreVideo-Setup.exe</code>). Every release also publishes a
+        latest Windows installer (<code>CoreVideo-Setup-vX.Y.Z.exe</code>). Every release also publishes a
         matching <code>.sha256</code> checksum you can verify.</p>
       </div></div>
       <div class="step"><div class="step-body">
         <h3>2. Run the installer</h3>
-        <p>Close OBS Studio if it is open, then double-click <code>CoreVideo-Setup.exe</code> and
+        <p>Close OBS Studio if it is open, then double-click <code>CoreVideo-Setup-vX.Y.Z.exe</code> and
         follow the prompts. The installer adds the CoreVideo plugin and its bundled Zoom runtime to
         your OBS Studio installation.</p>
         
       </div></div>
       <div class="step"><div class="step-body">
         <h3>3. Open OBS Studio</h3>
-        <p>Launch OBS Studio 30 or newer. CoreVideo loads automatically: you'll see the
+        <p>Launch OBS Studio. CoreVideo loads automatically: you'll see the
         <strong>Zoom Control</strong> dock and a <strong>Tools&nbsp;→&nbsp;Zoom Plugin Settings</strong>
         menu item. If the dock is hidden, enable it from <strong>Docks&nbsp;→&nbsp;Zoom Control</strong>.</p>
         
@@ -413,15 +412,14 @@
       authorize it. There are two equivalent ways to do that:
     </p>
     <ul>
-      <li><strong>From OBS (recommended):</strong> click <strong>Sign in with Zoom</strong> in the
-      Zoom Control dock or Tools&nbsp;→&nbsp;Zoom Plugin Settings. Your browser opens Zoom's
+      <li><strong>From OBS (recommended):</strong> click <strong>Sign in with Zoom</strong> under
+      <strong>Tools&nbsp;→&nbsp;Zoom Plugin Settings</strong>. Your browser opens Zoom's
       authorization page; review the requested permissions and click <strong>Allow</strong>.
       CoreVideo is added to your account automatically and the sign-in completes back in OBS.</li>
       <li><strong>From the Zoom App Marketplace:</strong> open the
       <a href="https://marketplace.zoom.us/" target="_blank" rel="noopener">Zoom App Marketplace</a>,
       search for <strong>CoreVideo</strong>, open the listing, and click <strong>Add</strong>.
-      After you click <strong>Allow</strong> on the permissions screen, install the Windows app
-      (steps above) and sign in — the account authorization is already in place.</li>
+      After you click <strong>Allow</strong>, install CoreVideo for your platform and sign in from OBS.</li>
     </ul>
     <p>
       Either way, CoreVideo then appears under
@@ -454,9 +452,8 @@
 
   <!-- ── macOS status ─────────────────────────────────── -->
   <section id="mac-beta">
-    <h2>macOS: Apple Silicon beta</h2>
-    <p><strong>CoreVideo v0.1.45-beta.1 is available as a signed and notarized installer.</strong>
-      Requires an Apple Silicon Mac (M1 or later). Use OBS Studio 32.2.1 or newer for this beta; the replacement package was built against OBS 32.2.1.</p>
+    <h2>macOS on Apple Silicon</h2>
+    <p>The signed and notarized installer requires an Apple Silicon Mac (M1 or later) and OBS Studio 32.2.1 or newer.</p>
     <p><a href="/download/#macos">Download the macOS installer and SHA-256 checksum</a>.</p>
     <ol>
       <li>Close OBS and open the downloaded <code>.pkg</code>.</li>
@@ -464,9 +461,7 @@
       <li>Reopen OBS, sign in to Zoom, and join a meeting. Allow the requested permissions.
         The meeting host must grant recording permission before raw video and audio can start.</li>
     </ol>
-    <p>The original macOS downloads were replaced on September 6, 2026 after signature errors.
-      Download the replacement installer if you previously downloaded this beta. The old ZIP was removed.</p>
-    <p>ISO recording requires a working FFmpeg executable configured in Zoom ISO Recorder; the macOS installer does not bundle it.</p>
+    <p>For ISO recording, use <strong>Download FFmpeg</strong> in Zoom ISO Recorder or select an existing executable.</p>
     <p>Talkback remains Windows-only. For your own screen, use OBS's native macOS Screen Capture source.
       Intel Macs are not supported by this package.</p>
   </section>
@@ -482,20 +477,18 @@
     <div class="steps">
       <div class="step"><div class="step-body">
         <h3>1. Click "Sign in with Zoom"</h3>
-        <p>In the Zoom Control dock, or via <strong>Tools&nbsp;→&nbsp;Zoom Plugin Settings</strong>.</p>
+        <p>Open <strong>Tools&nbsp;→&nbsp;Zoom Plugin Settings</strong>, then click <strong>Sign in with Zoom</strong>.</p>
         <figure class="shot"><img src="/documentation/images/settings.png" alt="Tools → Zoom Plugin Settings: Sign in with Zoom (no Client ID or secret for end users)."><figcaption>Tools → Zoom Plugin Settings: Sign in with Zoom (no Client ID or secret for end users).</figcaption></figure>
       </div></div>
       <div class="step"><div class="step-body">
         <h3>2. Authorize in your browser</h3>
         <p>Your browser opens Zoom's consent screen. Approve access. CoreVideo registers its
-        <code>corevideo://</code> callback handler automatically the first time.</p>
+        <code>corevideo-obs://</code> callback handler automatically the first time.</p>
         
       </div></div>
       <div class="step"><div class="step-body">
         <h3>3. Done</h3>
-        <p>The dock shows a connected status and token expiry. Tokens are stored locally on your
-        machine (DPAPI-encrypted on Windows). CoreVideo never sees your Zoom password, and no client
-        secret is stored in the app.</p>
+        <p>Return to OBS. Zoom Plugin Settings shows <strong>Signed in</strong> and the token expiry as soon as the callback succeeds. Tokens are stored locally and DPAPI-encrypted on Windows.</p>
       </div></div>
     </div>
   </section>
@@ -505,8 +498,8 @@
     <h2>Requirements</h2>
     <table>
       <tr><th>Requirement</th><th>Notes</th></tr>
-      <tr><td>Windows 10 / 11 (64-bit)</td><td>Windows is the release channel (installer or ZIP). A signed <a href="#mac-beta">macOS Apple Silicon beta installer</a> is also available. Linux requires a source build.</td></tr>
-      <tr><td>OBS Studio 30+</td><td>Install OBS first; CoreVideo loads as a plugin.</td></tr>
+      <tr><td>Windows 10 / 11 (64-bit)</td><td>Windows x64 has an installer and portable ZIP. A signed <a href="#mac-beta">macOS Apple Silicon installer</a> is also available. Linux requires a source build.</td></tr>
+      <tr><td>OBS Studio</td><td>Use 32.2.2 or later on Windows for the tested release configuration, and 32.2.1 or later on Apple Silicon.</td></tr>
       <tr><td>A Zoom account</td><td>Any account you can sign in with. No developer account, SDK key, or client secret required.</td></tr>
       <tr><td>Network bandwidth</td><td>Plan roughly 4-6 Mbps per 1080p participant feed. Your Zoom account and app entitlements affect maximum quality and stream count (standard accounts are commonly limited to ~30 Mbps incoming video; Enhanced Media / HBM can raise that to ~100 Mbps).</td></tr>
     </table>
@@ -550,8 +543,9 @@
     <p><strong>Use case:</strong> See every source's assignment and feed health at a glance, and
     save/load named participant-to-source layouts between shows.</p>
     <p><strong>Prerequisites:</strong> CoreVideo sources added to your scene.</p>
-    <p>Open the <strong>Zoom Output Manager</strong> dock to assign participants, watch live thumbnails
-    and health, and save/load profiles. See <a href="#output-profiles">Output Profiles</a>.</p>
+    <p>Open <strong>Zoom Output Manager</strong>, choose an <strong>Assignment</strong> and click
+    <strong>Apply</strong>. If a new source is missing from the table, click <strong>Refresh</strong>.
+    See the <a href="/quickstart/">Operator Quickstart</a> and <a href="#output-profiles">Output Profiles</a>.</p>
     
 
     <h3>ISO recording</h3>
@@ -613,30 +607,23 @@
   <!-- ── Troubleshooting ────────────────────────────────────────── -->
   <section id="troubleshooting">
     <h2>Troubleshooting</h2>
-    <div class="callout warning">
-      <div class="callout-title">⚠️ Public beta</div>
-      CoreVideo is in public beta. The Windows installer is not yet code-signed, and
-      the issues below are the ones we expect to see most from new installs. If
-      something isn't covered here, see <a href="#filing-a-bug">Filing a bug</a> below.
-    </div>
+    <p>For problems outside this list, see <a href="#filing-a-bug">Filing a bug</a>.</p>
     <table>
       <tr><th>Symptom</th><th>Fix</th></tr>
-      <tr><td>Zoom Control dock not visible after install</td><td>Enable it from OBS <strong>Docks&nbsp;→&nbsp;Zoom Control</strong> (or <strong>Tools&nbsp;→&nbsp;Zoom Control</strong>, which creates and shows it even if you've never opened it before). Confirm OBS is version 30+ and was fully closed during install.</td></tr>
-      <tr><td>"Sign in with Zoom" doesn't complete</td><td>Finish the browser consent and allow the <code>corevideo://</code> link to open CoreVideo. Re-run sign-in from Tools&nbsp;→&nbsp;Zoom Plugin Settings. See <a href="#signin-loop">Sign-in loop</a> below for more.</td></tr>
+      <tr><td>Zoom Control dock not visible after install</td><td>Enable it from OBS <strong>Docks&nbsp;→&nbsp;Zoom Control</strong> (or <strong>Tools&nbsp;→&nbsp;Zoom Control</strong>, which creates and shows it even if you've never opened it before). Check the supported build on the <a href="/download/">download page</a> and confirm that OBS was closed during installation.</td></tr>
+      <tr><td>"Sign in with Zoom" doesn't complete</td><td>Finish the browser consent and allow the <code>corevideo-obs://</code> link to open CoreVideo. Re-run sign-in from Tools&nbsp;→&nbsp;Zoom Plugin Settings. See <a href="#signin-loop">Sign-in loop</a> below for more.</td></tr>
       <tr><td>Joined, but no video</td><td>Work through the <a href="#no-video-frames">No video frames</a> checklist below.</td></tr>
       <tr><td>Source shows color bars</td><td>The source isn't subscribed yet — assign a participant or slot in the source properties or the Output Manager.</td></tr>
       <tr><td>Choppy or low-resolution feeds</td><td>Reduce the number of concurrent 1080p feeds or the requested resolution, and check available bandwidth (~4-6 Mbps per 1080p feed).</td></tr>
-      <tr><td>Windows warns "Windows protected your PC" during install</td><td>Expected for the unsigned beta installer — see <a href="#smartscreen">SmartScreen</a> below.</td></tr>
+      <tr><td>Windows warns "Windows protected your PC" during install</td><td>Expected for the unsigned and notarized installer — see <a href="#smartscreen">SmartScreen</a> below.</td></tr>
       <tr><td>Windows Firewall prompts for CoreVideo or ZoomObsEngine</td><td>Both control ports are loopback-only — see <a href="#firewall-prompts">Firewall prompts</a> below.</td></tr>
     </table>
 
     <h3 id="smartscreen">Installer blocked by Windows SmartScreen</h3>
     <p>
-      CoreVideo's beta installer (<code>CoreVideo-Setup.exe</code>) is not yet
+      CoreVideo's Windows installer (<code>CoreVideo-Setup-vX.Y.Z.exe</code>) is not yet
       code-signed, so Windows SmartScreen will show <strong>"Windows protected your
-      PC"</strong> the first time you run it. This is expected during the beta —
-      it does not mean the download is unsafe, but you should still confirm you got
-      the file from <a href="https://corevideo.io/download">corevideo.io/download</a>
+      PC"</strong> the first time you run it. Confirm you downloaded the installer from <a href="https://corevideo.io/download">corevideo.io/download</a>
       or the official <a href="https://github.com/iamfatness/CoreVideo/releases">GitHub Releases</a> page.
     </p>
     <div class="steps">
@@ -652,9 +639,9 @@
         <p>Every release publishes a matching <code>.sha256</code> file next to the
         installer and ZIP. Compare it against a local hash before running the
         installer:</p>
-        <pre><code>certutil -hashfile CoreVideo-Setup.exe SHA256</code></pre>
+        <pre><code>certutil -hashfile CoreVideo-Setup-vX.Y.Z.exe SHA256</code></pre>
         <p>or, in PowerShell:</p>
-        <pre><code>Get-FileHash .\CoreVideo-Setup.exe -Algorithm SHA256</code></pre>
+        <pre><code>Get-FileHash .\CoreVideo-Setup-vX.Y.Z.exe -Algorithm SHA256</code></pre>
         <p>The result should match the contents of the corresponding
         <code>.sha256</code> file from the same release.</p>
       </div></div>
@@ -697,19 +684,21 @@
     <p>
       "Sign in with Zoom" opens your browser to Zoom's consent screen and expects
       the browser to hand control back to CoreVideo afterward through the
-      <code>corevideo://</code> URL scheme. A few different things can break that
+      <code>corevideo-obs://</code> URL scheme. A few different things can break that
       handoff:
     </p>
     <ul>
-      <li><strong>The <code>corevideo://</code> handler isn't registered yet.</strong>
+      <li><strong>The <code>corevideo-obs://</code> handler isn't registered yet.</strong>
       CoreVideo registers it automatically the first time you click <strong>Sign in
       with Zoom</strong>. If a browser prompt asks which app should open a
-      <code>corevideo://</code> link, choose CoreVideo (and "always allow" it) — if
+      <code>corevideo-obs://</code> link, choose CoreVideo (and "always allow" it) — if
       you dismiss or block that prompt, the callback has nowhere to go and the
       browser tab just sits there after you approve access in Zoom.</li>
+      <li><strong>CoreVideo Pro opens after consent.</strong> Update the OBS plugin from the
+      <a href="/download/">download page</a>. Start a fresh sign-in from OBS to use its own callback address.</li>
       <li><strong>The callback helper didn't launch.</strong> The last hop is a
-      small helper binary, <code>CoreVideoOAuthCallback.exe</code>, which the OS
-      launches for the <code>corevideo://oauth/callback</code> URL and which
+      small helper, <code>CoreVideoOAuthCallback.exe</code> on Windows or <code>CoreVideoOAuthCallback.app</code> on Mac, which the OS
+      launches for the <code>corevideo-obs://oauth/callback</code> URL and which
       forwards it to the plugin's local control server as an
       <code>oauth_callback</code> command. If antivirus software or SmartScreen
       blocked that helper from running, sign-in will look like it hung after you
@@ -1252,7 +1241,7 @@ sequenceDiagram
       (Proof Key for Code Exchange, S256) for user-level attributed meeting joins
       and Zoom App Marketplace compliance. The desktop plugin opens the broker
       start URL, receives a short-lived broker token through
-      <code>corevideo://oauth/callback</code>, and never stores a Zoom app secret.
+      <code>corevideo-obs://oauth/callback</code>, and never stores a Zoom app secret.
     </p>
 
     <h3>Setup (one-time per machine)</h3>
@@ -1266,7 +1255,7 @@ sequenceDiagram
       <div class="step"><div class="step-body">
         <h3>Register the URL scheme</h3>
         <p>Click <strong>Sign in with Zoom</strong>. CoreVideo registers the
-        <code>corevideo://</code> callback helper automatically on first use.</p>
+        <code>corevideo-obs://</code> callback helper automatically on first use.</p>
       </div></div>
       <div class="step"><div class="step-body">
         <h3>Authorize</h3>
@@ -1277,7 +1266,7 @@ sequenceDiagram
       <div class="step"><div class="step-body">
         <h3>Callback forwarding</h3>
         <p>Zoom redirects to the broker callback, then the broker returns an
-        encrypted broker token to <code>corevideo://oauth/callback</code>. The
+        encrypted broker token to <code>corevideo-obs://oauth/callback</code>. The
         helper forwards that URL to the plugin via the TCP control server
         (<code>oauth_callback</code> command). Tokens are stored; on Windows they
         are DPAPI-protected before writing to OBS config.</p>
@@ -1307,7 +1296,7 @@ sequenceDiagram
     ZoomCloud2-->>Browser: consent screen
     User->>Browser: approve
     ZoomCloud2-->>Broker2: redirect to /oauth/callback?code=…&state=…
-    Broker2-->>Browser: redirect → corevideo://oauth/callback
+    Broker2-->>Browser: redirect → corevideo-obs://oauth/callback
     Browser->>Helper: launch CoreVideoOAuthCallback helper
     Helper->>ZCS2: POST {"cmd":"oauth_callback", url}
     ZCS2->>ZOA: handle_redirect_url(url)
@@ -1859,7 +1848,7 @@ sequenceDiagram
       <tr><td><code>speaker_director_release</code></td><td><code>{"cmd":"speaker_director_release"}</code></td><td><code>speaker_director</code> object with automatic direction restored</td></tr>
       <tr><td><code>join</code></td><td><code>{"cmd":"join","meeting_id":"…","passcode":"…","display_name":"OBS"}</code></td><td><code>ok</code></td></tr>
       <tr><td><code>leave</code></td><td><code>{"cmd":"leave"}</code></td><td><code>ok</code></td></tr>
-      <tr><td><code>oauth_callback</code></td><td><code>{"cmd":"oauth_callback","url":"corevideo://oauth/callback?broker_token=…&amp;state=…"}</code></td><td><code>ok</code> or <code>error</code> - forwards the OS URL-scheme callback to <code>ZoomOAuthManager::handle_redirect_url()</code>. Token check is bypassed for this command; OAuth state and broker token validation still guard against replay.</td></tr>
+      <tr><td><code>oauth_callback</code></td><td><code>{"cmd":"oauth_callback","url":"corevideo-obs://oauth/callback?broker_token=…&amp;state=…"}</code></td><td><code>ok</code> or <code>error</code> - forwards the OS URL-scheme callback to <code>ZoomOAuthManager::handle_redirect_url()</code>. Token check is bypassed for this command; OAuth state and broker token validation still guard against replay.</td></tr>
     </table>
 
     <h3>Participant object</h3>
@@ -2009,10 +1998,10 @@ sequenceDiagram
       <tr><td>OAuth Client ID</td><td>Embedded/brokered</td><td>Developer-only field when the build has no embedded broker URL. Published builds use the broker public client configuration.</td></tr>
       <tr><td>OAuth Client Secret</td><td>&mdash;</td><td>Not used in published builds. Public Client OAuth uses PKCE and no desktop secret.</td></tr>
       <tr><td>Authorization URL</td><td>Embedded</td><td>Published builds use <code>https://corevideo.iamfatness.us/oauth/start</code>.</td></tr>
-      <tr><td>Redirect URI</td><td><code>corevideo://oauth/callback</code></td><td>Local return URI used by the callback helper after broker authorization.</td></tr>
+      <tr><td>Redirect URI</td><td><code>corevideo-obs://oauth/callback</code></td><td>Local return URI used by the callback helper after broker authorization.</td></tr>
       <tr><td>Scopes</td><td><code>user:read:token user:read:user</code></td><td>OAuth scopes requested during authorization.</td></tr>
       <tr><td>OAuth Status label</td><td>—</td><td>Shows connected/disconnected status and token expiry</td></tr>
-      <tr><td>Register corevideo:// URL Scheme</td><td>—</td><td>Registers the OS URL scheme handler for the callback helper; published builds do this automatically on sign-in.</td></tr>
+      <tr><td>Register corevideo-obs:// URL Scheme</td><td>—</td><td>Registers the OS URL scheme handler for the callback helper; published builds do this automatically on sign-in.</td></tr>
       <tr><td>Sign in with Zoom</td><td>—</td><td>Opens browser to begin the broker-backed PKCE authorization flow.</td></tr>
       <tr><td>Refresh Token</td><td>—</td><td>Manually trigger token refresh</td></tr>
       <tr><td>Disconnect</td><td>—</td><td>Clears stored access and refresh tokens</td></tr>
@@ -2090,7 +2079,7 @@ sequenceDiagram
       program recording, start/stop ISO recording, and monitor active ISO
       sessions with source, participant, resolution, frame counts, audio chunk
       counts, and output file paths. Recently completed sessions remain visible
-      after stop so operators can confirm completed MP4/WAV outputs before
+      after stop so operators can confirm completed MP4 files before
       opening the folder.
     </p>
     <p>
@@ -2104,7 +2093,7 @@ sequenceDiagram
 
     <div class="diagram-wrap" tabindex="0" role="group" aria-label="Architecture diagram (scrollable)">
       <img src="/core-plugin/images/iso-recording-flow.svg" alt="CoreVideo ISO recording flow" style="max-width:100%;height:auto;">
-      <div class="diagram-caption">Assignments resolve the participant IDs. Each assigned Zoom source can feed an FFmpeg writer for video/audio ISO files while OBS continues to own the program output.</div>
+      <div class="diagram-caption">Selected feeds resolve to participant IDs. Each participant gets one MP4 with isolated audio. OBS owns the optional program recording.</div>
     </div>
 
     <h3>Start Recording</h3>
@@ -2112,8 +2101,10 @@ sequenceDiagram
   "cmd": "iso_recording_start",
   "output_dir": "C:/Recordings/CoreVideo",
   "ffmpeg_path": "ffmpeg",
-  "record_program": true
+  "record_program": true,
+  "source_uuids": ["OUTPUT_SOURCE_UUID"]
 }</code></pre>
+    <p>Use the IDs returned by <code>list_outputs</code>. If <code>source_uuids</code> is omitted, TCP uses the saved feed selection in Zoom ISO Recorder. OSC uses the same saved selection.</p>
 
     <h3>Check Status</h3>
     <pre><code>{ "cmd": "iso_recording_status" }</code></pre>

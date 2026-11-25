@@ -7,6 +7,44 @@ are tagged `vMAJOR.MINOR.PATCH` and published as
 
 ## [Unreleased]
 
+## [0.1.55] - 2026-11-25
+
+### Fixed
+
+- Zoom Plugin Settings shows the signed-in state as soon as OBS saves the
+  token returned from the browser. The dialog now shows browser instructions
+  inline during sign-in.
+- Output Manager waits for open pickers before refreshing their rows, and
+  fits into a smaller OBS dock.
+- Zoom Control shows the next setup step. Output Manager explains how to add
+  the first OBS source and apply assignments.
+
+## [0.1.53] - 2026-11-25
+
+### Fixed
+
+- Zoom sign-in returns to the OBS plugin when CoreVideo Pro is also installed.
+  The OBS callback uses its own URL scheme on Windows and macOS, including
+  for installs upgrading with the previous callback saved in OBS settings.
+
+## [0.1.52] - 2026-11-25
+
+### Fixed
+
+- Screen Share uses the Zoom engine's share-discovery state, even when the
+  presenter has no participant roster row. A slow static share can hold its
+  last frame between updates on Windows and macOS.
+- Update notices require a newer stable release with an installer or portable
+  package for the running platform.
+
+Windows includes the microphone selection and muted-join fixes from v0.1.51.
+
+## [0.1.51] - 2026-11-24
+
+Windows x64 release. Keeps the Zoom SDK settings service alive across
+authentication and joins, fixes muted-join preflight, and supports explicitly
+selecting an input device. macOS continued on v0.1.50 for this release.
+
 ## [0.1.50] - 2026-11-14
 
 Full release for Windows and macOS (Apple Silicon). Screen share is the
@@ -1165,7 +1203,11 @@ sign-in, per-participant and screen-share sources, the Active Speaker
 Director, auto-reconnect, TCP/OSC control APIs, ISO recording, the Output
 Manager, and the initial Windows release packaging and CI pipeline.
 
-[Unreleased]: https://github.com/iamfatness/CoreVideo/compare/v0.1.45...HEAD
+[Unreleased]: https://github.com/iamfatness/CoreVideo/compare/v0.1.55...HEAD
+[0.1.55]: https://github.com/iamfatness/CoreVideo/compare/v0.1.53...v0.1.55
+[0.1.53]: https://github.com/iamfatness/CoreVideo/compare/v0.1.52...v0.1.53
+[0.1.52]: https://github.com/iamfatness/CoreVideo/compare/v0.1.51...v0.1.52
+[0.1.51]: https://github.com/iamfatness/CoreVideo/compare/v0.1.50...v0.1.51
 [0.1.45]: https://github.com/iamfatness/CoreVideo/compare/v0.1.45-beta.3...v0.1.45
 [0.1.45-beta.3]: https://github.com/iamfatness/CoreVideo/compare/v0.1.45-beta.2...v0.1.45-beta.3
 [0.1.45-beta.2]: https://github.com/iamfatness/CoreVideo/compare/v0.1.45-beta.1...v0.1.45-beta.2

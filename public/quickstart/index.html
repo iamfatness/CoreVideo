@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <script src="/assets/google-tag-manager.js"></script>
+  <script async src="https://www.googletagmanager.com/gtm.js?id=GTM-PSHZHBGZ"></script>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CoreVideo Operator Quickstart - Zoom in OBS</title>
+  <meta name="description" content="Install CoreVideo, sign in to Zoom, start the engine, and assign your first participant source in OBS.">
+  <meta name="theme-color" content="#0a0b0c">
+  <link rel="icon" href="/favicon.svg">
+  <link rel="preload" href="/assets/fonts/SpaceGrotesk-var.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/assets/fonts/IBMPlexMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="canonical" href="https://corevideo.io/quickstart/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="CoreVideo">
+  <meta property="og:title" content="CoreVideo Operator Quickstart - Zoom in OBS">
+  <meta property="og:description" content="Install CoreVideo, sign in to Zoom, start the engine, and assign your first participant source in OBS.">
+  <meta property="og:image" content="https://corevideo.io/assets/corevideo-share.jpg">
+  <meta property="og:image:alt" content="CoreVideo - Zoom participant video and audio as native OBS Studio sources">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:url" content="https://corevideo.io/quickstart/">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="CoreVideo Operator Quickstart - Zoom in OBS">
+  <meta name="twitter:description" content="Install CoreVideo, sign in to Zoom, start the engine, and assign your first participant source in OBS.">
+  <meta name="twitter:image" content="https://corevideo.io/assets/corevideo-share.jpg">
+  <meta name="twitter:image:alt" content="CoreVideo - Zoom participant video and audio as native OBS Studio sources">
+  <link rel="stylesheet" href="/assets/site.css">
+  <script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "606f185a54e7489bb11a93235343469b"}'></script>
+</head>
+<body class="document-page">
+  <header class="site-header">
+    <a class="brand" href="/"><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
+    <nav><a href="/">Home</a><a href="/pro/">CoreVideo Pro</a><a href="/zcomms/">ZComms</a><a href="/pro/documentation/">Pro Docs</a><a href="/documentation/">Plugin Docs</a><a href="/core-plugin/">Core Plugin</a><a href="/download/">Download</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a></nav>
+  </header>
+  <main class="content">
+    <h1>CoreVideo Operator Quickstart</h1>
+<p>This guide is for an operator using a published CoreVideo installer. It avoids source-build and Marketplace setup details unless they affect day-to-day use.</p>
+<h2>Install</h2>
+<ol><li>Download the Windows x64 or macOS Apple Silicon installer from the latest GitHub release.</li><li>Close OBS Studio before running the installer.</li><li>Run the <code>.exe</code> on Windows or the signed <code>.pkg</code> on macOS.</li><li>Start OBS Studio.</li><li>Confirm these OBS docks and tools are available:</li></ol>
+<ul><li><strong>Zoom Control</strong></li><li><strong>Zoom Output Manager</strong></li><li><strong>Zoom Diagnostics</strong></li><li><strong>Zoom ISO Recorder</strong></li><li><strong>Zoom Talkback</strong> (Windows)</li></ul>
+<p>Each has a matching entry under <strong>Tools</strong>, alongside <strong>Zoom Plugin Settings</strong>.</p>
+<p>Published installers include the OBS plugin, <code>ZoomObsEngine</code>, Zoom SDK runtime, Qt runtime, TLS plugins, OAuth callback helper, and locale files. End users do not need to download the Zoom SDK or enter Zoom app credentials.</p>
+<h2>Sign In</h2>
+<ol><li>Open <strong>Tools &gt; Zoom Plugin Settings</strong>.</li><li>Click <strong>Sign in with Zoom</strong>. This button is in the settings dialog, not on the Zoom Control dock.</li><li>Approve CoreVideo in the browser and allow it to open the OBS callback helper if prompted.</li><li>Return to OBS. The settings dialog updates to <strong>Signed in</strong> after the callback succeeds. <strong>Sign out</strong> is beside it if you ever need to start a fresh flow.</li></ol>
+<p>CoreVideo uses the published app's Public Client OAuth and Meeting SDK public app key. There should be no prompt for a client secret in a production build.</p>
+<h2>Join A Meeting</h2>
+<ol><li>Enter the meeting ID, or paste a full Zoom join URL.</li><li>Enter the passcode if needed.</li><li>Choose the join display name.</li><li>Leave the join-token dropdown on <strong>Zoom sign-in</strong> unless Zoom support has given you a ZAK or an app privilege token to paste.</li><li>Tick <strong>Join as Webinar / Zoom Events</strong> for a webinar.</li><li>Click <strong>Join</strong>, then <strong>Start Engine</strong> once you are in. If asked, have the host grant local recording permission and click <strong>Start Engine</strong> again.</li><li>Use the visible Zoom Meeting SDK window for waiting room admit, self audio, self video, and normal in-meeting controls. Joining early and waiting to be admitted is fine - CoreVideo holds its join window open for the length of a legitimate waiting-room wait rather than giving up on it.</li></ol>
+<p>If join fails, open <strong>Zoom Diagnostics</strong> and export a support bundle before changing settings. The bundle redacts tokens and includes OBS/engine/ISO status.</p>
+<h2>Assign Outputs</h2>
+<ol><li>In an OBS scene, click <strong>+</strong> in the <strong>Sources</strong> dock and add a <strong>CoreVideo Participant</strong> source.</li><li>Open <strong>Zoom Output Manager</strong> from <strong>Zoom Control</strong>. Each row is an existing OBS source. If you just added a source while the manager was open, click <strong>Refresh</strong>.</li><li>In the source's <strong>Assignment</strong> menu, choose one of these:</li></ol>
+<ul><li><strong>Participant</strong> for a fixed Zoom participant.</li><li><strong>Active Speaker</strong> for the directed speaker feed.</li><li><strong>Spotlight Slot 1-8</strong> for ZoomISO-style fixed stage slots.</li><li><strong>Screen share</strong> for the active meeting share.</li></ul>
+<ol><li>Click <strong>Apply</strong> to send the assignment to the source.</li><li>Check the preview and signal:</li></ol>
+<ul><li>Resolution/FPS show what Zoom is actually delivering.</li><li>A warning marker means the observed feed does not match the requested output or is stale.</li><li>Active-speaker, spotlight, and screen-share assignments show dedicated warnings when no eligible routed source is available.</li></ul>
+<p>CoreVideo keeps OBS sources at a stable canvas size and lets OBS scale lower quality feeds instead of changing source geometry during a meeting.</p>
+<h2>Tiles Wall</h2>
+<p>Use <strong>CoreVideo Tiles</strong> when you want everyone on screen at once as a gallery, in a single OBS source that relays itself as people come and go.</p>
+<ol><li>Add <strong>CoreVideo Tiles</strong> from <strong>Sources -&gt; Add</strong>.</li><li>Leave <strong>Fill mode</strong> on <code>Auto - everyone with video</code> to fill the wall with whoever has video, or pick <code>Manual - choose per tile</code> to place people yourself.</li><li>Set <strong>Maximum tiles</strong> to the largest wall you want, and list anyone who should never appear under <strong>Never show</strong> — a stage camera or a recording bot.</li><li>Style it: <strong>Tile shape</strong>, <strong>Gap between tiles</strong>, <strong>Margin around the wall</strong>, <strong>Background colour</strong> and optional <strong>Background source</strong>, then borders and glow if the show wants them.</li><li>For per-person faders and ISO tracks, set <strong>Participant audio scene or group</strong> to a scene or group, and add that scene or group to every scene so audio does not come and go as you cut. Leave it blank if you do not want the wall creating audio sources.</li><li>Optionally turn on <strong>Animate layout changes</strong> so the wall eases when people join and leave instead of jumping on one frame. It is off by default. Set it before you go live rather than mid-show, and give it a look on program first — a busy roster reflows more often than you might expect.</li></ol>
+<p>Tiles are always filled, never letterboxed: a tile narrower than the camera feeding it crops the sides. If you run a second wall, leave its audio field blank — only one wall should own participant audio.</p>
+<h2>Active Speaker</h2>
+<p>Use the <strong>CoreVideo Active Speaker</strong> OBS source when you want one clean output that follows the current directed speaker.</p>
+<ol><li>Add or select <strong>CoreVideo Active Speaker</strong>.</li><li>Configure sensitivity and hold time in source properties or Zoom Control.</li><li>Use exclusion slots for fixed host/question-reader workflows.</li><li>Use manual take/release when a producer needs to override automatic switching.</li></ol>
+<p>The director is CoreVideo's own speaker-follow logic. It is not the same thing as Zoom's active-speaker video feed.</p>
+<h2>Audio</h2>
+<p>Route the dedicated <strong>CoreVideo Participant Audio</strong> and <strong>CoreVideo Active Speaker Audio</strong> sources to program rather than relying on a video source's own embedded audio track. The dedicated path drains the engine's ring in order, stamps from a master clock, and counts what it loses; the embedded track reads only the newest buffer and accounts for nothing.</p>
+<p>Audio arrives ahead of picture, so trim it back - **Tools &gt; Zoom Plugin Settings</p>
+<p>Output Manager's per-row <strong>Delay (embedded)</strong> for one video source's own track, against the <strong>A/V Offset (embedded)</strong> column beside it. Trim off air: lowering a delay pushes the timestamp backward once and glitches that source.</p>
+<blockquote><p>Audio &gt; Audio delay (dedicated sources)** for the dedicated sources, and the</p></blockquote>
+<h2>Talkback</h2>
+<p><strong>Available on Windows.</strong></p>
+<p>Open <strong>Zoom Talkback</strong> to talk privately to talent over Zoom's own talkback channels.</p>
+<ol><li>Choose the OBS audio source you talk through in the dock's source combo. Use a dedicated source with every program track unchecked in Advanced Audio Properties, and read the line under the combo - it tells you whether the audience would hear it.</li><li>Press <strong>Edit talent</strong>, tick everyone you may need to talk to, press <strong>Assign channels</strong>, then <strong>Done</strong>. Channels are created now so a key press has only to open the microphone. Zoom rate-limits this, so a large list can take around twenty seconds. Do it before the show, not during it.</li><li>Read the plan report. Zoom allows 16 channels and 10 people per channel; anyone the budget could not cover is named.</li><li>Hold a cell to talk, or tick <strong>Latch</strong> for press-on/press-off. <strong>All talent</strong> is the full-width cell on top.</li><li>Trust the banner, not the button. <code>ON AIR</code> means the engine confirmed it; <code>ON AIR - BOT MUTED</code> means Zoom will not let CoreVideo unmute and nobody hears you - ask the host to unmute CoreVideo.</li></ol>
+<p>Talkback reaches only the breakout room the engine is in. A cell reading <code>not in channel</code> usually means the talent is in a different room.</p>
+<h2>ISO Recording</h2>
+<ol><li>Open <strong>Zoom ISO Recorder</strong>.</li><li>If the status line says <strong>FFmpeg not found</strong>, click <strong>Download FFmpeg</strong>. CoreVideo fetches a verified FFmpeg build (about 115 MB on Windows, 28 MB on Mac) into your OBS settings folder; no admin rights are needed. To use your own FFmpeg instead, click <strong>Browse</strong>. On a Mac, an FFmpeg installed with Homebrew is found automatically.</li><li>Choose an output folder.</li><li>Choose the video encoder:</li></ol>
+<ul><li><code>libx264</code> is the safest CPU fallback.</li><li><code>h264_nvenc</code>, <code>h264_qsv</code>, and <code>h264_amf</code> reduce CPU load when supported by the installed FFmpeg build and hardware.</li><li>On a Mac, <code>h264_videotoolbox</code> (Apple VideoToolbox) is the hardware encoder.</li></ul>
+<ol><li>Enable <strong>Record program</strong> if CoreVideo should also start OBS program recording.</li><li>Select the routed feeds to record, then click <strong>Start ISO Recording</strong>.</li></ol>
+<p>CoreVideo writes one continuous MP4 per participant with H.264 video and isolated AAC audio. Resolution changes keep the same file. The panel shows the requested and actual encoders, active sessions, and file paths.</p>
+<h2>Diagnostics And Support</h2>
+<p>Use <strong>Zoom Diagnostics</strong> during every production test. Export a support bundle when you see:</p>
+<ul><li>Join/auth errors.</li><li>Engine crash or reconnect loop.</li><li>Stale frames.</li><li>Resolution stuck below the requested quality.</li><li>ISO encoder failures.</li><li>OBS close/reopen dock issues.</li></ul>
+<p>The bundle includes redacted settings, recent OBS log excerpts, engine status, output health, active speaker status, screen-share status, and ISO recorder status.</p>
+<h2>Known Scope</h2>
+<p>The OBS plugin is the production surface today. Sidecar is tracked separately and should not be presented as the production scene/look designer until the Sidecar roadmap issues are complete.</p>
+  </main>
+  <footer class="site-footer">
+    <span>CoreVideo is an independent product and is not affiliated with Zoom Video Communications, Inc.</span>
+  </footer>
+</body>
+</html>

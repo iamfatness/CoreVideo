@@ -4,10 +4,13 @@ This guide covers the main CoreVideo OBS plugin workflows. It intentionally
 focuses on the OBS plugin, `ZoomObsEngine`, Zoom source assignment, control APIs,
 audio routing, talkback, and ISO recording.
 
-Current Windows release: **v0.1.49**. macOS Apple Silicon beta:
-**v0.1.45-beta.2**, available as a signed and notarized installer on the
-[download page](https://corevideo.io/download/#macos). Talkback is unavailable
-on macOS. The Mac package was built against OBS 32.2.1; use that version or newer.
+The [download page](https://corevideo.io/download/) has the current Windows x64
+and signed Apple Silicon installers. Use OBS Studio 32.2.1 or newer on Mac.
+Talkback is available on Windows.
+
+Follow the [Operator Quickstart](https://corevideo.io/quickstart/) to sign in,
+join a meeting, start the engine, add a CoreVideo source, and apply its first
+assignment.
 
 One naming quirk to get out of the way: the OBS **sources** this plugin
 registers are called `CoreVideo ...`, but its **docks and Tools menu entries**
@@ -31,7 +34,7 @@ test independently from the Zoom SDK.
 **Current limitation (high feed counts):** All video frames travel as CPU I420
 through shared memory. At 8+ concurrent 1080p sources this creates substantial
 memory bandwidth pressure due to multiple per-subscription copies. See
-[ROADMAP.md](ROADMAP.md) (Large-meeting capacity guidance) for exploration of
+[ROADMAP.md](https://github.com/iamfatness/CoreVideo/blob/main/docs/ROADMAP.md) (Large-meeting capacity guidance) for exploration of
 GPU texture sharing (Spout on Windows, Syphon on macOS) as a lower-CPU
 alternative transport in the future.
 

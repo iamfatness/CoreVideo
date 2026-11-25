@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1120" height="500" viewBox="0 0 1120 500" role="img" aria-labelledby="title desc">
   <title id="title">CoreVideo ISO recording flow</title>
-  <desc id="desc">Diagram showing assignment triggering ISO recording, shared memory frames, FFmpeg encoded video, WAV audio, and main OBS recording.</desc>
+  <desc id="desc">Diagram showing assignment triggering ISO recording, shared memory frames, FFmpeg-encoded MP4 with isolated audio, and main OBS recording.</desc>
   <defs>
     <style>
       .bg{fill:#070914}.box{fill:#101827;stroke:#38bdf8;stroke-width:2;rx:12}.file{fill:#162033;stroke:#22c55e;stroke-width:2;rx:10}.text{font-family:Segoe UI,Arial,sans-serif;fill:#f8fafc}.muted{fill:#a6b3c6}.arrow{stroke:#38bdf8;stroke-width:3;fill:none;marker-end:url(#arrow)}
@@ -11,22 +11,22 @@
   </defs>
   <rect class="bg" width="1120" height="500"/>
   <text class="text" x="48" y="54" font-size="30" font-weight="700">Auto ISO Recording</text>
-  <text class="muted" x="48" y="82" font-size="16">Per-source sessions rotate when resolved participant or resolution changes.</text>
+  <text class="muted" x="48" y="82" font-size="16">Selected feeds write one continuous MP4 per participant.</text>
   <rect class="box" x="50" y="130" width="210" height="86"/>
-  <text class="text" x="75" y="165" font-size="18" font-weight="700">Assignment</text>
+  <text class="text" x="75" y="165" font-size="18" font-weight="700">Selected feeds</text>
   <text class="muted" x="75" y="192" font-size="14">participant / active speaker / spotlight</text>
   <rect class="box" x="325" y="130" width="210" height="86"/>
   <text class="text" x="350" y="165" font-size="18" font-weight="700">ZoomSource</text>
-  <text class="muted" x="350" y="192" font-size="14">reads I420 + PCM shared memory</text>
+  <text class="muted" x="350" y="192" font-size="14">video + isolated participant audio</text>
   <rect class="box" x="600" y="130" width="210" height="86"/>
   <text class="text" x="625" y="165" font-size="18" font-weight="700">ZoomIsoRecorder</text>
   <text class="muted" x="625" y="192" font-size="14">plugin-side session manager</text>
   <rect class="file" x="875" y="90" width="190" height="70"/>
   <text class="text" x="902" y="123" font-size="18" font-weight="700">ISO .mp4</text>
-  <text class="muted" x="902" y="146" font-size="14">FFmpeg libx264</text>
+  <text class="muted" x="902" y="146" font-size="14">H.264 video + AAC audio</text>
   <rect class="file" x="875" y="190" width="190" height="70"/>
-  <text class="text" x="902" y="223" font-size="18" font-weight="700">ISO .wav</text>
-  <text class="muted" x="902" y="246" font-size="14">PCM 16-bit audio</text>
+  <text class="text" x="902" y="223" font-size="18" font-weight="700">FFmpeg log</text>
+  <text class="muted" x="902" y="246" font-size="14">per-recording diagnostics</text>
   <rect class="file" x="875" y="310" width="190" height="70"/>
   <text class="text" x="902" y="343" font-size="18" font-weight="700">OBS Program</text>
   <text class="muted" x="902" y="366" font-size="14">optional main recording</text>
@@ -35,7 +35,7 @@
   <path class="arrow" d="M810 155 C842 145 846 130 875 125"/>
   <path class="arrow" d="M810 190 C842 205 846 220 875 225"/>
   <path class="arrow" d="M705 216 C720 335 790 345 875 345"/>
-  <text class="muted" x="96" y="300" font-size="16">Control examples</text>
+  <text class="muted" x="96" y="300" font-size="16">Select feeds in Zoom ISO Recorder before starting via TCP or OSC.</text>
   <text class="text" x="96" y="330" font-size="15">TCP: {"cmd":"iso_recording_start","output_dir":"C:/Recordings/CoreVideo"}</text>
   <text class="text" x="96" y="360" font-size="15">OSC: /zoom/iso/start "C:/Recordings/CoreVideo"</text>
 </svg>

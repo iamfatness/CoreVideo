@@ -1,9 +1,8 @@
 # Support
 
-Current Windows release: **v0.1.49**. macOS Apple Silicon beta:
-**v0.1.45-beta.2**, signed and notarized. See [Downloads](https://corevideo.io/download/)
-for the correct package. Include your operating system, OBS version, and
-CoreVideo version with a bug report.
+Use [Downloads](https://corevideo.io/download/) for the current Windows x64
+or signed and notarized Apple Silicon installer. Include your operating system,
+OBS version, and CoreVideo version with a bug report.
 
 ## Documentation
 
@@ -14,6 +13,7 @@ site:
 
 | Topic | Link |
 |---|---|
+| First session and source assignment | [Operator Quickstart](https://corevideo.io/quickstart/) |
 | Adding the plugin to OBS | [Adding the App](https://corevideo.io/documentation/#adding) |
 | Requirements | [Requirements](https://corevideo.io/documentation/#requirements) |
 | Configuration reference | [Configuration](https://corevideo.io/documentation/#configuration) |
@@ -51,8 +51,7 @@ the Tools menu for "CoreVideo" finds nothing.
 ## macOS installation and recording
 
 Use the [signed macOS installer](https://corevideo.io/download/#macos), close OBS
-before installing, then reopen it. The replacement beta was built against
-OBS 32.2.1; use that version or newer. If an earlier copy reports a signature
+before installing, then reopen it. Use OBS Studio 32.2.1 or newer. If an earlier copy reports a signature
 error, download the replacement package rather than disabling Gatekeeper.
 The plugin installs under `~/Library/Application Support/obs-studio/plugins/`.
 
@@ -60,6 +59,19 @@ For ISO recording, select and test a working FFmpeg executable in
 **Zoom ISO Recorder**; FFmpeg is not included in the macOS package. If the engine
 requests recording permission, wait for the host to grant it and start raw
 media again. For your own screen, use OBS's macOS Screen Capture source.
+
+## Zoom sign-in and output assignment
+
+If Zoom opens CoreVideo Pro after consent, update the OBS plugin and start a
+fresh sign-in from **Tools → Zoom Plugin Settings**. The browser should open
+the OBS callback helper. The settings dialog updates to **Signed in** when
+the callback completes.
+
+If the Output Manager is empty, add a **CoreVideo Participant** in the OBS
+**Sources** dock, then click **Refresh** in the manager. Choose an
+**Assignment** and click **Apply**. If the entire dock disappears during
+selection, include whether it was docked or floating and attach a support
+bundle from the same OBS session.
 
 ## Collecting logs
 
@@ -443,7 +455,7 @@ bandwidth tier, not as a hard prerequisite for raw data.
   It is unavailable on macOS. Talkback has no OSC addresses,
   no Companion actions, and no OBS hotkey yet - the dock and the TCP control API
   are the only keying surfaces.
-- **macOS Apple Silicon has a signed and notarized beta installer.** Use the
+- **macOS Apple Silicon has a signed and notarized installer.** Use the
   [current package](https://corevideo.io/download/#macos); if an earlier
   download reports a signature error, install the current one. Talkback remains
   Windows-only. Intel Macs have no package; Linux requires a source build.

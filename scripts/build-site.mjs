@@ -63,8 +63,8 @@ function latestReleaseVersion() {
 }
 
 const RELEASE_VERSION = latestReleaseVersion();
-// macOS betas are signed locally and published separately from Windows releases.
-const MAC_VERSION = "0.1.50";
+// Keep the Apple Silicon pin independent for Windows-only releases.
+const MAC_VERSION = "0.1.55";
 const MAC_RELEASE = `https://github.com/iamfatness/CoreVideo/releases/tag/v${MAC_VERSION}`;
 const MAC_INSTALLER = `https://github.com/iamfatness/CoreVideo/releases/download/v${MAC_VERSION}/CoreVideo-Setup-v${MAC_VERSION}.pkg`;
 const RELEASES_LATEST = "https://github.com/iamfatness/CoreVideo/releases/latest";
@@ -156,6 +156,13 @@ const markdownPages = [
     description:
       "How to route Zoom participants to OBS sources: per-participant video and audio, active-speaker follow, spotlight slots, screen share, and ISO recording.",
     output: "core-plugin/index.html",
+  },
+  {
+    source: path.join(docsDir, "OPERATOR_QUICKSTART.md"),
+    title: "Operator Quickstart",
+    seoTitle: "CoreVideo Operator Quickstart - Zoom in OBS",
+    description: "Install CoreVideo, sign in to Zoom, start the engine, and assign your first participant source in OBS.",
+    output: "quickstart/index.html",
   },
 ];
 
@@ -252,7 +259,8 @@ function homeContent() {
     <p class="lede">CoreVideo joins the meeting through the Zoom Meeting SDK and hands OBS each participant's own video and audio as a real source &mdash; no NDI, no virtual camera, no screen capture, and no second machine. Follow the active speaker, pin spotlight slots, take the screen share, and record every guest to an isolated file.</p>
     <div class="hero-actions">
       <a class="button primary" href="/download/">Download${RELEASE_VERSION ? ` v${RELEASE_VERSION}` : ""} for Windows</a>
-      <a class="button" href="/download/#macos">Download for macOS &mdash; Apple Silicon beta</a>
+      <a class="button" href="/download/#macos">Download for macOS &mdash; Apple Silicon</a>
+      <a class="button" href="/quickstart/">Operator Quickstart</a>
       <a class="button" href="/core-plugin/">How it works</a>
       <a class="button" href="https://github.com/iamfatness/CoreVideo">View source</a>
     </div>
@@ -263,7 +271,7 @@ function homeContent() {
   <div><strong>CoreVideo Tiles</strong><span>Arrange participant feeds in a styled gallery within one OBS source, with rounded corners, borders, and flexible layouts.</span></div>
   <div><strong>Active speaker &amp; spotlight</strong><span>Point a source at whoever is talking, at Zoom spotlight slot 1&hellip;N, or at a fixed guest with an automatic failover if they drop.</span></div>
   <div><strong>Screen share &amp; interpretation</strong><span>Subscribe to the live screen share, and pull existing Zoom interpretation audio channels in as dedicated sources.</span></div>
-  <div><strong>ISO recording</strong><span>Record every assigned participant to an MP4 video file and a matching PCM WAV audio file, alongside the main program recording.</span></div>
+  <div><strong>ISO recording</strong><span>Record selected Zoom feeds as per-participant MP4 files with isolated audio, alongside optional OBS program recording.</span></div>
   <div><strong>Active Speaker Director</strong><span>An automatic take with a hold time, a sensitivity threshold, an exclusion list, and a &ldquo;require video&rdquo; rule &mdash; so the cut follows the conversation without chattering.</span></div>
   <div><strong>Output profiles</strong><span>The Output Manager saves and reloads a whole assignment set, so last week&rsquo;s routing comes back on the next show instead of being rebuilt by hand.</span></div>
   <div><strong>Stream Deck &amp; Companion</strong><span>A Bitfocus Companion module (v5 or newer) picks the output and the participant <em>by name</em> from the live roster, so a button keeps working after somebody rejoins.</span></div>
@@ -817,8 +825,8 @@ function downloadPageContent() {
     : "Download for Windows";
 
   const versionNote = v
-    ? `<p class="lede">Latest release <strong>v${v}</strong> &mdash; Windows installer for OBS Studio 30 and newer. Free and open source under the MIT license.</p>`
-    : `<p class="lede">Windows installer for OBS Studio 30 and newer. Free and open source under the MIT license.</p>`;
+    ? `<p class="lede">Latest release <strong>v${v}</strong> &mdash; Windows x64 installer. OBS Studio 32.2.2 or later recommended. Free and open source under the MIT license.</p>`
+    : `<p class="lede">Windows x64 installer. OBS Studio 32.2.2 or later recommended. Free and open source under the MIT license.</p>`;
 
   const fileRows = v
     ? `<section class="link-grid" aria-label="Release files">
@@ -826,7 +834,7 @@ function downloadPageContent() {
   <a href="${asset(`CoreVideo-Windows-x64-v${v}.zip`)}"><strong>Portable ZIP (x64)</strong><span>Unpack into the OBS plugin directory yourself &mdash; for locked-down or portable OBS setups.</span></a>
   <a href="${asset(`CoreVideo-Setup-v${v}.exe.sha256`)}"><strong>Installer checksum</strong><span>SHA-256 for the installer, to verify the download before running it.</span></a>
   <a href="${asset(`CoreVideo-Windows-x64-v${v}.zip.sha256`)}"><strong>ZIP checksum</strong><span>SHA-256 for the portable archive.</span></a>
-  <a href="${RELEASES_LATEST}"><strong>Companion module</strong><span>The Bitfocus Companion module (<code>corevideo-obs</code>) ships with each release. Requires Companion v5 or newer.</span></a>
+  <a href="https://github.com/iamfatness/CoreVideo/releases/download/v0.1.44/corevideo-obs-1.0.2.tgz"><strong>Companion module</strong><span>Download <code>corevideo-obs</code> 1.0.2 for Companion v5 or newer.</span></a>
 </section>`
     : "";
 
@@ -843,35 +851,35 @@ function downloadPageContent() {
     ${versionNote}
     <div class="hero-actions">
       <a class="button primary" href="${primaryHref}">${primaryLabel}</a>
-      <a class="button" href="${RELEASES_LATEST}">Windows release notes</a>
+      <a class="button" href="${RELEASES_LATEST}">Release notes</a>
     </div>
   </div>
 </section>
 ${fileRows}
-<p>See the <a href="${RELEASES_LATEST}">Windows release notes</a> for the latest changes. Existing installs are offered new stable releases by the in-plugin update check.</p>
+<p>See the <a href="${RELEASES_LATEST}">Release notes</a> for the latest changes. The plugin offers newer stable releases with a package for the installed platform.</p>
 <section id="macos">
-<h2>macOS &mdash; Apple Silicon beta v${MAC_VERSION}</h2>
-<p>Developer ID signed, notarized by Apple, and stapled. The macOS installer is built and notarized separately from the Windows release, so its version can trail Windows; it carries the same raw-media recovery, waiting-room and video-quality fixes and the panelist loudness readiness board.</p>
+<h2>macOS &mdash; Apple Silicon v${MAC_VERSION}</h2>
+<p>The macOS installer is Developer ID signed and Apple-notarized.</p>
 <div class="hero-actions">
 <a class="button primary" href="${MAC_INSTALLER}">Download macOS installer (.pkg)</a>
 <a class="button" href="${MAC_INSTALLER}.sha256">SHA-256 checksum</a>
 <a class="button" href="${MAC_RELEASE}">macOS release notes</a>
 </div>
-<p>Requires an Apple Silicon Mac (M1 or later). The package is built against OBS Studio 32.2.1; use that version or newer for this beta. Intel Macs are not supported by this package.</p>
+<p>Requires an Apple Silicon Mac (M1 or later) and OBS Studio 32.2.1 or later.</p>
 <ol>
 <li>Close OBS, then open the downloaded <code>.pkg</code>.</li>
 <li>Install for your user account. No administrator password is needed.</li>
-<li>Reopen OBS, sign in to Zoom through CoreVideo, and join a meeting. Allow the requested permissions; the host must grant recording permission for media capture.</li>
+<li>Reopen OBS and follow the <a href="/quickstart/">Operator Quickstart</a> to sign in, join, and assign your first source.</li>
 </ol>
-<p>For ISO recording, set a working FFmpeg executable in <strong>Zoom ISO Recorder</strong> and test it before recording. The macOS package does not bundle FFmpeg.</p>
+<p>For ISO recording, use <strong>Download FFmpeg</strong> in Zoom ISO Recorder or select an existing FFmpeg executable.</p>
 <p>Talkback is Windows-only. For your own screen, use OBS's macOS Screen Capture source; CoreVideo receives other participants' shares.</p>
 <p>To verify the download, save the installer and checksum in the same folder and run:</p>
 <pre><code>shasum -a 256 -c CoreVideo-Setup-v${MAC_VERSION}.pkg.sha256</code></pre>
 </section>
 <h2>Windows requirements</h2>
 <ul>
-<li><strong>OBS Studio 30 or newer</strong>, 64-bit.</li>
-<li><strong>Windows 10 or Windows 11</strong> (x64). For macOS, use the <a href="#macos">Apple Silicon beta installer above</a>. Linux requires a source build.</li>
+<li><strong>64-bit OBS Studio</strong>. The installer is validated against OBS Studio 32.2.2.</li>
+<li><strong>Windows 10 or Windows 11</strong> (x64). For macOS, use the <a href="#macos">Apple Silicon installer above</a>. Linux requires a source build.</li>
 <li><strong>A Zoom account you can sign in with.</strong> CoreVideo joins meetings through the Zoom Meeting SDK, so the video quality and number of simultaneous feeds you get follow your Zoom account entitlements.</li>
 <li><strong>Downstream bandwidth</strong> for the feeds you subscribe to &mdash; roughly 4-6 Mbps per 1080p participant. Standard accounts are typically capped around 30 Mbps incoming; Enhanced Media / HBM raises that to roughly 100 Mbps.</li>
 </ul>
@@ -879,8 +887,7 @@ ${fileRows}
 <ol>
 <li>Close OBS Studio.</li>
 <li>Run the installer and point it at your OBS installation directory if it is not detected automatically.</li>
-<li>Start OBS and open <strong>Tools -&gt; Zoom Plugin Settings</strong> to sign in, then <strong>Docks -&gt; Zoom Control</strong> to join a meeting.</li>
-<li>Add a <strong>CoreVideo Participant</strong> source to any scene, then assign it to a participant, the active speaker, a spotlight slot, or the screen share.</li>
+<li>Reopen OBS and follow the <a href="/quickstart/">Operator Quickstart</a> to sign in, join, and assign your first source.</li>
 </ol>
 <p>The Windows installer is <strong>not code-signed yet</strong>, so Windows SmartScreen warns the first time you run it &mdash; &quot;More info&quot;, then &quot;Run anyway&quot;. Verify the SHA-256 below if you would rather check the file than trust the dialog.</p>
 <p>The <a href="/core-plugin/">Core Plugin Guide</a> walks through participant routing, isolated audio, and ISO recording in detail, and <a href="/support/">Support</a> covers log collection and reporting a bug.</p>

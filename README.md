@@ -4,7 +4,7 @@
 
 [![Latest release](https://img.shields.io/github/v/release/iamfatness/CoreVideo?label=release)](https://github.com/iamfatness/CoreVideo/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20(beta)-blue)](https://corevideo.io/download/)
+[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20Apple%20Silicon-blue)](https://corevideo.io/download/)
 [![OBS Studio](https://img.shields.io/badge/OBS%20Studio-30%2B-302E31)](https://obsproject.com/)
 
 ![OBS Studio multiview showing preview and program alongside four scenes built from individual Zoom participant sources](site-assets/obs-multiview.webp)
@@ -53,7 +53,7 @@ disconnects.
 - **Hardware-accelerated video** - optional FFmpeg I420->NV12 conversion via CUDA, VAAPI, VideoToolbox, or QSV (`-DCOREVIDEO_HW_ACCEL=ON`)
 - **Video loss mode** - hold last frame or show black when a feed drops; shows color-bar placeholder before first frame
 - **Raw audio capture** - 48 kHz PCM, mono or stereo, with per-participant audio isolation and mixer routing
-- **Auto ISO recording** - record assigned participant/active-speaker/spotlight outputs to separate FFmpeg-encoded MP4 files with matching PCM WAV audio, plus optional main OBS program recording
+- **Auto ISO recording** - record selected participant, active-speaker, and spotlight feeds to per-participant MP4 files with isolated AAC audio, plus optional main OBS program recording
 - **ISO capacity guidance** - recorder panel estimates ISO/program encode paths and warns when CPU or GPU encoder pressure is likely
 - **Assignment modes** - each source independently follows: a fixed participant, the active speaker, a ZoomISO-style spotlight slot (1-8), or the active screen share
 - **Failover participant** - configure a secondary participant that activates automatically when the primary leaves
@@ -78,56 +78,52 @@ disconnects.
 - **Output profiles** - save and load named participant-to-source mappings as JSON files
 - **Output manager dock** - dockable OBS panel and API for viewing and reconfiguring all sources at runtime, including active speaker, screen-share, and Spotlight 1-8 assignments with roster markers
 - **Public Client Meeting SDK authentication** - published builds pass the Marketplace Public Client ID as `AuthContext.publicAppKey`; no Meeting SDK secret is shipped in the desktop app
-- **Zoom OAuth PKCE** - user-level OAuth 2.0 with PKCE (public client, no desktop secret) for attributed joins and Marketplace compliance; the broker start URL is baked in at build time; `corevideo://` custom URL scheme with platform callback helpers (`CoreVideoOAuthCallback.exe` / `.app`); DPAPI token protection on Windows (plaintext with a logged warning elsewhere - see [Security](#security))
+- **Zoom OAuth PKCE** - user-level OAuth 2.0 with PKCE (public client, no desktop secret) for attributed joins and Marketplace compliance; the broker start URL is baked in at build time; `corevideo-obs://` custom URL scheme with platform callback helpers (`CoreVideoOAuthCallback.exe` / `.app`); DPAPI token protection on Windows (plaintext with a logged warning elsewhere - see [Security](#security))
 - **Visible Zoom Meeting SDK window** - the helper process uses Zoom's default Meeting SDK UI so operators can admit waiting-room participants, start self video/audio, and use normal in-meeting controls while OBS receives raw feeds
 - **SDK 5.17.x and 7.x** - auto-detects flat and subfolder header layouts
 - **Hardened security** - constant-time token comparison, validated IPC input, sanitised participant IDs, SIGPIPE handling
 - **Modern UI** - CoreVideo stylesheet with dark theme, animated `CvStatusDot`, `CvBanner` first-run notices, and button role variants (primary / danger)
-- **Platform support** - Windows 10/11 x64 (supported) and macOS on Apple Silicon (public beta) are the packaged, CI-released targets. Intel Macs are not supported. The same CMake project also configures on Windows arm64 and Linux, but those are unsupported/experimental source builds. See [Platform Support](#platform-support) below.
+- **Platform support** - Windows x64 and macOS on Apple Silicon are the packaged targets. Intel Macs are not supported. The same CMake project also configures on Windows arm64 and Linux, but those are unsupported/experimental source builds. See [Platform Support](#platform-support) below.
 
 ## Requirements
 
 | Dependency | Version | Notes |
 |---|---|---|
-| OBS Studio | 30+ | `libobs` + `obs-frontend-api` |
+| OBS Studio | 32.2.2 recommended on Windows, 32.2.1 or later on Apple Silicon | `libobs` and `obs-frontend-api` for source builds |
 | CMake | 3.16+ | Build system |
 | Qt | 6.x | Core + Network + Widgets |
 | FFmpeg | Runtime executable | Required for auto ISO recording. Must be on `PATH` or supplied via `ffmpeg_path`. |
-| Zoom Meeting SDK | **5.17.x / 7.x** | Source builds only: place in `third_party/zoom-sdk/`. Official Windows release downloads bundle the runtime files needed by end users. |
+| Zoom Meeting SDK | **5.17.x / 7.x** | Source builds only: place in `third_party/zoom-sdk/`. Official Windows and macOS packages bundle the runtime files needed by end users. |
 | C++ compiler | C++17 | MSVC 2022 / Clang 14+ / GCC 11+ |
-| Zoom Developer Account | - | Marketplace app with Public Client OAuth + PKCE and Meeting SDK / Embed enabled for the same environment. |
+| Zoom Developer Account | Custom source builds only | Marketplace app with Public Client OAuth + PKCE and Meeting SDK / Embed enabled for the same environment. |
 
 ## Platform Support
 
 | Platform | Status |
 |---|---|
-| **Windows 10/11 x64** | **Supported.** The only platform with a maintained release pipeline: checksummed ZIP and NSIS installer, built and published from a maintainer's machine with `scripts/release-local.ps1` (the Zoom Meeting SDK is license-restricted, so the package cannot be built on a public runner - see `docs/RELEASE_CHECKLIST.md`). This is the only configuration the maintainers build, test, and run in production. |
+| **Windows x64** | Checksummed NSIS installer and portable ZIP. Release CI builds and validates the package with the Zoom Meeting SDK runtime. |
 | Windows arm64 | Source build only, untested. `CMakeLists.txt` auto-detects an arm64 Zoom SDK layout under `third_party/zoom-sdk/arm64` if present, but there is no arm64 CI job, no arm64 release artifact, and no maintainer testing on arm64 hardware. Treat it as "may compile," not "known to work." |
-| **macOS (Apple Silicon)** | **Public beta.** Maintained release pipeline (`.github/workflows/release-macos.yml`) publishes an installable plugin bundle to GitHub Releases with the full engine: auth, join, roster, active speaker, participant video/audio, and remote screen share are live-verified. The beta bundle is not yet notarized — the zip's `INSTALL.txt` documents the one-time quarantine-clear step. **Apple Silicon only by policy**: no Intel (x86_64) or universal builds are published or planned. |
+| **macOS (Apple Silicon)** | Developer ID signed and Apple-notarized per-user installer with the Zoom Meeting SDK runtime. Talkback is available on Windows. |
 | macOS (Intel) | Not supported. Source builds may configure but are untested and will not be packaged. |
 | Linux | Source build only, unsupported - **no official packages**. CI (`build.yml`, Linux job) compiles and unit-tests only the cross-platform C++ (`BUILD_TESTING`) with the plugin/engine/sidecar all `OFF`; it never links against Qt6, OBS, or the Zoom SDK on Linux. There is no Linux packaging, no distro integration, and no libsecret-backed token storage yet (see Security). |
 
-The CMake project genuinely supports configuring on all of the above (see `buildspec/macos.cmake`, the Unix-socket IPC path in `engine-ipc.h`, and `oauth-callback-helper-macos.mm`), so a source build is *possible* on macOS/Linux/Windows-arm64 - it is just not something the project packages, tests, or supports today. If you get one working, bug reports and PRs are welcome, but expect to do your own SDK/Qt/OBS wiring.
-
 ## Release Status
 
-Packaged release targets are **Windows x64**
-(installer or ZIP) and **macOS on Apple Silicon** (signed .pkg installer, beta) - see
-[Platform Support](#platform-support) above. The Windows installer is not
-yet code-signed, so Windows SmartScreen will flag it on first run (see
-[Troubleshooting](https://corevideo.io/documentation/#troubleshooting)); the
-macOS beta bundle is not yet notarized, so a one-time quarantine-clear step is
-required (documented in the zip's `INSTALL.txt`).
+Download the current Windows x64 installer or ZIP, or the signed and notarized
+Apple Silicon installer, from [CoreVideo.io](https://corevideo.io/download/).
+For install, sign-in, and your first live source, use the
+[Operator Quickstart](docs/OPERATOR_QUICKSTART.md).
+
 Known limitations and what's planned next are tracked in the
 **[Roadmap](docs/ROADMAP.md)**. To report a bug or request a feature, open a
 [GitHub issue](https://github.com/iamfatness/CoreVideo/issues/new/choose) -
 the bug report template walks you through attaching a redacted support bundle
 from the Zoom Diagnostics dock. New releases are announced through a
 dismissible in-app update banner in the Zoom Control dock (a plain,
-unauthenticated check against the public GitHub Releases API, once per OBS
-session) and on the [Releases page](https://github.com/iamfatness/CoreVideo/releases).
+unauthenticated check for a newer stable release with a package for your
+platform, once per OBS session) and on the [Releases page](https://github.com/iamfatness/CoreVideo/releases).
 
-## Quick Start
+## Source Build Quick Start
 
 1. **For source builds, get the Zoom SDK** - download from the [Zoom Developer Portal](https://developers.zoom.us/docs/meeting-sdk/releases/) and place it at `third_party/zoom-sdk/`. CMake auto-detects x64/arm64/x86 sub-layouts on Windows. End users installing an official Windows release do not need to download or provide SDK files.
 
@@ -339,9 +335,9 @@ cmake -B build \
 These values are compiled into the plugin and used for every install of that build. There is no UI for entering production credentials, and embedded values override stale `global.ini` entries. Current production builds use the Public Client ID for OAuth and pass the same value to the Meeting SDK as `AuthContext.publicAppKey`.
 
 ### Flow
-1. In **Tools -> Zoom Plugin Settings**, click **Authorize with Zoom** (no IDs to enter). The plugin registers the `corevideo://` URL scheme automatically on first use.
+1. In **Tools -> Zoom Plugin Settings**, click **Authorize with Zoom** (no IDs to enter). The plugin registers the `corevideo-obs://` URL scheme automatically on first use.
 2. The browser opens at `https://corevideo.iamfatness.us/oauth/start`; the broker generates the PKCE verifier/challenge and redirects to Zoom.
-3. Zoom redirects to `https://corevideo.iamfatness.us/oauth/callback`; the broker returns a short-lived broker token to `corevideo://oauth/callback`.
+3. Zoom redirects to `https://corevideo.iamfatness.us/oauth/callback`; the broker returns a short-lived broker token to `corevideo-obs://oauth/callback`.
 4. `CoreVideoOAuthCallback.exe` (Windows) or `CoreVideoOAuthCallback.app` (macOS) forwards the URL to the plugin via the TCP control server (`oauth_callback` command).
 5. The plugin verifies state, redeems the broker token over HTTPS, and persists access + refresh tokens. On Windows, tokens are DPAPI-protected before storage; on macOS/Linux they are currently stored in plaintext with a logged warning (see [Security](#security)).
 6. Before each meeting join, CoreVideo refreshes the token if needed and fetches the signed-in user's ZAK. The Zoom helper process initializes the SDK with `AuthContext.publicAppKey` set to the embedded Public Client ID and `AuthContext.jwt_token` set to null, then joins with the ZAK.
@@ -368,7 +364,7 @@ echo '{"cmd":"assign_output","source":"Zoom Participant 1","participant_id":123,
 echo '{"cmd":"assign_output","source":"Zoom Participant 1","participant_id":123,"audio_delay_ms":80}' | nc 127.0.0.1 19870
 
 # Forward OAuth callback URL from custom scheme helper
-echo '{"cmd":"oauth_callback","url":"corevideo://oauth/callback?broker_token=...&state=..."}' | nc 127.0.0.1 19870
+echo '{"cmd":"oauth_callback","url":"corevideo-obs://oauth/callback?broker_token=...&state=..."}' | nc 127.0.0.1 19870
 ```
 
 Commands: `help`, `status`, `list_participants`, `list_outputs`, `list_audio_sources`, `assign_output`, `assign_output_ex`, `recover_stale_outputs`, `upgrade_low_quality_outputs`, `join`, `leave`, `oauth_callback`, `iso_recording_start`, `iso_recording_stop`, `iso_recording_status`, `speaker_director_status`, `speaker_director_configure`, `speaker_director_take`, `speaker_director_release`.
@@ -384,7 +380,7 @@ an output-folder picker, FFmpeg path/test controls, CPU/GPU H.264 encoder
 selection, a program-recording toggle, Start/Stop buttons, disk-space warnings,
 encoder capacity guidance, and a live table of active ISO sessions and file
 paths. Recently completed sessions remain visible after stop so operators can
-verify the MP4/WAV outputs without browsing the folder manually. GPU encoders
+verify the completed MP4 files without browsing the folder manually. GPU encoders
 lower CPU use but consume one encoder session per ISO feed;
 8 ISO feeds plus an OBS program stream may require using CPU x264 for one path.
 If a selected hardware encoder is missing from the FFmpeg build, CoreVideo falls
@@ -395,7 +391,7 @@ FFmpeg process errors in the session table and TCP/OSC status JSON.
 
 ```sh
 # Start ISO recording. record_program=true also starts OBS program recording.
-echo '{"cmd":"iso_recording_start","output_dir":"C:/Recordings/CoreVideo","ffmpeg_path":"ffmpeg","record_program":true}' | nc 127.0.0.1 19870
+echo '{"cmd":"iso_recording_start","output_dir":"C:/Recordings/CoreVideo","ffmpeg_path":"ffmpeg","record_program":true,"source_uuids":["OUTPUT_SOURCE_UUID"]}' | nc 127.0.0.1 19870
 
 # Inspect active ISO sessions and output file paths.
 echo '{"cmd":"iso_recording_status"}' | nc 127.0.0.1 19870
@@ -404,7 +400,7 @@ echo '{"cmd":"iso_recording_status"}' | nc 127.0.0.1 19870
 echo '{"cmd":"iso_recording_stop"}' | nc 127.0.0.1 19870
 ```
 
-Each active source segment writes one `*.mp4` video file and one matching `*.wav` PCM audio file. A new segment starts when the resolved participant or source resolution changes.
+Choose feeds in Zoom ISO Recorder or pass their IDs in `source_uuids`. Each participant gets one continuous MP4 with 1080p30 H.264 video and isolated AAC audio per recording session. Resolution changes preserve the same file. Multiple selected outputs for the same participant share a recording.
 
 ### UDP OSC (port 19871)
 
@@ -584,9 +580,9 @@ ZoomObsEngine  (separate child process - owns ALL Zoom SDK access)
     `-- Named shared memory (ZoomObsPlugin_<uuid>) for I420 video + PCM audio frames
 
 CoreVideoOAuthCallback  (thin helper binary - ships beside the plugin)
-|-- Windows: CoreVideoOAuthCallback.exe - intercepts corevideo:// URI via registry;
+|-- Windows: CoreVideoOAuthCallback.exe - intercepts corevideo-obs:// URI via registry;
 |            reads control-server port from OBS global config; POSTs oauth_callback command
-`-- macOS:   CoreVideoOAuthCallback.app - registered with Launch Services for corevideo://;
+`-- macOS:   CoreVideoOAuthCallback.app - registered with Launch Services for corevideo-obs://;
              same forwarding behaviour
 ```
 

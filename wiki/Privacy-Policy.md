@@ -46,7 +46,7 @@ Two properties are worth stating plainly because they are not obvious:
 
 ### Recordings You Make
 
-CoreVideo's ISO recorder writes MP4 video and WAV audio files, plus an FFmpeg log
+CoreVideo's ISO recorder writes MP4 files with participant video and audio, plus an FFmpeg log
 per session, to a folder the operator chooses. Diagnostic support bundles are
 written to the OBS plugin configuration directory. All of these stay on the
 operator's machine; CoreVideo never uploads them. A support bundle redacts
@@ -93,14 +93,22 @@ The broker at `corevideo.iamfatness.us` is used only for Zoom OAuth token exchan
 
 Once per OBS session, CoreVideo makes a single anonymous HTTPS GET request to the
 public GitHub Releases API
-(`api.github.com/repos/iamfatness/CoreVideo/releases/latest`) to see whether a
-newer release is available. The request carries no meeting data, credentials,
-telemetry, or CoreVideo-specific identifiers - only what GitHub already logs for
+(`api.github.com/repos/iamfatness/CoreVideo/releases?per_page=100`) to check for
+a newer stable release with a package for the installed platform. The request
+carries no meeting data, credentials, telemetry, or CoreVideo-specific identifiers - only what GitHub already logs for
 any anonymous HTTP request, such as an IP address, governed by GitHub's own
 privacy statement. The check never blocks startup, never downloads or installs
 anything, and fails silently when offline. It can be turned off in **Tools ->
 Zoom Plugin Settings -> Check for updates on startup**, which is enabled by
 default.
+
+### FFmpeg Download
+
+If the operator chooses **Download FFmpeg** in Zoom ISO Recorder, CoreVideo
+downloads a pinned FFmpeg build from GitHub on Windows or
+`ffmpeg.martin-riedl.de` on macOS. The request carries no meeting data or
+credentials. CoreVideo verifies the SHA-256 checksum and stores the binary in
+the operator's OBS settings folder. The operator can remove it from the same dock.
 
 ### Cloudflare and GitHub (Documentation)
 

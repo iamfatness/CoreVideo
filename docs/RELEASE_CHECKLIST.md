@@ -2,13 +2,14 @@
 
 Use this checklist before publishing a GitHub Release or installer.
 
-Windows releases are built and published **from a maintainer's Windows
-machine**, not from GitHub Actions. That is how every release to date has been
-cut: the plugin needs the license-restricted Zoom Meeting SDK, which cannot be
-handed to a public runner. GitHub Actions only runs cross-platform validation
-(macOS compile, Linux/GCC unit tests, Companion module tests, CodeQL,
-Cppcheck/Flawfinder); it builds no Windows package and publishes no release, and
-pushing a `v*` tag publishes nothing on its own.
+The Windows release workflow builds and validates the installer and ZIP using
+the restricted Zoom Meeting SDK from the private SDK draft. It stages the
+packages on a release draft. A maintainer can also build the same package layout
+locally on Windows.
+
+Build the macOS package on the maintainer's Mac with Developer ID signing and
+notarization. Attach the package and checksum to the same draft before
+publishing a dual-platform release. Keep the SDK draft private.
 
 ## Build Inputs
 
@@ -131,14 +132,18 @@ automated OBS smoke, and sidecar release gates.
 - `docs/CORE_PLUGIN_FUNCTIONALITY.md` matches current OBS UI.
 - `docs/OPERATOR_QUICKSTART.md` is current.
 - `docs/ZOOM_MARKETPLACE_OAUTH.md` matches the active production OAuth path.
-- Published website at `corevideo.io` (with `corevideo.iamfatness.us` as a live
-  alias) is deployed from the same commit as the release.
+- Update the Windows version in `CHANGELOG.md` and advance `MAC_VERSION` in
+  `scripts/build-site.mjs` after that macOS package is public. A Windows-only
+  release keeps the previous Mac pin.
+- Deploy CoreVideo.io after the release is public. Run
+  `node scripts/build-site.mjs && node scripts/check-site-downloads.mjs`
+  and verify the live download page and operator quickstart.
 - Sidecar content is clearly labeled as roadmap or architecture until it is
   production-ready.
 
 ## Publish
 
-Everything published comes out of `dist/`:
+The Windows workflow stages these assets on a draft. A local build writes the same files to `dist/`:
 
 - `CoreVideo-Setup-vX.Y.Z.exe` - the recommended end-user installer.
 - `CoreVideo-Windows-x64-vX.Y.Z.zip` - for manual/advanced installs.
@@ -147,28 +152,13 @@ Everything published comes out of `dist/`:
 - `CoreVideo-Windows-x64-vX.Y.Z.manifest.json` - install-layout manifest, for
   comparing a local install against the published package.
 
-Publish by rerunning the same command with `-Upload`:
+Attach `CoreVideo-Setup-vX.Y.Z.pkg` and its SHA-256 checksum for a macOS
+release. Verify the Windows installer and ZIP checksums and run Gatekeeper
+assessment on the signed and notarized Mac installer. Publish the draft after
+the intended packages and release notes are present.
 
-```powershell
-.\scripts\release-local.ps1 -Version vX.Y.Z -BuildPath build-rel -Configuration Release -Upload
-```
+### Prereleases
 
-`-Upload` reuses an existing release for that tag, or creates the release - and
-the tag, at the current `HEAD` - if there is none, with
-`generate_release_notes`, then uploads the five assets above (replacing any
-same-named asset). It authenticates through Git Credential Manager, so be
-signed in to GitHub with Git first. Assets can also be attached by hand from
-`dist/` if you prefer.
-
-Then add release notes with known limitations and upgrade notes.
-
-### Betas must be published as full releases
-
-`-Upload` marks the release as a prerelease whenever the version has a suffix
-(anything containing `-`, e.g. `v0.2.0-beta.1`). GitHub's `/releases/latest`
-excludes prereleases, and it is what both the plugin's startup update check
-(`src/cv-update-check.cpp`) and the website's `/download` link
-(`site-worker.js`) read. A prerelease therefore reaches nobody who already has
-CoreVideo installed. To ship a beta to existing installs, publish it as a
-**full** release - use a version without a `-` suffix, or clear the prerelease
-flag on the release afterwards.
+The plugin update check considers newer stable releases with an uploaded
+package for its platform. Testers can install a GitHub prerelease from the
+release page.

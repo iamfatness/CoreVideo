@@ -2,7 +2,7 @@
 
 CoreVideo is an OBS Studio plugin that pulls Zoom meeting video, audio, screen
 share, and Zoom interpretation audio into OBS as native sources - no NDI, no
-virtual camera, no screen capture of a Zoom window. Current Windows release: **v0.1.49**; macOS Apple Silicon beta: **v0.1.45-beta.2**.
+virtual camera, no screen capture of a Zoom window.
 
 This wiki holds the policy and support pages. Everything operational - install,
 configuration, architecture, the control APIs - lives on the documentation site,
@@ -11,6 +11,7 @@ the two.
 
 | | |
 |---|---|
+| **Operator Quickstart** | https://corevideo.io/quickstart/ |
 | **Full documentation** | https://corevideo.io/documentation/ |
 | **Plugin guide** (sources, assignment, talkback, ISO recording, control APIs) | https://corevideo.io/core-plugin/ |
 | **Downloads** | https://corevideo.io/download/ |
@@ -20,8 +21,8 @@ the two.
 ## Pages here
 
 - [Support](Support) - troubleshooting, log collection, how to file a useful bug
-- [Privacy Policy](Privacy-Policy)
-- [Terms of Use](Terms-of-Use)
+- [Privacy Policy](https://corevideo.io/privacy/)
+- [Terms of Use](https://corevideo.io/terms/)
 
 ---
 
@@ -29,7 +30,7 @@ the two.
 
 | Resource | Link |
 |---|---|
-| Latest release (Windows installer + ZIP) | https://github.com/iamfatness/CoreVideo/releases/latest |
+| Latest release (Windows and macOS) | https://github.com/iamfatness/CoreVideo/releases/latest |
 | Changelog | https://github.com/iamfatness/CoreVideo/blob/main/CHANGELOG.md |
 | Source code | https://github.com/iamfatness/CoreVideo |
 | Issues and bug reports | https://github.com/iamfatness/CoreVideo/issues |
@@ -42,9 +43,8 @@ the two.
 
 ## Platform status
 
-**Windows 10/11 x64 and macOS Apple Silicon have packaged builds.** Windows
-uses the stable release channel; macOS v0.1.45-beta.2 is a public beta with a
-Developer ID signed, notarized installer. [Download and install](https://corevideo.io/download/#macos).
+**Windows x64 and macOS Apple Silicon have packaged builds.** The macOS
+installer is Developer ID signed and notarized. [Download and install](https://corevideo.io/download/#macos).
 Intel
 Macs are not supported by this package, and Linux requires a source build.
 

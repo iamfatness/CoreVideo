@@ -2,6 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <script src="/assets/google-tag-manager.js"></script>
+  <script async src="https://www.googletagmanager.com/gtm.js?id=GTM-PSHZHBGZ"></script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CoreVideo - Zoom Video &amp; Audio as Native OBS Sources</title>
   <meta name="description" content="Free open-source OBS Studio plugin: Zoom participant video, audio, and screen share as native OBS sources. No NDI, virtual camera, or screen capture.">
@@ -26,6 +28,7 @@
   <meta name="twitter:image" content="https://corevideo.io/assets/corevideo-share.jpg">
   <meta name="twitter:image:alt" content="CoreVideo - Zoom participant video and audio as native OBS Studio sources">
   <link rel="stylesheet" href="/assets/site.css">
+  <script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "606f185a54e7489bb11a93235343469b"}'></script>
   <script type="application/ld+json">
 {
   "@context": "https://schema.org",
@@ -51,7 +54,7 @@
         "priceCurrency": "USD",
         "availability": "https://schema.org/InStock"
       },
-      "softwareVersion": "0.1.45"
+      "softwareVersion": "0.1.55"
     },
     {
       "@type": "WebSite",
@@ -68,7 +71,8 @@
     <nav><a href="/" aria-current="page">Home</a><a href="/pro/">CoreVideo Pro</a><a href="/zcomms/">ZComms</a><a href="/pro/documentation/">Pro Docs</a><a href="/documentation/">Plugin Docs</a><a href="/core-plugin/">Core Plugin</a><a href="/download/">Download</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a></nav>
   </header>
   <main class="content">
-    <section class="hero">
+    <a class="announce" href="/news/corevideo-pro-1-0/"><span class="tally tally-live">New</span><span class="announce-text"><strong>CoreVideo Pro 1.0 is here.</strong> The first stable release of the standalone Zoom production studio for Windows.</span><span class="announce-cta">Read the announcement &rarr;</span></a>
+<section class="hero">
   <figure class="hero-media">
     <div class="console">
       <div class="console-bar"><span class="tally tally-live">Live</span><span>Program</span><span class="tc">1080p60 &middot; 6 Zoom sources</span></div>
@@ -80,8 +84,9 @@
     <h1>Bring Zoom participants into OBS as native sources.</h1>
     <p class="lede">CoreVideo joins the meeting through the Zoom Meeting SDK and hands OBS each participant's own video and audio as a real source &mdash; no NDI, no virtual camera, no screen capture, and no second machine. Follow the active speaker, pin spotlight slots, take the screen share, and record every guest to an isolated file.</p>
     <div class="hero-actions">
-      <a class="button primary" href="/download/">Download v0.1.45 for Windows</a>
-      <a class="button" href="/download/#macos">Download for macOS &mdash; Apple Silicon beta</a>
+      <a class="button primary" href="/download/">Download v0.1.55 for Windows</a>
+      <a class="button" href="/download/#macos">Download for macOS &mdash; Apple Silicon</a>
+      <a class="button" href="/quickstart/">Operator Quickstart</a>
       <a class="button" href="/core-plugin/">How it works</a>
       <a class="button" href="https://github.com/iamfatness/CoreVideo">View source</a>
     </div>
@@ -92,7 +97,7 @@
   <div><strong>CoreVideo Tiles</strong><span>Arrange participant feeds in a styled gallery within one OBS source, with rounded corners, borders, and flexible layouts.</span></div>
   <div><strong>Active speaker &amp; spotlight</strong><span>Point a source at whoever is talking, at Zoom spotlight slot 1&hellip;N, or at a fixed guest with an automatic failover if they drop.</span></div>
   <div><strong>Screen share &amp; interpretation</strong><span>Subscribe to the live screen share, and pull existing Zoom interpretation audio channels in as dedicated sources.</span></div>
-  <div><strong>ISO recording</strong><span>Record every assigned participant to an MP4 video file and a matching PCM WAV audio file, alongside the main program recording.</span></div>
+  <div><strong>ISO recording</strong><span>Record selected Zoom feeds as per-participant MP4 files with isolated audio, alongside optional OBS program recording.</span></div>
   <div><strong>Active Speaker Director</strong><span>An automatic take with a hold time, a sensitivity threshold, an exclusion list, and a &ldquo;require video&rdquo; rule &mdash; so the cut follows the conversation without chattering.</span></div>
   <div><strong>Output profiles</strong><span>The Output Manager saves and reloads a whole assignment set, so last week&rsquo;s routing comes back on the next show instead of being rebuilt by hand.</span></div>
   <div><strong>Stream Deck &amp; Companion</strong><span>A Bitfocus Companion module (v5 or newer) picks the output and the participant <em>by name</em> from the live roster, so a button keeps working after somebody rejoins.</span></div>
@@ -109,15 +114,15 @@
 </section>
 <section class="link-grid products" aria-label="CoreVideo products">
   <a href="/download/"><span class="tier">Free &middot; OBS plugin</span><strong>CoreVideo for OBS</strong><span>The plugin on this page: Zoom participant video, audio, screen share, interpretation, and ISO recording as native sources in the OBS you already run. MIT licensed.</span></a>
-  <a class="featured" href="/pro/"><span class="tier tier-premium">Premium &middot; Standalone app</span><strong>CoreVideo Pro</strong><span>Want the whole console instead of a plugin? Pro is the standalone studio being built around the same capture core: multi-scene production, participant management, recording, and streaming.</span></a>
+  <a class="featured" href="/pro/"><span class="tier tier-premium">New &middot; 1.0 &middot; Windows</span><strong>CoreVideo Pro</strong><span>Want the whole console instead of a plugin? Pro is the standalone studio: every Zoom guest as their own 1080p source, scenes with Take, talkback inside the meeting, and Program, per-guest ISO, stream, NDI and a virtual camera at once.</span></a>
   <a href="/zcomms/"><span class="tier">Standalone &middot; Talkback</span><strong>ZComms</strong><span>The intercom on its own. Named talk keys into Zoom&rsquo;s private talkback channels, extern feeds from a multichannel interface, and honest key states. Windows.</span></a>
 </section>
 <section class="link-grid" aria-label="CoreVideo resources">
   <a href="/documentation/"><strong>Plugin Docs</strong><span>Architecture, setup, control APIs, and operating notes.</span></a>
   <a href="/core-plugin/"><strong>Core Plugin Guide</strong><span>OBS workflows, participant routing, isolated audio, and ISO recording.</span></a>
   <a href="/zcomms/"><strong>ZComms</strong><span>Standalone talkback and IFB station for Zoom productions.</span></a>
-  <a href="/pro/"><strong>CoreVideo Pro</strong><span>Standalone production app for live and recorded conversations.</span></a>
-  <a href="/pro/documentation/"><strong>CoreVideo Pro Architecture</strong><span>Native media core, typed IPC, capture, AI direction, and outputs &mdash; with diagrams.</span></a>
+  <a href="/pro/"><strong>CoreVideo Pro</strong><span>Standalone production studio for live and recorded Zoom shows. Version 1.0, Windows.</span></a>
+  <a href="/pro/documentation/"><strong>CoreVideo Pro Architecture</strong><span>How 1.0 is built: the WinUI console, the C++ media core, the isolated Zoom engine, and the outputs.</span></a>
   <a href="/terms/"><strong>Terms of Use</strong><span>Marketplace-ready usage terms and license requirements.</span></a>
   <a href="/privacy/"><strong>Privacy Policy</strong><span>Data processing, local storage, and third-party service details.</span></a>
   <a href="/support/"><strong>Support</strong><span>Issue reporting, troubleshooting, and common fixes.</span></a>

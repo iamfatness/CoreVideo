@@ -73,7 +73,7 @@ and never silently pretends. **Do not fake frames.**
 - **Keychain** (Phase 3, already compiles): verify SecItem store/read/rotate under OBS's
   process context — tokens persist across restarts and never land in `global.ini` plaintext;
   corrupt/missing item → re-auth, never silent stale.
-- **OAuth**: verify `corevideo://` URL-scheme registration and the callback round-trip.
+- **OAuth**: verify `corevideo-obs://` URL-scheme registration and the callback round-trip.
 
 ## Packaging / signing / notarization (needs your Mac + the owner's Apple Developer ID)
 - Bundle `ZoomSDK.framework` + its ~30 sibling frameworks/dylibs with correct

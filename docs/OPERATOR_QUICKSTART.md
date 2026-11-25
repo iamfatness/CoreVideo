@@ -5,16 +5,16 @@ source-build and Marketplace setup details unless they affect day-to-day use.
 
 ## Install
 
-1. Download the latest Windows installer from GitHub Releases.
+1. Download the Windows x64 or macOS Apple Silicon installer from the latest GitHub release.
 2. Close OBS Studio before running the installer.
-3. Run `CoreVideo-Setup-vX.Y.Z.exe`.
+3. Run the `.exe` on Windows or the signed `.pkg` on macOS.
 4. Start OBS Studio.
-5. Confirm these OBS docks/tools are available:
+5. Confirm these OBS docks and tools are available:
    - **Zoom Control**
    - **Zoom Output Manager**
    - **Zoom Diagnostics**
    - **Zoom ISO Recorder**
-   - **Zoom Talkback**
+   - **Zoom Talkback** (Windows)
 
 Each has a matching entry under **Tools**, alongside **Zoom Plugin Settings**.
 
@@ -27,8 +27,8 @@ not need to download the Zoom SDK or enter Zoom app credentials.
 1. Open **Tools > Zoom Plugin Settings**.
 2. Click **Sign in with Zoom**. This button is in the settings dialog, not on the
    Zoom Control dock.
-3. Approve CoreVideo in the browser.
-4. Return to OBS and confirm the dialog's status line shows you are signed in.
+3. Approve CoreVideo in the browser and allow it to open the OBS callback helper if prompted.
+4. Return to OBS. The settings dialog updates to **Signed in** after the callback succeeds.
    **Sign out** is beside it if you ever need to start a fresh flow.
 
 CoreVideo uses the published app's Public Client OAuth and Meeting SDK public
@@ -42,7 +42,7 @@ app key. There should be no prompt for a client secret in a production build.
 4. Leave the join-token dropdown on **Zoom sign-in** unless Zoom support has
    given you a ZAK or an app privilege token to paste.
 5. Tick **Join as Webinar / Zoom Events** for a webinar.
-6. Click **Join**, then **Start Engine** once you are in.
+6. Click **Join**, then **Start Engine** once you are in. If asked, have the host grant local recording permission and click **Start Engine** again.
 7. Use the visible Zoom Meeting SDK window for waiting room admit, self audio,
    self video, and normal in-meeting controls. Joining early and waiting to be
    admitted is fine - CoreVideo holds its join window open for the length of a
@@ -53,15 +53,15 @@ changing settings. The bundle redacts tokens and includes OBS/engine/ISO status.
 
 ## Assign Outputs
 
-1. Open **Zoom Output Manager**.
-2. For each CoreVideo participant source, choose an assignment mode:
+1. In an OBS scene, click **+** in the **Sources** dock and add a **CoreVideo Participant** source.
+2. Open **Zoom Output Manager** from **Zoom Control**. Each row is an existing OBS source. If you just added a source while the manager was open, click **Refresh**.
+3. In the source's **Assignment** menu, choose one of these:
    - **Participant** for a fixed Zoom participant.
    - **Active Speaker** for the directed speaker feed.
    - **Spotlight Slot 1-8** for ZoomISO-style fixed stage slots.
    - **Screen share** for the active meeting share.
-3. Request 1080p for production sources when the Zoom account and meeting
-   entitlements support it.
-4. Watch the health markers:
+4. Click **Apply** to send the assignment to the source.
+5. Check the preview and signal:
    - Resolution/FPS show what Zoom is actually delivering.
    - A warning marker means the observed feed does not match the requested
      output or is stale.
@@ -127,7 +127,7 @@ delay pushes the timestamp backward once and glitches that source.
 
 ## Talkback
 
-**Newer than v0.1.44 - on `main`, not in the v0.1.44 installer.**
+**Available on Windows.**
 
 Open **Zoom Talkback** to talk privately to talent over Zoom's own talkback
 channels.
@@ -167,11 +167,11 @@ channel` usually means the talent is in a different room.
    - On a Mac, `h264_videotoolbox` (Apple VideoToolbox) is the hardware encoder.
 5. Enable **Record program** if CoreVideo should also start OBS program
    recording.
-6. Click **Start ISO Recording**.
+6. Select the routed feeds to record, then click **Start ISO Recording**.
 
-ISO recording follows assigned outputs. It records assigned participant video
-to MP4 and matching audio to WAV. The panel shows requested encoder, actual
-encoder, fallback state, active sessions, and file paths.
+CoreVideo writes one continuous MP4 per participant with H.264 video and
+isolated AAC audio. Resolution changes keep the same file. The panel shows
+the requested and actual encoders, active sessions, and file paths.
 
 ## Diagnostics And Support
 

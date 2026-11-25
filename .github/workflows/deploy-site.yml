@@ -76,7 +76,7 @@ jobs:
         run: node scripts/check-site-seo.mjs
 
       - name: Check review feedback contract
-        run: node --test tests/review-feedback.test.mjs
+        run: node --test tests/review-feedback.test.mjs tests/site-oauth-callback.test.mjs
 
       # A pinned download (the macOS .pkg) pointed at an asset that was never
       # uploaded and 404'd for weeks. Block the deploy instead.

@@ -317,7 +317,7 @@ function zoomFailureMessage(prefix, exchanged) {
   };
 }
 
-// The OBS plugin has its own scheme. Pro and older OBS versions use
+// Edge and the OBS plugin each have their own scheme. Pro and older versions use
 // corevideo://. ZComms (the talkback panel,
 // which shares this Marketplace app while it awaits its own) receives the
 // callback on its loopback HTTP server instead -- the RFC 8252 §7.3 shape
@@ -325,7 +325,8 @@ function zoomFailureMessage(prefix, exchanged) {
 // /oauth/callback path is honored so an open-redirect through this broker
 // cannot be built out of a loopback URL.
 function isAllowedOauthReturnUri(returnUri) {
-  if (returnUri === "corevideo-obs://oauth/callback" ||
+  if (returnUri === "corevideo-edge://oauth/callback" ||
+      returnUri === "corevideo-obs://oauth/callback" ||
       returnUri === "corevideo://oauth/callback") {
     return true;
   }

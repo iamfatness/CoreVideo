@@ -16,6 +16,7 @@ function start(returnUri) {
 }
 
 for (const [name, uri, expected] of [
+  ["Edge", "corevideo-edge://oauth/callback", "corevideo-edge://oauth/callback"],
   ["OBS", "corevideo-obs://oauth/callback", "corevideo-obs://oauth/callback"],
   ["Pro and older OBS", "corevideo://oauth/callback", "corevideo://oauth/callback"],
   ["omitted return URI", null, "corevideo://oauth/callback"],
@@ -35,7 +36,14 @@ for (const [name, uri, expected] of [
   });
 }
 
-test("OAuth rejects an unlisted OBS callback", async () => {
-  const response = await start("corevideo-obs://oauth/other");
-  assert.equal(response.status, 400);
-});
+for (const uri of [
+  "corevideo-obs://oauth/other",
+  "corevideo-edge://oauth/other",
+  "corevideo-edge://oauth/callback?next=https://example.com",
+  "corevideo-other://oauth/callback",
+]) {
+  test(`OAuth rejects the unlisted callback ${uri}`, async () => {
+    const response = await start(uri);
+    assert.equal(response.status, 400);
+  });
+}

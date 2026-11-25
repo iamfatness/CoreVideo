@@ -34,6 +34,7 @@ a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset:
   border-bottom: 1px solid var(--line);
 }
 .hero-media { margin: 0; }
+.screenshot-hero { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); }
 .hero h1 {
   margin: 0 0 20px;
   font-size: clamp(46px, 5.1vw, 80px);
@@ -72,30 +73,17 @@ a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset:
   height: auto;
 }
 .product-shot figcaption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 16px;
   padding: 9px 14px;
   border-top: 1px solid var(--line);
   color: var(--mut);
   font-size: 13px;
 }
-.product-mark {
-  display: grid;
-  place-items: center;
-  min-height: clamp(200px, 26vw, 350px);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
-  background:
-    linear-gradient(90deg, transparent calc(50% - 0.5px), var(--line) 50%, transparent calc(50% + 0.5px)),
-    linear-gradient(transparent calc(50% - 0.5px), var(--line) 50%, transparent calc(50% + 0.5px)),
-    var(--panel);
-}
-.product-mark .mv {
-  box-sizing: content-box;
-  padding: clamp(18px, 4vw, 44px);
-  width: clamp(115px, 18vw, 228px);
-  height: auto;
-  color: var(--tx);
-  background: var(--panel);
-}
+.product-shot figcaption a { display: inline-flex; align-items: center; min-height: 28px; }
 .product-utility { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 16px 0 0; font-size: 14px; }
 
 /* Suite landing page */

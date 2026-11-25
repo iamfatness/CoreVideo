@@ -1658,10 +1658,10 @@ Pro ships from `iamfatness/CoreVideoPro`; `PRO_VERSION` and the `PRO_*` URLs in
 `scripts/build-site.mjs` are its only coupling. The announcement
 (`/news/corevideo-pro-1-0/`) pins the 1.0.0 installer on purpose; every other
 Pro download button uses releases/latest. `/pro/` and `/pro/documentation/`
-describe only what the CoreVideoPro README marks proven or shipped. The old
-June concept render (captions, Magic Scene) is no longer shown because 1.0
-excludes both; use a production capture when one is available. The CoreVideo
-Pro page links to the 1.0 announcement.
+describe only what the CoreVideoPro README marks proven or shipped. The Pro
+hero uses the compiled Windows Studio capture from `docs/reference/images/rc-studio-controls.png`
+in the CoreVideoPro `v1.0.0` tag. The ZComms hero shows the released `v0.1.14`
+panel rendered with sample participant and channel state.
 
 Every `<pre>` and `<table>` gets `tabindex="0"` at the single write point
 (`focusableScrollRegions()` in `writeText`), because they scroll inside

@@ -91,6 +91,22 @@ const PRO_RELEASE_TAG = `${PRO_REPO}/releases/tag/v${PRO_VERSION}`;
 const PRO_SETUP = `${PRO_REPO}/releases/download/v${PRO_VERSION}/CoreVideoPro-Setup-v${PRO_VERSION}.exe`;
 const PRO_ANNOUNCEMENT = "/news/corevideo-pro-1-0/";
 
+// Pro: the compiled Windows capture in docs/reference/images at tag v1.0.0.
+const PRO_STUDIO_IMAGE = {
+  file: "pro-studio-1-0.webp",
+  width: 1600,
+  height: 900,
+  alt: "CoreVideo Pro Studio showing scene presets, the multiviewer, Take, and the recording and streaming controls",
+};
+
+// ZComms: the v0.1.14 panel rendered with a sample roster and channel state.
+const ZCOMMS_PANEL_IMAGE = {
+  file: "zcomms-talkback-0-1-14.webp",
+  width: 2000,
+  height: 1280,
+  alt: "ZComms talkback panel showing All Call, named talk keys, an active on-air key, and the operator microphone meter",
+};
+
 // GitHub's releases/latest excludes prereleases. Keep Edge's beta tag explicit.
 const EDGE_REPO = "https://github.com/iamfatness/CoreVideoEdge";
 const EDGE_BETA = "beta-2026-11-11-0d83fc2";
@@ -108,19 +124,6 @@ const MULTIVIEW_MARK =
   `<line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/>` +
   `<line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/>` +
   `<rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg>`;
-
-// The ZComms mark: an intercom panel of six talk keys with one key lit, the
-// same idiom as the Multiview mark (a grid with one live cell) applied to a
-// hardware talkback desk rather than a monitor wall.
-const TALKBACK_MARK =
-  `<svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true">` +
-  `<rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/>` +
-  `<rect x="4.6" y="4.6" width="7" height="5.6" rx="1.4" fill="currentColor" opacity=".38"/>` +
-  `<rect x="12.5" y="4.6" width="7" height="5.6" rx="1.4" fill="currentColor" opacity=".38"/>` +
-  `<rect x="20.4" y="4.6" width="7" height="5.6" rx="1.4" fill="#22c86e"/>` +
-  `<rect x="4.6" y="13.8" width="7" height="5.6" rx="1.4" fill="currentColor" opacity=".38"/>` +
-  `<rect x="12.5" y="13.8" width="7" height="5.6" rx="1.4" fill="currentColor" opacity=".38"/>` +
-  `<rect x="20.4" y="13.8" width="7" height="5.6" rx="1.4" fill="currentColor" opacity=".38"/></svg>`;
 
 const pages = [
   {
@@ -326,8 +329,25 @@ function obsPageContent() {
 </section>`;
 }
 
+function productScreenshot({ file, width, height, alt }, caption) {
+  const src = `/assets/${file}`;
+  return `<figure class="hero-media product-shot">
+    <img src="${src}" width="${width}" height="${height}" alt="${escapeHtml(alt)}">
+    <figcaption><span>${caption}</span><a href="${src}">View full size</a></figcaption>
+  </figure>`;
+}
+
+function screenshotSocialImage({ file, width, height, alt }) {
+  return {
+    image: `${PRIMARY_ORIGIN}/assets/${file}`,
+    imageAlt: alt,
+    imageWidth: width,
+    imageHeight: height,
+  };
+}
+
 function proPageContent() {
-  return `<section class="hero product-hero">
+  return `<section class="hero product-hero screenshot-hero">
   <div class="hero-copy">
     <p class="eyebrow">Standalone production studio for Windows</p>
     <h1>CoreVideo Pro</h1>
@@ -338,7 +358,7 @@ function proPageContent() {
     </div>
     <p class="product-utility"><a href="${PRO_ANNOUNCEMENT}">What&rsquo;s in 1.0</a><a href="${PRO_REPO}">GitHub repository</a></p>
   </div>
-  <div class="hero-media product-mark" aria-hidden="true">${MULTIVIEW_MARK}</div>
+  ${productScreenshot(PRO_STUDIO_IMAGE, "CoreVideo Pro 1.0 Studio on Windows")}
 </section>
 <section class="link-grid" aria-label="CoreVideo Pro features">
   <div><strong>Individual Zoom sources</strong><span>Join by link and route each guest&rsquo;s video and audio separately. View the live roster and follow the active speaker as needed.</span></div>
@@ -501,7 +521,7 @@ function proAnnouncementContent() {
 }
 
 function zcommsPageContent() {
-  return `<section class="hero product-hero">
+  return `<section class="hero product-hero screenshot-hero">
   <div class="hero-copy">
     <p class="eyebrow">Talkback and IFB station for Windows</p>
     <h1>ZComms</h1>
@@ -512,7 +532,7 @@ function zcommsPageContent() {
     </div>
     <p class="product-utility"><a href="${ZCOMMS_REPO}">GitHub repository</a></p>
   </div>
-  <div class="hero-media product-mark" aria-hidden="true">${TALKBACK_MARK}</div>
+  ${productScreenshot(ZCOMMS_PANEL_IMAGE, "ZComms v0.1.14 talkback panel in a sample session")}
 </section>
 <section class="link-grid" aria-label="What ZComms does">
   <div><strong>A named key per person</strong><span>Every talkback-capable participant gets a standing channel of their own, and the key wears their name. ALL CALL spans the panel; latch makes a press stick.</span></div>
@@ -1008,7 +1028,7 @@ function zcommsJsonLd() {
       "Standalone Windows talkback and IFB station for Zoom productions: named talk keys over the Zoom Meeting SDK's private talkback channels, extern feeds from a multichannel interface, and breakout-aware routing.",
     url: `${PRIMARY_ORIGIN}/zcomms/`,
     downloadUrl: ZCOMMS_RELEASES_LATEST,
-    image: OG_IMAGE,
+    image: screenshotSocialImage(ZCOMMS_PANEL_IMAGE).image,
   };
 }
 
@@ -1194,6 +1214,7 @@ writeText(
       seoTitle: "CoreVideo Pro 1.0 - Zoom Production Studio for Windows",
       description:
         "CoreVideo Pro 1.0 for Windows: Zoom guests as 1080p sources, scenes with Take, in-meeting talkback, ISO recording, streaming, NDI and a virtual camera.",
+      socialImage: screenshotSocialImage(PRO_STUDIO_IMAGE),
     },
     proPageContent(),
     {
@@ -1291,6 +1312,7 @@ writeText(
       seoTitle: "ZComms - Zoom Talkback & Intercom Station for Live Production",
       description:
         "Standalone Windows talkback and IFB station for Zoom: named talk keys, 16 private channels, extern feeds from a multichannel interface, breakout-aware.",
+      socialImage: screenshotSocialImage(ZCOMMS_PANEL_IMAGE),
     },
     zcommsPageContent(),
     {
@@ -1488,6 +1510,8 @@ for (const name of [
   "dynamic-gallery.webp",
   "edge-routing.png",
   "volt-rundown.png",
+  PRO_STUDIO_IMAGE.file,
+  ZCOMMS_PANEL_IMAGE.file,
 ]) {
   const source = path.join(siteAssetsDir, name);
   if (fs.existsSync(source)) {

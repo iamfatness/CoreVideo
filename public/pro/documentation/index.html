@@ -2,10 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <script src="/assets/google-tag-manager.js"></script>
+  <script async src="https://www.googletagmanager.com/gtm.js?id=GTM-PSHZHBGZ"></script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CoreVideo Pro Architecture | CoreVideo</title>
-  <meta name="description" content="CoreVideo Pro architecture: native media core, typed IPC, isolated Zoom capture, Blackmagic/AJA input, GPU compositing, AI direction, and ISO/streaming outputs.">
-  <meta name="theme-color" content="#0a0b0c">
+  <meta name="description" content="How CoreVideo Pro 1.0 is built: WinUI console, C++ media core, isolated Zoom engine, Direct3D 11 compositor, and recording, ISO, stream, NDI and camera outputs.">
+  <meta name="theme-color" content="#111620">
   <link rel="icon" href="/favicon.svg">
   <link rel="preload" href="/assets/fonts/SpaceGrotesk-var.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/assets/fonts/IBMPlexMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
@@ -13,7 +15,7 @@
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="CoreVideo">
   <meta property="og:title" content="CoreVideo Pro Architecture | CoreVideo">
-  <meta property="og:description" content="CoreVideo Pro architecture: native media core, typed IPC, isolated Zoom capture, Blackmagic/AJA input, GPU compositing, AI direction, and ISO/streaming outputs.">
+  <meta property="og:description" content="How CoreVideo Pro 1.0 is built: WinUI console, C++ media core, isolated Zoom engine, Direct3D 11 compositor, and recording, ISO, stream, NDI and camera outputs.">
   <meta property="og:image" content="https://corevideo.io/assets/corevideo-share.jpg">
   <meta property="og:image:alt" content="CoreVideo - Zoom participant video and audio as native OBS Studio sources">
   <meta property="og:image:width" content="1200">
@@ -22,50 +24,72 @@
   <meta property="og:url" content="https://corevideo.io/pro/documentation/">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="CoreVideo Pro Architecture | CoreVideo">
-  <meta name="twitter:description" content="CoreVideo Pro architecture: native media core, typed IPC, isolated Zoom capture, Blackmagic/AJA input, GPU compositing, AI direction, and ISO/streaming outputs.">
+  <meta name="twitter:description" content="How CoreVideo Pro 1.0 is built: WinUI console, C++ media core, isolated Zoom engine, Direct3D 11 compositor, and recording, ISO, stream, NDI and camera outputs.">
   <meta name="twitter:image" content="https://corevideo.io/assets/corevideo-share.jpg">
   <meta name="twitter:image:alt" content="CoreVideo - Zoom participant video and audio as native OBS Studio sources">
+  <link rel="stylesheet" href="/assets/site-shell.css">
   <link rel="stylesheet" href="/assets/site.css">
+  <script defer src="/assets/site-nav.js"></script>
+  <script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "606f185a54e7489bb11a93235343469b"}'></script>
 </head>
 <body class="document-page">
-  <header class="site-header">
-    <a class="brand" href="/"><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
-    <nav><a href="/">Home</a><a href="/pro/">CoreVideo Pro</a><a href="/edge/">Edge</a><a href="/volt/">Volt</a><a href="/zcomms/">ZComms</a><a href="/pro/documentation/" aria-current="page">Pro Docs</a><a href="/documentation/">Plugin Docs</a><a href="/core-plugin/">Core Plugin</a><a href="/download/">Download</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a></nav>
-  </header>
-  <main class="content">
+  <a class="skip-link" href="#main-content">Skip to content</a>
+<header class="site-header">
+  <div class="site-header-inner">
+    <a class="brand" href="/" ><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
+    <nav class="site-nav" aria-label="Main navigation">
+      <details class="site-menu">
+        <summary>Products<span class="site-chevron" aria-hidden="true"></span></summary>
+        <div class="site-menu-panel">
+          <a href="/obs/">CoreVideo for OBS</a><a href="/pro/">CoreVideo Pro</a><a href="/edge/">CoreVideo Edge</a><a href="/zcomms/">ZComms</a><a href="/volt/">Volt</a>
+        </div>
+      </details>
+      <a href="/documentation/">Docs</a>
+      <a href="/support/">Support</a>
+    </nav>
+    <a class="site-download" href="/download/">Downloads</a>
+  </div>
+</header>
+  <main class="content" id="main-content" tabindex="-1">
     <h1>CoreVideo Pro Architecture</h1>
-<p>CoreVideo Pro is a live-production studio for Windows and macOS, built around a native media core. It is <strong>in development and not released</strong>: this guide is a design document describing how the product is architected, in the present tense the way architecture is normally written, and not a claim that every stage below is finished. It describes end to end &mdash; how Zoom participants and local cameras are captured, how frames are composited and directed, and how program, ISO, and streaming outputs are produced. For the OBS plugin&apos;s internals, see the <a href="/core-plugin/">Core Plugin guide</a>.</p>
-<h2>Design principles</h2>
+<p>How CoreVideo Pro 1.0.0 is put together on Windows. The as-built detail, with the evidence behind each capability, lives in the <a href="https://github.com/iamfatness/CoreVideoPro#readme">project README</a>. For the OBS plugin&apos;s internals, see the <a href="/core-plugin/">Core Plugin guide</a>.</p>
+<h2>Three processes</h2>
 <ul>
-<li><strong>Native media core, web renderer.</strong> A C++ media core owns the real-time pipeline; the React/Vite renderer drives the UI and never touches media frames directly.</li>
-<li><strong>Typed IPC contracts.</strong> The renderer and core talk over typed command/state contracts, so the host shell (Electron, Tauri, or a custom native shell) stays replaceable.</li>
-<li><strong>Process isolation.</strong> The Zoom Meeting SDK runs in its own process, so an SDK crash cannot take down the operator console.</li>
-<li><strong>Local-first.</strong> Capture, compositing, recording, and streaming all run on the operator&apos;s machine; nothing is routed through a third-party cloud.</li>
+<li><strong>The operator console</strong> is a native WinUI 3 app on .NET 9. It owns no real-time media: it sends production commands and draws the program, preview and multiviewer from shared GPU textures.</li>
+<li><strong>The media core</strong> is a C++ process that owns real-time pixels and audio: the Direct3D 11 compositor, the audio mixer and dynamics, the Media Foundation recorder, and every output sender.</li>
+<li><strong>The Zoom engine</strong> is a separate process that runs the Zoom Meeting SDK and writes each participant&apos;s raw video and audio to shared memory, so a problem inside the SDK cannot take the console down with it.</li>
 </ul>
-<h2>System architecture</h2>
-<figure class="doc-image"><img src="/pro/images/corevideo-pro-architecture.svg" alt="CoreVideo Pro system architecture: the React/Vite renderer over typed IPC, a native C++ media core, an isolated Zoom capture process plus local Blackmagic/AJA capture, and recording, ISO, and streaming outputs."></figure>
-<p>The <strong>operator renderer</strong> presents the production console, scene and template editor, source and audio panels, and a keyboard command layer. It issues typed commands (assign slot, take, arm record, start stream) and receives typed state snapshots (feed health, output status, levels). It renders no media itself.</p>
-<p>The <strong>native media core</strong> receives raw frames over a shared media bus, composites the active scene graph on the GPU, mixes audio, draws graphics and captions, and hands a program feed to the hardware encoder. The <strong>outputs</strong> stage records the program and per-guest ISOs and streams to one or more destinations.</p>
-<h2>Capture and the media core</h2>
-<p>Zoom media is captured through the Zoom Meeting SDK&apos;s raw video and audio APIs in a dedicated capture process &mdash; no window grabbing, virtual cameras, or display capture. Each participant becomes a clean video, audio, and screen-share source with a full data model: name, role, talking/mute/video state, spotlight, breakout room, and feed quality.</p>
-<p>Local cameras from Blackmagic (DeckLink, UltraStudio) and AJA (Io, Kona) devices are detected on launch and on hot-plug, and appear as first-class sources alongside Zoom participants. Frames move from the capture process to the core over a shared media bus as GPU textures, so large frames are never copied through the IPC pipe. The GPU compositor renders with Direct3D 11/12 on Windows and Metal on macOS.</p>
-<h2>Production pipeline</h2>
-<figure class="doc-image"><img src="/pro/images/corevideo-pro-pipeline.svg" alt="CoreVideo Pro production pipeline: sources flow through capture and sync into a GPU scene-graph compositor fed by the AI director and audio mixer, producing a program feed that is encoded to recording, ISO, and streaming outputs."></figure>
-<p>Sources are captured and synchronised, then routed into the scene-graph compositor. A scene is a template with typed slots (fixed, host, presenter, active speaker, screen share, gallery, fallback), assignment rules, and safe regions for lower-thirds and captions. Producers work in a program/preview model: stage a layout, then <strong>Take</strong> it to program with a Cut, Fade, or Slide transition.</p>
-<p>The <strong>AI director</strong> watches the live call and feeds scene decisions into the compositor; the <strong>audio mixer</strong> levels every source and supplies the mixed bus to the program feed. The program feed is encoded once on hardware and fanned out to recording, ISO, and streaming.</p>
-<h2>AI direction</h2>
-<p><strong>Magic Scene</strong> inspects participant count, roles, screen-share, and the active speaker, picks a template, fills the slots, adds lower-thirds and captions, applies the brand kit, and produces a ready-to-stream scene set you can accept, regenerate, or edit. <strong>Set &amp; Forget</strong> then runs the show: it switches on active speaker and screen share, holds shots to avoid rapid cutting, reveals lower-thirds, and returns to the host or panel. Manual overrides always win, with one click back to automatic.</p>
-<h2>Audio</h2>
-<p>Each Zoom participant and local source has independent gain with smart auto-leveling and a manual trim on top, per-source noise suppression, and mute/solo. A master meter provides a limiter and clipping warnings, and an A/V sync offset aligns local capture with Zoom audio.</p>
-<h2>Graphics, captions and branding</h2>
-<p>Lower-thirds are generated automatically from each participant&apos;s Zoom name and role and can be overridden; they reveal and hide on cue and reposition to avoid collisions. Real-time program captions carry speaker attribution. A brand kit (logo, color, font, background) is applied automatically, alongside a brand bug, banners, call-to-action overlays, and per-source chroma key.</p>
+<p>The console and the core talk over typed JSON-line commands and snapshots on the child process&apos;s standard input and output. Video crosses process boundaries as keyed-mutex DXGI shared textures, never as copies through a pipe.</p>
+<h2>Sources</h2>
+<p>Zoom participants arrive as separate raw 1080p video and audio sources. Webcams and capture cards are read by Media Foundation inside the core, screens and windows through Windows Graphics Capture, and local clips and stills play from a media bin with cue, live and pause owned by the core. Each source keeps its own clock and texture, and scenes select from them.</p>
+<h2>Program</h2>
+<p>A scene is a layout of slots. The operator builds the next shot in Preview and Takes it to Program. The compositor renders Program, Preview and the multiviewer on the GPU at 1080p60, with per-source framing, borders, colour grading, CoreVideo Tiles, lower thirds and graphics. A short Program buffer (two or three frames) gives every output a steady 60 fps cadence.</p>
 <h2>Outputs</h2>
-<p>CoreVideo Pro records the program to MP4/MOV (up to 4K, 30/60fps) and captures per-guest ISO feeds for clean re-edits. Streaming targets RTMP, NDI, and SRT with YouTube, Twitch, and custom presets and a multi-destination model that tracks armed/live state, bitrate, latency, and health per destination. Hardware encoders (NVENC, Quick Sync, AMF on Windows; VideoToolbox on macOS) keep CPU load low, and an output preflight blocks streaming when a destination is missing an endpoint, key, or compatible URL.</p>
-<h2>Platform and shell</h2>
-<p>The renderer is shell-agnostic: it runs inside whatever native host is present (Electron, Tauri, or a custom shell) and falls back to mock engines only for local development. Engine bundles are injected, so the UI swaps simulated engines for the native Zoom, media, and output implementations without importing mock singletons. The native media core stays the durable part of the product; the shell and renderer can evolve independently behind the typed IPC contracts.</p>
+<p>The same Program feeds every output at once: an MP4 Program recording and per-guest ISO recordings on hardware encoders with isolated write queues, an SRT stream with GPU-direct HEVC or H.264 encoding or an RTMP stream, NDI with an optional graphics key, and the &ldquo;CoreVideo Pro Camera&rdquo; registered with the Windows Frame Server for Zoom, Teams or OBS. If the media core restarts, recording resumes and the stream reconnects on their own.</p>
+<h2>Comms</h2>
+<p>Talkback rides the Zoom Meeting SDK&apos;s private talkback channels, so the operator speaks to chosen people in the meeting without the room hearing. Private comms keeps the operator&apos;s own meeting audio silent.</p>
+<h2>How a release is qualified</h2>
+<p>Before a release, the installed build runs a 30-minute outputs soak in which every output is judged frame by frame by a picture identity stamped into Program, alongside a clean-machine install test. The 1.0.0 results are in the <a href="https://github.com/iamfatness/CoreVideoPro/releases/tag/v1.0.0">release notes</a>.</p>
   </main>
   <footer class="site-footer">
-    <span>CoreVideo and CoreVideo Pro are independent products and are not affiliated with Zoom Video Communications, Inc.</span>
-  </footer>
+  <div class="site-footer-inner">
+    <a class="brand" href="/"><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
+    <nav class="footer-links" aria-label="Products">
+      <a href="/obs/">CoreVideo for OBS</a><a href="/pro/">CoreVideo Pro</a><a href="/edge/">CoreVideo Edge</a><a href="/zcomms/">ZComms</a><a href="/volt/">Volt</a>
+    </nav>
+    <nav class="footer-links" aria-label="Resources">
+      <a href="/download/">Downloads</a>
+      <a href="/quickstart/">Operator quickstart</a>
+      <a href="/documentation/">OBS plugin docs</a>
+      <a href="/pro/documentation/">Pro docs</a>
+      <a href="/support/">Support</a>
+      <a href="https://github.com/iamfatness/CoreVideo">GitHub</a>
+    </nav>
+    <div class="site-footer-end">
+      <span>CoreVideo and CoreVideo Pro are independent products and are not affiliated with Zoom Video Communications, Inc.</span>
+      <nav aria-label="Legal"><a href="/privacy/">Privacy</a><a href="/terms/">Terms</a></nav>
+    </div>
+  </div>
+</footer>
 </body>
 </html>

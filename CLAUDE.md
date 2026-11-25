@@ -1660,8 +1660,8 @@ Pro ships from `iamfatness/CoreVideoPro`; `PRO_VERSION` and the `PRO_*` URLs in
 Pro download button uses releases/latest. `/pro/` and `/pro/documentation/`
 describe only what the CoreVideoPro README marks proven or shipped. The old
 June concept render (captions, Magic Scene) is no longer shown because 1.0
-excludes both; replace the brand-lockup hero with a real 1.0 capture when one
-exists. The home page `announcementStrip()` is news: remove it once 1.0 is old.
+excludes both; use a production capture when one is available. The CoreVideo
+Pro page links to the 1.0 announcement.
 
 Every `<pre>` and `<table>` gets `tabindex="0"` at the single write point
 (`focusableScrollRegions()` in `writeText`), because they scroll inside

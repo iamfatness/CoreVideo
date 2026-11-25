@@ -7,55 +7,41 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CoreVideo — OBS Plugin for Live Zoom Video</title>
   <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <link rel="stylesheet" href="/assets/site-shell.css">
+  <script defer src="/assets/site-nav.js"></script>
   <style>
-    @font-face { font-family: "Space Grotesk"; src: url("/assets/fonts/SpaceGrotesk-var.woff2") format("woff2"); font-weight: 300 700; font-display: swap; }
-    @font-face { font-family: "IBM Plex Mono"; src: url("/assets/fonts/IBMPlexMono-Regular.woff2") format("woff2"); font-weight: 400; font-display: swap; }
-    @font-face { font-family: "IBM Plex Mono"; src: url("/assets/fonts/IBMPlexMono-SemiBold.woff2") format("woff2"); font-weight: 600; font-display: swap; }
     :root {
-      --bg: #0a0b0c;
-      --surface: #16191b;
-      --border: rgba(255, 255, 255, 0.09);
-      --accent: #22c86e;
-      --text: #e9edef;
-      --muted: #8b949b;
-      --green: #22c86e;
+      --border: var(--line);
+      --text: var(--tx);
+      --muted: var(--mut);
+      --green: var(--accent);
       --orange: #e8a41f;
       --red: #e5433f;
       --purple: #bc8cff;
     }
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    html { scroll-behavior: smooth; }
     body {
       background: var(--bg); color: var(--text);
-      font-family: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      line-height: 1.7; font-size: 18px;
+      font: 18px/1.65 var(--ui);
     }
-    /* Shared site top bar — matches the layout header in build-site.mjs */
-    .site-topbar { position: sticky; top: 0; z-index: 200; display: flex; align-items: center; justify-content: space-between;
-      gap: 20px; padding: 11px clamp(18px,4vw,40px); background: rgba(10,11,12,0.92); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); }
-    .site-topbar .brand { display: inline-flex; align-items: center; gap: 10px; color: var(--text); font-weight: 600; font-size: 18px; letter-spacing: -0.01em; text-decoration: none; }
-    .site-topbar .brand svg { display: block; width: 26px; height: 20px; color: var(--text); }
-    .site-topbar .topnav { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 2px; }
-    .site-topbar .topnav a { color: var(--muted); font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 12.5px; font-weight: 500; letter-spacing: 0.07em; text-transform: uppercase; text-decoration: none; padding: 7px 10px; border: 1px solid transparent; border-radius: 6px; }
-    .site-topbar .topnav a:hover { color: var(--text); background: rgba(255,255,255,0.05); }
-    .site-topbar .topnav a[aria-current="page"] { color: var(--text); border-color: rgba(34,200,110,0.45); background: rgba(34,200,110,0.12); }
-    .site-topbar .topnav a.dl { color: #06170d; background: var(--accent); font-weight: 700; padding: 6px 13px; border-radius: 7px; margin-left: 5px; }
 
-    #sidebar {
-      position: fixed; top: 52px; left: 0; bottom: 0; width: 260px;
+    .docs-index {
+      position: fixed; top: var(--header-height); left: 0; bottom: 0; width: 260px;
       background: var(--bg); border-right: 1px solid var(--border);
       padding: 18px 0 32px; overflow-y: auto; z-index: 100;
     }
+    .docs-index > summary { display: none; }
     #sidebar a {
       display: block; padding: 6px 20px; color: var(--muted); text-decoration: none;
       font-size: 0.88rem; border-left: 2px solid transparent; transition: color .15s, background .15s, border-color .15s;
     }
     #sidebar a:hover, #sidebar a.active { color: var(--text); border-left-color: var(--accent); background: rgba(34,200,110,.08); }
     .nav-section { padding: 18px 20px 6px; font-family: "IBM Plex Mono", ui-monospace, monospace;
-      font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: .14em; color: #77828a; }
+      font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: .14em; color: var(--muted); }
     .nav-section-first { padding-top: 4px; }
-    main { margin-left: 260px; max-width: 960px; padding: 48px 56px; }
-    section[id] { scroll-margin-top: 72px; }
+    main { margin-left: 260px; max-width: 1060px; padding: clamp(26px, 5vw, 64px); }
+
+    .site-footer { margin-left: 260px; }
 
     h1 { font-size: 2.2rem; font-weight: 800; margin-bottom: 12px; }
     h2 { font-size: 1.5rem; font-weight: 700; margin: 48px 0 16px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
@@ -67,7 +53,7 @@
     a  { color: var(--accent); text-decoration: none; }
     a:hover { text-decoration: underline; }
     /* Prose links must be distinguishable without color (WCAG 1.4.1). The
-       sidebar nav lives outside <main>, so it is unaffected. */
+       sidebar nav lives outside the main element, so it is unaffected. */
     main a { text-decoration: underline; text-underline-offset: 2px; }
     /* Screenshot figures (and placeholders until real captures are added) */
     figure.shot { margin: 20px 0; }
@@ -88,25 +74,28 @@
     }
     pre code { background: none; border: none; padding: 0; color: #e6edf3; font-size: 0.875rem; }
 
-    .hero {
-      background: linear-gradient(135deg, #16191b 0%, #0a0b0c 60%);
-      border: 1px solid var(--border); border-radius: 12px; padding: 40px; margin-bottom: 40px;
-      position: relative; overflow: hidden;
+    .docs-intro h1 {
+      font-size: clamp(36px, 5vw, 58px);
+      font-weight: 620;
+      line-height: 1.06;
+      letter-spacing: -0.055em;
     }
-    .hero::before {
-      content: ''; position: absolute; top: -60px; right: -60px;
-      width: 300px; height: 300px; border-radius: 50%;
-      background: radial-gradient(circle, rgba(34,200,110,.16) 0%, transparent 70%);
+    .docs-intro p { max-width: 56ch; color: var(--muted); }
+    .docs-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+    .docs-actions a {
+      display: inline-flex;
+      min-height: 44px;
+      align-items: center;
+      padding: 8px 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      color: var(--tx);
+      font-size: 14px;
+      font-weight: 650;
+      text-decoration: none;
     }
-    .hero-badges { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
-    .badge {
-      background: #16191b; border: 1px solid var(--border); border-radius: 20px; padding: 4px 12px;
-      font-size: 0.75rem; font-weight: 600; color: var(--muted);
-    }
-    .badge.blue   { border-color: #1f6feb; color: var(--accent); background: rgba(31,111,235,.12); }
-    .badge.green  { border-color: #238636; color: var(--green);  background: rgba(35,134,54,.12); }
-    .badge.purple { border-color: #6e40c9; color: var(--purple); background: rgba(110,64,201,.12); }
-    .badge.orange { border-color: #9e6a03; color: var(--orange); background: rgba(158,106,3,.12); }
+    .docs-actions a:first-child { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+    .docs-actions a:hover { border-color: var(--accent); }
 
     .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; margin: 20px 0; }
     .card {
@@ -145,7 +134,7 @@
     .step { display: flex; gap: 16px; margin-bottom: 20px; }
     .step::before {
       counter-increment: step; content: counter(step);
-      min-width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: #fff;
+      min-width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: var(--accent-ink);
       display: flex; align-items: center; justify-content: center;
       font-size: 0.8rem; font-weight: 700; flex-shrink: 0; margin-top: 2px;
     }
@@ -155,21 +144,27 @@
     .step-body { flex: 1 1 auto; min-width: 0; }
     .step-body h3 { margin: 0 0 8px; font-size: 0.95rem; font-weight: 600; color: var(--text); }
 
-    section { scroll-margin-top: 24px; }
 
     @media (max-width: 960px) {
-      /* Sidebar becomes a horizontal on-page index instead of disappearing. */
-      #sidebar { position: static; width: auto; bottom: auto; display: flex; align-items: center;
-        overflow-x: auto; white-space: nowrap; padding: 10px 12px; gap: 2px;
-        border-right: none; border-bottom: 1px solid var(--border); }
-      .nav-section { padding: 0 6px 0 14px; }
-      .nav-section-first { padding-left: 6px; }
-      #sidebar a { padding: 6px 10px; border-left: none; border-radius: 6px; font-size: 0.82rem; }
-      #sidebar a:hover, #sidebar a.active { background: rgba(34,200,110,.12); }
+      .docs-index {
+        position: static;
+        width: auto;
+        padding: 0;
+        border-right: 0;
+        border-bottom: 1px solid var(--border);
+      }
+      .docs-index > summary {
+        display: list-item;
+        min-height: 44px;
+        padding: 9px var(--site-gutter);
+        font-size: 15px;
+        color: var(--tx);
+        cursor: pointer;
+      }
+      #sidebar { max-height: min(45vh, 360px); overflow-y: auto; padding: 10px 0; }
+      #sidebar a { padding-block: 8px; }
       main { margin-left: 0; padding: 28px 20px; }
-      .site-topbar { flex-direction: column; align-items: flex-start; gap: 10px; }
-      .site-topbar .topnav { justify-content: flex-start; }
-      main > footer { margin-left: 0 !important; }
+      .site-footer { margin-left: 0; }
       table { display: block; overflow-x: auto; }
     }
   </style>
@@ -194,24 +189,26 @@
 </head>
 <body>
 
-<header class="site-topbar">
-  <a class="brand" href="/"><svg viewBox="0 0 32 24" width="26" height="20" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
-  <nav class="topnav">
-    <a href="/">Home</a>
-    <a href="/pro/">CoreVideo Pro</a>
-    <a href="/edge/">Edge</a>
-    <a href="/volt/">Volt</a>
-    <a href="/zcomms/">ZComms</a>
-    <a href="/pro/documentation/">Pro Docs</a>
-    <a href="/documentation/" aria-current="page">Plugin Docs</a>
-    <a href="/core-plugin/">Core Plugin</a>
-    <a href="/terms/">Terms</a>
-    <a href="/privacy/">Privacy</a>
-    <a href="/support/">Support</a>
-    <a class="dl" href="/download">Download</a>
-  </nav>
+<a class="skip-link" href="#main-content">Skip to content</a>
+<header class="site-header">
+  <div class="site-header-inner">
+    <a class="brand" href="/" ><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
+    <nav class="site-nav" aria-label="Main navigation">
+      <details class="site-menu">
+        <summary>Products<span class="site-chevron" aria-hidden="true"></span></summary>
+        <div class="site-menu-panel">
+          <a href="/obs/">CoreVideo for OBS</a><a href="/pro/">CoreVideo Pro</a><a href="/edge/">CoreVideo Edge</a><a href="/zcomms/">ZComms</a><a href="/volt/">Volt</a>
+        </div>
+      </details>
+      <a href="/documentation/" aria-current="page">Docs</a>
+      <a href="/support/">Support</a>
+    </nav>
+    <a class="site-download" href="/download/">Downloads</a>
+  </div>
 </header>
 
+<details class="docs-index" open>
+<summary>On this page</summary>
 <nav id="sidebar" aria-label="On this page">
   <div class="nav-section nav-section-first">Overview</div>
   <a href="#overview">Introduction</a>
@@ -251,51 +248,19 @@
   <a href="#configuration">Configuration Reference</a>
   <a href="#ui-modern">Plugin UI</a>
 </nav>
+</details>
 
-<main>
+<main id="main-content" tabindex="-1">
 
-  <div class="hero">
-    <h1>CoreVideo</h1>
-    <p style="font-size:1.1rem;color:#8b949e;max-width:640px;">
-      An OBS Studio plugin that captures live Zoom meeting video, audio,
-      screen share, and Zoom interpretation audio channel capture — with a dockable control panel,
-      auto-reconnect, ZoomISO-style assignment modes, hardware video acceleration,
-      and TCP/OSC control APIs for full broadcast automation.
-    </p>
-    <div class="callout warning" style="margin-top:18px;">
-      <div class="callout-title">Install CoreVideo</div>
-      Packaged builds are available for
-      <strong>Windows x64</strong> (installer or ZIP) and
-      <strong>macOS Apple Silicon</strong> (signed and notarized installer). Linux requires a source build
-      (<a href="#mac-beta">details</a>) — see
-      <a href="https://github.com/iamfatness/CoreVideo/blob/main/docs/ROADMAP.md">the Roadmap</a> for known limitations and what's
-      planned next. To report a problem, use
-      <a href="https://github.com/iamfatness/CoreVideo/issues/new/choose">GitHub Issues</a>
-      (the bug report template walks you through attaching a redacted
-      <a href="#troubleshooting">support bundle</a>). New releases are announced
-      through a dismissible in-app update banner in the Zoom Control dock and on the
-      <a href="https://github.com/iamfatness/CoreVideo/releases">GitHub Releases</a> page.
+  <header class="docs-intro">
+    <h1>OBS plugin documentation</h1>
+    <p>Set up CoreVideo, route Zoom participants into OBS, and learn how the plugin, engine, and control APIs work.</p>
+    <div class="docs-actions">
+      <a href="/download/">Download the plugin</a>
+      <a href="/quickstart/">Operator quickstart</a>
+      <a href="#adding">Installation in OBS</a>
     </div>
-    <div class="callout warning" style="margin-top:18px;">
-      <div class="callout-title">Zoom Raw Data Bandwidth Planning</div>
-      CoreVideo uses Zoom Meeting SDK raw data APIs. Raw data access does not require Enhanced Media by itself,
-      but quality and stream count follow Zoom account and app entitlements. Standard accounts are commonly
-      constrained to roughly 30 Mbps incoming video; Enhanced Media / HBM can raise that envelope to roughly
-      100 Mbps. Plan around 4-6 Mbps per standard 1080p feed.
-    </div>
-    <div class="hero-badges" style="margin-top:16px;">
-      <span class="badge green">Free</span>
-      <span class="badge green">OBS Studio 32.2.x</span>
-      <span class="badge orange">Windows installer</span>
-      <span class="badge purple">Sign in with Zoom</span>
-      <span class="badge blue">OAuth 2.0 PKCE</span>
-    </div>
-    <div style="margin-top:18px;">
-      <a href="https://corevideo.io/download" style="display:inline-block;background:var(--accent);color:#06170d;font-weight:700;padding:11px 20px;border-radius:8px;text-decoration:none;">Download for Windows</a>
-      &nbsp;<a href="#mac-beta" style="display:inline-block;padding:11px 18px;border:1px solid var(--border);border-radius:8px;text-decoration:none;">macOS installer</a>
-      &nbsp;<a href="#adding" style="display:inline-block;padding:11px 18px;border:1px solid var(--border);border-radius:8px;text-decoration:none;">How to install</a>
-    </div>
-  </div>
+  </header>
 
   <!-- ── Overview ───────────────────────────────────────────────── -->
   <section id="overview">
@@ -2201,11 +2166,27 @@ sequenceDiagram
     </p>
   </section>
 
-  <footer style="margin-top:64px;padding-top:26px;border-top:1px solid var(--border);color:var(--muted);font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;text-align:center;">
-    <p>CoreVideo is an independent product and is not affiliated with Zoom Video Communications, Inc.</p>
-    <p style="margin-top:10px;text-transform:none;letter-spacing:0;font-size:12px;">Developers: CoreVideo is open source — <a href="https://github.com/iamfatness/CoreVideo">build from source on GitHub</a>.</p>
-  </footer>
 </main>
+<footer class="site-footer">
+  <div class="site-footer-inner">
+    <a class="brand" href="/"><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
+    <nav class="footer-links" aria-label="Products">
+      <a href="/obs/">CoreVideo for OBS</a><a href="/pro/">CoreVideo Pro</a><a href="/edge/">CoreVideo Edge</a><a href="/zcomms/">ZComms</a><a href="/volt/">Volt</a>
+    </nav>
+    <nav class="footer-links" aria-label="Resources">
+      <a href="/download/">Downloads</a>
+      <a href="/quickstart/">Operator quickstart</a>
+      <a href="/documentation/">OBS plugin docs</a>
+      <a href="/pro/documentation/">Pro docs</a>
+      <a href="/support/">Support</a>
+      <a href="https://github.com/iamfatness/CoreVideo">GitHub</a>
+    </nav>
+    <div class="site-footer-end">
+      <span>CoreVideo is independent and is not affiliated with Zoom Video Communications, Inc.</span>
+      <nav aria-label="Legal"><a href="/privacy/">Privacy</a><a href="/terms/">Terms</a></nav>
+    </div>
+  </div>
+</footer>
 
 <script src="/assets/docs-init.js"></script>
 </body>

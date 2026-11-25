@@ -126,9 +126,9 @@ const pages = [
   {
     source: "Home.md",
     title: "CoreVideo",
-    seoTitle: "CoreVideo - Zoom Video & Audio as Native OBS Sources",
+    seoTitle: "CoreVideo - Production Tools for Live Zoom Shows",
     description:
-      "Free open-source OBS Studio plugin: Zoom participant video, audio, and screen share as native OBS sources. No NDI, virtual camera, or screen capture.",
+      "Production tools for Zoom shows: the CoreVideo OBS plugin, CoreVideo Pro, Edge, ZComms, and Volt for routing, switching, talkback, recording, and publishing.",
     output: "index.html",
   },
   {
@@ -249,100 +249,99 @@ function normalizeText(value) {
 
 // The one-line strip that opens the home page while a release is news. It is a
 // link, not a modal or a cookie-gated banner: one sentence and a destination.
-function announcementStrip() {
-  return `<a class="announce" href="${PRO_ANNOUNCEMENT}"><span class="tally tally-live">New</span><span class="announce-text"><strong>CoreVideo Pro 1.0 is here.</strong> The first stable release of the standalone Zoom production studio for Windows.</span><span class="announce-cta">Read the announcement &rarr;</span></a>`;
-}
+const products = [
+  { name: "CoreVideo for OBS", path: "/obs/", platform: "Windows and Apple Silicon", description: "Bring Zoom guests into OBS as individual video and audio sources." },
+  { name: "CoreVideo Pro", path: "/pro/", platform: "Windows", description: "Switch scenes, record, and stream from a standalone production studio." },
+  { name: "CoreVideo Edge", path: "/edge/", platform: "Windows beta", description: "Route and record additional Zoom guests on a second machine." },
+  { name: "ZComms", path: "/zcomms/", platform: "Windows", description: "Cue talent privately from a dedicated talkback and IFB station." },
+  { name: "Volt", path: "/volt/", platform: "Source installation", description: "Run the rundown, cue clips, and publish from one show session." },
+];
 
 function homeContent() {
-  return `${announcementStrip()}
-<section class="hero">
-  <figure class="hero-media">
-    <div class="console">
-      <div class="console-bar"><span class="tally tally-live">Live</span><span>Program</span><span class="tc">1080p60 &middot; 6 Zoom sources</span></div>
-      <div class="console-screen"><img src="/assets/dynamic-gallery.webp" alt="A six-participant gallery composed in OBS from individual CoreVideo sources, each guest in their own rounded, bordered tile on a branded background"></div>
-    </div>
-  </figure>
-  <div class="hero-copy">
-    <p class="eyebrow">Free, open-source OBS Studio plugin</p>
-    <h1>Bring Zoom participants into OBS as native sources.</h1>
-    <p class="lede">CoreVideo joins the meeting through the Zoom Meeting SDK and hands OBS each participant's own video and audio as a real source &mdash; no NDI, no virtual camera, no screen capture, and no second machine. Follow the active speaker, pin spotlight slots, take the screen share, and record every guest to an isolated file.</p>
+  return `<section class="suite-hero">
+  <div class="suite-intro">
+    <h1>Bring Zoom into the control room.</h1>
+    <p class="lede">Choose the tools you need to route guests, switch the show, cue talent, and deliver the recording.</p>
     <div class="hero-actions">
-      <a class="button primary" href="/download/">Download${RELEASE_VERSION ? ` v${RELEASE_VERSION}` : ""} for Windows</a>
-      <a class="button" href="/download/#macos">Download for macOS &mdash; Apple Silicon</a>
-      <a class="button" href="/quickstart/">Operator Quickstart</a>
-      <a class="button" href="/core-plugin/">How it works</a>
-      <a class="button" href="https://github.com/iamfatness/CoreVideo">View source</a>
+      <a class="button primary" href="#products">Explore products</a>
+      <a class="button" href="/download/">Get the OBS plugin</a>
     </div>
   </div>
+  <figure class="suite-media">
+    <img src="/assets/dynamic-gallery.webp" width="1400" height="776" fetchpriority="high" alt="Six Zoom guests composed from individual camera feeds in OBS">
+    <figcaption><span class="preview-label">Program preview</span><a href="/obs/">Made with CoreVideo for OBS</a></figcaption>
+  </figure>
 </section>
-<section aria-labelledby="products-heading">
-  <h2 id="products-heading">CoreVideo products</h2>
-  <div class="link-grid products">
-    <a href="/download/"><span class="tier">OBS plugin</span><strong>CoreVideo for OBS</strong><span>Bring Zoom participant video, audio, screen share, and interpretation into OBS as native sources.</span></a>
-    <a class="featured" href="/pro/"><span class="tier tier-premium">Windows</span><strong>CoreVideo Pro</strong><span>Run a Zoom production from a standalone studio with scenes, Program, streaming, talkback, and ISO recording.</span></a>
-    <a href="/zcomms/"><span class="tier">Windows</span><strong>ZComms</strong><span>Run private Zoom talkback and IFB from a dedicated intercom desk.</span></a>
-    <a href="/edge/"><span class="tier">Windows beta</span><strong>CoreVideo Edge</strong><span>Route and record additional Zoom guests on a separate Windows machine and send feeds to Pro over NDI or SRT.</span></a>
-    <a href="/volt/"><span class="tier">Available from source</span><strong>Volt</strong><span>Manage your rundown, find and cue clips, and publish approved versions from one show session.</span></a>
+<section class="suite-products" id="products" aria-labelledby="products-heading">
+  <h2 id="products-heading">Choose your CoreVideo tools</h2>
+  <div class="product-grid">
+    ${products.map(({name, path, platform, description}) => `<a class="product-tile" href="${path}">
+      <span class="product-platform">${platform}</span>
+      <h3>${name}</h3>
+      <p>${description}</p>
+      <span class="link-arrow" aria-hidden="true">&nearr;</span>
+    </a>`).join("\n    ")}
   </div>
 </section>
-<section class="link-grid" aria-label="What the plugin does">
-  <div><strong>One source per participant</strong><span>Each Zoom participant becomes a separate OBS source at up to 1080p, with their audio on its own track &mdash; not a crop out of a gallery screenshot.</span></div>
-  <div><strong>CoreVideo Tiles</strong><span>Arrange participant feeds in a styled gallery within one OBS source, with rounded corners, borders, and flexible layouts.</span></div>
-  <div><strong>Active speaker &amp; spotlight</strong><span>Point a source at whoever is talking, at Zoom spotlight slot 1&hellip;N, or at a fixed guest with an automatic failover if they drop.</span></div>
-  <div><strong>Screen share &amp; interpretation</strong><span>Subscribe to the live screen share, and pull existing Zoom interpretation audio channels in as dedicated sources.</span></div>
-  <div><strong>ISO recording</strong><span>Record selected Zoom feeds as per-participant MP4 files with isolated audio, alongside optional OBS program recording.</span></div>
-  <div><strong>Active Speaker Director</strong><span>An automatic take with a hold time, a sensitivity threshold, an exclusion list, and a &ldquo;require video&rdquo; rule &mdash; so the cut follows the conversation without chattering.</span></div>
-  <div><strong>Output profiles</strong><span>The Output Manager saves and reloads a whole assignment set, so last week&rsquo;s routing comes back on the next show instead of being rebuilt by hand.</span></div>
-  <div><strong>Stream Deck &amp; Companion</strong><span>A Bitfocus Companion module (v5 or newer) picks the output and the participant <em>by name</em> from the live roster, so a button keeps working after somebody rejoins.</span></div>
-  <div><strong>Remote control</strong><span>A TCP and OSC control surface drives joins, assignments, and recording from whatever already runs your show.</span></div>
-</section>
-<figure class="doc-image">
-  <img src="/assets/obs-multiview.webp" alt="OBS Studio multiview: preview and program above four scenes built from individual Zoom participant sources - the host alone, the host with a reader, the host with the active speaker, and the active speaker full frame" loading="lazy">
-  <figcaption>Every guest arrives as their own OBS source, so scenes, transitions, and the multiview all work the way they already do &mdash; this is stock OBS, cutting between Zoom participants.</figcaption>
-</figure>
-<section>
-  <h2>Talkback, without leaving the meeting</h2>
-  <p>The Zoom Meeting SDK carries a private talkback path alongside the meeting floor &mdash; 16 channels, up to 10 people each, with room audio ducked while you speak.</p>
-  <p><a href="/zcomms/">ZComms</a> is the standalone answer: a full intercom desk with named talk keys, ALL CALL, latch, extern feeds from a multichannel interface, and breakout-aware routing. It ships today. The OBS plugin also has a <a href="/core-plugin/">Zoom Talkback dock</a> on Windows (v0.1.45 and later); it is unavailable on macOS.</p>
-</section>
-<section class="link-grid" aria-label="CoreVideo resources">
-  <a href="/documentation/"><strong>Plugin Docs</strong><span>Architecture, setup, control APIs, and operating notes.</span></a>
-  <a href="/core-plugin/"><strong>Core Plugin Guide</strong><span>OBS workflows, participant routing, isolated audio, and ISO recording.</span></a>
-  <a href="/zcomms/"><strong>ZComms</strong><span>Standalone talkback and IFB station for Zoom productions.</span></a>
-  <a href="/pro/"><strong>CoreVideo Pro</strong><span>Standalone production studio for live and recorded Zoom shows. Version 1.0, Windows.</span></a>
-  <a href="/pro/documentation/"><strong>CoreVideo Pro Architecture</strong><span>How 1.0 is built: the WinUI console, the C++ media core, the isolated Zoom engine, and the outputs.</span></a>
-  <a href="/terms/"><strong>Terms of Use</strong><span>Marketplace-ready usage terms and license requirements.</span></a>
-  <a href="/privacy/"><strong>Privacy Policy</strong><span>Data processing, local storage, and third-party service details.</span></a>
-  <a href="/support/"><strong>Support</strong><span>Issue reporting, troubleshooting, and common fixes.</span></a>
+<section class="start-panel" aria-labelledby="start-heading">
+  <div>
+    <h2 id="start-heading">Start with OBS</h2>
+    <p>Install the free plugin and route your first Zoom guest in OBS Studio.</p>
+  </div>
+  <div class="hero-actions">
+    <a class="button primary" href="/download/">Download the plugin</a>
+    <a class="button" href="/quickstart/">Operator quickstart</a>
+  </div>
 </section>`;
 }
 
-// Pro's page describes the 1.0 that ships, and nothing it does not: every item
-// below is "proven" or "shipped" in the CoreVideoPro README's capability table.
-// The June concept render that used to head this page showed captions and the
-// Magic Scene auto-director, both excluded from 1.0, so the hero is the brand
-// lockup until a real 1.0 capture replaces it.
-function proPageContent() {
-  return `<section class="hero">
-  <figure class="hero-media">
-    <div class="console">
-      <div class="console-bar"><span class="tally tally-air">On Air</span><span class="tally tally-pgm">Pgm</span><span class="tc">1080p60 &middot; v${PRO_VERSION}</span></div>
-      <div class="console-screen center"><div class="brand-lockup">${MULTIVIEW_MARK}<div class="wordmark">CoreVideo Pro</div><div class="brand-sub">Zoom production studio for Windows</div></div></div>
-    </div>
-  </figure>
+function obsPageContent() {
+  return `<section class="hero product-hero">
   <div class="hero-copy">
-    <p class="eyebrow">Version ${PRO_VERSION} &middot; standalone studio for Windows</p>
-    <h1>Produce your Zoom show from one console.</h1>
-    <p class="lede">CoreVideo Pro is a standalone production studio built around Zoom. Every guest arrives as their own clean 1080p source, you build the show in scenes and Take it to Program, you cue talent privately inside the meeting, and the same Program goes out as a recording, per-guest ISOs, a stream, NDI and a Windows virtual camera at the same time.</p>
+    <p class="eyebrow">Free, open-source OBS Studio plugin</p>
+    <h1>CoreVideo for OBS</h1>
+    <p class="lede">Bring Zoom participants into OBS as native video and audio sources. Build scenes from individual guests, screen shares, and interpretation feeds.</p>
     <div class="hero-actions">
-      <a class="button primary" href="${PRO_RELEASES_LATEST}">Download for Windows</a>
-      <a class="button" href="${PRO_ANNOUNCEMENT}">What&rsquo;s in 1.0</a>
-      <a class="button" href="${PRO_REPO}">View on GitHub</a>
+      <a class="button primary" href="/download/">Download the plugin</a>
+      <a class="button" href="/quickstart/">Operator quickstart</a>
     </div>
   </div>
+  <figure class="hero-media product-shot">
+    <img src="/assets/obs-multiview.webp" width="1600" height="664" alt="OBS multiview with Preview, Program, and four scenes composed from individual Zoom guests">
+    <figcaption>Preview, Program, and scenes in OBS Studio</figcaption>
+  </figure>
+</section>
+<section class="link-grid product-features" aria-label="What the OBS plugin does">
+  <div><strong>Assign guests to OBS sources</strong><span>Route a named participant, follow the active speaker, or assign a Zoom spotlight slot. Arrange multiple guests into a gallery with CoreVideo Tiles.</span></div>
+  <div><strong>Route screen shares and isolated audio</strong><span>Add a dedicated source for the meeting&rsquo;s screen share or an interpretation channel. Mix each guest on their own audio track.</span></div>
+  <div><strong>Record individual feeds</strong><span>Record selected feeds as per-participant MP4s with isolated audio alongside your OBS Program recording.</span></div>
+</section>
+<section aria-labelledby="obs-guides">
+  <h2 id="obs-guides">Set up and operate</h2>
+  <div class="link-grid product-features">
+    <a href="/core-plugin/"><strong>Core plugin guide</strong><span>Assignments, audio isolation, and recording workflows.</span></a>
+    <a href="/documentation/"><strong>OBS plugin documentation</strong><span>Installation, configuration, and control APIs.</span></a>
+    <a href="https://github.com/iamfatness/CoreVideo"><strong>GitHub repository</strong><span>Source code, issues, and release history.</span></a>
+  </div>
+</section>`;
+}
+
+function proPageContent() {
+  return `<section class="hero product-hero">
+  <div class="hero-copy">
+    <p class="eyebrow">Standalone production studio for Windows</p>
+    <h1>CoreVideo Pro</h1>
+    <p class="lede">Switch a Zoom production from one console. Route participant video and audio, cue talent privately, and send Program to recording, streaming, NDI, and a Windows virtual camera.</p>
+    <div class="hero-actions">
+      <a class="button primary" href="${PRO_RELEASES_LATEST}">Download for Windows</a>
+      <a class="button" href="/pro/documentation/">Pro documentation</a>
+    </div>
+    <p class="product-utility"><a href="${PRO_ANNOUNCEMENT}">What&rsquo;s in 1.0</a><a href="${PRO_REPO}">GitHub repository</a></p>
+  </div>
+  <div class="hero-media product-mark" aria-hidden="true">${MULTIVIEW_MARK}</div>
 </section>
 <section class="link-grid" aria-label="CoreVideo Pro features">
-  <div><strong>Zoom-first, not Zoom-as-an-input</strong><span>Join by link and each participant comes in through the Zoom Meeting SDK as a separate raw 1080p video and audio source, with the live roster and the active speaker beside them.</span></div>
+  <div><strong>Individual Zoom sources</strong><span>Join by link and route each guest&rsquo;s video and audio separately. View the live roster and follow the active speaker as needed.</span></div>
   <div><strong>Talkback inside the meeting</strong><span>The Comms page talks to people in the meeting over Zoom&rsquo;s private talkback channels. The room does not hear you, and there is no second app or audio cable.</span></div>
   <div><strong>1080p60 on the GPU</strong><span>A Direct3D 11 compositor renders Program, Preview and the multiviewer, with per-source framing, borders, colour grading, lower thirds and graphics.</span></div>
   <div><strong>Every output at once</strong><span>Program recording, per-guest ISO recordings, an SRT or RTMP stream, NDI with an optional graphics key, and the &ldquo;CoreVideo Pro Camera&rdquo; for Zoom, Teams or OBS.</span></div>
@@ -502,27 +501,22 @@ function proAnnouncementContent() {
 }
 
 function zcommsPageContent() {
-  return `<section class="hero">
-  <figure class="hero-media">
-    <div class="console">
-      <div class="console-bar"><span class="tally tally-live">Key</span><span>All Call</span><span class="tc">16 ch &middot; 10 per ch</span></div>
-      <div class="console-screen center"><div class="brand-lockup">${TALKBACK_MARK}<div class="wordmark">ZComms</div><div class="brand-sub">Talkback &amp; IFB station for Zoom</div></div></div>
-    </div>
-  </figure>
+  return `<section class="hero product-hero">
   <div class="hero-copy">
-    <p class="eyebrow">Standalone Windows intercom station</p>
-    <h1>Talk to one panelist. The room hears nothing.</h1>
-    <p class="lede">ZComms is a talkback and IFB station for productions that run on Zoom. The panel is a grid of keys, and a key wears a person&apos;s name &mdash; hold it and your voice lands in that person&apos;s ear alone, while the meeting floor, the recording, and everyone else carry on unaware. It rides the Zoom Meeting SDK&apos;s own talkback channels: no virtual audio cable, no second machine, no bot account.</p>
+    <p class="eyebrow">Talkback and IFB station for Windows</p>
+    <h1>ZComms</h1>
+    <p class="lede">Cue talent privately during a Zoom production. Assign named keys to people or groups and connect feeds from a console or intercom.</p>
     <div class="hero-actions">
       <a class="button primary" href="${ZCOMMS_RELEASES_LATEST}">Download for Windows</a>
-      <a class="button" href="#how-it-works">How it works</a>
-      <a class="button" href="${ZCOMMS_REPO}">View source</a>
+      <a class="button" href="#how-it-works">How talkback works</a>
     </div>
+    <p class="product-utility"><a href="${ZCOMMS_REPO}">GitHub repository</a></p>
   </div>
+  <div class="hero-media product-mark" aria-hidden="true">${TALKBACK_MARK}</div>
 </section>
 <section class="link-grid" aria-label="What ZComms does">
   <div><strong>A named key per person</strong><span>Every talkback-capable participant gets a standing channel of their own, and the key wears their name. ALL CALL spans the panel; latch makes a press stick.</span></div>
-  <div><strong>Private, not disruptive</strong><span>Talkback is its own path, so nothing you say reaches the meeting floor. Members duck under your voice while you are keyed and return to unity when you let go &mdash; ducked, not muted.</span></div>
+  <div><strong>Private talkback</strong><span>Only the selected guests hear you. Their meeting audio drops while you&rsquo;re keyed and returns to its normal level when you release.</span></div>
   <div><strong>Extern feeds</strong><span>Latch one channel &mdash; or a stereo pair &mdash; of a multichannel interface into a talkback channel, so a larger intercom, a console bus, or a Dante feed uses Zoom as its last mile.</span></div>
   <div><strong>Honest keys</strong><span>A key reads live only while someone is actually hearing you. Keyed into an empty channel reads amber; a person in another breakout room reads dark, names the room, and refuses the press.</span></div>
 </section>
@@ -627,12 +621,6 @@ function zcommsPageContent() {
 
 function edgePageContent() {
   return `<section class="hero product-hero">
-  <figure class="hero-media">
-    <div class="console">
-      <div class="console-bar"><span>CoreVideo Edge</span><span class="tc">Routing &middot; Sample session</span></div>
-      <div class="console-screen"><img src="/assets/edge-routing.png" width="1280" height="800" alt="Edge Routing screen showing Zoom participants assigned to eight slots, with feed resolution and frame rate controls"></div>
-    </div>
-  </figure>
   <div class="hero-copy">
     <p class="eyebrow">Windows x64 beta</p>
     <h1>CoreVideo Edge</h1>
@@ -642,6 +630,10 @@ function edgePageContent() {
       <a class="button" href="${EDGE_RELEASE}">Release notes &amp; checksums</a>
     </div>
   </div>
+  <figure class="hero-media product-shot">
+    <img src="/assets/edge-routing.png" width="1280" height="800" alt="Edge Routing screen with Zoom participants assigned to eight slots">
+    <figcaption>Participant routing in a sample session</figcaption>
+  </figure>
 </section>
 <section class="link-grid product-features" aria-label="What Edge does">
   <div><strong>Route and monitor guests</strong><span>Choose up to eight Zoom participants and preview each routed feed. Request a resolution and frame rate for each slot. Actual video quality depends on what Zoom delivers.</span></div>
@@ -665,12 +657,6 @@ function edgePageContent() {
 
 function voltPageContent() {
   return `<section class="hero product-hero">
-  <figure class="hero-media">
-    <div class="console">
-      <div class="console-bar"><span>Volt</span><span class="tc">Rundown &middot; Sample session</span></div>
-      <div class="console-screen"><img src="/assets/volt-rundown.png" width="1920" height="1080" alt="Volt operator rundown showing the current and next items, a Take button, and armed cues"></div>
-    </div>
-  </figure>
   <div class="hero-copy">
     <p class="eyebrow">Available from source</p>
     <h1>Volt</h1>
@@ -680,6 +666,10 @@ function voltPageContent() {
       <a class="button" href="${VOLT_REPO}">View source</a>
     </div>
   </div>
+  <figure class="hero-media product-shot">
+    <img src="/assets/volt-rundown.png" width="1920" height="1080" alt="Volt operator rundown showing the current and next items, the Take button, and armed cues">
+    <figcaption>Rundown and cues in a sample session</figcaption>
+  </figure>
 </section>
 <section class="link-grid product-features" aria-label="What Volt does">
   <div><strong>Find the right clip</strong><span>Ingest media and recordings, build proxies, and use transcript search to find the section you need.</span></div>
@@ -896,96 +886,76 @@ function jsonLdBlock(data) {
 
 function downloadPageContent() {
   const v = RELEASE_VERSION;
-  const tagBase = v
-    ? `https://github.com/iamfatness/CoreVideo/releases/download/v${v}`
-    : null;
-  const asset = (name) => `${tagBase}/${name}`;
+  const releaseAssets = v && `https://github.com/iamfatness/CoreVideo/releases/download/v${v}`;
+  const windowsInstaller = v ? `${releaseAssets}/CoreVideo-Setup-v${v}.exe` : RELEASES_LATEST;
+  const windowsZip = v && `${releaseAssets}/CoreVideo-Windows-x64-v${v}.zip`;
 
-  // Without a resolved version there are no version-stamped asset URLs to
-  // build, so the page degrades to the always-current release listing rather
-  // than printing links that 404.
-  const primaryHref = v ? asset(`CoreVideo-Setup-v${v}.exe`) : RELEASES_LATEST;
-  const primaryLabel = v
-    ? `Download for Windows &mdash; v${v}`
-    : "Download for Windows";
-
-  const versionNote = v
-    ? `<p class="lede">Latest release <strong>v${v}</strong> &mdash; Windows x64 installer. OBS Studio 32.2.2 or later recommended. Free and open source under the MIT license.</p>`
-    : `<p class="lede">Windows x64 installer. OBS Studio 32.2.2 or later recommended. Free and open source under the MIT license.</p>`;
-
-  const fileRows = v
-    ? `<section class="link-grid" aria-label="Release files">
-  <a href="${asset(`CoreVideo-Setup-v${v}.exe`)}"><strong>Windows installer (.exe)</strong><span>Recommended. Installs the plugin into your existing OBS Studio installation.</span></a>
-  <a href="${asset(`CoreVideo-Windows-x64-v${v}.zip`)}"><strong>Portable ZIP (x64)</strong><span>Unpack into the OBS plugin directory yourself &mdash; for locked-down or portable OBS setups.</span></a>
-  <a href="${asset(`CoreVideo-Setup-v${v}.exe.sha256`)}"><strong>Installer checksum</strong><span>SHA-256 for the installer, to verify the download before running it.</span></a>
-  <a href="${asset(`CoreVideo-Windows-x64-v${v}.zip.sha256`)}"><strong>ZIP checksum</strong><span>SHA-256 for the portable archive.</span></a>
-  <a href="https://github.com/iamfatness/CoreVideo/releases/download/v0.1.44/corevideo-obs-1.0.2.tgz"><strong>Companion module</strong><span>Download <code>corevideo-obs</code> 1.0.2 for Companion v5 or newer.</span></a>
-</section>`
-    : "";
-
-  return `<section class="hero">
-  <figure class="hero-media">
-    <div class="console">
-      <div class="console-bar"><span class="tally tally-live">Live</span><span>CoreVideo</span><span class="tc">${v ? `v${v}` : "latest"} &middot; x64</span></div>
-      <div class="console-screen center"><div class="brand-lockup">${MULTIVIEW_MARK}<div class="wordmark">CoreVideo</div><div class="brand-sub">Free OBS Studio plugin</div></div></div>
-    </div>
-  </figure>
-  <div class="hero-copy">
-    <p class="eyebrow">Download</p>
-    <h1>Install CoreVideo for OBS Studio.</h1>
-    ${versionNote}
+  return `<header class="page-intro">
+  <h1>Download CoreVideo for OBS</h1>
+  <p class="lede">Choose the installer for the computer running OBS Studio.</p>
+  <p><a href="#other-products">Looking for another CoreVideo product?</a></p>
+</header>
+<div class="download-grid">
+  <section class="download-panel" id="windows" aria-labelledby="windows-heading">
+    <p class="product-platform">Windows x64${v ? ` / v${v}` : ""}</p>
+    <h2 id="windows-heading">Windows</h2>
+    <p>Windows 10 or 11 with 64-bit OBS Studio. OBS 32.2.2 or later is recommended.</p>
     <div class="hero-actions">
-      <a class="button primary" href="${primaryHref}">${primaryLabel}</a>
-      <a class="button" href="${RELEASES_LATEST}">Release notes</a>
+      <a class="button primary" href="${windowsInstaller}">Download Windows installer</a>
+      ${v ? `<a class="button" href="${windowsZip}">Portable ZIP</a>` : ""}
     </div>
-  </div>
-</section>
-${fileRows}
-<p>See the <a href="${RELEASES_LATEST}">Release notes</a> for the latest changes. The plugin offers newer stable releases with a package for the installed platform.</p>
-<section id="macos">
-<h2>macOS &mdash; Apple Silicon v${MAC_VERSION}</h2>
-<p>The macOS installer is Developer ID signed and Apple-notarized.</p>
-<div class="hero-actions">
-<a class="button primary" href="${MAC_INSTALLER}">Download macOS installer (.pkg)</a>
-<a class="button" href="${MAC_INSTALLER}.sha256">SHA-256 checksum</a>
-<a class="button" href="${MAC_RELEASE}">macOS release notes</a>
+    <ul class="download-links">
+      <li><a href="${RELEASES_LATEST}">Windows release notes</a></li>
+      ${v ? `<li><a href="${windowsInstaller}.sha256">Installer checksum</a></li>
+      <li><a href="${windowsZip}.sha256">ZIP checksum</a></li>` : ""}
+    </ul>
+  </section>
+  <section class="download-panel" id="macos" aria-labelledby="macos-heading">
+    <p class="product-platform">Apple Silicon / v${MAC_VERSION}</p>
+    <h2 id="macos-heading">macOS</h2>
+    <p>Apple Silicon Mac with OBS Studio 32.2.1 or later. Developer ID signed and Apple notarized.</p>
+    <div class="hero-actions">
+      <a class="button primary" href="${MAC_INSTALLER}">Download macOS installer</a>
+    </div>
+    <ul class="download-links">
+      <li><a href="${MAC_RELEASE}">macOS release notes</a></li>
+      <li><a href="${MAC_INSTALLER}.sha256">Installer checksum</a></li>
+    </ul>
+  </section>
 </div>
-<p>Requires an Apple Silicon Mac (M1 or later) and OBS Studio 32.2.1 or later.</p>
-<ol>
-<li>Close OBS, then open the downloaded <code>.pkg</code>.</li>
-<li>Install for your user account. No administrator password is needed.</li>
-<li>Reopen OBS and follow the <a href="/quickstart/">Operator Quickstart</a> to sign in, join, and assign your first source.</li>
-</ol>
-<p>For ISO recording, use <strong>Download FFmpeg</strong> in Zoom ISO Recorder or select an existing FFmpeg executable.</p>
-<p>Talkback is Windows-only. For your own screen, use OBS's macOS Screen Capture source; CoreVideo receives other participants' shares.</p>
-<p>To verify the download, save the installer and checksum in the same folder and run:</p>
-<pre><code>shasum -a 256 -c CoreVideo-Setup-v${MAC_VERSION}.pkg.sha256</code></pre>
+<section>
+  <h2>Install the OBS plugin</h2>
+  <ol>
+    <li>Close OBS Studio.</li>
+    <li>Open the installer. On Windows, select your OBS installation folder if it is not detected. On macOS, install for your user account.</li>
+    <li>Reopen OBS and follow the <a href="/quickstart/">Operator Quickstart</a> to sign in, join a meeting, and assign your first source.</li>
+  </ol>
+  <p>The Windows installer is unsigned. Verify the checksum before continuing past SmartScreen&rsquo;s <strong>More info</strong> and <strong>Run anyway</strong> prompts.</p>
+  <details class="download-details">
+    <summary>Verify an installer</summary>
+    <p>Compare the result from PowerShell with the Windows installer checksum:</p>
+    <pre><code class="language-powershell">Get-FileHash .\\CoreVideo-Setup-${v ? `v${v}` : "vX.Y.Z"}.exe -Algorithm SHA256</code></pre>
+    <p>On macOS, save the installer and checksum in the same folder, then run:</p>
+    <pre><code>shasum -a 256 -c CoreVideo-Setup-v${MAC_VERSION}.pkg.sha256</code></pre>
+  </details>
+  <details class="download-details">
+    <summary>Zoom, platform, and recording requirements</summary>
+    <p>Sign in with a Zoom account to join meetings. The account&rsquo;s Zoom entitlements and bandwidth determine the number and quality of feeds you can receive. A 1080p feed typically uses 4&ndash;6 Mbps.</p>
+    <p>For ISO recording on macOS, choose <strong>Download FFmpeg</strong> in Zoom ISO Recorder or select an existing FFmpeg executable. Talkback is available on Windows. Use OBS&rsquo;s macOS Screen Capture for your own screen and CoreVideo for other participants&rsquo; shares.</p>
+    <p>See the <a href="/core-plugin/">Core Plugin Guide</a> for workflows or <a href="/support/">Support</a> for troubleshooting and log collection.</p>
+  </details>
 </section>
-<h2>Windows requirements</h2>
-<ul>
-<li><strong>64-bit OBS Studio</strong>. The installer is validated against OBS Studio 32.2.2.</li>
-<li><strong>Windows 10 or Windows 11</strong> (x64). For macOS, use the <a href="#macos">Apple Silicon installer above</a>. Linux requires a source build.</li>
-<li><strong>A Zoom account you can sign in with.</strong> CoreVideo joins meetings through the Zoom Meeting SDK, so the video quality and number of simultaneous feeds you get follow your Zoom account entitlements.</li>
-<li><strong>Downstream bandwidth</strong> for the feeds you subscribe to &mdash; roughly 4-6 Mbps per 1080p participant. Standard accounts are typically capped around 30 Mbps incoming; Enhanced Media / HBM raises that to roughly 100 Mbps.</li>
-</ul>
-<h2>Install on Windows</h2>
-<ol>
-<li>Close OBS Studio.</li>
-<li>Run the installer and point it at your OBS installation directory if it is not detected automatically.</li>
-<li>Reopen OBS and follow the <a href="/quickstart/">Operator Quickstart</a> to sign in, join, and assign your first source.</li>
-</ol>
-<p>The Windows installer is <strong>not code-signed yet</strong>, so Windows SmartScreen warns the first time you run it &mdash; &quot;More info&quot;, then &quot;Run anyway&quot;. Verify the SHA-256 below if you would rather check the file than trust the dialog.</p>
-<p>The <a href="/core-plugin/">Core Plugin Guide</a> walks through participant routing, isolated audio, and ISO recording in detail, and <a href="/support/">Support</a> covers log collection and reporting a bug.</p>
-<h2>Verify your download</h2>
-<p>Each release ships a SHA-256 file alongside the binary. On Windows, compare the hashes with PowerShell:</p>
-<pre><code class="language-powershell">Get-FileHash .\\CoreVideo-Setup-${v ? `v${v}` : "vX.Y.Z"}.exe -Algorithm SHA256</code></pre>
-<h2>Building from source</h2>
-<p>CoreVideo is MIT-licensed and builds from source on Windows, macOS, and Linux. See the <a href="https://github.com/iamfatness/CoreVideo">repository</a> for the toolchain requirements and CMake options, including hardware-accelerated colour conversion.</p>
-<section aria-labelledby="more-downloads-heading">
-  <h2 id="more-downloads-heading">Edge and Volt</h2>
-  <ul>
-    <li><a href="/edge/">CoreVideo Edge</a> &mdash; Windows x64 beta installer and portable ZIP.</li>
-    <li><a href="/volt/">Volt</a> &mdash; source installation and operations guide.</li>
+<section>
+  <h2>Companion and source builds</h2>
+  <p>Download the <a href="https://github.com/iamfatness/CoreVideo/releases/download/v0.1.44/corevideo-obs-1.0.2.tgz">CoreVideo module for Companion v5 or newer</a>. For build instructions, including Linux, see the <a href="https://github.com/iamfatness/CoreVideo">CoreVideo GitHub repository</a>.</p>
+</section>
+<section id="other-products">
+  <h2>Other CoreVideo products</h2>
+  <ul class="other-products">
+    <li><a href="/pro/">CoreVideo Pro</a><span>Standalone studio for Windows</span></li>
+    <li><a href="/edge/">CoreVideo Edge</a><span>Windows beta installer and portable ZIP</span></li>
+    <li><a href="/zcomms/">ZComms</a><span>Talkback and IFB for Windows</span></li>
+    <li><a href="/volt/">Volt</a><span>Source installation and operations guide</span></li>
   </ul>
 </section>`;
 }
@@ -994,15 +964,16 @@ ${fileRows}
 // download-style rich result; the price-0 offer is what marks it free.
 function pluginJsonLd() {
   const app = {
+    "@context": "https://schema.org",
     "@type": "SoftwareApplication",
-    name: "CoreVideo",
+    name: "CoreVideo for OBS",
     alternateName: "CoreVideo OBS Plugin",
     applicationCategory: "MultimediaApplication",
     applicationSubCategory: "OBS Studio plugin",
-    operatingSystem: "Windows 10, Windows 11",
+    operatingSystem: "Windows 10, Windows 11, macOS on Apple Silicon",
     description:
       "OBS Studio plugin that captures Zoom meeting participants as native OBS sources - per-participant video and audio, screen share, interpretation audio, and ISO recording - using the Zoom Meeting SDK rather than NDI, a virtual camera, or screen capture.",
-    url: `${PRIMARY_ORIGIN}/`,
+    url: `${PRIMARY_ORIGIN}/obs/`,
     downloadUrl: `${PRIMARY_ORIGIN}/download/`,
     installUrl: `${PRIMARY_ORIGIN}/download/`,
     softwareHelp: `${PRIMARY_ORIGIN}/documentation/`,
@@ -1018,17 +989,7 @@ function pluginJsonLd() {
   };
   if (RELEASE_VERSION) app.softwareVersion = RELEASE_VERSION;
 
-  return {
-    "@context": "https://schema.org",
-    "@graph": [
-      app,
-      {
-        "@type": "WebSite",
-        name: SITE_NAME,
-        url: `${PRIMARY_ORIGIN}/`,
-      },
-    ],
-  };
+  return app;
 }
 
 // Structured data for ZComms. Windows-only and no price claim: the product
@@ -1051,25 +1012,54 @@ function zcommsJsonLd() {
   };
 }
 
+const footerNote =
+  "CoreVideo is independent and is not affiliated with Zoom Video Communications, Inc.";
+
+function siteHeader(here) {
+  const current = (path) => here === path ? ' aria-current="page"' : "";
+  return `<a class="skip-link" href="#main-content">Skip to content</a>
+<header class="site-header">
+  <div class="site-header-inner">
+    <a class="brand" href="/" ${here === "/" ? 'aria-current="page"' : ""}>${MULTIVIEW_MARK}<span>CoreVideo</span></a>
+    <nav class="site-nav" aria-label="Main navigation">
+      <details class="site-menu">
+        <summary>Products<span class="site-chevron" aria-hidden="true"></span></summary>
+        <div class="site-menu-panel">
+          ${products.map(({name, path}) => `<a href="${path}"${current(path)}>${name}</a>`).join("")}
+        </div>
+      </details>
+      <a href="/documentation/"${current("/documentation/")}>Docs</a>
+      <a href="/support/"${current("/support/")}>Support</a>
+    </nav>
+    <a class="site-download" href="/download/"${current("/download/")}>Downloads</a>
+  </div>
+</header>`;
+}
+
+function siteFooter(note = footerNote) {
+  return `<footer class="site-footer">
+  <div class="site-footer-inner">
+    <a class="brand" href="/">${MULTIVIEW_MARK}<span>CoreVideo</span></a>
+    <nav class="footer-links" aria-label="Products">
+      ${products.map(({name, path}) => `<a href="${path}">${name}</a>`).join("")}
+    </nav>
+    <nav class="footer-links" aria-label="Resources">
+      <a href="/download/">Downloads</a>
+      <a href="/quickstart/">Operator quickstart</a>
+      <a href="/documentation/">OBS plugin docs</a>
+      <a href="/pro/documentation/">Pro docs</a>
+      <a href="/support/">Support</a>
+      <a href="https://github.com/iamfatness/CoreVideo">GitHub</a>
+    </nav>
+    <div class="site-footer-end">
+      <span>${note}</span>
+      <nav aria-label="Legal"><a href="/privacy/">Privacy</a><a href="/terms/">Terms</a></nav>
+    </div>
+  </div>
+</footer>`;
+}
+
 function layout(page, content, options = {}) {
-  const nav = [
-    ["Home", "/"],
-    ["CoreVideo Pro", "/pro/"],
-    ["Edge", "/edge/"],
-    ["Volt", "/volt/"],
-    ["ZComms", "/zcomms/"],
-    ["Pro Docs", "/pro/documentation/"],
-    ["Plugin Docs", "/documentation/"],
-    ["Core Plugin", "/core-plugin/"],
-    ["Download", "/download/"],
-    ["Terms", "/terms/"],
-    ["Privacy", "/privacy/"],
-    ["Support", "/support/"],
-  ];
-
-  const footerText = options.footerText ??
-    "CoreVideo is an independent product and is not affiliated with Zoom Video Communications, Inc.";
-
   const here = options.canonical ? options.canonical.replace(PRIMARY_ORIGIN, "") : null;
 
   // Search results and social cards show the title verbatim, so a page that
@@ -1085,24 +1075,21 @@ ${GOOGLE_TAG_MANAGER}
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${escapeHtml(fullTitle)}</title>
   <meta name="description" content="${escapeHtml(page.description)}">
-  <meta name="theme-color" content="#0a0b0c">
+  <meta name="theme-color" content="#111620">
   <link rel="icon" href="/favicon.svg">
   <link rel="preload" href="/assets/fonts/SpaceGrotesk-var.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/assets/fonts/IBMPlexMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
 ${options.canonical ? `  <link rel="canonical" href="${escapeHtml(options.canonical)}">\n` : ""}${socialTags({ title: fullTitle, description: page.description, url: options.canonical, ...page.socialImage })}
+  <link rel="stylesheet" href="/assets/site-shell.css">
   <link rel="stylesheet" href="/assets/site.css">
+  <script defer src="/assets/site-nav.js"></script>
 ${ANALYTICS_BEACON}${options.jsonLd ? jsonLdBlock(options.jsonLd) : ""}</head>
 <body class="${options.home ? "home-page" : "document-page"}">
-  <header class="site-header">
-    <a class="brand" href="/">${MULTIVIEW_MARK}<span>CoreVideo</span></a>
-    <nav>${nav.map(([label, href]) => `<a href="${href}"${here && href === here ? ' aria-current="page"' : ""}>${label}</a>`).join("")}</nav>
-  </header>
-  <main class="content">
+  ${siteHeader(here)}
+  <main class="content" id="main-content" tabindex="-1">
     ${content}
   </main>
-  <footer class="site-footer">
-    <span>${footerText}</span>
-  </footer>
+  ${siteFooter(options.footerText)}
 </body>
 </html>
 `;
@@ -1143,7 +1130,12 @@ for (const page of pages) {
   const html = layout(page, isHome ? homeContent() : markdownToHtml(markdown), {
     home: isHome,
     canonical: canonicalUrl(page.output),
-    jsonLd: isHome ? pluginJsonLd() : undefined,
+    jsonLd: isHome ? {
+      "@context": "https://schema.org",
+      "@type": "WebSite",
+      name: SITE_NAME,
+      url: `${PRIMARY_ORIGIN}/`,
+    } : undefined,
   });
   writeText(page.output, html);
   for (const alias of page.aliases ?? []) {
@@ -1162,6 +1154,19 @@ for (const page of markdownPages) {
 // Download page. This used to be a bare 302 from the worker straight to the
 // GitHub releases list, which meant the highest-intent page on the site was not
 // a page at all - nothing to rank, and nothing to read before installing.
+writeText(
+  "obs/index.html",
+  layout(
+    {
+      title: "CoreVideo for OBS",
+      seoTitle: "CoreVideo for OBS - Native Zoom Video and Audio Sources",
+      description: "Bring individual Zoom guests, audio, screen shares, and interpretation channels into OBS Studio. Free for Windows and Apple Silicon.",
+    },
+    obsPageContent(),
+    { home: true, canonical: canonicalUrl("obs/index.html"), jsonLd: pluginJsonLd() },
+  ),
+);
+
 writeText(
   "download/index.html",
   layout(
@@ -1535,6 +1540,8 @@ const DOCS_DESCRIPTION =
 const DOCS_CANONICAL = canonicalUrl("documentation/index.html");
 
 const docsHtml = fs.readFileSync(path.join(docsDir, "index.html"), "utf8")
+  .replace("<!-- site-header -->", siteHeader("/documentation/"))
+  .replace("<!-- site-footer -->", siteFooter())
   .replace(/(<meta charset="UTF-8"\s*\/>)/i, `$1\n${GOOGLE_TAG_MANAGER}`)
   .replaceAll("iamfatness.github.io/CoreVideo", publicDocumentationUrl
     ? new URL("/documentation", publicDocumentationUrl).host + "/documentation"
@@ -1567,10 +1574,9 @@ if (!docsHtml.includes('rel="canonical"')) {
 writeText("documentation/index.html", docsHtml);
 writeText("docs/index.html", docsHtml);
 
-writeText(
-  "assets/site.css",
-  fs.readFileSync(path.join(siteAssetsDir, "site.css"), "utf8"),
-);
+for (const asset of ["site-shell.css", "site.css", "site-nav.js"]) {
+  writeText(`assets/${asset}`, fs.readFileSync(path.join(siteAssetsDir, asset), "utf8"));
+}
 
 // Docs-page script (mermaid theme init + sidebar highlighting). Must be an
 // external self-hosted file: the worker's CSP has script-src 'self' + jsdelivr

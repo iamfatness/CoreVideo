@@ -2,10 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <script src="/assets/google-tag-manager.js"></script>
+  <script async src="https://www.googletagmanager.com/gtm.js?id=GTM-PSHZHBGZ"></script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ZComms - Zoom Talkback &amp; Intercom Station for Live Production</title>
   <meta name="description" content="Standalone Windows talkback and IFB station for Zoom: named talk keys, 16 private channels, extern feeds from a multichannel interface, breakout-aware.">
-  <meta name="theme-color" content="#0a0b0c">
+  <meta name="theme-color" content="#111620">
   <link rel="icon" href="/favicon.svg">
   <link rel="preload" href="/assets/fonts/SpaceGrotesk-var.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/assets/fonts/IBMPlexMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
@@ -25,7 +27,10 @@
   <meta name="twitter:description" content="Standalone Windows talkback and IFB station for Zoom: named talk keys, 16 private channels, extern feeds from a multichannel interface, breakout-aware.">
   <meta name="twitter:image" content="https://corevideo.io/assets/corevideo-share.jpg">
   <meta name="twitter:image:alt" content="CoreVideo - Zoom participant video and audio as native OBS Studio sources">
+  <link rel="stylesheet" href="/assets/site-shell.css">
   <link rel="stylesheet" href="/assets/site.css">
+  <script defer src="/assets/site-nav.js"></script>
+  <script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "606f185a54e7489bb11a93235343469b"}'></script>
   <script type="application/ld+json">
 {
   "@context": "https://schema.org",
@@ -43,32 +48,40 @@
   </script>
 </head>
 <body class="home-page">
-  <header class="site-header">
-    <a class="brand" href="/"><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
-    <nav><a href="/">Home</a><a href="/pro/">CoreVideo Pro</a><a href="/edge/">Edge</a><a href="/volt/">Volt</a><a href="/zcomms/" aria-current="page">ZComms</a><a href="/pro/documentation/">Pro Docs</a><a href="/documentation/">Plugin Docs</a><a href="/core-plugin/">Core Plugin</a><a href="/download/">Download</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a></nav>
-  </header>
-  <main class="content">
-    <section class="hero">
-  <figure class="hero-media">
-    <div class="console">
-      <div class="console-bar"><span class="tally tally-live">Key</span><span>All Call</span><span class="tc">16 ch &middot; 10 per ch</span></div>
-      <div class="console-screen center"><div class="brand-lockup"><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><rect x="4.6" y="4.6" width="7" height="5.6" rx="1.4" fill="currentColor" opacity=".38"/><rect x="12.5" y="4.6" width="7" height="5.6" rx="1.4" fill="currentColor" opacity=".38"/><rect x="20.4" y="4.6" width="7" height="5.6" rx="1.4" fill="#22c86e"/><rect x="4.6" y="13.8" width="7" height="5.6" rx="1.4" fill="currentColor" opacity=".38"/><rect x="12.5" y="13.8" width="7" height="5.6" rx="1.4" fill="currentColor" opacity=".38"/><rect x="20.4" y="13.8" width="7" height="5.6" rx="1.4" fill="currentColor" opacity=".38"/></svg><div class="wordmark">ZComms</div><div class="brand-sub">Talkback &amp; IFB station for Zoom</div></div></div>
-    </div>
-  </figure>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+<header class="site-header">
+  <div class="site-header-inner">
+    <a class="brand" href="/" ><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
+    <nav class="site-nav" aria-label="Main navigation">
+      <details class="site-menu">
+        <summary>Products<span class="site-chevron" aria-hidden="true"></span></summary>
+        <div class="site-menu-panel">
+          <a href="/obs/">CoreVideo for OBS</a><a href="/pro/">CoreVideo Pro</a><a href="/edge/">CoreVideo Edge</a><a href="/zcomms/" aria-current="page">ZComms</a><a href="/volt/">Volt</a>
+        </div>
+      </details>
+      <a href="/documentation/">Docs</a>
+      <a href="/support/">Support</a>
+    </nav>
+    <a class="site-download" href="/download/">Downloads</a>
+  </div>
+</header>
+  <main class="content" id="main-content" tabindex="-1">
+    <section class="hero product-hero">
   <div class="hero-copy">
-    <p class="eyebrow">Standalone Windows intercom station</p>
-    <h1>Talk to one panelist. The room hears nothing.</h1>
-    <p class="lede">ZComms is a talkback and IFB station for productions that run on Zoom. The panel is a grid of keys, and a key wears a person&apos;s name &mdash; hold it and your voice lands in that person&apos;s ear alone, while the meeting floor, the recording, and everyone else carry on unaware. It rides the Zoom Meeting SDK&apos;s own talkback channels: no virtual audio cable, no second machine, no bot account.</p>
+    <p class="eyebrow">Talkback and IFB station for Windows</p>
+    <h1>ZComms</h1>
+    <p class="lede">Cue talent privately during a Zoom production. Assign named keys to people or groups and connect feeds from a console or intercom.</p>
     <div class="hero-actions">
       <a class="button primary" href="https://github.com/iamfatness/ZComms/releases/latest">Download for Windows</a>
-      <a class="button" href="#how-it-works">How it works</a>
-      <a class="button" href="https://github.com/iamfatness/ZComms">View source</a>
+      <a class="button" href="#how-it-works">How talkback works</a>
     </div>
+    <p class="product-utility"><a href="https://github.com/iamfatness/ZComms">GitHub repository</a></p>
   </div>
+  <div class="hero-media product-mark" aria-hidden="true"><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><rect x="4.6" y="4.6" width="7" height="5.6" rx="1.4" fill="currentColor" opacity=".38"/><rect x="12.5" y="4.6" width="7" height="5.6" rx="1.4" fill="currentColor" opacity=".38"/><rect x="20.4" y="4.6" width="7" height="5.6" rx="1.4" fill="#22c86e"/><rect x="4.6" y="13.8" width="7" height="5.6" rx="1.4" fill="currentColor" opacity=".38"/><rect x="12.5" y="13.8" width="7" height="5.6" rx="1.4" fill="currentColor" opacity=".38"/><rect x="20.4" y="13.8" width="7" height="5.6" rx="1.4" fill="currentColor" opacity=".38"/></svg></div>
 </section>
 <section class="link-grid" aria-label="What ZComms does">
   <div><strong>A named key per person</strong><span>Every talkback-capable participant gets a standing channel of their own, and the key wears their name. ALL CALL spans the panel; latch makes a press stick.</span></div>
-  <div><strong>Private, not disruptive</strong><span>Talkback is its own path, so nothing you say reaches the meeting floor. Members duck under your voice while you are keyed and return to unity when you let go &mdash; ducked, not muted.</span></div>
+  <div><strong>Private talkback</strong><span>Only the selected guests hear you. Their meeting audio drops while you&rsquo;re keyed and returns to its normal level when you release.</span></div>
   <div><strong>Extern feeds</strong><span>Latch one channel &mdash; or a stereo pair &mdash; of a multichannel interface into a talkback channel, so a larger intercom, a console bus, or a Dante feed uses Zoom as its last mile.</span></div>
   <div><strong>Honest keys</strong><span>A key reads live only while someone is actually hearing you. Keyed into an empty channel reads amber; a person in another breakout room reads dark, names the room, and refuses the press.</span></div>
 </section>
@@ -160,17 +173,35 @@
   <h2>Where it fits</h2>
   <p>ZComms and CoreVideo are separate products that came out of the same problem &mdash; running a real show inside somebody else&apos;s Zoom meeting &mdash; and they share the Zoom Meeting SDK and the same sign-in broker. ZComms is the standalone desk: it is what you run when the intercom is the job, on its own machine or beside a switcher that has nothing to do with Zoom.</p>
   <p>The <a href="/core-plugin/">CoreVideo plugin</a> includes a Zoom Talkback dock on Windows (v0.1.45 and later), for operators keying talent from OBS. macOS talkback is unavailable. ZComms provides a separate operator position and feeds from a larger comms system.</p>
-  <table>
+  <table tabindex="0">
     <thead><tr><th>Product</th><th>Form factor</th><th>Talkback</th></tr></thead>
     <tbody>
       <tr><td><strong>ZComms</strong></td><td>Standalone Windows app</td><td>The whole product &mdash; a full desk, extern feeds, and its own operator position. Shipping now.</td></tr>
-      <tr><td><strong>CoreVideo</strong> for OBS</td><td>OBS Studio plugin</td><td>An intercom dock beside the video routing, for the operator already cutting the show. In development, unreleased.</td></tr>
+      <tr><td><strong>CoreVideo</strong> for OBS</td><td>OBS Studio plugin</td><td>A Zoom Talkback dock beside the video routing, for the operator already cutting the show in OBS. Windows, v0.1.45 and later; unavailable on macOS.</td></tr>
+      <tr><td><strong>CoreVideo Pro</strong></td><td>Standalone Windows app</td><td>The Comms page inside the production studio, for the operator running the whole show from Pro. Shipping in <a href="/news/corevideo-pro-1-0/">version 1.0</a>.</td></tr>
     </tbody>
   </table>
 </section>
   </main>
   <footer class="site-footer">
-    <span>ZComms is an independent product and is not affiliated with Zoom Video Communications, Inc.</span>
-  </footer>
+  <div class="site-footer-inner">
+    <a class="brand" href="/"><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
+    <nav class="footer-links" aria-label="Products">
+      <a href="/obs/">CoreVideo for OBS</a><a href="/pro/">CoreVideo Pro</a><a href="/edge/">CoreVideo Edge</a><a href="/zcomms/">ZComms</a><a href="/volt/">Volt</a>
+    </nav>
+    <nav class="footer-links" aria-label="Resources">
+      <a href="/download/">Downloads</a>
+      <a href="/quickstart/">Operator quickstart</a>
+      <a href="/documentation/">OBS plugin docs</a>
+      <a href="/pro/documentation/">Pro docs</a>
+      <a href="/support/">Support</a>
+      <a href="https://github.com/iamfatness/CoreVideo">GitHub</a>
+    </nav>
+    <div class="site-footer-end">
+      <span>ZComms is an independent product and is not affiliated with Zoom Video Communications, Inc.</span>
+      <nav aria-label="Legal"><a href="/privacy/">Privacy</a><a href="/terms/">Terms</a></nav>
+    </div>
+  </div>
+</footer>
 </body>
 </html>

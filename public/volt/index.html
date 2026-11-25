@@ -7,7 +7,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CoreVideo Volt - Show Rundown, Media Library, and Publishing</title>
   <meta name="description" content="Run a show from a shared rundown, find and cue clips, and publish approved versions from one CoreVideo Volt session.">
-  <meta name="theme-color" content="#0a0b0c">
+  <meta name="theme-color" content="#111620">
   <link rel="icon" href="/favicon.svg">
   <link rel="preload" href="/assets/fonts/SpaceGrotesk-var.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/assets/fonts/IBMPlexMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
@@ -27,22 +27,31 @@
   <meta name="twitter:description" content="Run a show from a shared rundown, find and cue clips, and publish approved versions from one CoreVideo Volt session.">
   <meta name="twitter:image" content="https://corevideo.io/assets/volt-rundown.png">
   <meta name="twitter:image:alt" content="Volt operator rundown and cue controls">
+  <link rel="stylesheet" href="/assets/site-shell.css">
   <link rel="stylesheet" href="/assets/site.css">
+  <script defer src="/assets/site-nav.js"></script>
   <script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "606f185a54e7489bb11a93235343469b"}'></script>
 </head>
 <body class="home-page">
-  <header class="site-header">
-    <a class="brand" href="/"><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
-    <nav><a href="/">Home</a><a href="/pro/">CoreVideo Pro</a><a href="/edge/">Edge</a><a href="/volt/" aria-current="page">Volt</a><a href="/zcomms/">ZComms</a><a href="/pro/documentation/">Pro Docs</a><a href="/documentation/">Plugin Docs</a><a href="/core-plugin/">Core Plugin</a><a href="/download/">Download</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a></nav>
-  </header>
-  <main class="content">
+  <a class="skip-link" href="#main-content">Skip to content</a>
+<header class="site-header">
+  <div class="site-header-inner">
+    <a class="brand" href="/" ><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
+    <nav class="site-nav" aria-label="Main navigation">
+      <details class="site-menu">
+        <summary>Products<span class="site-chevron" aria-hidden="true"></span></summary>
+        <div class="site-menu-panel">
+          <a href="/obs/">CoreVideo for OBS</a><a href="/pro/">CoreVideo Pro</a><a href="/edge/">CoreVideo Edge</a><a href="/zcomms/">ZComms</a><a href="/volt/" aria-current="page">Volt</a>
+        </div>
+      </details>
+      <a href="/documentation/">Docs</a>
+      <a href="/support/">Support</a>
+    </nav>
+    <a class="site-download" href="/download/">Downloads</a>
+  </div>
+</header>
+  <main class="content" id="main-content" tabindex="-1">
     <section class="hero product-hero">
-  <figure class="hero-media">
-    <div class="console">
-      <div class="console-bar"><span>Volt</span><span class="tc">Rundown &middot; Sample session</span></div>
-      <div class="console-screen"><img src="/assets/volt-rundown.png" width="1920" height="1080" alt="Volt operator rundown showing the current and next items, a Take button, and armed cues"></div>
-    </div>
-  </figure>
   <div class="hero-copy">
     <p class="eyebrow">Available from source</p>
     <h1>Volt</h1>
@@ -52,6 +61,10 @@
       <a class="button" href="https://github.com/iamfatness/CoreVideo-Volt">View source</a>
     </div>
   </div>
+  <figure class="hero-media product-shot">
+    <img src="/assets/volt-rundown.png" width="1920" height="1080" alt="Volt operator rundown showing the current and next items, the Take button, and armed cues">
+    <figcaption>Rundown and cues in a sample session</figcaption>
+  </figure>
 </section>
 <section class="link-grid product-features" aria-label="What Volt does">
   <div><strong>Find the right clip</strong><span>Ingest media and recordings, build proxies, and use transcript search to find the section you need.</span></div>
@@ -65,7 +78,24 @@
 </section>
   </main>
   <footer class="site-footer">
-    <span>CoreVideo is an independent product and is not affiliated with Zoom Video Communications, Inc.</span>
-  </footer>
+  <div class="site-footer-inner">
+    <a class="brand" href="/"><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
+    <nav class="footer-links" aria-label="Products">
+      <a href="/obs/">CoreVideo for OBS</a><a href="/pro/">CoreVideo Pro</a><a href="/edge/">CoreVideo Edge</a><a href="/zcomms/">ZComms</a><a href="/volt/">Volt</a>
+    </nav>
+    <nav class="footer-links" aria-label="Resources">
+      <a href="/download/">Downloads</a>
+      <a href="/quickstart/">Operator quickstart</a>
+      <a href="/documentation/">OBS plugin docs</a>
+      <a href="/pro/documentation/">Pro docs</a>
+      <a href="/support/">Support</a>
+      <a href="https://github.com/iamfatness/CoreVideo">GitHub</a>
+    </nav>
+    <div class="site-footer-end">
+      <span>CoreVideo is independent and is not affiliated with Zoom Video Communications, Inc.</span>
+      <nav aria-label="Legal"><a href="/privacy/">Privacy</a><a href="/terms/">Terms</a></nav>
+    </div>
+  </div>
+</footer>
 </body>
 </html>

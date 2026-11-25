@@ -5,17 +5,17 @@
   <script src="/assets/google-tag-manager.js"></script>
   <script async src="https://www.googletagmanager.com/gtm.js?id=GTM-PSHZHBGZ"></script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CoreVideo - Zoom Video &amp; Audio as Native OBS Sources</title>
-  <meta name="description" content="Free open-source OBS Studio plugin: Zoom participant video, audio, and screen share as native OBS sources. No NDI, virtual camera, or screen capture.">
-  <meta name="theme-color" content="#0a0b0c">
+  <title>CoreVideo - Production Tools for Live Zoom Shows</title>
+  <meta name="description" content="Production tools for Zoom shows: the CoreVideo OBS plugin, CoreVideo Pro, Edge, ZComms, and Volt for routing, switching, talkback, recording, and publishing.">
+  <meta name="theme-color" content="#111620">
   <link rel="icon" href="/favicon.svg">
   <link rel="preload" href="/assets/fonts/SpaceGrotesk-var.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/assets/fonts/IBMPlexMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="canonical" href="https://corevideo.io/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="CoreVideo">
-  <meta property="og:title" content="CoreVideo - Zoom Video &amp; Audio as Native OBS Sources">
-  <meta property="og:description" content="Free open-source OBS Studio plugin: Zoom participant video, audio, and screen share as native OBS sources. No NDI, virtual camera, or screen capture.">
+  <meta property="og:title" content="CoreVideo - Production Tools for Live Zoom Shows">
+  <meta property="og:description" content="Production tools for Zoom shows: the CoreVideo OBS plugin, CoreVideo Pro, Edge, ZComms, and Volt for routing, switching, talkback, recording, and publishing.">
   <meta property="og:image" content="https://corevideo.io/assets/corevideo-share.jpg">
   <meta property="og:image:alt" content="CoreVideo - Zoom participant video and audio as native OBS Studio sources">
   <meta property="og:image:width" content="1200">
@@ -23,118 +23,121 @@
   <meta property="og:locale" content="en_US">
   <meta property="og:url" content="https://corevideo.io/">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="CoreVideo - Zoom Video &amp; Audio as Native OBS Sources">
-  <meta name="twitter:description" content="Free open-source OBS Studio plugin: Zoom participant video, audio, and screen share as native OBS sources. No NDI, virtual camera, or screen capture.">
+  <meta name="twitter:title" content="CoreVideo - Production Tools for Live Zoom Shows">
+  <meta name="twitter:description" content="Production tools for Zoom shows: the CoreVideo OBS plugin, CoreVideo Pro, Edge, ZComms, and Volt for routing, switching, talkback, recording, and publishing.">
   <meta name="twitter:image" content="https://corevideo.io/assets/corevideo-share.jpg">
   <meta name="twitter:image:alt" content="CoreVideo - Zoom participant video and audio as native OBS Studio sources">
+  <link rel="stylesheet" href="/assets/site-shell.css">
   <link rel="stylesheet" href="/assets/site.css">
+  <script defer src="/assets/site-nav.js"></script>
   <script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "606f185a54e7489bb11a93235343469b"}'></script>
   <script type="application/ld+json">
 {
   "@context": "https://schema.org",
-  "@graph": [
-    {
-      "@type": "SoftwareApplication",
-      "name": "CoreVideo",
-      "alternateName": "CoreVideo OBS Plugin",
-      "applicationCategory": "MultimediaApplication",
-      "applicationSubCategory": "OBS Studio plugin",
-      "operatingSystem": "Windows 10, Windows 11",
-      "description": "OBS Studio plugin that captures Zoom meeting participants as native OBS sources - per-participant video and audio, screen share, interpretation audio, and ISO recording - using the Zoom Meeting SDK rather than NDI, a virtual camera, or screen capture.",
-      "url": "https://corevideo.io/",
-      "downloadUrl": "https://corevideo.io/download/",
-      "installUrl": "https://corevideo.io/download/",
-      "softwareHelp": "https://corevideo.io/documentation/",
-      "license": "https://opensource.org/licenses/MIT",
-      "isAccessibleForFree": true,
-      "image": "https://corevideo.io/assets/corevideo-share.jpg",
-      "offers": {
-        "@type": "Offer",
-        "price": "0",
-        "priceCurrency": "USD",
-        "availability": "https://schema.org/InStock"
-      },
-      "softwareVersion": "0.1.55"
-    },
-    {
-      "@type": "WebSite",
-      "name": "CoreVideo",
-      "url": "https://corevideo.io/"
-    }
-  ]
+  "@type": "WebSite",
+  "name": "CoreVideo",
+  "url": "https://corevideo.io/"
 }
   </script>
 </head>
 <body class="home-page">
-  <header class="site-header">
-    <a class="brand" href="/"><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
-    <nav><a href="/" aria-current="page">Home</a><a href="/pro/">CoreVideo Pro</a><a href="/edge/">Edge</a><a href="/volt/">Volt</a><a href="/zcomms/">ZComms</a><a href="/pro/documentation/">Pro Docs</a><a href="/documentation/">Plugin Docs</a><a href="/core-plugin/">Core Plugin</a><a href="/download/">Download</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/support/">Support</a></nav>
-  </header>
-  <main class="content">
-    <a class="announce" href="/news/corevideo-pro-1-0/"><span class="tally tally-live">New</span><span class="announce-text"><strong>CoreVideo Pro 1.0 is here.</strong> The first stable release of the standalone Zoom production studio for Windows.</span><span class="announce-cta">Read the announcement &rarr;</span></a>
-<section class="hero">
-  <figure class="hero-media">
-    <div class="console">
-      <div class="console-bar"><span class="tally tally-live">Live</span><span>Program</span><span class="tc">1080p60 &middot; 6 Zoom sources</span></div>
-      <div class="console-screen"><img src="/assets/dynamic-gallery.webp" alt="A six-participant gallery composed in OBS from individual CoreVideo sources, each guest in their own rounded, bordered tile on a branded background"></div>
-    </div>
-  </figure>
-  <div class="hero-copy">
-    <p class="eyebrow">Free, open-source OBS Studio plugin</p>
-    <h1>Bring Zoom participants into OBS as native sources.</h1>
-    <p class="lede">CoreVideo joins the meeting through the Zoom Meeting SDK and hands OBS each participant's own video and audio as a real source &mdash; no NDI, no virtual camera, no screen capture, and no second machine. Follow the active speaker, pin spotlight slots, take the screen share, and record every guest to an isolated file.</p>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+<header class="site-header">
+  <div class="site-header-inner">
+    <a class="brand" href="/" aria-current="page"><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
+    <nav class="site-nav" aria-label="Main navigation">
+      <details class="site-menu">
+        <summary>Products<span class="site-chevron" aria-hidden="true"></span></summary>
+        <div class="site-menu-panel">
+          <a href="/obs/">CoreVideo for OBS</a><a href="/pro/">CoreVideo Pro</a><a href="/edge/">CoreVideo Edge</a><a href="/zcomms/">ZComms</a><a href="/volt/">Volt</a>
+        </div>
+      </details>
+      <a href="/documentation/">Docs</a>
+      <a href="/support/">Support</a>
+    </nav>
+    <a class="site-download" href="/download/">Downloads</a>
+  </div>
+</header>
+  <main class="content" id="main-content" tabindex="-1">
+    <section class="suite-hero">
+  <div class="suite-intro">
+    <h1>Bring Zoom into the control room.</h1>
+    <p class="lede">Choose the tools you need to route guests, switch the show, cue talent, and deliver the recording.</p>
     <div class="hero-actions">
-      <a class="button primary" href="/download/">Download v0.1.55 for Windows</a>
-      <a class="button" href="/download/#macos">Download for macOS &mdash; Apple Silicon</a>
-      <a class="button" href="/quickstart/">Operator Quickstart</a>
-      <a class="button" href="/core-plugin/">How it works</a>
-      <a class="button" href="https://github.com/iamfatness/CoreVideo">View source</a>
+      <a class="button primary" href="#products">Explore products</a>
+      <a class="button" href="/download/">Get the OBS plugin</a>
     </div>
   </div>
+  <figure class="suite-media">
+    <img src="/assets/dynamic-gallery.webp" width="1400" height="776" fetchpriority="high" alt="Six Zoom guests composed from individual camera feeds in OBS">
+    <figcaption><span class="preview-label">Program preview</span><a href="/obs/">Made with CoreVideo for OBS</a></figcaption>
+  </figure>
 </section>
-<section aria-labelledby="products-heading">
-  <h2 id="products-heading">CoreVideo products</h2>
-  <div class="link-grid products">
-    <a href="/download/"><span class="tier">OBS plugin</span><strong>CoreVideo for OBS</strong><span>Bring Zoom participant video, audio, screen share, and interpretation into OBS as native sources.</span></a>
-    <a class="featured" href="/pro/"><span class="tier tier-premium">Windows</span><strong>CoreVideo Pro</strong><span>Run a Zoom production from a standalone studio with scenes, Program, streaming, talkback, and ISO recording.</span></a>
-    <a href="/zcomms/"><span class="tier">Windows</span><strong>ZComms</strong><span>Run private Zoom talkback and IFB from a dedicated intercom desk.</span></a>
-    <a href="/edge/"><span class="tier">Windows beta</span><strong>CoreVideo Edge</strong><span>Route and record additional Zoom guests on a separate Windows machine and send feeds to Pro over NDI or SRT.</span></a>
-    <a href="/volt/"><span class="tier">Available from source</span><strong>Volt</strong><span>Manage your rundown, find and cue clips, and publish approved versions from one show session.</span></a>
+<section class="suite-products" id="products" aria-labelledby="products-heading">
+  <h2 id="products-heading">Choose your CoreVideo tools</h2>
+  <div class="product-grid">
+    <a class="product-tile" href="/obs/">
+      <span class="product-platform">Windows and Apple Silicon</span>
+      <h3>CoreVideo for OBS</h3>
+      <p>Bring Zoom guests into OBS as individual video and audio sources.</p>
+      <span class="link-arrow" aria-hidden="true">&nearr;</span>
+    </a>
+    <a class="product-tile" href="/pro/">
+      <span class="product-platform">Windows</span>
+      <h3>CoreVideo Pro</h3>
+      <p>Switch scenes, record, and stream from a standalone production studio.</p>
+      <span class="link-arrow" aria-hidden="true">&nearr;</span>
+    </a>
+    <a class="product-tile" href="/edge/">
+      <span class="product-platform">Windows beta</span>
+      <h3>CoreVideo Edge</h3>
+      <p>Route and record additional Zoom guests on a second machine.</p>
+      <span class="link-arrow" aria-hidden="true">&nearr;</span>
+    </a>
+    <a class="product-tile" href="/zcomms/">
+      <span class="product-platform">Windows</span>
+      <h3>ZComms</h3>
+      <p>Cue talent privately from a dedicated talkback and IFB station.</p>
+      <span class="link-arrow" aria-hidden="true">&nearr;</span>
+    </a>
+    <a class="product-tile" href="/volt/">
+      <span class="product-platform">Source installation</span>
+      <h3>Volt</h3>
+      <p>Run the rundown, cue clips, and publish from one show session.</p>
+      <span class="link-arrow" aria-hidden="true">&nearr;</span>
+    </a>
   </div>
 </section>
-<section class="link-grid" aria-label="What the plugin does">
-  <div><strong>One source per participant</strong><span>Each Zoom participant becomes a separate OBS source at up to 1080p, with their audio on its own track &mdash; not a crop out of a gallery screenshot.</span></div>
-  <div><strong>CoreVideo Tiles</strong><span>Arrange participant feeds in a styled gallery within one OBS source, with rounded corners, borders, and flexible layouts.</span></div>
-  <div><strong>Active speaker &amp; spotlight</strong><span>Point a source at whoever is talking, at Zoom spotlight slot 1&hellip;N, or at a fixed guest with an automatic failover if they drop.</span></div>
-  <div><strong>Screen share &amp; interpretation</strong><span>Subscribe to the live screen share, and pull existing Zoom interpretation audio channels in as dedicated sources.</span></div>
-  <div><strong>ISO recording</strong><span>Record selected Zoom feeds as per-participant MP4 files with isolated audio, alongside optional OBS program recording.</span></div>
-  <div><strong>Active Speaker Director</strong><span>An automatic take with a hold time, a sensitivity threshold, an exclusion list, and a &ldquo;require video&rdquo; rule &mdash; so the cut follows the conversation without chattering.</span></div>
-  <div><strong>Output profiles</strong><span>The Output Manager saves and reloads a whole assignment set, so last week&rsquo;s routing comes back on the next show instead of being rebuilt by hand.</span></div>
-  <div><strong>Stream Deck &amp; Companion</strong><span>A Bitfocus Companion module (v5 or newer) picks the output and the participant <em>by name</em> from the live roster, so a button keeps working after somebody rejoins.</span></div>
-  <div><strong>Remote control</strong><span>A TCP and OSC control surface drives joins, assignments, and recording from whatever already runs your show.</span></div>
-</section>
-<figure class="doc-image">
-  <img src="/assets/obs-multiview.webp" alt="OBS Studio multiview: preview and program above four scenes built from individual Zoom participant sources - the host alone, the host with a reader, the host with the active speaker, and the active speaker full frame" loading="lazy">
-  <figcaption>Every guest arrives as their own OBS source, so scenes, transitions, and the multiview all work the way they already do &mdash; this is stock OBS, cutting between Zoom participants.</figcaption>
-</figure>
-<section>
-  <h2>Talkback, without leaving the meeting</h2>
-  <p>The Zoom Meeting SDK carries a private talkback path alongside the meeting floor &mdash; 16 channels, up to 10 people each, with room audio ducked while you speak.</p>
-  <p><a href="/zcomms/">ZComms</a> is the standalone answer: a full intercom desk with named talk keys, ALL CALL, latch, extern feeds from a multichannel interface, and breakout-aware routing. It ships today. The OBS plugin also has a <a href="/core-plugin/">Zoom Talkback dock</a> on Windows (v0.1.45 and later); it is unavailable on macOS.</p>
-</section>
-<section class="link-grid" aria-label="CoreVideo resources">
-  <a href="/documentation/"><strong>Plugin Docs</strong><span>Architecture, setup, control APIs, and operating notes.</span></a>
-  <a href="/core-plugin/"><strong>Core Plugin Guide</strong><span>OBS workflows, participant routing, isolated audio, and ISO recording.</span></a>
-  <a href="/zcomms/"><strong>ZComms</strong><span>Standalone talkback and IFB station for Zoom productions.</span></a>
-  <a href="/pro/"><strong>CoreVideo Pro</strong><span>Standalone production studio for live and recorded Zoom shows. Version 1.0, Windows.</span></a>
-  <a href="/pro/documentation/"><strong>CoreVideo Pro Architecture</strong><span>How 1.0 is built: the WinUI console, the C++ media core, the isolated Zoom engine, and the outputs.</span></a>
-  <a href="/terms/"><strong>Terms of Use</strong><span>Marketplace-ready usage terms and license requirements.</span></a>
-  <a href="/privacy/"><strong>Privacy Policy</strong><span>Data processing, local storage, and third-party service details.</span></a>
-  <a href="/support/"><strong>Support</strong><span>Issue reporting, troubleshooting, and common fixes.</span></a>
+<section class="start-panel" aria-labelledby="start-heading">
+  <div>
+    <h2 id="start-heading">Start with OBS</h2>
+    <p>Install the free plugin and route your first Zoom guest in OBS Studio.</p>
+  </div>
+  <div class="hero-actions">
+    <a class="button primary" href="/download/">Download the plugin</a>
+    <a class="button" href="/quickstart/">Operator quickstart</a>
+  </div>
 </section>
   </main>
   <footer class="site-footer">
-    <span>CoreVideo is an independent product and is not affiliated with Zoom Video Communications, Inc.</span>
-  </footer>
+  <div class="site-footer-inner">
+    <a class="brand" href="/"><svg class="mv" viewBox="0 0 32 24" width="28" height="21" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="22" rx="4" stroke="currentColor" stroke-width="1.6"/><line x1="16" y1="2" x2="16" y2="22" stroke="currentColor" stroke-width="1.2" opacity=".45"/><line x1="2" y1="12" x2="30" y2="12" stroke="currentColor" stroke-width="1.2" opacity=".45"/><rect x="17.4" y="2.6" width="12.8" height="8.6" rx="1.6" fill="#22c86e"/></svg><span>CoreVideo</span></a>
+    <nav class="footer-links" aria-label="Products">
+      <a href="/obs/">CoreVideo for OBS</a><a href="/pro/">CoreVideo Pro</a><a href="/edge/">CoreVideo Edge</a><a href="/zcomms/">ZComms</a><a href="/volt/">Volt</a>
+    </nav>
+    <nav class="footer-links" aria-label="Resources">
+      <a href="/download/">Downloads</a>
+      <a href="/quickstart/">Operator quickstart</a>
+      <a href="/documentation/">OBS plugin docs</a>
+      <a href="/pro/documentation/">Pro docs</a>
+      <a href="/support/">Support</a>
+      <a href="https://github.com/iamfatness/CoreVideo">GitHub</a>
+    </nav>
+    <div class="site-footer-end">
+      <span>CoreVideo is independent and is not affiliated with Zoom Video Communications, Inc.</span>
+      <nav aria-label="Legal"><a href="/privacy/">Privacy</a><a href="/terms/">Terms</a></nav>
+    </div>
+  </div>
+</footer>
 </body>
 </html>

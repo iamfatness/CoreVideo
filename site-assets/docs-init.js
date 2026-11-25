@@ -1,7 +1,7 @@
   // NOTE: custom themeVariables are only honored with theme:'base' in Mermaid
   // v10 — with theme:'dark' they are silently ignored (that was the source of
   // the unreadable khaki clusters).
-  mermaid.initialize({
+  window.mermaid?.initialize({
     startOnLoad: true,
     theme: 'base',
     themeVariables: {
@@ -30,6 +30,16 @@
       actorFontSize: 15, actorFontWeight: 600, messageFontSize: 14, noteFontSize: 13 },
     state: { useMaxWidth: false },
     class: { useMaxWidth: false },
+  });
+
+  const index = document.querySelector(".docs-index");
+  const smallScreen = window.matchMedia("(max-width: 960px)");
+  const updateIndex = () => { index.open = !smallScreen.matches; };
+
+  updateIndex();
+  smallScreen.addEventListener("change", updateIndex);
+  index.addEventListener("click", (event) => {
+    if (smallScreen.matches && event.target.closest("a[href^='#']")) index.open = false;
   });
 
   const sections = document.querySelectorAll('section[id]');

@@ -1745,7 +1745,7 @@ void ZoomDock::on_join_clicked()
 
     if (plan.needs_oauth_sign_in) {
         QString error;
-        if (!ZoomOAuthManager::instance().begin_authorization(this, &error)) {
+        if (!ZoomOAuthManager::instance().begin_authorization(&error)) {
             QMessageBox::warning(this, "Zoom Authentication",
                 error.isEmpty()
                     ? QString::fromUtf8(zoom_join::join_error_guidance(

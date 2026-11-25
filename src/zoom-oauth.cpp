@@ -11,14 +11,12 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QMap>
-#include <QMessageBox>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRandomGenerator>
 #include <QUrl>
 #include <QUrlQuery>
-#include <QWidget>
 #include <obs-module.h>
 
 #if defined(_WIN32)
@@ -107,7 +105,7 @@ static QUrl broker_base_from_authorization_url(const std::string &authorization_
     return url;
 }
 
-bool ZoomOAuthManager::begin_authorization(QWidget *parent, QString *error)
+bool ZoomOAuthManager::begin_authorization(QString *error)
 {
     ZoomPluginSettings s = ZoomPluginSettings::load();
     QString registration_error;
@@ -188,11 +186,6 @@ bool ZoomOAuthManager::begin_authorization(QWidget *parent, QString *error)
              redacted_tail(client_id).c_str());
     }
 
-    if (parent) {
-        QMessageBox::information(parent, "Zoom OAuth",
-            "Your browser has been opened for Zoom authorization. Return to OBS "
-            "after approving CoreVideo.");
-    }
     return true;
 }
 
@@ -223,6 +216,7 @@ bool ZoomOAuthManager::parse_token_response(const QByteArray &body, QString *err
     const int expires_in = obj.value("expires_in").toInt(3600);
     s.oauth_expires_at = QDateTime::currentSecsSinceEpoch() + expires_in - 60;
     s.save();
+    emit tokens_saved();
     return true;
 }
 

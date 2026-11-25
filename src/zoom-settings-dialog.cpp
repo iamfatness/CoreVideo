@@ -67,6 +67,8 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
             this, &ZoomSettingsDialog::onRefreshOAuth);
     connect(m_oauth_disconnect_btn, &QPushButton::clicked,
             this, &ZoomSettingsDialog::onDisconnectOAuth);
+    connect(&ZoomOAuthManager::instance(), &ZoomOAuthManager::tokens_saved,
+            this, &ZoomSettingsDialog::updateOAuthStatus, Qt::QueuedConnection);
 
     auto *oauth_button_row = new QHBoxLayout;
     oauth_button_row->setSpacing(8);
@@ -419,10 +421,12 @@ void ZoomSettingsDialog::onAuthorizeOAuth()
     if (!saveSettings(false, false))
         return;
     QString error;
-    if (!ZoomOAuthManager::instance().begin_authorization(this, &error)) {
+    if (!ZoomOAuthManager::instance().begin_authorization(&error)) {
         QMessageBox::warning(this, "Zoom OAuth", error);
+        return;
     }
-    updateOAuthStatus();
+    m_oauth_status_label->setText(
+        "Finish signing in with Zoom in your browser, then return to OBS.");
 }
 
 void ZoomSettingsDialog::onRefreshOAuth()

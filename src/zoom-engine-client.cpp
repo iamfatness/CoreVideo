@@ -1,3 +1,4 @@
+#include "corevideo-runtime-path.h"
 #include "zoom-engine-client.h"
 #include "zoom-settings.h"
 #include "speaker-director.h"
@@ -185,7 +186,7 @@ static std::string engine_executable_path()
         std::string path(module_path);
         const size_t slash = path.find_last_of("\\/");
         if (slash != std::string::npos) {
-            const std::string module_dir = path.substr(0, slash + 1);
+            const std::string module_dir = corevideo_runtime_directory(module_path).string() + "\\";
             std::string candidate = module_dir + "zoom-runtime\\ZoomObsEngine.exe";
             if (GetFileAttributesA(candidate.c_str()) != INVALID_FILE_ATTRIBUTES)
                 return candidate;

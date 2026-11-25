@@ -326,6 +326,8 @@ try {
     New-Item -ItemType Directory -Force -Path $installPath | Out-Null
     Invoke-NativeCommand cmake --install $resolvedBuildPath --config $Configuration --prefix $installPath
 
+    & (Join-Path $PSScriptRoot "ConvertTo-CoreVideoLayout.ps1") -PackageRoot $installPath
+
     & (Join-Path $PSScriptRoot "Test-CoreVideoPackage.ps1") `
         -PackageRoot $installPath `
         -FullRuntime `
@@ -369,21 +371,11 @@ try {
         if (-not (Test-Path -LiteralPath $ObsInstallPath)) {
             throw "OBS install path does not exist: $ObsInstallPath"
         }
-        # Pre-v0.1.30 installs left the FFmpeg runtime loose in obs-plugins\64bit,
-        # which collides with OBS 32.2+'s same-named FFmpeg 8 DLLs and stops
-        # OBS's own obs-ffmpeg module from loading. Sweep before copying.
-        $legacyDir = Join-Path $ObsInstallPath "obs-plugins\64bit"
-        if (Test-Path -LiteralPath $legacyDir) {
-            Get-ChildItem -LiteralPath $legacyDir -File |
-                Where-Object { $_.Name -match '^(avcodec|avdevice|avfilter|avformat|avutil|swresample|swscale)-\d+\.dll$' } |
-                Remove-Item -Force
-        }
-        Copy-Item -Path (Join-Path $installPath "*") -Destination $ObsInstallPath -Recurse -Force
-        & (Join-Path $PSScriptRoot "Test-CoreVideoPackage.ps1") `
-            -PackageRoot $ObsInstallPath `
-            -FullRuntime `
-            -ExpectedOAuthClientId $OAuthClientId `
-            -ExpectedMeetingSdkPublicAppKey $MeetingSdkPublicAppKey
+        # Use the same version checks, destination selection and migration as
+        # the distributed installer; do not maintain a second copy/delete path.
+        if (-not (Test-Path -LiteralPath $installerPath)) { throw "Local installation requires the NSIS installer." }
+        $process = Start-Process -FilePath $installerPath -ArgumentList @("/S", "/D=$ObsInstallPath") -Wait -PassThru
+        if ($process.ExitCode -ne 0) { throw "CoreVideo installer failed: $($process.ExitCode)" }
     }
 
     if ($Upload) {

@@ -2,7 +2,7 @@
 
 Project notes for Claude Code sessions working in this repository: CoreVideo,
 the OBS Studio plugin that pulls Zoom meeting video and audio into OBS as
-native sources. Current release: **v0.1.50** (2026-11-14). Update this file in
+native sources. Current release: **v0.1.51** (2026-11-24). Update this file in
 the same change as any substantive work — docs-updated is part of done.
 
 ## Architecture in one paragraph
@@ -1807,3 +1807,12 @@ thumbnails; its browser controls simulate workflows and do not control the app.
 service. Rebuild with `npm run build`; publish through Deploy Site when the local
 Cloudflare login is unavailable. Do not describe this page as an installed beta
 or claim full-output qualification from its reference images.
+
+## OBS compatibility migration (unreleased)
+
+Minimum OBS is now 32.2.2 across supported packaged platforms. Windows packaging
+converts the CMake staging tree through ConvertTo-CoreVideoLayout.ps1. One runtime
+lives in plugins/obs-zoom-plugin; same-name entry DLLs retain OBS 32 standard and
+portable discovery. Runtime-path resolution must prefer the shared package over
+stale helpers left in a portable legacy directory. Keep minimum/latest startup,
+data-file and duplicate-entry tests; do not infer compatibility from compilation.

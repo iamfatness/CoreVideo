@@ -273,7 +273,7 @@
     <div class="hero-badges" style="margin-top:16px;">
       <span class="badge orange">Public beta</span>
       <span class="badge green">Free</span>
-      <span class="badge green">OBS Studio 30+</span>
+      <span class="badge green">OBS Studio 32.2.2+</span>
       <span class="badge orange">Windows installer</span>
       <span class="badge purple">Sign in with Zoom</span>
       <span class="badge blue">OAuth 2.0 PKCE</span>
@@ -399,12 +399,12 @@
         <h4>2. Run the installer</h4>
         <p>Close OBS Studio if it is open, then double-click <code>CoreVideo-Setup.exe</code> and
         follow the prompts. The installer adds the CoreVideo plugin and its bundled Zoom runtime to
-        your OBS Studio installation.</p>
+        ProgramData for standard OBS, or inside the selected portable OBS folder. OBS Studio 32.2.2 or newer is required. The complete package supports both the OBS 32 and OBS 33 plugin loaders; do not move or rename individual DLLs.</p>
         
       </div></div>
       <div class="step"><div class="step-body">
         <h4>3. Open OBS Studio</h4>
-        <p>Launch OBS Studio 30 or newer. CoreVideo loads automatically: you'll see the
+        <p>Launch OBS Studio 32.2.2 or newer. CoreVideo loads automatically: you'll see the
         <strong>Zoom Control</strong> dock and a <strong>Tools&nbsp;→&nbsp;Zoom Plugin Settings</strong>
         menu item. If the dock is hidden, enable it from <strong>Docks&nbsp;→&nbsp;Zoom Control</strong>.</p>
         
@@ -465,7 +465,7 @@
   <section id="mac-beta">
     <h2>macOS: Apple Silicon beta</h2>
     <p><strong>CoreVideo v0.1.45-beta.1 is available as a signed and notarized installer.</strong>
-      Requires an Apple Silicon Mac (M1 or later). Use OBS Studio 32.2.1 or newer for this beta; the replacement package was built against OBS 32.2.1.</p>
+      Requires an Apple Silicon Mac (M1 or later). Use OBS Studio 32.2.2 or newer for this beta; the replacement package was built against OBS 32.2.1.</p>
     <p><a href="/download/#macos">Download the macOS installer and SHA-256 checksum</a>.</p>
     <ol>
       <li>Close OBS and open the downloaded <code>.pkg</code>.</li>
@@ -515,7 +515,7 @@
     <table>
       <tr><th>Requirement</th><th>Notes</th></tr>
       <tr><td>Windows 10 / 11 (64-bit)</td><td>Windows is the release channel (installer or ZIP). A signed <a href="#mac-beta">macOS Apple Silicon beta installer</a> is also available. Linux requires a source build.</td></tr>
-      <tr><td>OBS Studio 30+</td><td>Install OBS first; CoreVideo loads as a plugin.</td></tr>
+      <tr><td>OBS Studio 32.2.2+</td><td>Install OBS first; CoreVideo loads as a plugin.</td></tr>
       <tr><td>A Zoom account</td><td>Any account you can sign in with. No developer account, SDK key, or client secret required.</td></tr>
       <tr><td>Network bandwidth</td><td>Plan roughly 4-6 Mbps per 1080p participant feed. Your Zoom account and app entitlements affect maximum quality and stream count (standard accounts are commonly limited to ~30 Mbps incoming video; Enhanced Media / HBM can raise that to ~100 Mbps).</td></tr>
     </table>
@@ -630,7 +630,7 @@
     </div>
     <table>
       <tr><th>Symptom</th><th>Fix</th></tr>
-      <tr><td>Zoom Control dock not visible after install</td><td>Enable it from OBS <strong>Docks&nbsp;→&nbsp;Zoom Control</strong> (or <strong>Tools&nbsp;→&nbsp;Zoom Control</strong>, which creates and shows it even if you've never opened it before). Confirm OBS is version 30+ and was fully closed during install.</td></tr>
+      <tr><td>Zoom Control dock not visible after install</td><td>Enable it from OBS <strong>Docks&nbsp;→&nbsp;Zoom Control</strong> (or <strong>Tools&nbsp;→&nbsp;Zoom Control</strong>, which creates and shows it even if you've never opened it before). Confirm OBS is version 32.2.2+ and was fully closed during install.</td></tr>
       <tr><td>"Sign in with Zoom" doesn't complete</td><td>Finish the browser consent and allow the <code>corevideo://</code> link to open CoreVideo. Re-run sign-in from Tools&nbsp;→&nbsp;Zoom Plugin Settings. See <a href="#signin-loop">Sign-in loop</a> below for more.</td></tr>
       <tr><td>Joined, but no video</td><td>Work through the <a href="#no-video-frames">No video frames</a> checklist below.</td></tr>
       <tr><td>Source shows color bars</td><td>The source isn't subscribed yet — assign a participant or slot in the source properties or the Output Manager.</td></tr>
@@ -769,7 +769,7 @@
     Manager / ISO Recorder menu items or docks appear at all, the plugin itself
     likely failed to load:</p>
     <ul>
-      <li><strong>Confirm OBS Studio is 30 or newer</strong> (Help → About). CoreVideo
+      <li><strong>Confirm OBS Studio is 32.2.2 or newer</strong> (Help → About). CoreVideo
       links against OBS 30's plugin API; older OBS builds cannot load it.</li>
       <li><strong>Check the OBS log</strong> (Help&nbsp;→&nbsp;Log Files&nbsp;→&nbsp;View
       Current Log) for a module-load failure mentioning

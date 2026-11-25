@@ -1,3 +1,4 @@
+#include "corevideo-runtime-path.h"
 #include "zoom-diagnostics-dialog.h"
 #include "cv-style.h"
 #include "obs-zoom-version.h"
@@ -709,6 +710,11 @@ static bool write_json_file(const QString &path, const QJsonObject &obj)
 
 static QString obs_module_file_path(const char *name)
 {
+#if defined(_WIN32)
+    const char *binary = obs_get_module_binary_path(obs_current_module());
+    if (binary)
+        return QString::fromStdWString((corevideo_runtime_directory(std::filesystem::u8path(binary)) / name).wstring());
+#endif
     char *path = obs_module_file(name);
     const QString result = path ? QString::fromUtf8(path) : QString{};
     if (path)

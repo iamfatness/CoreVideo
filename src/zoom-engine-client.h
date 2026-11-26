@@ -164,6 +164,9 @@ public:
               MeetingKind kind = MeetingKind::Meeting,
               const ZoomJoinAuthTokens &tokens = {});
     void leave();
+    struct InputDevice { std::string id, name; };
+    std::vector<InputDevice> input_devices() const;
+    void refresh_input_devices();
     void start_media();
     void stop_media();
     // Triggers the Milestone 1 talkback probe for one named participant. The
@@ -458,6 +461,7 @@ private:
     std::unordered_map<void *, RosterCallback> m_roster_callbacks;
     std::unordered_map<void *, ErrorCallback> m_error_callbacks;
     std::unordered_map<void *, NoticeCallback> m_notice_callbacks;
+    std::vector<InputDevice> m_input_devices;
     std::string m_last_error;
     // Terminal raw-media diagnostic, surfaced by last_error() only as fallback.
     // Never consulted by meeting/reconnect classification. Guarded by m_mtx.

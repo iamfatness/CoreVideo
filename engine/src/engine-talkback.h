@@ -53,6 +53,10 @@
 
 class EngineTalkback : public ZOOMSDK::IMeetingTalkbackCtrlEvent {
 public:
+    void set_safe_meeting_input(bool safe) { m_safe_meeting_input = safe; }
+private:
+    bool m_safe_meeting_input = false;
+public:
     // Starts the probe ladder. Reports and returns without blocking; the
     // asynchronous rungs continue through the callbacks below and tick().
     //

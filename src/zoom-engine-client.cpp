@@ -1,4 +1,5 @@
 #include "zoom-engine-client.h"
+#include "zoom-settings.h"
 #include "speaker-director.h"
 #include "talkback-nomination-dispatch.h" // Task 5 fix round 2, N5
 #include "talkback-key.h"  // talkback_session_mic_blocked() -- Law 1
@@ -1468,9 +1469,22 @@ void ZoomEngineClient::handle_event(const std::string &line)
         blog(LOG_INFO, "[obs-zoom-plugin] Zoom engine ready");
         return;
     }
+    if (cmd == "input_devices") {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        m_input_devices.clear();
+        for (const auto &value : obj.value("devices").toArray()) {
+            const auto device = value.toObject();
+            m_input_devices.push_back({device.value("id").toString().toStdString(),
+                                      device.value("name").toString().toStdString()});
+        }
+        return;
+    }
     if (cmd == "auth_ok") {
         blog(LOG_INFO, "[obs-zoom-plugin] Zoom engine authenticated");
         m_authenticated.store(true, std::memory_order_release);
+#if defined(_WIN32)
+        refresh_input_devices();
+#endif
         {
             std::lock_guard<std::mutex> lk(m_mtx);
             if (m_join_pending)
@@ -1876,6 +1890,9 @@ void ZoomEngineClient::handle_event(const std::string &line)
                          "[obs-zoom-plugin] Permanent Zoom meeting failure %d (%s) - not retrying",
                          code, reason.toUtf8().constData());
                     ZoomReconnectManager::instance().on_join_failed(true);
+                } else if (reason == "input_policy") {
+                    m_state.store(MeetingState::Failed, std::memory_order_release);
+                    ZoomReconnectManager::instance().on_join_failed(true);
                 } else if (reason == "license") {
                     m_state.store(MeetingState::Failed, std::memory_order_release);
                     ZoomReconnectManager::instance().trigger(RecoveryReason::LicenseError);
@@ -1977,10 +1994,25 @@ void ZoomEngineClient::handle_event(const std::string &line)
     }
 }
 
+std::vector<ZoomEngineClient::InputDevice> ZoomEngineClient::input_devices() const
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    return m_input_devices;
+}
+
+void ZoomEngineClient::refresh_input_devices()
+{
+    { std::lock_guard<std::mutex> lk(m_mtx); m_input_devices.clear(); }
+    if (m_authenticated.load()) write_json(R"({"cmd":"input_devices"})");
+}
+
 void ZoomEngineClient::send_join_locked()
 {
     if (!m_join_pending || m_pending_meeting_id.empty()) return;
 
+#if defined(_WIN32)
+    const auto input = ZoomPluginSettings::load();
+#endif
     const char *kind_str = (m_pending_kind == MeetingKind::Webinar) ? "webinar" : "meeting";
     blog(LOG_INFO, "[obs-zoom-plugin] Sending Zoom join to engine: meeting_id=%s kind=%s",
          m_pending_meeting_id.c_str(), kind_str);
@@ -1988,6 +2020,10 @@ void ZoomEngineClient::send_join_locked()
         R"(","passcode":")" + json_escape(m_pending_passcode) +
         R"(","display_name":")" + json_escape(m_pending_display_name) +
         R"(","kind":")" + kind_str + "\"";
+#if defined(_WIN32)
+    json += R"(,"input_mode":")" + json_escape(input.windows_input_mode) +
+            R"(","input_device_id":")" + json_escape(input.windows_input_device_id) + "\"";
+#endif
     if (!m_pending_tokens.on_behalf_token.empty()) {
         json += R"(,"on_behalf_token":")" +
             json_escape(m_pending_tokens.on_behalf_token) + "\"";

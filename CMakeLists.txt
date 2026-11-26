@@ -9,6 +9,11 @@ option(COREVIDEO_BUILD_ENGINE "Build the ZoomObsEngine helper process" ON)
 option(COREVIDEO_BUILD_SIDECAR "Build the CoreVideo Sidecar control app" ON)
 
 include(CTest)
+if(BUILD_TESTING)
+    add_executable(CoreVideoEngineInputPolicyTest tests/engine-input-policy-test.cpp)
+    target_include_directories(CoreVideoEngineInputPolicyTest PRIVATE engine/src)
+    add_test(NAME CoreVideoEngineInputPolicy COMMAND CoreVideoEngineInputPolicyTest)
+endif()
 
 # Embedded credentials (set via -D or CI secrets; empty = user must enter)
 set(ZOOM_EMBED_SDK_KEY          "" CACHE STRING "Pre-embedded Zoom SDK key")

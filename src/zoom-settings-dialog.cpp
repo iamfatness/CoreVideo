@@ -2,6 +2,10 @@
 #include "cv-style.h"
 #include "obs-zoom-version.h"
 #include "zoom-settings.h"
+#include "zoom-engine-client.h"
+#include <QTimer>
+#include <QSignalBlocker>
+#include <QAbstractItemView>
 #include "zoom-control-server.h"
 #include "zoom-oauth.h"
 #include "zoom-osc-server.h"
@@ -153,6 +157,73 @@ ZoomSettingsDialog::ZoomSettingsDialog(QWidget *parent)
     audio_form->addRow(new QLabel("Audio delay (dedicated sources):", this),
                        m_audio_delay_spin);
 
+#if defined(_WIN32)
+    m_input_mode = new QComboBox(this);
+    m_input_mode->addItem("Leave SDK input unchanged; join muted", "unchanged");
+    m_input_mode->addItem("Choose SDK input; join muted", "device");
+    m_input_mode->addItem("Silent virtual input for OBS talkback (opt in)", "silent");
+    int mode_index = m_input_mode->findData(QString::fromStdString(s.windows_input_mode));
+    if (mode_index < 0) {
+        m_input_mode->addItem("Unknown saved input mode — choose a mode", QString::fromStdString(s.windows_input_mode));
+        mode_index = m_input_mode->count() - 1;
+    }
+    m_input_mode->setCurrentIndex(mode_index);
+    m_input_device = new QComboBox(this);
+    m_input_device->addItem("Choose an available SDK input", "");
+    if (!s.windows_input_device_id.empty()) {
+        m_input_device->addItem(QString::fromStdString(s.windows_input_device_name) + " (saved; not verified)",
+                               QString::fromStdString(s.windows_input_device_id));
+        m_input_device->setCurrentIndex(1);
+    }
+    auto *input_note = new QLabel("Applies on the next join. Inputs can be refreshed while the engine is authenticated. "
+        "Unavailable saved inputs block joining. OBS talkback requires the silent virtual input; "
+        "this opt-in may hide microphones in Zoom Workplace on the same PC. Restart OBS to leave silent mode.", this);
+    input_note->setWordWrap(true);
+    auto *refresh_inputs = new QPushButton("Refresh SDK inputs", this);
+    connect(refresh_inputs, &QPushButton::clicked, this, [] {
+        auto &engine = ZoomEngineClient::instance();
+        if (!engine.is_running()) {
+            const auto settings = ZoomPluginSettings::load();
+            engine.start(settings.resolved_jwt_token(), settings.resolved_meeting_sdk_public_app_key());
+        }
+        engine.refresh_input_devices();
+    });
+    auto *input_timer = new QTimer(this);
+    connect(input_timer, &QTimer::timeout, this, [this] {
+        if (m_input_device->view()->isVisible()) return;
+        const auto devices = ZoomEngineClient::instance().input_devices();
+        QString signature;
+        for (const auto &device : devices)
+            signature += QString::fromStdString(device.id) + QChar(0) + QString::fromStdString(device.name) + QChar(0);
+        if (m_input_device->property("inventory").toString() == signature) return;
+        m_input_device->setProperty("inventory", signature);
+        const auto saved_id = m_input_device->currentData().toString();
+        const auto saved_name = m_input_device->currentText().split(" (unavailable").front().split(" (saved;").front();
+        QSignalBlocker blocker(m_input_device);
+        m_input_device->clear();
+        m_input_device->addItem("Choose an available SDK input", "");
+        for (const auto &device : devices)
+            m_input_device->addItem(QString::fromStdString(device.name), QString::fromStdString(device.id));
+        int index = m_input_device->findData(saved_id);
+        if (index < 0 && !saved_id.isEmpty()) {
+            m_input_device->addItem(saved_name + " (unavailable; refresh or reconnect)", saved_id);
+            index = m_input_device->count() - 1;
+        }
+        m_input_device->setCurrentIndex(qMax(0, index));
+    });
+    input_timer->start(1000);
+    ZoomEngineClient::instance().refresh_input_devices();
+    auto update_input = [this] {
+        m_input_device->setEnabled(m_input_mode->currentData().toString() == "device");
+    };
+    connect(m_input_mode, qOverload<int>(&QComboBox::currentIndexChanged), this, [update_input](int) { update_input(); });
+    update_input();
+    audio_form->addRow("Meeting input (Windows):", m_input_mode);
+    audio_form->addRow("SDK microphone:", m_input_device);
+    audio_form->addRow("", refresh_inputs);
+    audio_form->addRow("", input_note);
+#endif
+
     auto *audio_group = new QGroupBox("Audio", this);
     audio_group->setLayout(audio_form);
 
@@ -301,6 +372,11 @@ bool ZoomSettingsDialog::saveSettings(bool close_dialog, bool restart_servers)
     s.reconnect_policy.on_engine_crash = m_rc_on_crash_cb->isChecked();
     s.reconnect_policy.on_disconnect   = m_rc_on_disc_cb->isChecked();
     s.reconnect_policy.on_auth_fail    = m_rc_on_auth_cb->isChecked();
+#if defined(_WIN32)
+    s.windows_input_mode = m_input_mode->currentData().toString().toStdString();
+    s.windows_input_device_id = m_input_device->currentData().toString().toStdString();
+    s.windows_input_device_name = m_input_device->currentText().split(" (unavailable").front().split(" (saved;").front().toStdString();
+#endif
     s.save();
     ZoomReconnectManager::instance().set_policy(s.reconnect_policy);
     ZoomControlServer::instance().set_token(s.control_token);

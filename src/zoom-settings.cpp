@@ -395,6 +395,13 @@ ZoomPluginSettings ZoomPluginSettings::load()
         config_get_int(cfg, SECTION, "AudioDelayMs"));
     if (s.audio_delay_ms > 500) s.audio_delay_ms = 500;
 
+    const char *input_mode = config_get_string(cfg, SECTION, "WindowsInputMode");
+    if (input_mode && *input_mode) s.windows_input_mode = input_mode;
+    const char *input_id = config_get_string(cfg, SECTION, "WindowsInputDeviceId");
+    const char *input_name = config_get_string(cfg, SECTION, "WindowsInputDeviceName");
+    s.windows_input_device_id = input_id ? input_id : "";
+    s.windows_input_device_name = input_name ? input_name : "";
+
     const char *iso_output_dir = config_get_string(cfg, SECTION, "IsoOutputDir");
     const char *iso_ffmpeg_path = config_get_string(cfg, SECTION, "IsoFfmpegPath");
     const char *iso_video_encoder = config_get_string(cfg, SECTION, "IsoVideoEncoder");
@@ -564,6 +571,9 @@ void ZoomPluginSettings::save() const
     config_set_int   (cfg, SECTION, "HideParticipantsWithoutVideo",
                       hide_participants_without_video ? 1 : 0);
     config_set_int   (cfg, SECTION, "AudioDelayMs", audio_delay_ms);
+    config_set_string(cfg, SECTION, "WindowsInputMode", windows_input_mode.c_str());
+    config_set_string(cfg, SECTION, "WindowsInputDeviceId", windows_input_device_id.c_str());
+    config_set_string(cfg, SECTION, "WindowsInputDeviceName", windows_input_device_name.c_str());
     config_set_string(cfg, SECTION, "IsoOutputDir",           iso_output_dir.c_str());
     config_set_string(cfg, SECTION, "IsoFfmpegPath",          iso_ffmpeg_path.c_str());
     config_set_string(cfg, SECTION, "IsoVideoEncoder",        iso_video_encoder.c_str());

@@ -37,6 +37,7 @@ static void routes(const std::string &line, IpcCommand expected, const char *wha
 
 int main()
 {
+    routes(R"({"cmd":"input_devices"})", IpcCommand::InputDevices, "input device inventory");
     // ── The bug this file exists for ────────────────────────────────────────
     const std::string unsubscribe =
         R"({"cmd":"unsubscribe","source_uuid":"tile_1_0"})";

@@ -101,6 +101,7 @@ a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset:
   line-height: 0.98;
   letter-spacing: -0.07em;
   font-weight: 620;
+  text-wrap: balance;
 }
 .suite-intro .lede { max-width: 37ch; }
 .suite-media {

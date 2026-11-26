@@ -263,7 +263,7 @@ const products = [
 function homeContent() {
   return `<section class="suite-hero">
   <div class="suite-intro">
-    <h1>Bring Zoom into the control room.</h1>
+    <h1>Make Zoom the core of your show.</h1>
     <p class="lede">Choose the tools you need to route guests, switch the show, cue talent, and deliver the recording.</p>
     <div class="hero-actions">
       <a class="button primary" href="#products">Explore products</a>
